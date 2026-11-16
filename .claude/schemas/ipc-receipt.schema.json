@@ -1,0 +1,83 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:ovpt:unleash:ipc-receipt:1",
+  "title": "CommandReceipt",
+  "description": "Reçu de commande unleash.ipc.v2. Il ne porte pas sa lignée : GetCommandReceipt et l'inspection historique l'enveloppent avec authority_generation, lineage_status (current ou historical) et provenance_ref.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "receipt_id",
+    "command_id",
+    "accepted_at",
+    "aggregate_id",
+    "new_revision",
+    "operation_id",
+    "state",
+    "event_cursor"
+  ],
+  "properties": {
+    "command_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "accepted_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "aggregate_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "new_revision": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    "operation_id": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "format": "uuid",
+      "description": "Clé toujours présente, null sans opération longue."
+    },
+    "state": {
+      "enum": [
+        "accepted",
+        "completed",
+        "blocked",
+        "rejected"
+      ]
+    },
+    "event_cursor": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "stream_id",
+        "sequence"
+      ],
+      "properties": {
+        "stream_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "sequence": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        }
+      }
+    },
+    "result_ref": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "receipt_id": {
+      "type": "string",
+      "format": "uuid",
+      "description": "Identifiant global unique serveur du reçu ; cible de causation.kind=command"
+    }
+  }
+}

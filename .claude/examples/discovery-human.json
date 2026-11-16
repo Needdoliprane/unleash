@@ -1,0 +1,63 @@
+{
+  "schema_version": "unleash.discovery.v1",
+  "receipt_id": "discovery-human-01",
+  "intent_id": "intent-procedure-01",
+  "origin": {
+    "origin_kind": "control_plane",
+    "principal_id": "principal-user-01",
+    "control_principal_id": "principal-user-01",
+    "cause": {
+      "kind": "command_receipt",
+      "id": "command-receipt-human-01"
+    }
+  },
+  "query_ids": [
+    "query-human-01"
+  ],
+  "catalog_revision": 89,
+  "purpose": "pre_creation",
+  "decision": "create",
+  "strategy": "new",
+  "candidate_ids": [],
+  "target_resource_id": null,
+  "target_version_ref": null,
+  "justification": "Nouvelle procédure créée par l’utilisateur après découverte dans le projet sans dépôt.",
+  "source_refs": [
+    {
+      "source_kind": "resource_snapshot",
+      "source_id": "source-document-01",
+      "version_id": "resource-snapshot-12",
+      "content_digest": {
+        "algorithm": "sha256",
+        "hex": "2222222222222222222222222222222222222222222222222222222222222222"
+      },
+      "generation": 12,
+      "access_policy_ref": "policy-document-01",
+      "acl_revision": 2,
+      "observed_at": "2026-11-16T14:00:00Z",
+      "capture_consistency": "unverified",
+      "source_binding_id": "binding-document-01",
+      "resource_ref_id": "resource-document-01"
+    }
+  ],
+  "freshness": "valid",
+  "temporal_relation": "before_creation",
+  "validation_basis": {
+    "intent_revision": 1,
+    "scope_ref": "scope-project-01",
+    "scope_revision": 4,
+    "policy_version_ref": "discovery-policy-v1",
+    "validator_version": "discovery-validator-v1",
+    "event_cursor": {
+      "stream_id": "00000000-0000-4000-8000-000000000201",
+      "sequence": 150
+    },
+    "checked_at": "2026-11-16T14:00:00Z",
+    "valid_until": "2026-11-16T14:05:00Z",
+    "max_age_ms": 300000
+  },
+  "recorded_at": "2026-11-16T14:00:01Z",
+  "supersedes_receipt_id": null,
+  "creation_use_id": null,
+  "coverage_ref": "coverage-query-human-01"
+}

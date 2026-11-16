@@ -1,0 +1,83 @@
+{
+  "schema_version": "unleash.workflow.v1.2",
+  "workflow_id": "fixture.rows-replay",
+  "version": 1,
+  "name": "Parcours borné des lignes",
+  "description": "Fixture de conception uniquement : adapter fixture.observe-row à implémenter, aucun site réel.",
+  "bindings": {},
+  "model_policy": "forbidden",
+  "budget": {
+    "max_duration_seconds": 86400,
+    "max_step_activations": 20000,
+    "max_llm_calls": 0,
+    "max_output_tokens": 0,
+    "max_cost_microusd": 0,
+    "max_agent_executions": 0,
+    "max_concurrent_action_executions": 1
+  },
+  "body": {
+    "id": "rows",
+    "kind": "for_each",
+    "items": {
+      "source": "path",
+      "path": "/input/rows"
+    },
+    "max_items": 10000,
+    "batch_size": 1000,
+    "body": {
+      "id": "observe-row",
+      "kind": "action",
+      "operation": {
+        "id": "fixture.observe-row",
+        "version": 1
+      },
+      "contract_profile": {
+        "id": "fixture.observation",
+        "version": 1
+      },
+      "scope_key": "fixture-records",
+      "inputs": {
+        "row": {
+          "source": "path",
+          "path": "/items/rows/value"
+        },
+        "index": {
+          "source": "path",
+          "path": "/items/rows/index"
+        }
+      },
+      "timeout_seconds": 30,
+      "max_attempts": 1,
+      "retry_policy": "never"
+    },
+    "after_batch": {
+      "id": "record-batch",
+      "kind": "action",
+      "operation": {
+        "id": "fixture.record-batch",
+        "version": 1
+      },
+      "contract_profile": {
+        "id": "fixture.observation",
+        "version": 1
+      },
+      "scope_key": "fixture-records",
+      "inputs": {
+        "batch": {
+          "source": "path",
+          "path": "/items/rows/batch"
+        }
+      },
+      "timeout_seconds": 30,
+      "max_attempts": 1,
+      "retry_policy": "never"
+    }
+  },
+  "completion": {
+    "success_when": {
+      "op": "eq",
+      "path": "/results/rows/outputs/all_items_completed",
+      "value": true
+    }
+  }
+}

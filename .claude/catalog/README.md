@@ -1,0 +1,18 @@
+# Catalogue exploitable du dossier de conception
+
+Ce catalogue est une projection de conception, **pas un bundle exécutable du produit**. Une application peut importer les exigences, les features, leurs dépendances, les invariants confirmés, les décisions d’architecture acceptées ou proposées, les risques, les questions et les références de tests pour organiser le développement. Elle ne peut pas convertir les textes d’experts en permissions, ni des preuves attendues en résultats acquis.
+
+- [design-catalog.json](design-catalog.json) : objets et statuts, 19 features et leurs sept documents, invariants, exigences et décisions.
+- [operations.json](operations.json) : registre de noms/classification/propriétaires, liens contractuels et mapping des 58 groupes GUI/TUI.
+- [package-manifest.json](package-manifest.json) : inventaire des fichiers du dossier, tailles et empreintes SHA-256, hors exclusions déclarées (le manifest lui-même, `settings.local.json` et les préfixes d’état local `state/` et `worktrees/`).
+- [traceability.json](../testing/traceability.json) : exigences → architecture → feature → AC → test → preuve attendue.
+
+Les [schémas](../schemas/README.md) fixent les formes. Le [contrat d’ingestion](../specs/document-package-ingestion.md) précise validations, conflits et frontière de confiance. Les sources Markdown canoniques et les projections doivent concorder ; une divergence est une erreur à corriger, pas une règle de priorité cachée. Les audits sont historiques et attribués, distincts des contrats consolidés.
+
+**Statuts.** Le statut d’une décision suit `proposed → accepted → superseded`. `accepted` désigne une décision d’architecture arrêtée par l’autorité déléguée de Louis (révision R7) : elle fait autorité pour l’implémentation, se révise par un ADR de supersession et n’est jamais un invariant confirmé. Une question tranchée porte `resolved`. Un import ne promeut aucun statut ; le statut vient de la source Markdown.
+
+**Outillage de développement.** Dans `.claude/`, `agents/dev/`, `dev/`, `hooks/`, `rules/`, `skills/` et `settings.json` sont inventoriés et hachés, mais non normatifs : ils ne définissent aucun contrat produit et ne sont jamais exécutés par un import. Le produit Unleash ne lit jamais `.claude/` à l’exécution.
+
+**Portée du registre.** [operations.json](operations.json) inventorie les commandes, lectures, flux et handshake exposés aux clients GUI/TUI/CLI, ainsi que les commandes du canal worker/harness authentifié (RecordClaim, RecordObservation, RecordJudgment), sans groupe PAR. Les ports internes et les intentions internes du broker sont nommés par leur feature propriétaire et ne sont pas des noms wire.
+
+`contract_stage=documented` signifie que le contrat métier est documenté et lié. `payload_schema_ref=null` signifie qu’aucun schéma complet de payload wire générable n’est livré pour cette opération ; c’est aujourd’hui le cas de toutes les opérations du registre. Le nom (operation-name) et l’enveloppe de commande (CommandEnvelope v2, CommandReceipt, Error) peuvent être contrôlés ; l’enveloppe de lecture, sa réponse et les trames Hello/SubscribeEvents sont décrites en prose dans le [catalogue commun](../architecture/client-operation-catalog.md) et leurs schémas sont un livrable du jalon M0. Produire les DTO exhaustifs et leurs tests reste un livrable du jalon M0 des équipes Rust. Cette absence n’autorise pas un consumer à deviner les champs ni à dispatch une opération. Le registre sert maintenant à la navigation, la couverture et la planification ; une activation runtime requiert les compilateurs, handlers et preuves de qualification du produit.

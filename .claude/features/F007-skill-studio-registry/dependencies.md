@@ -1,0 +1,9 @@
+# F007 — Dépendances
+
+Le stockage local conserve bundles, versions et rapports ; les index de recherche sont dérivés et reconstruisibles. Le knowledge fournit discovery receipts et provenance à travers tous les types de ressources. Le service d'autorisation décide quels candidats sont visibles et quels droits peuvent être demandés. Le moteur de contrats F008 évalue structure, références et fixtures. Le routeur modèle sert la création NL et la résolution de capacités ; une panne n'empêche pas l'édition manuelle d'un draft.
+
+F004 porte responsabilité N+2 et composition N+1. F005 consomme les bindings et applique immutabilité et réconciliation. F006 décrit les slots tardifs autorisés dans le workflow. Les clients GUI/CLI/TUI partagent les mêmes services et événements, notamment les refus `PUBLICATION_CONFLICT` et `BINDING_ALREADY_ENGAGED`. Aucun client ne peut écrire directement une table de registre.
+
+Les identités qualifiées (`entry_kind`, `scope_kind`, `scope_owner_key`, `entry_id`, version), digests et états de version sont fixés par [ADR-06](../../architecture/adr/ADR-06-skill-role-registry.md) (R7) ; Studio et backend se développent en parallèle sur ces contrats. Les fixtures doivent inclure rôles homonymes, skills incompatibles et permissions révoquées. La compatibilité d'import Agent Skills est un adaptateur documentaire explicitement limité ; le runtime ne doit pas exécuter automatiquement des scripts du format tiers.
+
+La conservation de versions dépend de la politique de rétention des sessions et preuves. Un run historique doit signaler ses bundles manquants après purge. Les modèles et outils externes sont référencés de façon versionnée lorsque possible, sans prétendre qu'une API distante est elle-même immuable. Le code interne de cette feature est Rust ; cette règle n'interdit aucun langage de repository développé par les agents.

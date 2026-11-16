@@ -1,0 +1,100 @@
+# Exemple de configuration Unleash, non normatif : ce n'est pas la configuration d'un produit déjà livré.
+# Il amorce les agrégats Settings, Policy, ProviderProfile et la configuration AI-Guard par SetSettings, SetPolicy, SetProviderProfile et ConfigureGuard ;
+# il ne contourne ni expected_revision ni receipt. Format non normatif tant qu'aucun schéma de configuration n'est publié.
+schema_version = "unleash.config.v1"
+product_name = "OVPT Unleash"
+
+[execution]
+# Pool unique C : agent_invocation + replay_worker + provider_probe, sans exemption ; plafond dur 50 non surchargeable (ADR-13, Q-15).
+max_active_executions = 5
+# Réserve de contrôle : "soft" par défaut, "hard" en option (exige C >= 2) ; une combinaison incohérente est refusée.
+control_reserve_mode = "soft"
+control_reserved_units = 1
+control_burst_limit = 2
+
+[security]
+# broker_only : ActionBroker seul ; dès qu'un endpoint AI-Guard est configuré, le défaut devient guard_required, fail-closed (ADR-10, Q-04).
+guard_mode = "broker_only"
+# Mode d'isolation des nouveaux projets (Q-05) : "standard" par défaut ; "strict" ajoute le code hostile lancé sous le même UID
+# et refuse l'action si le confinement requis n'est pas prouvé. Le mode effectif est porté par la politique du projet (SetPolicy).
+isolation_mode = "standard"
+require_explicit_provider_destinations = true
+
+[providers.openai]
+provider_kind = "openai"
+dialect = "openai_responses"
+endpoint = "https://api.openai.com/v1"
+auth_mode = "secret_ref"
+secret_ref = "os-secret:ovpt-unleash/openai/default"
+# store=false ; l'historique nécessaire est transmis explicitement par Unleash.
+response_storage = "disabled"
+
+[providers.anthropic]
+provider_kind = "anthropic"
+dialect = "anthropic_messages"
+endpoint = "https://api.anthropic.com"
+auth_mode = "secret_ref"
+secret_ref = "os-secret:ovpt-unleash/anthropic/default"
+
+# Clés fournies par l'utilisateur (BYO) ; un profil n'est actif qu'après TestProviderProfile réussi (ADR-11, Q-07).
+[models.development]
+provider = "openai"
+model_id = "gpt-6.1-sol"
+reasoning_effort = "high"
+max_output_tokens = 16384
+
+[models.audit]
+provider = "anthropic"
+model_id = "claude-fable-5-2"
+# Paramètres natifs validés par le profil de capacités, sans tool_choice forcé.
+max_output_tokens = 16384
+
+[routing]
+# Aucun fallback inter-fournisseurs par défaut (Q-07).
+fallback = []
+
+[routing.roles]
+developer = "development"
+auditor = "audit"
+
+[budgets]
+# Montants en micro-unités USD, comptes cumulatifs ; valeurs de départ confirmées ou modifiées par l'utilisateur avant activation (Q-07).
+currency = "USD"
+global_limit_micros = 50000000
+project_default_limit_micros = 20000000
+cost_bound_mode = "strict"
+alert_percent = [80, 100]
+probe_max_cost_micros = 100000
+
+[retention]
+# Politique visible et modifiable ; journal métier sans échéance automatique. Jamais de purge d'un objet requis par un run
+# non terminal, un effet inconnu, une preuve active ou un pin (Q-12, storage-model).
+policy = "unleash.retention.default.v1"
+command_response_days = 7
+model_payload_days_after_mission = 90
+tool_output_days = 30
+browser_artifact_days = 30
+dirty_capture_days = 30
+automation_data_days = 90
+document_copy_days_after_removal = 30
+export_artifact_days = 7
+diagnostic_log_days = 14
+diagnostic_log_max_mib = 512
+cache_max_gib = 2
+clean_worktree_days = 7
+
+[backup]
+automatic = true
+interval_hours = 24
+keep_daily = 7
+keep_weekly = 4
+destination = "default"
+
+[connectors.oauth]
+# "bring_your_own" pour un build communautaire ; les identifiants du client officiel viennent du profil de distribution signé,
+# jamais de ce fichier (Q-08).
+client_profile = "ovpt_official"
+
+[documents]
+watch_mode = "poll"
+default_assignment_policy = "pinned_revision"

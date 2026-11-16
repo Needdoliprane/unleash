@@ -1,0 +1,453 @@
+{
+  "schema_version": "unleash.design.review-register.v1",
+  "revision": "R7",
+  "scope": "documentary_review_only",
+  "experts": [
+    {
+      "id": "E01",
+      "role": "Chief Software Architect",
+      "actual_delegation": true,
+      "report_path": "audits/r6/expert-01-chief.md"
+    },
+    {
+      "id": "E02",
+      "role": "Rust Systems Architect",
+      "actual_delegation": true,
+      "report_path": "audits/r6/expert-02-rust.md"
+    },
+    {
+      "id": "E03",
+      "role": "Workflow & Deterministic Execution",
+      "actual_delegation": true,
+      "report_path": "audits/r6/expert-03-workflow.md"
+    },
+    {
+      "id": "E04",
+      "role": "Multi-Agent Systems",
+      "actual_delegation": true,
+      "report_path": "audits/r6/expert-04-multi-agent.md"
+    },
+    {
+      "id": "E05",
+      "role": "LLM API & Context",
+      "actual_delegation": true,
+      "report_path": "audits/r6/expert-05-llm.md"
+    },
+    {
+      "id": "E06",
+      "role": "Git & Integration",
+      "actual_delegation": true,
+      "report_path": "audits/r6/expert-06-git.md"
+    },
+    {
+      "id": "E07",
+      "role": "Knowledge & Code Intelligence",
+      "actual_delegation": true,
+      "report_path": "audits/r6/expert-07-knowledge.md"
+    },
+    {
+      "id": "E08",
+      "role": "Skill & Contract Systems",
+      "actual_delegation": true,
+      "report_path": "audits/r6/expert-08-skills.md"
+    },
+    {
+      "id": "E09",
+      "role": "Reliability & Persistence",
+      "actual_delegation": true,
+      "report_path": "audits/r6/expert-09-reliability.md"
+    },
+    {
+      "id": "E10",
+      "role": "Security / AI-Guard",
+      "actual_delegation": true,
+      "report_path": "audits/r6/expert-10-security.md"
+    },
+    {
+      "id": "E11",
+      "role": "UX / GUI / TUI",
+      "actual_delegation": true,
+      "report_path": "audits/r6/expert-11-ux.md"
+    },
+    {
+      "id": "E12",
+      "role": "QA & Verification",
+      "actual_delegation": true,
+      "report_path": "audits/r6/expert-12-qa.md"
+    },
+    {
+      "id": "E13",
+      "role": "Independent Adversarial Reviewer",
+      "actual_delegation": true,
+      "report_path": "audits/r6/expert-13-adversarial.md"
+    },
+    {
+      "id": "E14",
+      "role": "Technical Product Architect",
+      "actual_delegation": true,
+      "report_path": "audits/r6/expert-14-product.md"
+    }
+  ],
+  "findings": [
+    {
+      "id": "R6-E01-01",
+      "expert_id": "E01",
+      "severity": "Élevée",
+      "problem": "Probe fournisseur impossible sans invocation agente",
+      "status": "corrected_in_design",
+      "resolution": "ModelOrigin et ProviderProbeContext ; même pool 5/50, données synthétiques et mandat authentifié.",
+      "canonical_path": "features/F012-model-api-router/interfaces.md",
+      "acceptance_refs_text": "T-F012-013/014/018",
+      "audit_path": "audits/r6/expert-01-chief.md",
+      "product_verification": "not_run"
+    },
+    {
+      "id": "R6-E01-02",
+      "expert_id": "E01",
+      "severity": "Moyenne",
+      "problem": "Noms d’opérations et contrats non structurés",
+      "status": "corrected_in_design",
+      "resolution": "Registre de 196 opérations, propriétaires/parité ; GetStateSnapshot distinct, enveloppe et payload distingués.",
+      "canonical_path": "catalog/operations.json",
+      "acceptance_refs_text": "DOC-ING-005",
+      "audit_path": "audits/r6/expert-01-chief.md",
+      "product_verification": "not_run"
+    },
+    {
+      "id": "R6-E02-01",
+      "expert_id": "E02",
+      "severity": "Bloquant invariant",
+      "problem": "Deux racines peuvent créer deux schedulers",
+      "status": "corrected_in_design",
+      "resolution": "Autorité utilisateur OS unique et rendez-vous indépendant de data_root ; changement après drainage.",
+      "canonical_path": "architecture/runtime-lifecycle.md",
+      "acceptance_refs_text": "T-F001-001",
+      "audit_path": "audits/r6/expert-02-rust.md",
+      "product_verification": "not_run"
+    },
+    {
+      "id": "R6-E02-02",
+      "expert_id": "E02",
+      "severity": "Bloquant invariant",
+      "problem": "Relecture PID puis kill conserve la course",
+      "status": "corrected_in_design",
+      "resolution": "Cible non réutilisable qualifiée ou IdentityUnverified ; groupe et handle individuel qualifiés séparément.",
+      "canonical_path": "architecture/process-supervision.md",
+      "acceptance_refs_text": "T-F011-002/006",
+      "audit_path": "audits/r6/expert-02-rust.md",
+      "product_verification": "not_run"
+    },
+    {
+      "id": "R6-E03-01",
+      "expert_id": "E03",
+      "severity": "Élevée",
+      "problem": "Curseur CSV et choix de ligne non définis",
+      "status": "corrected_in_design",
+      "resolution": "for_each borné v1.2, portée /items, cursor/result atomiques, after_batch explicite ; v1/v1.1 conservés.",
+      "canonical_path": "architecture/workflow-data-iteration.md",
+      "acceptance_refs_text": "T-F019-003/005/012",
+      "audit_path": "audits/r6/expert-03-workflow.md",
+      "product_verification": "not_run"
+    },
+    {
+      "id": "R6-E03-02",
+      "expert_id": "E03",
+      "severity": "Élevée",
+      "problem": "Diagnostic publié inaccessible sous blocked",
+      "status": "corrected_in_design",
+      "resolution": "Microsteps et route diagnostique réduite admis sans lever la barrière ; reprise après résolution prouvée.",
+      "canonical_path": "architecture/state-machines.md",
+      "acceptance_refs_text": "T-F005-003/006 ; T-F019-001/011",
+      "audit_path": "audits/r6/expert-03-workflow.md",
+      "product_verification": "not_run"
+    },
+    {
+      "id": "R6-E03-03",
+      "expert_id": "E03",
+      "severity": "Moyenne",
+      "problem": "F006 interdit un candidat de qualification permis par F019",
+      "status": "corrected_in_design",
+      "resolution": "Exception qualification_only/purpose=evaluation explicite, refus du même snapshot en opérationnel.",
+      "canonical_path": "features/F006-workflow-compiler/dependencies.md",
+      "acceptance_refs_text": "T-F019-002/004/008",
+      "audit_path": "audits/r6/expert-03-workflow.md",
+      "product_verification": "not_run"
+    },
+    {
+      "id": "R6-E04-01",
+      "expert_id": "E04",
+      "severity": "Élevée",
+      "problem": "Décision de clôture human/owner_agent sans commande",
+      "status": "corrected_in_design",
+      "resolution": "RecordMissionDecision/RecordGoalDecision, critères/owner/epoch/bundle/révision ; mechanical sans LLM.",
+      "canonical_path": "features/F004-hierarchical-orchestration/interfaces.md",
+      "acceptance_refs_text": "T-F004-008/011",
+      "audit_path": "audits/r6/expert-04-multi-agent.md",
+      "product_verification": "not_run"
+    },
+    {
+      "id": "R6-E04-02",
+      "expert_id": "E04",
+      "severity": "Moyenne",
+      "problem": "Compteur sans progrès réinitialisable entre réveils",
+      "status": "corrected_in_design",
+      "resolution": "Chaîne persistante, réservations de tours, défaut huit, progrès observables et réarmement attribué.",
+      "canonical_path": "specs/agent-hierarchy.md",
+      "acceptance_refs_text": "T-F004-006",
+      "audit_path": "audits/r6/expert-04-multi-agent.md",
+      "product_verification": "not_run"
+    },
+    {
+      "id": "R6-E05-01",
+      "expert_id": "E05",
+      "severity": "Élevée",
+      "problem": "Résumé perd les restrictions de sa source",
+      "status": "corrected_in_design",
+      "resolution": "Politique transitive des dérivés, provenance et déclassification autorisée ; context v2.",
+      "canonical_path": "specs/model-routing.md",
+      "acceptance_refs_text": "T-F012-009/015",
+      "audit_path": "audits/r6/expert-05-llm.md",
+      "product_verification": "not_run"
+    },
+    {
+      "id": "R6-E05-02",
+      "expert_id": "E05",
+      "severity": "Élevée",
+      "problem": "Contexte distant implicite contredit les exclusions locales",
+      "status": "corrected_in_design",
+      "resolution": "Historique explicite, continuation distante refusée ; opaque qualifié et métadonnées de rétention.",
+      "canonical_path": "architecture/session-model.md",
+      "acceptance_refs_text": "T-F012-010/011",
+      "audit_path": "audits/r6/expert-05-llm.md",
+      "product_verification": "not_run"
+    },
+    {
+      "id": "R6-E05-03",
+      "expert_id": "E05",
+      "severity": "Moyenne",
+      "problem": "Préférence modèle skill non représentée",
+      "status": "corrected_in_design",
+      "resolution": "ModelSelectionBinding externe versionné exact, résolution par scope et tombstone.",
+      "canonical_path": "features/F012-model-api-router/interfaces.md",
+      "acceptance_refs_text": "T-F012-002",
+      "audit_path": "audits/r6/expert-05-llm.md",
+      "product_verification": "not_run"
+    },
+    {
+      "id": "R6-E06-01",
+      "expert_id": "E06",
+      "severity": "Élevée",
+      "problem": "Symref peut déplacer une cible non mandatée",
+      "status": "corrected_in_design",
+      "resolution": "Refs directes requises, mutations sans déréférencement et cas extérieur réconcilié.",
+      "canonical_path": "architecture/git-coordination.md",
+      "acceptance_refs_text": "T-F010-001/006/011",
+      "audit_path": "audits/r6/expert-06-git.md",
+      "product_verification": "not_run"
+    },
+    {
+      "id": "R6-E06-02",
+      "expert_id": "E06",
+      "severity": "Élevée",
+      "problem": "refs/replace change une lecture sous OID inchangé",
+      "status": "corrected_in_design",
+      "resolution": "Profil brut commun sans replacements, version/digest conservés et preuves antérieures revalidées.",
+      "canonical_path": "specs/git-integration.md",
+      "acceptance_refs_text": "T-F010-004/008/009",
+      "audit_path": "audits/r6/expert-06-git.md",
+      "product_verification": "not_run"
+    },
+    {
+      "id": "R6-E07-01",
+      "expert_id": "E07",
+      "severity": "Élevée",
+      "problem": "DiscoveryReceipt exige une invocation pour un humain",
+      "status": "corrected_in_design",
+      "resolution": "Origines invocation/replay/control_plane exclusives et authentifiées.",
+      "canonical_path": "schemas/discovery-receipt.schema.json",
+      "acceptance_refs_text": "T-F009-005/008",
+      "audit_path": "audits/r6/expert-07-knowledge.md",
+      "product_verification": "not_run"
+    },
+    {
+      "id": "R6-E07-02",
+      "expert_id": "E07",
+      "severity": "Moyenne",
+      "problem": "Discovery sans Git n’a pas de provenance commune",
+      "status": "corrected_in_design",
+      "resolution": "TypedSourceRef Git, document, fichier et registry, cohérence/ACL/révisions explicites.",
+      "canonical_path": "architecture/knowledge-indexing.md",
+      "acceptance_refs_text": "T-F009-001/011",
+      "audit_path": "audits/r6/expert-07-knowledge.md",
+      "product_verification": "not_run"
+    },
+    {
+      "id": "R6-E07-03",
+      "expert_id": "E07",
+      "severity": "Moyenne",
+      "problem": "La propre création périme sa preuve préalable",
+      "status": "corrected_in_design",
+      "resolution": "DiscoveryUseObservation historique séparée de current_freshness et completion_revalidation.",
+      "canonical_path": "specs/shared-knowledge.md",
+      "acceptance_refs_text": "T-F009-005/008",
+      "audit_path": "audits/r6/expert-07-knowledge.md",
+      "product_verification": "not_run"
+    },
+    {
+      "id": "R6-E08-01",
+      "expert_id": "E08",
+      "severity": "Élevée",
+      "problem": "Lien claim/preuve sans prédicat vérifiable",
+      "status": "corrected_in_design",
+      "resolution": "Vocabulaire fermé versionné et claim_predicate_matches ; prose et inconnu ne deviennent pas vrais.",
+      "canonical_path": "schemas/contract-claim.schema.json",
+      "acceptance_refs_text": "T-F008-004/007",
+      "audit_path": "audits/r6/expert-08-skills.md",
+      "product_verification": "not_run"
+    },
+    {
+      "id": "R6-E08-02",
+      "expert_id": "E08",
+      "severity": "Élevée",
+      "problem": "Un test favorable peut remplacer la commande attendue",
+      "status": "corrected_in_design",
+      "resolution": "Attente autoritaire et binding scellés avant effet, argv/cwd/env/suite/parser/snapshot vérifiés.",
+      "canonical_path": "schemas/expected-execution-binding.schema.json",
+      "acceptance_refs_text": "T-F008-005",
+      "audit_path": "audits/r6/expert-08-skills.md",
+      "product_verification": "not_run"
+    },
+    {
+      "id": "R6-E09-01",
+      "expert_id": "E09",
+      "severity": "Bloquant invariant",
+      "problem": "Retry client réexécutable après rollback",
+      "status": "corrected_in_design",
+      "resolution": "IPC v2 avec authority_generation, refus avant idempotence, tombstones et capsule des effets/coûts.",
+      "canonical_path": "architecture/failure-recovery.md",
+      "acceptance_refs_text": "T-F018-002/007 ; T-F002-004",
+      "audit_path": "audits/r6/expert-09-reliability.md",
+      "product_verification": "not_run"
+    },
+    {
+      "id": "R6-E09-02",
+      "expert_id": "E09",
+      "severity": "Élevée",
+      "problem": "Attachement concurrent pendant GC/unlink",
+      "status": "corrected_in_design",
+      "resolution": "Pins et writer, deleting/tombstone, incarnations physiques distinctes et barrière de backup.",
+      "canonical_path": "architecture/storage-model.md",
+      "acceptance_refs_text": "T-F002-006/010 ; T-F018-002",
+      "audit_path": "audits/r6/expert-09-reliability.md",
+      "product_verification": "not_run"
+    },
+    {
+      "id": "R6-E10-01",
+      "expert_id": "E10",
+      "severity": "Élevée",
+      "problem": "Allow conserve des contraintes sans les imposer",
+      "status": "corrected_in_design",
+      "resolution": "Obligations typées imposées avant secret/dispatch ; inconnue ou impossible refuse.",
+      "canonical_path": "specs/ai-guard.md",
+      "acceptance_refs_text": "T-F017-005/008/010 ; T-SEC-10",
+      "audit_path": "audits/r6/expert-10-security.md",
+      "product_verification": "not_run"
+    },
+    {
+      "id": "R6-E10-02",
+      "expert_id": "E10",
+      "severity": "Moyenne",
+      "problem": "Réauthentification peut changer le principal du compte",
+      "status": "corrected_in_design",
+      "resolution": "ProviderPrincipalBinding et auth_generation, mismatch suspend accès/Watch et conserve provenance.",
+      "canonical_path": "specs/connectors.md",
+      "acceptance_refs_text": "T-F013-007/009",
+      "audit_path": "audits/r6/expert-10-security.md",
+      "product_verification": "not_run"
+    },
+    {
+      "id": "R6-E11-01",
+      "expert_id": "E11",
+      "severity": "Moyenne",
+      "problem": "Draft guidé sauvegardé introuvable dans un autre client",
+      "status": "corrected_in_design",
+      "resolution": "GetOverview expose les préparations y compris avant projet, sous ACL et pagination.",
+      "canonical_path": "features/F004-hierarchical-orchestration/interfaces.md",
+      "acceptance_refs_text": "T-F014-015 ; T-F015-017",
+      "audit_path": "audits/r6/expert-11-ux.md",
+      "product_verification": "not_run"
+    },
+    {
+      "id": "R6-E11-02",
+      "expert_id": "E11",
+      "severity": "Moyenne",
+      "problem": "Deux Apply de même draft peuvent dupliquer le travail",
+      "status": "corrected_in_design",
+      "resolution": "Application unique par draft, résultat réutilisé, draft appliqué figé et clone explicite.",
+      "canonical_path": "features/F004-hierarchical-orchestration/interfaces.md",
+      "acceptance_refs_text": "T-F004-012 ; T-F015-003/017",
+      "audit_path": "audits/r6/expert-11-ux.md",
+      "product_verification": "not_run"
+    },
+    {
+      "id": "R6-E11-03",
+      "expert_id": "E11",
+      "severity": "Moyenne",
+      "problem": "Correction d’une valeur CSV sans interaction intégrée",
+      "status": "corrected_in_design",
+      "resolution": "Formulaire/copie locale, diff, nouvelle révision puis validation intégrale ; mêmes fonctions TUI.",
+      "canonical_path": "design/guided-automation-experience.md",
+      "acceptance_refs_text": "T-F019-005 ; T-F014-015 ; T-F015-017",
+      "audit_path": "audits/r6/expert-11-ux.md",
+      "product_verification": "not_run"
+    },
+    {
+      "id": "R6-E12-01",
+      "expert_id": "E12",
+      "severity": "Élevée",
+      "problem": "Validation accepte omissions/doublons/fausses preuves",
+      "status": "corrected_in_design",
+      "resolution": "Comparaison bidirectionnelle sources/projections, arêtes exactes, statuts et code d’échec ; formats sondés.",
+      "canonical_path": "testing/document-validation.md",
+      "acceptance_refs_text": "DOC-ING-002/003/004",
+      "audit_path": "audits/r6/expert-12-qa.md",
+      "product_verification": "not_run"
+    },
+    {
+      "id": "R6-E12-02",
+      "expert_id": "E12",
+      "severity": "Moyenne",
+      "problem": "Sous-preuves E2E H/N omettent la reprise",
+      "status": "corrected_in_design",
+      "resolution": "Dépendances obligatoires F018/F003/F002 explicites ; preuves partielles ne clôturent pas la recette.",
+      "canonical_path": "testing/integration-tests.md",
+      "acceptance_refs_text": "AC-E2E-H/N",
+      "audit_path": "audits/r6/expert-12-qa.md",
+      "product_verification": "not_run"
+    },
+    {
+      "id": "R6-E12-03",
+      "expert_id": "E12",
+      "severity": "Moyenne",
+      "problem": "Pression WAL sans oracle discriminant",
+      "status": "corrected_in_design",
+      "resolution": "Lecteur retenu + écritures + export, quotas et pression visibles, reprise sans faux receipt.",
+      "canonical_path": "features/F002-persistence-events/tests.md",
+      "acceptance_refs_text": "T-F002-002/007",
+      "audit_path": "audits/r6/expert-12-qa.md",
+      "product_verification": "not_run"
+    },
+    {
+      "id": "R6-E13-01",
+      "expert_id": "E13",
+      "severity": "Élevée",
+      "problem": "Validation du package peut résoudre un $ref distant",
+      "status": "corrected_in_design",
+      "resolution": "Scan des références avant validation, registre URN local et retrieve refusant, sentinelle sans réseau.",
+      "canonical_path": "specs/document-package-ingestion.md",
+      "acceptance_refs_text": "DOC-ING-006/007",
+      "audit_path": "audits/r6/expert-13-adversarial.md",
+      "product_verification": "not_run"
+    }
+  ]
+}

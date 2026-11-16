@@ -1,0 +1,104 @@
+{
+  "schema_version": "unleash.context.v2",
+  "manifest_id": "00000000-0000-4000-8000-000000000001",
+  "invocation_id": "00000000-0000-4000-8000-000000000002",
+  "session_id": "00000000-0000-4000-8000-000000000003",
+  "agent_id": "00000000-0000-4000-8000-000000000004",
+  "role_binding_ref": "fixture.role.binding.v1",
+  "workflow_run_ref": null,
+  "model_profile_ref": "fixture.model.profile.v1",
+  "scope_revision": 1,
+  "trigger_refs": [
+    "fixture.trigger.user-request"
+  ],
+  "segments": [
+    {
+      "id": "fixture.instructions",
+      "kind": "instruction",
+      "source_ref": "fixture.instructions.object",
+      "source_revision": "1",
+      "content_hash": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+      "selection": "included",
+      "trust": "control",
+      "availability": "retained",
+      "effective_data_policy_ref": {
+        "id": "fixture.policy.public",
+        "version": 1,
+        "digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+      },
+      "lineage": {
+        "kind": "source",
+        "status": "complete",
+        "source_refs": [],
+        "producer_action_ref": null
+      },
+      "size_bytes": 64
+    },
+    {
+      "id": "fixture.local.document",
+      "kind": "document",
+      "source_ref": "fixture.document.object",
+      "source_revision": "1",
+      "content_hash": "sha256:4444444444444444444444444444444444444444444444444444444444444444",
+      "selection": "excluded",
+      "trust": "document",
+      "availability": "retained",
+      "reason": "Source remplacée par un résumé pour cet appel local ; la restriction de destination demeure héritée.",
+      "effective_data_policy_ref": {
+        "id": "fixture.policy.local_only",
+        "version": 1,
+        "digest": "sha256:2222222222222222222222222222222222222222222222222222222222222222"
+      },
+      "lineage": {
+        "kind": "source",
+        "status": "complete",
+        "source_refs": [],
+        "producer_action_ref": null
+      },
+      "size_bytes": 128
+    },
+    {
+      "id": "fixture.local.summary",
+      "kind": "summary",
+      "source_ref": "fixture.summary.object",
+      "source_revision": "1",
+      "content_hash": "sha256:5555555555555555555555555555555555555555555555555555555555555555",
+      "selection": "included",
+      "trust": "document",
+      "availability": "retained",
+      "effective_data_policy_ref": {
+        "id": "fixture.policy.local_only",
+        "version": 1,
+        "digest": "sha256:2222222222222222222222222222222222222222222222222222222222222222"
+      },
+      "lineage": {
+        "kind": "derived",
+        "status": "complete",
+        "source_refs": [
+          {
+            "source_ref": "fixture.document.object",
+            "source_revision": "1",
+            "content_hash": "sha256:4444444444444444444444444444444444444444444444444444444444444444",
+            "data_policy_ref": {
+              "id": "fixture.policy.local_only",
+              "version": 1,
+              "digest": "sha256:2222222222222222222222222222222222222222222222222222222222222222"
+            }
+          }
+        ],
+        "producer_action_ref": "00000000-0000-4000-8000-000000000010"
+      },
+      "size_bytes": 48
+    }
+  ],
+  "payload_hash": "sha256:6666666666666666666666666666666666666666666666666666666666666666",
+  "retention_policy_ref": "fixture.retention.local.v1",
+  "model_call_id": "00000000-0000-4000-8000-000000000005",
+  "action_id": "00000000-0000-4000-8000-000000000006",
+  "invocation_bundle_digest": "sha256:7777777777777777777777777777777777777777777777777777777777777777",
+  "parent_manifest_id": null,
+  "provider_profile_ref": "fixture.provider.synthetic.v1",
+  "model_id": "fixture.synthetic-model",
+  "capability_snapshot_ref": "fixture.capability.v1",
+  "context_mode": "explicit_unleash_history"
+}

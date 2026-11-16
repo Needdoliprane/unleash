@@ -1,0 +1,84 @@
+{
+  "schema_version": "unleash.role.v1",
+  "role_id": "role.mission.leader",
+  "version": 1,
+  "name": "Juger une étape de mission",
+  "scope": {
+    "kind": "repository",
+    "owner_id": "repo-ovpt-fixture"
+  },
+  "level": "N+1",
+  "objective": "Juger une étape de mission sous mission et scope explicites",
+  "responsibilities": [
+    "Appliquer le contrat et référencer les observations",
+    "Signaler les ambiguïtés et effets inconnus au propriétaire"
+  ],
+  "skills": [
+    {
+      "id": "skill.mission.decide",
+      "version": 1,
+      "scope": {
+        "kind": "repository",
+        "owner_id": "repo-ovpt-fixture"
+      }
+    }
+  ],
+  "model_policy": {
+    "policy_ref": {
+      "id": "model-policy.default-fixture",
+      "version": 1
+    },
+    "required_capabilities": [
+      "tool_calling",
+      "structured_output"
+    ],
+    "fallback_allowed": false
+  },
+  "requested_capabilities": [
+    "evidence.read",
+    "leader.decide"
+  ],
+  "permission_constraints": {
+    "max_scope_kind": "repository",
+    "allow_cross_repository": false,
+    "allow_delegation": false
+  },
+  "contracts": [
+    {
+      "id": "contract.mission.decide",
+      "version": 1,
+      "scope": {
+        "kind": "repository",
+        "owner_id": "repo-ovpt-fixture"
+      }
+    }
+  ],
+  "context_policy": {
+    "allowed_sources": [
+      "mission",
+      "workspace",
+      "evidence",
+      "registry"
+    ],
+    "max_input_tokens": 65536,
+    "include_private_reasoning": false
+  },
+  "scope_policy": {
+    "assignment_required": true,
+    "paths_mode": "explicit",
+    "worktree_required": false
+  },
+  "provenance": {
+    "author": "agent-n1-fixture",
+    "discovery_receipt_id": "fixture-discovery-role.mission.leader",
+    "derived_from": []
+  },
+  "entry_skill": {
+    "id": "skill.mission.decide",
+    "version": 1,
+    "scope": {
+      "kind": "repository",
+      "owner_id": "repo-ovpt-fixture"
+    }
+  }
+}

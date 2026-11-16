@@ -1,0 +1,535 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:ovpt:unleash:design:catalog:1",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "const": "unleash.design.catalog.v1"
+    },
+    "package_id": {
+      "const": "ovpt.unleash.v1"
+    },
+    "revision": {
+      "type": "string",
+      "pattern": "^R[0-9]+$"
+    },
+    "date": {
+      "type": "string",
+      "format": "date"
+    },
+    "scope": {
+      "const": "specification_only"
+    },
+    "runtime_executable": {
+      "const": false
+    },
+    "features": {
+      "type": "array",
+      "minItems": 19,
+      "maxItems": 19,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^F\\d{3}$"
+          },
+          "status": {
+            "const": "proposed"
+          },
+          "path": {
+            "type": "string",
+            "minLength": 1
+          },
+          "documents": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "README": {
+                "type": "string",
+                "minLength": 1
+              },
+              "requirements": {
+                "type": "string",
+                "minLength": 1
+              },
+              "technical-design": {
+                "type": "string",
+                "minLength": 1
+              },
+              "interfaces": {
+                "type": "string",
+                "minLength": 1
+              },
+              "dependencies": {
+                "type": "string",
+                "minLength": 1
+              },
+              "acceptance": {
+                "type": "string",
+                "minLength": 1
+              },
+              "tests": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "required": [
+              "README",
+              "requirements",
+              "technical-design",
+              "interfaces",
+              "dependencies",
+              "acceptance",
+              "tests"
+            ]
+          },
+          "requirement_ids": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
+            "uniqueItems": true
+          },
+          "integration_dependencies": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
+            "uniqueItems": true
+          },
+          "dependency_notes": {
+            "type": "string",
+            "minLength": 1
+          },
+          "dependency_kind": {
+            "const": "integration_not_crate_dag"
+          }
+        },
+        "required": [
+          "id",
+          "status",
+          "path",
+          "documents",
+          "requirement_ids",
+          "integration_dependencies",
+          "dependency_notes",
+          "dependency_kind"
+        ]
+      }
+    },
+    "invariants": {
+      "type": "array",
+      "minItems": 65,
+      "maxItems": 65,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^INV-\\d{3}$"
+          },
+          "status": {
+            "const": "confirmed"
+          },
+          "statement": {
+            "type": "string",
+            "minLength": 1
+          },
+          "origin": {
+            "type": "string",
+            "minLength": 1
+          },
+          "source": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "path": {
+                "type": "string",
+                "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))[^\\\\]+$"
+              },
+              "subject": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "required": [
+              "path",
+              "subject"
+            ]
+          },
+          "specification_refs": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
+            "uniqueItems": true
+          },
+          "component": {
+            "type": "string",
+            "minLength": 1
+          },
+          "feature_text": {
+            "type": "string",
+            "minLength": 1
+          },
+          "acceptance_text": {
+            "type": "string",
+            "minLength": 1
+          },
+          "limits": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "required": [
+          "id",
+          "status",
+          "statement",
+          "origin",
+          "source",
+          "specification_refs",
+          "component",
+          "feature_text",
+          "acceptance_text",
+          "limits"
+        ]
+      }
+    },
+    "requirements": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "requirement_id": {
+            "type": "string",
+            "pattern": "^REQ-[A-Z]+-\\d{3}$"
+          },
+          "requirement": {
+            "type": "string",
+            "minLength": 1
+          },
+          "architecture": {
+            "type": "string",
+            "minLength": 1
+          },
+          "feature_id": {
+            "type": "string",
+            "pattern": "^F\\d{3}$"
+          },
+          "feature_path": {
+            "type": "string",
+            "minLength": 1
+          },
+          "acceptance_id": {
+            "type": "string",
+            "pattern": "^AC-F\\d{3}-\\d{3}$"
+          },
+          "test_id": {
+            "type": "string",
+            "pattern": "^T-F\\d{3}-\\d{3}$"
+          },
+          "evidence_id": {
+            "type": "string",
+            "pattern": "^EV-F\\d{3}-\\d{3}$"
+          },
+          "evidence_expected": {
+            "type": "string",
+            "minLength": 1
+          },
+          "product_test_status": {
+            "const": "not_run"
+          }
+        },
+        "required": [
+          "requirement_id",
+          "requirement",
+          "architecture",
+          "feature_id",
+          "feature_path",
+          "acceptance_id",
+          "test_id",
+          "evidence_id",
+          "evidence_expected",
+          "product_test_status"
+        ]
+      }
+    },
+    "decisions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^ADR-\\d{2}$"
+          },
+          "status": {
+            "enum": [
+              "proposed",
+              "accepted",
+              "superseded"
+            ]
+          },
+          "title": {
+            "type": "string",
+            "minLength": 1
+          },
+          "source": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "path": {
+                "type": "string",
+                "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))[^\\\\]+$"
+              },
+              "subject": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "required": [
+              "path",
+              "subject"
+            ]
+          },
+          "related_ids": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
+            "uniqueItems": true
+          }
+        },
+        "required": [
+          "id",
+          "status",
+          "title",
+          "source",
+          "related_ids"
+        ]
+      }
+    },
+    "assumptions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^H-\\d{2}$"
+          },
+          "status": {
+            "enum": [
+              "proposed"
+            ]
+          },
+          "source": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "path": {
+                "type": "string",
+                "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))[^\\\\]+$"
+              },
+              "subject": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "required": [
+              "path",
+              "subject"
+            ]
+          },
+          "hypothesis": {
+            "type": "string",
+            "minLength": 1
+          },
+          "rationale_or_verification": {
+            "type": "string",
+            "minLength": 1
+          },
+          "reconsider_when": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "status",
+          "source",
+          "hypothesis",
+          "rationale_or_verification",
+          "reconsider_when"
+        ]
+      }
+    },
+    "questions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^Q-\\d{2}$"
+          },
+          "status": {
+            "enum": [
+              "open",
+              "resolved",
+              "optional_unconfirmed"
+            ]
+          },
+          "source": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "path": {
+                "type": "string",
+                "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))[^\\\\]+$"
+              },
+              "subject": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "required": [
+              "path",
+              "subject"
+            ]
+          },
+          "question": {
+            "type": "string",
+            "minLength": 1
+          },
+          "recommendation": {
+            "type": "string",
+            "minLength": 1
+          },
+          "owner_gate": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "required": [
+          "id",
+          "status",
+          "source",
+          "question",
+          "recommendation",
+          "owner_gate"
+        ]
+      }
+    },
+    "risks": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^R-\\d{2}$"
+          },
+          "status": {
+            "enum": [
+              "identified"
+            ]
+          },
+          "source": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "path": {
+                "type": "string",
+                "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))[^\\\\]+$"
+              },
+              "subject": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "required": [
+              "path",
+              "subject"
+            ]
+          },
+          "risk": {
+            "type": "string",
+            "minLength": 1
+          },
+          "hypothesis_refs": {
+            "type": "string",
+            "minLength": 1
+          },
+          "mitigation": {
+            "type": "string",
+            "minLength": 1
+          },
+          "verification_owner": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "required": [
+          "id",
+          "status",
+          "source",
+          "risk",
+          "hypothesis_refs",
+          "mitigation",
+          "verification_owner"
+        ]
+      }
+    },
+    "operations_ref": {
+      "type": "string",
+      "minLength": 1
+    },
+    "traceability_ref": {
+      "type": "string",
+      "minLength": 1
+    },
+    "validation_ref": {
+      "type": "string",
+      "minLength": 1
+    },
+    "source_of_authority": {
+      "type": "string",
+      "minLength": 1
+    }
+  },
+  "required": [
+    "schema_version",
+    "package_id",
+    "revision",
+    "date",
+    "scope",
+    "runtime_executable",
+    "features",
+    "invariants",
+    "requirements",
+    "decisions",
+    "assumptions",
+    "questions",
+    "risks",
+    "operations_ref",
+    "traceability_ref",
+    "validation_ref",
+    "source_of_authority"
+  ]
+}

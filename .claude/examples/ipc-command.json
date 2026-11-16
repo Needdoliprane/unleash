@@ -1,0 +1,14 @@
+{
+  "protocol_version": "unleash.ipc.v2",
+  "request_id": "d2f8508a-8d14-4f38-85d7-0fb5cebd7a11",
+  "command_id": "e6ee94ea-6ce7-46df-abd1-41e6f0b02aff",
+  "actor_ref": null,
+  "project_id": "a73b59d2-4579-4abc-a6b6-6e17f1e80ea0",
+  "aggregate_id": "15f65a93-7bdc-4276-bb74-2bf8830b5b57",
+  "expected_revision": 4,
+  "command_type": "PauseMission",
+  "payload": {
+    "reason": "Intervention humaine sur le périmètre"
+  },
+  "authority_generation": "00000000-0000-4000-8000-000000000100"
+}

@@ -1,0 +1,59 @@
+{
+  "schema_version": "unleash.workflow.v1.1",
+  "workflow_id": "demo.reconcile.csv",
+  "version": 1,
+  "name": "Rapprochement de deux exports CSV",
+  "description": "Fixture documentaire sans données réelles ni adaptateur implémenté ; comparaison sur clés et montants entiers selon paramètres publiés.",
+  "model_policy": "forbidden",
+  "bindings": {},
+  "budget": {
+    "max_duration_seconds": 120,
+    "max_step_activations": 10,
+    "max_llm_calls": 0,
+    "max_output_tokens": 0,
+    "max_cost_microusd": 0,
+    "max_agent_executions": 0,
+    "max_concurrent_action_executions": 1
+  },
+  "body": {
+    "id": "compare",
+    "kind": "action",
+    "operation": {
+      "id": "demo.data.reconcile",
+      "version": 1
+    },
+    "contract_profile": {
+      "id": "demo.contract.reconciliation",
+      "version": 1
+    },
+    "scope_key": "selected.exports",
+    "inputs": {
+      "data_revision": {
+        "source": "path",
+        "path": "/input/data_revision_id"
+      },
+      "join_key": {
+        "source": "literal",
+        "value": "invoice_id"
+      },
+      "amount_unit": {
+        "source": "literal",
+        "value": "minor_currency_unit"
+      },
+      "duplicate_policy": {
+        "source": "literal",
+        "value": "block"
+      }
+    },
+    "timeout_seconds": 90,
+    "max_attempts": 1,
+    "retry_policy": "never"
+  },
+  "completion": {
+    "success_when": {
+      "op": "eq",
+      "path": "/results/compare/outputs/report_complete",
+      "value": true
+    }
+  }
+}

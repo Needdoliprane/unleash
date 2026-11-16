@@ -1,0 +1,24 @@
+# F009 — Critères d'acceptation
+
+Tous les scénarios sont **à exécuter**. Les preuves sont produites par le futur harness de test Rust ; le présent dossier ne déclare aucun scénario réussi.
+
+| ID | Given / contexte | When / action | Then / résultat observable |
+|---|---|---|---|
+| AC-F009-001 | Un même helper existe sur cible intégrée, commit feature et dirty ; un autre projet contient fichiers/documents sans Git | Chercher depuis les deux contextes consommateurs | Chaque résultat cite source/version/digest/génération et annotations datées ; identités Git exactes lorsqu'applicables, ResourceSnapshot/file_snapshot sans Git et états not_applicable ailleurs ; aucun « dernière version » sans provenance |
+| AC-F009-002 | Deux fichiers sont modifiés pendant une capture séquentielle | Capturer puis analyser | La capture reste `unverified` ou devient `inconsistent` ; jamais de badge cohérent obtenu par double scan |
+| AC-F009-003 | Un corpus Python/TS/Java/Go/Rust et un workspace mixte sont fournis | Charger chaque profil avec puis sans dépendances requises | Capacités réelles, versions et limites sont visibles ; le fallback lexical reste utilisable et clairement identifié |
+| AC-F009-004 | Un candidat privé est d'abord autorisé puis révoqué | Répéter recherche, export et constitution de contexte | Ni extrait, compteur d'exclus, cache partagé ni nouveau contexte ne révèle la ressource révoquée |
+| AC-F009-005 | Un reçu préalable, sa validation bornée et son opération sont liés | Créer, publier identiquement puis clôturer ; comparer changement extérieur pertinent, échéance dépassée et crash | L'effet propre exact préserve la conformité historique ; état courant distinct ; changement pertinent impose nouvelle discovery de clôture avec cible/version exactes ; borne expirée exige contrôle mécanique, lacune reste unknown ; aucun reçu antidaté |
+| AC-F009-006 | Le corpus contient macros, imports dynamiques et API interlangage | Demander symboles et références | Chaque relation indique méthode et confiance ; l'absence de résolution n'est pas présentée comme absence d'appel |
+| AC-F009-007 | Mission A développe un helper nonmergé avec ACL compatible | Mission B cherche une fonction proche | Le candidat A, son propriétaire et son état apparaissent ; disponibilité locale est fausse si le contenu n'est pas consommé par B |
+| AC-F009-008 | Créations identifiables de code/test/contrat/skill/rôle/automatisation/ressource depuis agent, humain ou replay | Attacher un reçu puis essayer absence, origine mélangée/forgée et réutilisation pour une seconde opération | Autorisation durable avant effet et usage exact observé ; origines exclusives dérivées du mandat ; humain/replay sans invocation ; mélange/forgerie refusés ; absence/tardivité visibles ; même retry dédupliqué, nouvelle création exige nouveau reçu |
+| AC-F009-009 | Deux helpers ressemblent mais leurs erreurs et règles de casse diffèrent | N+1 choisit une copie adaptée | Décision create/copy, justification de domaine et provenance sont conservées ; aucune mutualisation imposée |
+| AC-F009-010 | A veut attendre B tandis que B veut attendre A | Soumettre les deux arêtes concurremment | Une seule insertion compatible est admise ; le cycle est détecté ; aucune invocation dormante n'occupe un slot |
+| AC-F009-011 | L'index est détruit après archivage des sources, requêtes, décisions et usages | Reconstruire puis publier pendant une nouvelle modification, avec et sans historique complet | Objets historiques identiques ; éligibilité courante reconstruite séparément ; une génération ancienne ne remplace pas la nouvelle ; trou d'historique impose réconciliation/unknown, jamais absence de changement supposée |
+| AC-F009-012 | Un monorepo dépasse les budgets configurés | Rechercher et indexer sous charge | Limites respectées, état partiel visible, erreur différente d'une liste vide et service de contrôle réactif |
+
+## Critère global
+
+Le scénario utilisateur D est accepté lorsque B découvre le helper nonmergé de A, examine la source exacte et prend une décision traçable parmi réutiliser, coordonner, attendre ou créer/copier. La démonstration n'est pas limitée à une recherche par nom exact. Le cas trompeur `normalizeEmail`/`cleanEmail` doit également montrer qu'une similitude ne décide pas du contrat métier.
+
+Les variantes sans Git et sans modèle font partie de cette qualification. La preuve de recherche préalable et la décision réévaluée à la clôture sont deux observations distinctes : une création propre suivie d'un commit identique peut satisfaire la première sans nouvelle discovery ; une retouche extérieure pertinente exige la seconde. Une retouche ultérieure du même auteur ne bénéficie pas automatiquement de l'exclusion de l'effet propre. Un verdict de clôture ne réutilise pas une revalidation expirée ou portant une autre cible/version.

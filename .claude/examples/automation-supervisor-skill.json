@@ -1,0 +1,119 @@
+{
+  "schema_version": "unleash.skill.v1",
+  "skill_id": "skill.automation.supervise",
+  "version": 1,
+  "name": "Superviser un bloc observable",
+  "description": "Fixture documentaire : décider à partir des résultats typés, assertions et limites du bloc, sans effectuer chaque action ni modifier le plan engagé.",
+  "scope": {
+    "kind": "project",
+    "owner_id": "project-automation-fixture"
+  },
+  "instructions": "Examiner le bundle autorisé et sa révision. Distinguer résultat observé, logs et limites. Proposer continue/reconcile/correct/escalate uniquement dans le mandat. Un effet inconnu ne devient pas réussi par jugement ; ne pas répéter une mutation ni réécrire le plan.",
+  "input_schema": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": [
+      "review_target"
+    ],
+    "properties": {
+      "review_target": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 256
+      }
+    }
+  },
+  "output_schema": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": [
+      "decision",
+      "reason",
+      "evidence_bundle_id",
+      "observed_revision"
+    ],
+    "properties": {
+      "decision": {
+        "enum": [
+          "continue",
+          "reconcile",
+          "correct",
+          "escalate"
+        ]
+      },
+      "reason": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 4096
+      },
+      "evidence_bundle_id": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 256
+      },
+      "observed_revision": {
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 9007199254740991
+      }
+    }
+  },
+  "requested_capabilities": [
+    "evidence.read",
+    "leader.decide"
+  ],
+  "tools": [
+    {
+      "id": "tool.evidence.read",
+      "version": 1,
+      "required": true
+    },
+    {
+      "id": "tool.leader.decide",
+      "version": 1,
+      "required": true
+    }
+  ],
+  "contract": {
+    "contract_id": "contract.automation.supervise",
+    "version": 1,
+    "rules": [
+      {
+        "id": "output-shape",
+        "validator": "json_schema",
+        "phase": "completion",
+        "severity": "required",
+        "on_unknown": "block",
+        "parameters": {
+          "target": "output"
+        }
+      }
+    ]
+  },
+  "resources": [],
+  "acl": {
+    "read_scopes": [
+      "project"
+    ],
+    "requested_grants": [
+      "evidence.read",
+      "leader.decide"
+    ]
+  },
+  "provenance": {
+    "author": "user-fixture",
+    "source_uri": null,
+    "license": "Apache-2.0",
+    "discovery_receipt_id": "fixture-discovery-automation-supervise",
+    "derived_from": []
+  },
+  "evaluation_policy": {
+    "required_checks": [
+      "schema",
+      "references",
+      "permissions",
+      "fixtures"
+    ],
+    "judge_policy": "none"
+  }
+}

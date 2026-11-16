@@ -4,8 +4,8 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="dark light">
-  <meta name="description" content="Guide de lecture du dossier d’ingénierie OVPT Unleash, révision R6. Architecture, audits, spécifications et plan de réalisation de toute la V1.">
-  <title>OVPT Unleash — Commencer ici · R6</title>
+  <meta name="description" content="Guide de lecture du dossier d’ingénierie OVPT Unleash, révision R7. Architecture, audits, spécifications, décisions rendues et plan de réalisation de toute la V1.">
+  <title>OVPT Unleash — Commencer ici · R7</title>
   <style>
     :root{--ink:#101815;--panel:#18231e;--panel2:#203029;--text:#edf5ee;--muted:#b6cabc;--mint:#b1edcf;--copper:#efbd9c;--line:#3a4b41;--radius:20px}
     *{box-sizing:border-box}html{scroll-behavior:auto}body{margin:0;background:var(--ink);color:var(--text);font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;line-height:1.65;-webkit-font-smoothing:antialiased}a{color:var(--mint);text-decoration-thickness:1px;text-underline-offset:4px}a:hover{text-decoration-thickness:2px}a:focus-visible{outline:3px solid var(--copper);outline-offset:5px;border-radius:3px}code{font:0.88em ui-monospace,SFMono-Regular,Consolas,monospace;color:var(--mint);overflow-wrap:anywhere}p{margin:0 0 1em}h1,h2,h3{line-height:1.15;letter-spacing:-.035em;margin:0}h2{font-size:clamp(1.8rem,3.3vw,2.7rem);max-width:850px}h3{font-size:1.24rem}strong{font-weight:650}ul,ol{padding-left:1.25rem;margin:0}li+li{margin-top:.55rem}section{scroll-margin-top:24px}.wrap{width:min(1180px,calc(100% - 64px));margin:auto}.skip{position:absolute;left:16px;top:-100px;z-index:9;background:var(--mint);color:var(--ink);padding:12px}.skip:focus{top:12px}.masthead{display:flex;justify-content:space-between;align-items:center;padding:28px 0;border-bottom:1px solid var(--line);gap:20px}.brand{font-weight:800;letter-spacing:.14em;font-size:1.08rem;color:var(--text);text-decoration:none}.brand span{margin-left:14px;padding-left:18px;border-left:1px solid var(--line);font-weight:450;letter-spacing:.03em}.edition{color:var(--muted);font-size:.78rem;letter-spacing:.09em;text-transform:uppercase;text-align:right}.hero{display:grid;grid-template-columns:minmax(0,1.6fr) minmax(0,.8fr);gap:64px;padding:75px 0 54px;align-items:end}.eyebrow{font-size:.74rem;letter-spacing:.16em;text-transform:uppercase;color:var(--copper);font-weight:700;margin-bottom:24px}.hero h1{font-size:clamp(3rem,5.6vw,4.8rem);font-weight:650;max-width:810px;line-height:1.02}.hero h1 span{color:var(--mint)}.lead{font-size:1.13rem;color:var(--muted);max-width:730px;margin:26px 0 0}.note{padding:25px 0 3px 25px;border-left:2px solid var(--copper);font-size:.94rem}.note .label{display:block;margin-bottom:10px;color:var(--copper);font-size:.72rem;font-weight:750;text-transform:uppercase;letter-spacing:.13em}.note p:last-child{margin:0}.actions{display:flex;flex-wrap:wrap;gap:12px;margin:29px 0 0}.button{display:inline-block;border:1px solid var(--line);padding:12px 19px;border-radius:8px;font-size:.91rem;font-weight:650;text-decoration:none}.button.primary{background:var(--mint);color:var(--ink);border-color:var(--mint)}.button:hover{border-color:var(--mint);text-decoration:none}.stats{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));border-top:1px solid var(--line);border-bottom:1px solid var(--line);margin:0 0 28px}.stat{padding:24px 26px 22px;min-width:0}.stat:not(:nth-child(3n)){border-right:1px solid var(--line)}.stat:nth-child(-n+3){border-bottom:1px solid var(--line)}.stat strong{font-size:2.45rem;line-height:1;color:var(--text);display:block;font-weight:550;letter-spacing:-.04em}.stat span{display:block;font-size:.83rem;color:var(--muted);margin-top:10px}.jump{display:flex;gap:8px 23px;flex-wrap:wrap;font-size:.83rem;padding:0 0 24px}.jump a{color:var(--muted)}.section{padding:54px 0;border-top:1px solid var(--line)}.section-head{display:flex;gap:25px;align-items:baseline;margin-bottom:28px}.number{font:500 .82rem ui-monospace,SFMono-Regular,Consolas,monospace;color:var(--copper);flex:0 0 25px}.intro{color:var(--muted);max-width:850px;margin:0 0 28px}.grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:18px}.card{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);padding:27px;min-width:0}.card h3{margin-bottom:13px}.card p{color:var(--muted);font-size:.96rem}.card p:last-child{margin-bottom:0}.card .mini{font-size:.77rem;letter-spacing:.12em;text-transform:uppercase;color:var(--copper);display:block;margin-bottom:17px;font-weight:650}.card .outcome{border-top:1px solid var(--line);padding-top:15px;margin-top:18px;color:var(--text)}.reading{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:18px}.reading .card{padding:25px}.reading h3{font-size:1.16rem}.reading ul{font-size:.93rem}.reading p{font-size:.91rem}.band{margin-top:24px;padding:21px 25px;background:var(--panel2);border-radius:12px;color:var(--muted);font-size:.92rem}.band strong{color:var(--text)}.scope{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:25px}.scope article{border-top:2px solid var(--mint);padding-top:20px;min-width:0}.scope h3{margin-bottom:13px}.scope p{font-size:.94rem;color:var(--muted)}.features{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:0 28px;list-style:none;padding:0}.features li{margin:0;padding:15px 0;border-bottom:1px solid var(--line);display:flex;gap:13px;align-items:baseline;min-width:0}.features .fid{font:500 .73rem ui-monospace,SFMono-Regular,Consolas,monospace;color:var(--copper);white-space:nowrap}.features a{color:var(--text);font-size:.9rem;text-decoration:none;overflow-wrap:anywhere}.features a:hover{text-decoration:underline}.chain{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));border:1px solid var(--line);border-radius:12px;overflow:hidden;margin:24px 0}.chain div{padding:20px;min-width:0}.chain div+div{border-left:1px solid var(--line)}.chain b{display:block;font-size:.88rem;color:var(--mint);font-weight:650;margin-bottom:8px}.chain span{font-size:.81rem;color:var(--muted);display:block}.milestones{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}.milestone{display:flex;gap:19px;padding:20px 22px;border:1px solid var(--line);border-radius:12px;min-width:0}.milestone .tag{color:var(--mint);font:600 .93rem ui-monospace,SFMono-Regular,Consolas,monospace;padding-top:2px;flex:0 0 27px}.milestone h3{font-size:1.03rem;line-height:1.3;letter-spacing:-.015em}.milestone p{font-size:.86rem;color:var(--muted);margin:8px 0 0}.open{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px 34px}.open p{font-size:.92rem;color:var(--muted);border-bottom:1px solid var(--line);padding:0 0 14px}.open strong{display:block;color:var(--text);margin-bottom:4px}.closing{display:flex;justify-content:space-between;align-items:center;gap:25px;padding:30px;border:1px solid var(--line);border-radius:var(--radius);background:var(--panel)}.closing p{font-size:1.12rem;margin:0;max-width:750px}.closing .button{flex-shrink:0}.footer{padding:32px 0 42px;color:var(--muted);font-size:.78rem}.footer p{max-width:940px}.fine{font-size:.8rem;color:var(--muted)}
@@ -19,19 +19,19 @@
 <div class="wrap">
   <header class="masthead">
     <a class="brand" href="#contenu" aria-label="OVPT Unleash, accueil du guide">OVPT<span>UNLEASH</span></a>
-    <div class="edition">Dossier d’ingénierie · R6<br>16 novembre 2026</div>
+    <div class="edition">Dossier d’ingénierie · R7<br>16 novembre 2026</div>
   </header>
   <main id="contenu">
     <section class="hero" aria-labelledby="titre">
       <div>
         <p class="eyebrow">Architecture · Audits · Spécifications · Réalisation</p>
         <h1 id="titre">Le dossier pour<br>construire <span>Unleash.</span></h1>
-        <p class="lead">Un socle local pour organiser des équipes d’agents, exécuter des procédures réutilisables et relier chaque résultat à ses preuves. Toute la V1 est spécifiée ; ses garanties sont délimitées et mises à l’épreuve dans les plans de test.</p>
+        <p class="lead">Un socle local pour organiser des équipes d’agents, exécuter des procédures réutilisables et relier chaque résultat à ses preuves. Toute la V1 est spécifiée, les arbitrages sont rendus et la réalisation est ouverte dès M0 ; les garanties sont délimitées et mises à l’épreuve dans les plans de test.</p>
         <div class="actions"><a class="button primary" href=".claude/README.md">Ouvrir le dossier</a><a class="button" href="SYNTHESE.md">Lire la synthèse</a><a class="button" href=".claude/INDEX.md">Index intégral</a></div>
       </div>
       <aside class="note" aria-label="Statut du livrable">
         <span class="label">Le statut exact</span>
-        <p>Un dossier de conception contradictoire, destiné à la réalisation et à une ingestion documentaire contrôlée.</p>
+        <p>Un dossier de conception contradictoire, à la révision R7 : 21 questions résolues, 19 ADR acceptés, réalisation ouverte.</p>
         <p>Les tests du futur produit restent <code>not_run</code>. La qualité d’un importeur réel, du runtime ou des interfaces devra encore être démontrée.</p>
       </aside>
     </section>
@@ -39,17 +39,17 @@
       <div class="stat"><strong>19</strong><span>features · 7 documents chacune</span></div>
       <div class="stat"><strong>239</strong><span>exigences reliées à leur acceptation</span></div>
       <div class="stat"><strong>65</strong><span>invariants utilisateur suivis</span></div>
-      <div class="stat"><strong>14</strong><span>expertises réellement déléguées</span></div>
+      <div class="stat"><strong>16</strong><span>revues R7 par domaine, contre-vérifiées</span></div>
       <div class="stat"><strong>58</strong><span>groupes de parité GUI / TUI</span></div>
       <div class="stat"><strong>19</strong><span>ADR pour les choix structurants</span></div>
     </div>
-    <nav class="jump" aria-label="Sommaire du guide"><a href="#lire">Par où commencer</a><a href="#corrections">Les points difficiles</a><a href="#perimetre">Périmètre</a><a href="#application">Usage par une application</a><a href="#realisation">Réalisation</a><a href="#decisions">Décisions ouvertes</a></nav>
+    <nav class="jump" aria-label="Sommaire du guide"><a href="#lire">Par où commencer</a><a href="#corrections">Les points difficiles</a><a href="#perimetre">Périmètre</a><a href="#application">Usage par une application</a><a href="#realisation">Réalisation</a><a href="#decisions">Décisions et preuves</a></nav>
 
     <section class="section" id="lire">
       <div class="section-head"><span class="number">01</span><h2>Une entrée adaptée à chaque lecteur.</h2></div>
       <div class="reading">
-        <article class="card"><span class="mini">Porteur du produit</span><h3>Comprendre les arbitrages</h3><p>Les demandes confirmées, les objections et les décisions encore réservées à OVPT.</p><ul><li><a href=".claude/brief/invariants.md">Invariants et statuts</a></li><li><a href=".claude/audits/consolidated-verdict.md">Verdict consolidé</a></li><li><a href=".claude/brief/open-questions.md">Décisions résiduelles</a></li></ul></article>
-        <article class="card"><span class="mini">Équipe de réalisation</span><h3>Prendre un chantier</h3><p>Les contrats communs précèdent le développement parallèle des composants.</p><ul><li><a href=".claude/architecture/system-overview.md">Architecture globale</a></li><li><a href=".claude/architecture/ipc-and-apis.md">Protocole local commun</a></li><li><a href=".claude/plans/v1-implementation-plan.md">Plan de toute la V1</a></li></ul></article>
+        <article class="card"><span class="mini">Porteur du produit</span><h3>Comprendre les arbitrages</h3><p>Les demandes confirmées, les objections et les décisions rendues par délégation de Louis.</p><ul><li><a href=".claude/brief/invariants.md">Invariants et statuts</a></li><li><a href=".claude/audits/consolidated-verdict.md">Verdict consolidé</a></li><li><a href=".claude/brief/open-questions.md">Questions résolues</a></li></ul></article>
+        <article class="card"><span class="mini">Équipe de réalisation</span><h3>Prendre un chantier</h3><p>Les contrats communs précèdent le développement parallèle des composants. Un agent démarre par <a href="AGENTS.md">AGENTS.md</a>, puis <code>/goal</code> ou <code>$unleash-goal</code>.</p><ul><li><a href=".claude/architecture/system-overview.md">Architecture globale</a></li><li><a href=".claude/architecture/ipc-and-apis.md">Protocole local commun</a></li><li><a href=".claude/plans/v1-implementation-plan.md">Plan de toute la V1</a></li></ul></article>
         <article class="card"><span class="mini">Application &amp; revue</span><h3>Exploiter et vérifier</h3><p>Des objets structurés, leurs sources et la séparation entre preuve attendue et preuve acquise.</p><ul><li><a href=".claude/catalog/README.md">Catalogue documentaire</a></li><li><a href=".claude/testing/traceability.md">Chaînes de traçabilité</a></li><li><a href=".claude/testing/document-validation.md">Contrôles réellement exécutés</a></li></ul></article>
       </div>
       <p class="band">Après extraction, conserver ce guide à côté de <code>.claude/</code>. Le répertoire peut être masqué par le gestionnaire de fichiers. Les documents Markdown se lisent dans un éditeur compatible ; le guide fournit des liens relatifs et ne charge aucun contenu distant.</p>
@@ -57,14 +57,14 @@
 
     <section class="section" id="corrections">
       <div class="section-head"><span class="number">02</span><h2>Les quatre endroits où une belle architecture peut échouer.</h2></div>
-      <p class="intro">Les quatorze expertises ont produit trente constats corrigés en conception. Une contrelecture de remise a fermé un raccord supplémentaire. Les objections et les limites sont conservées dans les <a href=".claude/audits/r6/README.md">rapports attribués</a>.</p>
+      <p class="intro">L’audit R7 compte seize revues par domaine, chacune contre-vérifiée : 238 constats, dont 218 confirmés et corrigés dans les documents canoniques et 20 réfutés. Les objections de la révision précédente restent dans les <a href=".claude/audits/r6/README.md">rapports R6</a>.</p>
       <div class="grid">
         <article class="card"><span class="mini">01 · Connaissance partagée</span><h3>Découvert ne signifie pas disponible.</h3><p>Une fonction trouvée dans un autre worktree conserve sa source, sa version observée et son état Git. L’agent distingue ce qu’il peut utiliser maintenant de ce qui exige intégration ou coordination.</p><p class="outcome">La recherche préalable est une preuve historique ; sa fraîcheur courante se vérifie séparément. <a href=".claude/specs/shared-knowledge.md">Contrat de connaissance</a></p></article>
         <article class="card"><span class="mini">02 · Invocations N+1</span><h3>Le manager décide aux bonnes frontières.</h3><p>Appel API, invocation, étape et run sont des objets distincts. Les attentes deviennent durables ; une décision managériale passe par une commande typée. Le compteur sans progrès survit aux réveils.</p><p class="outcome">Le workflow engagé reste cohérent, sans orchestrateur caché dans les prompts. <a href=".claude/architecture/session-model.md">Sessions et invocations</a></p></article>
         <article class="card"><span class="mini">03 · Reprise après panne</span><h3>Une inconnue ne devient pas un retry.</h3><p>PID et session ne suffisent pas à prouver l’identité d’un exécuteur ou le résultat d’un effet. Le journal d’actions conserve l’incertitude ; la restauration change de lignée et refuse les anciennes commandes.</p><p class="outcome">Réconcilier avant de répéter, avec des points de panne et des oracles de test explicites. <a href=".claude/architecture/failure-recovery.md">Contrat de reprise</a></p></article>
         <article class="card"><span class="mini">04 · Skills et contrats</span><h3>Relier une preuve ne suffit pas à la vérifier.</h3><p>Les contrats utilisent un vocabulaire fermé. Une exécution de test attendue est liée avant l’effet à sa commande, son contexte et son snapshot ; un résultat favorable choisi après coup ne la remplace pas.</p><p class="outcome">Forme, observation et jugement sémantique restent séparés. <a href=".claude/specs/contract-enforcement.md">Contrats exécutables à construire</a></p></article>
       </div>
-      <p class="band"><strong>Autres raccords corrigés :</strong> autorité locale unique, probes sans faux agent, confidentialité des résumés, références Git, obligations AI-Guard, identité OAuth et reprise du guidage. Le <a href=".claude/brief/revision-2026-11-16-r6.md">résumé R6</a> relie chaque frontière à son contrat canonique.</p>
+      <p class="band"><strong>Autres raccords corrigés :</strong> autorité locale unique, probes sans faux agent, confidentialité des résumés, références Git, obligations AI-Guard, identité OAuth et reprise du guidage. La <a href=".claude/brief/revision-2026-11-16-r7.md">révision R7</a> consigne les arbitrages et les familles de corrections.</p>
     </section>
 
     <section class="section" id="perimetre">
@@ -74,7 +74,7 @@
         <article><h3>Procédures réutilisables</h3><p>Apprendre ou réparer une procédure avec un modèle, puis la rejouer sur de nouvelles données. Le mode sans modèle et la supervision par blocs sont explicites ; un changement de site n’autorise aucun remplacement silencieux en cours de run.</p></article>
         <article><h3>Parcours accessibles</h3><p>Partir d’un objectif ou d’un modèle de procédure, sans agents préconfigurés ni dépôt obligatoire. GUI et TUI couvrent les mêmes fonctions ; CLI scriptable et interfaces graphiques utilisent le même backend.</p></article>
       </div>
-      <p class="band">API cloud et profils locaux <strong>LM Studio, Ollama, llama.cpp</strong> sont prévus. Tauri et Ratatui/Crossterm sont des choix proposés à qualifier. La réutilisation de moteurs et la présentation HTML/CSS sont autorisées. La licence open source reste à choisir par OVPT.</p>
+      <p class="band">API cloud et profils locaux <strong>LM Studio, Ollama, llama.cpp</strong> sont prévus. Pile retenue : Tauri 2 avec React/TypeScript, Ratatui/Crossterm, rusqlite, fantoccini et Chrome for Testing. Licence Apache-2.0.</p>
       <h3 style="margin:34px 0 16px">Les 19 chantiers de la V1</h3>
       <ol class="features">
         <li><span class="fid">F001</span><a href=".claude/features/F001-core-daemon/README.md">Daemon utilisateur</a></li>
@@ -97,12 +97,12 @@
         <li><span class="fid">F018</span><a href=".claude/features/F018-reliability-recovery/README.md">Fiabilité et reprise</a></li>
         <li><span class="fid">F019</span><a href=".claude/features/F019-reusable-automations/README.md">Automatisations réutilisables</a></li>
       </ol>
-      <p class="fine" style="margin-top:18px">Chaque chantier possède objectif, exigences, conception technique, interfaces, dépendances, acceptation et tests : 133 documents canoniques au total.</p>
+      <p class="fine" style="margin-top:18px">Chaque chantier possède objectif, exigences, conception technique, interfaces, dépendances, acceptation et tests : sept documents canoniques par feature.</p>
     </section>
 
     <section class="section" id="application">
       <div class="section-head"><span class="number">04</span><h2>Un dossier qu’une application peut exploiter avec des contrôles explicites.</h2></div>
-      <p class="intro">Les catalogues JSON complètent les textes. Ils relient les objets, les 196 opérations documentées et les 58 groupes de parité. L’application peut préparer des missions à partir de ces références, dans son propre cadre d’autorisation.</p>
+      <p class="intro">Les catalogues JSON complètent les textes. Ils relient les objets, les 204 opérations documentées et les 58 groupes de parité. L’application peut préparer des missions à partir de ces références, dans son propre cadre d’autorisation.</p>
       <div class="chain" aria-label="Chaîne de traçabilité">
         <div><b>Exigence</b><span>Une demande identifiée et sa source.</span></div>
         <div><b>Architecture &amp; feature</b><span>Le responsable et le contrat applicable.</span></div>
@@ -111,7 +111,7 @@
       </div>
       <div class="grid">
         <article class="card"><h3>À contrôler lors de l’import</h3><p>Inventaire exact, empreintes, schémas, identifiants uniques, relations exactes et correspondance avec les sources. Les références restent confinées au paquet. Une divergence doit être signalée et refusée.</p><a href=".claude/specs/document-package-ingestion.md">Lire le contrat d’ingestion</a></article>
-        <article class="card"><h3>À construire au jalon M0</h3><p>Les DTO Rust et payloads runtime complets. Le registre indique <code>contract_stage=documented</code> : il sert aujourd’hui à consulter, vérifier et planifier. La compatibilité avec une application réelle n’a pas été testée, son importeur n’ayant pas été fourni.</p><a href=".claude/catalog/README.md">Lire les limites du catalogue</a></article>
+        <article class="card"><h3>À construire au jalon M0</h3><p>Les DTO Rust et payloads runtime complets. Le registre indique <code>contract_stage=documented</code> : il sert aujourd’hui à consulter, vérifier et planifier. La compatibilité avec une application réelle n’a pas été testée : son importeur n’a pas été fourni.</p><a href=".claude/catalog/README.md">Lire les limites du catalogue</a></article>
       </div>
       <p class="band"><strong>Frontière d’autorité :</strong> importer le dossier ne publie aucun skill, ne lance aucun agent et ne transforme aucune preuve attendue en test réussi. Le nom <code>.claude/</code> désigne le livrable documentaire ; il n’introduit aucune dépendance d’exécution à Claude Code.</p>
     </section>
@@ -133,20 +133,20 @@
     </section>
 
     <section class="section" id="decisions">
-      <div class="section-head"><span class="number">06</span><h2>Les décisions encore ouvertes restent visibles.</h2></div>
+      <div class="section-head"><span class="number">06</span><h2>Les décisions sont rendues ; les preuves restent à produire.</h2></div>
       <div class="open">
-        <p><strong>GUI et moteur de présentation</strong>Tauri est proposé. Le choix final dépend de prototypes réels, du design, de l’accessibilité et du parcours TUI équivalent.</p>
-        <p><strong>Frontière de migration des workflows</strong>Le nouveau run après drainage est proposé. L’adoption précise reste l’arbitrage Q-03, sans modification silencieuse de l’exécution engagée.</p>
-        <p><strong>AI-Guard et modèle de menace</strong>Le protocole réel, ses obligations et la frontière d’isolation doivent être examinés et qualifiés.</p>
-        <p><strong>Fournisseurs, OAuth et plateformes</strong>Versions, modèles, droits, matériel, OS et navigateur doivent être testés sur les configurations annoncées.</p>
-        <p><strong>Publication open source</strong>La licence, la politique de marque, les notices, les dépendances et les conditions de distribution relèvent d’OVPT.</p>
-        <p><strong>Récurrence calendaire</strong>Q-21 reste une option non confirmée. Le scheduler interne et le rejeu explicite sont bien prévus.</p>
+        <p><strong>GUI et moteur de présentation</strong>Tauri 2 avec React/TypeScript est retenu (ADR-03). Preuve restante : tranche verticale M0, accessibilité et parcours TUI équivalent.</p>
+        <p><strong>Frontière de migration des workflows</strong>La frontière est le Run (Q-03 résolue) : une nouvelle version n’est adoptée que par un nouveau Run, sans modification de l’exécution engagée.</p>
+        <p><strong>AI-Guard et modèle de menace</strong>ActionBroker interne unique, modes <code>standard</code> et <code>strict</code> retenus. Preuve restante : EXT-GUARD, qualification du contrat externe.</p>
+        <p><strong>Fournisseurs, OAuth et plateformes</strong>Clés API fournies par l’utilisateur, OAuth public avec PKCE, matrice macOS et Ubuntu arrêtées. Preuves restantes : EXT-MODEL (avec des modèles intelligents, sur décision de Louis), EXT-MODEL-LOCAL, EXT-BROWSER, EXT-DOC, EXT-OS.</p>
+        <p><strong>Publication open source</strong>Licence Apache-2.0 ; les noms OVPT et Unleash ne sont pas concédés. Preuves restantes : EXT-OSS (antériorité du nom) et EXT-DIST (signature, notarisation, SBOM).</p>
+        <p><strong>Récurrence calendaire</strong>Q-21 est écartée de la V1. Restent prévus le rejeu explicite, les timers internes et la CLI non interactive appelable par un ordonnanceur externe.</p>
       </div>
       <p class="intro">La rédaction ne remplace pas les essais du produit. Aucun runtime Unleash, compte marchand, achat, inférence réelle ou intégration AI-Guard n’est présenté comme qualifié par ce livrable.</p>
-      <div class="closing"><p>Commencer par les contrats partagés et les expériences M0, puis attribuer les features avec leurs critères de preuve.</p><a class="button primary" href=".claude/plans/v1-implementation-plan.md">Ouvrir le plan V1</a></div>
+      <div class="closing"><p>Lire AGENTS.md, puis commencer par les contrats partagés et les expériences M0 ; attribuer les features avec leurs critères de preuve.</p><a class="button primary" href=".claude/plans/v1-implementation-plan.md">Ouvrir le plan V1</a></div>
     </section>
   </main>
-  <footer class="footer"><p>OVPT Unleash · Révision R6 · Guide de lecture du dossier de conception. Les sources canoniques restent les documents liés, leurs statuts et leurs schémas. Présentation hors ligne, sans script ni ressource distante.</p><a href=".claude/INDEX.md">Tous les documents</a> · <a href=".claude/audits/r6/README.md">Toutes les expertises R6</a> · <a href=".claude/testing/document-validation.md">Résultats de validation documentaire</a></footer>
+  <footer class="footer"><p>OVPT Unleash · Révision R7 · Guide de lecture du dossier de conception. Les sources canoniques restent les documents liés, leurs statuts et leurs schémas. Présentation hors ligne, sans script ni ressource distante.</p><a href=".claude/INDEX.md">Tous les documents</a> · <a href=".claude/audits/r6/README.md">Expertises R6 (historique)</a> · <a href=".claude/testing/document-validation.md">Résultats de validation documentaire</a></footer>
 </div>
 </body>
 </html>

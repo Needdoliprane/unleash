@@ -1,0 +1,393 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "role_id",
+    "version",
+    "name",
+    "scope",
+    "level",
+    "objective",
+    "responsibilities",
+    "skills",
+    "model_policy",
+    "requested_capabilities",
+    "permission_constraints",
+    "contracts",
+    "context_policy",
+    "scope_policy",
+    "provenance",
+    "entry_skill"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "unleash.role.v1"
+    },
+    "role_id": {
+      "type": "string",
+      "pattern": "^[a-z0-9]+(?:[._-][a-z0-9]+)*$",
+      "maxLength": 128
+    },
+    "version": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9007199254740991
+    },
+    "name": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "scope": {
+      "$ref": "#/$defs/registryScope"
+    },
+    "level": {
+      "enum": [
+        "N",
+        "N+1",
+        "N+2"
+      ]
+    },
+    "objective": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 4096
+    },
+    "responsibilities": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 2048
+      },
+      "minItems": 1,
+      "maxItems": 32
+    },
+    "skills": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "version",
+          "scope"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^[a-z0-9]+(?:[._-][a-z0-9]+)*$",
+            "maxLength": 128
+          },
+          "version": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 9007199254740991
+          },
+          "scope": {
+            "$ref": "#/$defs/registryScope"
+          }
+        }
+      },
+      "minItems": 1,
+      "maxItems": 32,
+      "uniqueItems": true
+    },
+    "model_policy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "policy_ref",
+        "required_capabilities",
+        "fallback_allowed"
+      ],
+      "properties": {
+        "policy_ref": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "id",
+            "version"
+          ],
+          "properties": {
+            "id": {
+              "type": "string",
+              "pattern": "^[a-z0-9]+(?:[._-][a-z0-9]+)*$",
+              "maxLength": 128
+            },
+            "version": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9007199254740991
+            }
+          }
+        },
+        "required_capabilities": {
+          "type": "array",
+          "items": {
+            "enum": [
+              "tool_calling",
+              "structured_output",
+              "vision",
+              "streaming"
+            ]
+          },
+          "minItems": 0,
+          "maxItems": 4,
+          "uniqueItems": true
+        },
+        "fallback_allowed": {
+          "type": "boolean"
+        }
+      }
+    },
+    "requested_capabilities": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "^[a-z0-9]+(?:[._-][a-z0-9]+)*$",
+        "maxLength": 128
+      },
+      "minItems": 0,
+      "maxItems": 64,
+      "uniqueItems": true
+    },
+    "permission_constraints": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "max_scope_kind",
+        "allow_cross_repository",
+        "allow_delegation"
+      ],
+      "properties": {
+        "max_scope_kind": {
+          "enum": [
+            "global",
+            "project",
+            "repository"
+          ]
+        },
+        "allow_cross_repository": {
+          "type": "boolean"
+        },
+        "allow_delegation": {
+          "type": "boolean"
+        }
+      }
+    },
+    "contracts": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "version",
+          "scope"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^[a-z0-9]+(?:[._-][a-z0-9]+)*$",
+            "maxLength": 128
+          },
+          "version": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 9007199254740991
+          },
+          "scope": {
+            "$ref": "#/$defs/registryScope"
+          }
+        }
+      },
+      "minItems": 1,
+      "maxItems": 32,
+      "uniqueItems": true
+    },
+    "context_policy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "allowed_sources",
+        "max_input_tokens",
+        "include_private_reasoning"
+      ],
+      "properties": {
+        "allowed_sources": {
+          "type": "array",
+          "items": {
+            "enum": [
+              "mission",
+              "workspace",
+              "evidence",
+              "pinned_documents",
+              "registry"
+            ]
+          },
+          "minItems": 1,
+          "maxItems": 5,
+          "uniqueItems": true
+        },
+        "max_input_tokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1000000
+        },
+        "include_private_reasoning": {
+          "const": false
+        }
+      }
+    },
+    "scope_policy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "assignment_required",
+        "paths_mode",
+        "worktree_required"
+      ],
+      "properties": {
+        "assignment_required": {
+          "const": true
+        },
+        "paths_mode": {
+          "const": "explicit"
+        },
+        "worktree_required": {
+          "type": "boolean"
+        }
+      }
+    },
+    "provenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "author",
+        "discovery_receipt_id",
+        "derived_from"
+      ],
+      "properties": {
+        "author": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "discovery_receipt_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "derived_from": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "id",
+              "version"
+            ],
+            "properties": {
+              "id": {
+                "type": "string",
+                "pattern": "^[a-z0-9]+(?:[._-][a-z0-9]+)*$",
+                "maxLength": 128
+              },
+              "version": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 9007199254740991
+              }
+            }
+          },
+          "minItems": 0,
+          "maxItems": 32
+        }
+      }
+    },
+    "entry_skill": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "version",
+        "scope"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[a-z0-9]+(?:[._-][a-z0-9]+)*$",
+          "maxLength": 128
+        },
+        "version": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "scope": {
+          "$ref": "#/$defs/registryScope"
+        }
+      }
+    }
+  },
+  "$defs": {
+    "registryScope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "owner_id"
+      ],
+      "properties": {
+        "kind": {
+          "enum": [
+            "global",
+            "project",
+            "repository"
+          ]
+        },
+        "owner_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 256
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "global"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "owner_id": {
+                "type": "null"
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "owner_id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 256
+              }
+            }
+          }
+        }
+      ],
+      "description": "Portée de registre et owner de namespace ; owner_id est null pour global et non vide sinon."
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:ovpt:unleash:role:1",
+  "title": "Rôle OVPT Unleash — registre de premier ordre proposé",
+  "$comment": "Références exactes et permissions validées par le registre. La politique modèle est interne et ne désigne pas un ID fournisseur supposé. Les références skills, entry_skill et contracts d'une version publiée portent portée et owner de namespace ; une référence {id, version} non qualifiée n'existe qu'en draft, avant résolution."
+}

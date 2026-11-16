@@ -1,0 +1,155 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "claim_id",
+    "author_ref",
+    "subject",
+    "statement",
+    "proposition",
+    "observation_ids"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "unleash.contract-claim.v1"
+    },
+    "claim_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "author_ref": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "subject": {
+      "$ref": "urn:ovpt:unleash:expected-test-execution:1#/$defs/subject"
+    },
+    "statement": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 4096
+    },
+    "proposition": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "predicate_ref",
+            "expectation_ref",
+            "execution_binding_id",
+            "asserted_value"
+          ],
+          "properties": {
+            "kind": {
+              "const": "observable"
+            },
+            "predicate_ref": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "id",
+                "version"
+              ],
+              "properties": {
+                "id": {
+                  "const": "process.exit_code"
+                },
+                "version": {
+                  "const": 1
+                }
+              }
+            },
+            "expectation_ref": {
+              "$ref": "urn:ovpt:unleash:expected-test-execution:1#/$defs/exact_ref"
+            },
+            "execution_binding_id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256
+            },
+            "asserted_value": {
+              "type": "integer",
+              "minimum": -2147483648,
+              "maximum": 2147483647
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "predicate_ref",
+            "expectation_ref",
+            "execution_binding_id",
+            "asserted_value"
+          ],
+          "properties": {
+            "kind": {
+              "const": "observable"
+            },
+            "predicate_ref": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "id",
+                "version"
+              ],
+              "properties": {
+                "id": {
+                  "const": "test.expectation_satisfied"
+                },
+                "version": {
+                  "const": 1
+                }
+              }
+            },
+            "expectation_ref": {
+              "$ref": "urn:ovpt:unleash:expected-test-execution:1#/$defs/exact_ref"
+            },
+            "execution_binding_id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256
+            },
+            "asserted_value": {
+              "type": "boolean"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind"
+          ],
+          "properties": {
+            "kind": {
+              "const": "qualitative"
+            }
+          }
+        }
+      ]
+    },
+    "observation_ids": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 256
+      },
+      "minItems": 0,
+      "maxItems": 128,
+      "uniqueItems": true
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:ovpt:unleash:contract-claim:1",
+  "title": "Claim V1 — vocabulaire observable fermé et prose qualitative",
+  "$comment": "author_ref est résolu par le serveur. statement ne produit aucun prédicat. Un claim qualitatif reçoit unknown pour sa vérité observable. Les références invoquées sont des candidats sans autorité propre."
+}

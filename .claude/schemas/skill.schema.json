@@ -1,0 +1,1192 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "skill_id",
+    "version",
+    "name",
+    "description",
+    "scope",
+    "instructions",
+    "input_schema",
+    "output_schema",
+    "requested_capabilities",
+    "tools",
+    "contract",
+    "resources",
+    "acl",
+    "provenance",
+    "evaluation_policy"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "unleash.skill.v1"
+    },
+    "skill_id": {
+      "type": "string",
+      "pattern": "^[a-z0-9]+(?:[._-][a-z0-9]+)*$",
+      "maxLength": 128
+    },
+    "version": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9007199254740991
+    },
+    "name": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "description": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 4096
+    },
+    "scope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "owner_id"
+      ],
+      "properties": {
+        "kind": {
+          "enum": [
+            "global",
+            "project",
+            "repository"
+          ]
+        },
+        "owner_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 256
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "global"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "owner_id": {
+                "type": "null"
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "owner_id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 256
+              }
+            }
+          }
+        }
+      ]
+    },
+    "instructions": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 65536
+    },
+    "input_schema": {
+      "type": "object",
+      "maxProperties": 128
+    },
+    "output_schema": {
+      "type": "object",
+      "maxProperties": 128
+    },
+    "requested_capabilities": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "^[a-z0-9]+(?:[._-][a-z0-9]+)*$",
+        "maxLength": 128
+      },
+      "minItems": 0,
+      "maxItems": 64,
+      "uniqueItems": true
+    },
+    "tools": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "version",
+          "required"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^[a-z0-9]+(?:[._-][a-z0-9]+)*$",
+            "maxLength": 128
+          },
+          "version": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 9007199254740991
+          },
+          "required": {
+            "type": "boolean"
+          }
+        }
+      },
+      "minItems": 0,
+      "maxItems": 64
+    },
+    "contract": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "contract_id",
+        "version",
+        "rules"
+      ],
+      "properties": {
+        "contract_id": {
+          "type": "string",
+          "pattern": "^[a-z0-9]+(?:[._-][a-z0-9]+)*$",
+          "maxLength": 128
+        },
+        "version": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "rules": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/rule"
+          },
+          "minItems": 1,
+          "maxItems": 128
+        }
+      }
+    },
+    "resources": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "path",
+          "sha256"
+        ],
+        "properties": {
+          "path": {
+            "type": "string",
+            "pattern": "^[^/\\\\][^\\\\]*$",
+            "maxLength": 512
+          },
+          "sha256": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$"
+          }
+        }
+      },
+      "minItems": 0,
+      "maxItems": 128
+    },
+    "acl": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "read_scopes",
+        "requested_grants"
+      ],
+      "properties": {
+        "read_scopes": {
+          "type": "array",
+          "items": {
+            "enum": [
+              "global",
+              "project",
+              "repository"
+            ]
+          },
+          "minItems": 1,
+          "maxItems": 3,
+          "uniqueItems": true
+        },
+        "requested_grants": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[a-z0-9]+(?:[._-][a-z0-9]+)*$",
+            "maxLength": 128
+          },
+          "minItems": 0,
+          "maxItems": 64,
+          "uniqueItems": true
+        }
+      }
+    },
+    "provenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "author",
+        "source_uri",
+        "license",
+        "discovery_receipt_id",
+        "derived_from"
+      ],
+      "properties": {
+        "author": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "source_uri": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 2048
+        },
+        "license": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "discovery_receipt_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "derived_from": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "id",
+              "version"
+            ],
+            "properties": {
+              "id": {
+                "type": "string",
+                "pattern": "^[a-z0-9]+(?:[._-][a-z0-9]+)*$",
+                "maxLength": 128
+              },
+              "version": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 9007199254740991
+              }
+            }
+          },
+          "minItems": 0,
+          "maxItems": 32
+        }
+      }
+    },
+    "evaluation_policy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "required_checks",
+        "judge_policy"
+      ],
+      "properties": {
+        "required_checks": {
+          "type": "array",
+          "items": {
+            "enum": [
+              "schema",
+              "references",
+              "permissions",
+              "fixtures",
+              "semantic_review"
+            ]
+          },
+          "minItems": 1,
+          "maxItems": 5,
+          "uniqueItems": true
+        },
+        "judge_policy": {
+          "enum": [
+            "none",
+            "optional",
+            "required"
+          ]
+        }
+      }
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:ovpt:unleash:skill:1",
+  "title": "Skill OVPT Unleash — bundle proposé",
+  "$comment": "Les input_schema/output_schema doivent eux-mêmes être validés selon un profil local borné. Les ressources et permissions ont une validation sémantique supplémentaire.",
+  "$defs": {
+    "rule": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "id",
+            "validator",
+            "phase",
+            "severity",
+            "on_unknown",
+            "parameters"
+          ],
+          "properties": {
+            "id": {
+              "type": "string",
+              "pattern": "^[a-z0-9]+(?:[._-][a-z0-9]+)*$",
+              "maxLength": 128
+            },
+            "validator": {
+              "const": "json_schema"
+            },
+            "phase": {
+              "enum": [
+                "input",
+                "pre_action",
+                "post_action",
+                "completion"
+              ]
+            },
+            "severity": {
+              "enum": [
+                "required",
+                "informational"
+              ]
+            },
+            "on_unknown": {
+              "enum": [
+                "block",
+                "fail"
+              ]
+            },
+            "parameters": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "target"
+              ],
+              "properties": {
+                "target": {
+                  "enum": [
+                    "input",
+                    "output"
+                  ]
+                }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "id",
+            "validator",
+            "phase",
+            "severity",
+            "on_unknown",
+            "parameters"
+          ],
+          "properties": {
+            "id": {
+              "type": "string",
+              "pattern": "^[a-z0-9]+(?:[._-][a-z0-9]+)*$",
+              "maxLength": 128
+            },
+            "validator": {
+              "const": "artifact_present"
+            },
+            "phase": {
+              "enum": [
+                "input",
+                "pre_action",
+                "post_action",
+                "completion"
+              ]
+            },
+            "severity": {
+              "enum": [
+                "required",
+                "informational"
+              ]
+            },
+            "on_unknown": {
+              "enum": [
+                "block",
+                "fail"
+              ]
+            },
+            "parameters": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "output_pointer"
+              ],
+              "properties": {
+                "output_pointer": {
+                  "type": "string",
+                  "maxLength": 1024,
+                  "pattern": "^(?:/(?:[^~/]|~[01])*)*$"
+                }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "id",
+            "validator",
+            "phase",
+            "severity",
+            "on_unknown",
+            "parameters"
+          ],
+          "properties": {
+            "id": {
+              "type": "string",
+              "pattern": "^[a-z0-9]+(?:[._-][a-z0-9]+)*$",
+              "maxLength": 128
+            },
+            "validator": {
+              "const": "artifact_digest"
+            },
+            "phase": {
+              "enum": [
+                "input",
+                "pre_action",
+                "post_action",
+                "completion"
+              ]
+            },
+            "severity": {
+              "enum": [
+                "required",
+                "informational"
+              ]
+            },
+            "on_unknown": {
+              "enum": [
+                "block",
+                "fail"
+              ]
+            },
+            "parameters": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "output_pointer",
+                "expected_digest_pointer"
+              ],
+              "properties": {
+                "output_pointer": {
+                  "type": "string",
+                  "maxLength": 1024,
+                  "pattern": "^(?:/(?:[^~/]|~[01])*)*$"
+                },
+                "expected_digest_pointer": {
+                  "type": "string",
+                  "maxLength": 1024,
+                  "pattern": "^(?:/(?:[^~/]|~[01])*)*$"
+                }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "id",
+            "validator",
+            "phase",
+            "severity",
+            "on_unknown",
+            "parameters"
+          ],
+          "properties": {
+            "id": {
+              "type": "string",
+              "pattern": "^[a-z0-9]+(?:[._-][a-z0-9]+)*$",
+              "maxLength": 128
+            },
+            "validator": {
+              "const": "path_within_scope"
+            },
+            "phase": {
+              "enum": [
+                "input",
+                "pre_action",
+                "post_action",
+                "completion"
+              ]
+            },
+            "severity": {
+              "enum": [
+                "required",
+                "informational"
+              ]
+            },
+            "on_unknown": {
+              "enum": [
+                "block",
+                "fail"
+              ]
+            },
+            "parameters": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "resource_pointer"
+              ],
+              "properties": {
+                "resource_pointer": {
+                  "type": "string",
+                  "maxLength": 1024,
+                  "pattern": "^(?:/(?:[^~/]|~[01])*)*$"
+                }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "id",
+            "validator",
+            "phase",
+            "severity",
+            "on_unknown",
+            "parameters"
+          ],
+          "properties": {
+            "id": {
+              "type": "string",
+              "pattern": "^[a-z0-9]+(?:[._-][a-z0-9]+)*$",
+              "maxLength": 128
+            },
+            "validator": {
+              "const": "git_snapshot_matches"
+            },
+            "phase": {
+              "enum": [
+                "input",
+                "pre_action",
+                "post_action",
+                "completion"
+              ]
+            },
+            "severity": {
+              "enum": [
+                "required",
+                "informational"
+              ]
+            },
+            "on_unknown": {
+              "enum": [
+                "block",
+                "fail"
+              ]
+            },
+            "parameters": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "evidence_pointer",
+                "expected_snapshot_pointer"
+              ],
+              "properties": {
+                "evidence_pointer": {
+                  "type": "string",
+                  "maxLength": 1024,
+                  "pattern": "^(?:/(?:[^~/]|~[01])*)*$"
+                },
+                "expected_snapshot_pointer": {
+                  "type": "string",
+                  "maxLength": 1024,
+                  "pattern": "^(?:/(?:[^~/]|~[01])*)*$"
+                }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "id",
+            "validator",
+            "phase",
+            "severity",
+            "on_unknown",
+            "parameters"
+          ],
+          "properties": {
+            "id": {
+              "type": "string",
+              "pattern": "^[a-z0-9]+(?:[._-][a-z0-9]+)*$",
+              "maxLength": 128
+            },
+            "validator": {
+              "const": "observed_process_exit"
+            },
+            "phase": {
+              "enum": [
+                "input",
+                "pre_action",
+                "post_action",
+                "completion"
+              ]
+            },
+            "severity": {
+              "enum": [
+                "required",
+                "informational"
+              ]
+            },
+            "on_unknown": {
+              "enum": [
+                "block",
+                "fail"
+              ]
+            },
+            "parameters": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "observation_pointer",
+                "expected_exit_code"
+              ],
+              "properties": {
+                "observation_pointer": {
+                  "type": "string",
+                  "maxLength": 1024,
+                  "pattern": "^(?:/(?:[^~/]|~[01])*)*$"
+                },
+                "expected_exit_code": {
+                  "type": "integer",
+                  "minimum": -2147483648,
+                  "maximum": 2147483647
+                }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "id",
+            "validator",
+            "phase",
+            "severity",
+            "on_unknown",
+            "parameters"
+          ],
+          "properties": {
+            "id": {
+              "type": "string",
+              "pattern": "^[a-z0-9]+(?:[._-][a-z0-9]+)*$",
+              "maxLength": 128
+            },
+            "validator": {
+              "const": "test_observation_matches"
+            },
+            "phase": {
+              "enum": [
+                "input",
+                "pre_action",
+                "post_action",
+                "completion"
+              ]
+            },
+            "severity": {
+              "enum": [
+                "required",
+                "informational"
+              ]
+            },
+            "on_unknown": {
+              "enum": [
+                "block",
+                "fail"
+              ]
+            },
+            "parameters": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "observation_pointer",
+                "expected_snapshot_pointer",
+                "parser_ref",
+                "min_cases",
+                "require_all_passed"
+              ],
+              "properties": {
+                "observation_pointer": {
+                  "type": "string",
+                  "maxLength": 1024,
+                  "pattern": "^(?:/(?:[^~/]|~[01])*)*$"
+                },
+                "expected_snapshot_pointer": {
+                  "type": "string",
+                  "maxLength": 1024,
+                  "pattern": "^(?:/(?:[^~/]|~[01])*)*$"
+                },
+                "parser_ref": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "id",
+                    "version"
+                  ],
+                  "properties": {
+                    "id": {
+                      "type": "string",
+                      "pattern": "^[a-z0-9]+(?:[._-][a-z0-9]+)*$",
+                      "maxLength": 128
+                    },
+                    "version": {
+                      "type": "integer",
+                      "minimum": 1,
+                      "maximum": 9007199254740991
+                    }
+                  }
+                },
+                "min_cases": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 1000000
+                },
+                "require_all_passed": {
+                  "type": "boolean"
+                }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "id",
+            "validator",
+            "phase",
+            "severity",
+            "on_unknown",
+            "parameters"
+          ],
+          "properties": {
+            "id": {
+              "type": "string",
+              "pattern": "^[a-z0-9]+(?:[._-][a-z0-9]+)*$",
+              "maxLength": 128
+            },
+            "validator": {
+              "const": "claim_evidence_links"
+            },
+            "phase": {
+              "enum": [
+                "input",
+                "pre_action",
+                "post_action",
+                "completion"
+              ]
+            },
+            "severity": {
+              "enum": [
+                "required",
+                "informational"
+              ]
+            },
+            "on_unknown": {
+              "enum": [
+                "block",
+                "fail"
+              ]
+            },
+            "parameters": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "claim_pointer",
+                "require_snapshot_match"
+              ],
+              "properties": {
+                "claim_pointer": {
+                  "type": "string",
+                  "maxLength": 1024,
+                  "pattern": "^(?:/(?:[^~/]|~[01])*)*$"
+                },
+                "require_snapshot_match": {
+                  "type": "boolean"
+                }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "id",
+            "validator",
+            "phase",
+            "severity",
+            "on_unknown",
+            "parameters"
+          ],
+          "properties": {
+            "id": {
+              "type": "string",
+              "pattern": "^[a-z0-9]+(?:[._-][a-z0-9]+)*$",
+              "maxLength": 128
+            },
+            "validator": {
+              "const": "diff_within_scope"
+            },
+            "phase": {
+              "enum": [
+                "input",
+                "pre_action",
+                "post_action",
+                "completion"
+              ]
+            },
+            "severity": {
+              "enum": [
+                "required",
+                "informational"
+              ]
+            },
+            "on_unknown": {
+              "enum": [
+                "block",
+                "fail"
+              ]
+            },
+            "parameters": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "diff_pointer"
+              ],
+              "properties": {
+                "diff_pointer": {
+                  "type": "string",
+                  "maxLength": 1024,
+                  "pattern": "^(?:/(?:[^~/]|~[01])*)*$"
+                }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "id",
+            "validator",
+            "phase",
+            "severity",
+            "on_unknown",
+            "parameters"
+          ],
+          "properties": {
+            "id": {
+              "type": "string",
+              "pattern": "^[a-z0-9]+(?:[._-][a-z0-9]+)*$",
+              "maxLength": 128
+            },
+            "validator": {
+              "const": "integration_observed"
+            },
+            "phase": {
+              "enum": [
+                "input",
+                "pre_action",
+                "post_action",
+                "completion"
+              ]
+            },
+            "severity": {
+              "enum": [
+                "required",
+                "informational"
+              ]
+            },
+            "on_unknown": {
+              "enum": [
+                "block",
+                "fail"
+              ]
+            },
+            "parameters": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "observation_pointer",
+                "target_ref_pointer",
+                "expected_commits_pointer"
+              ],
+              "properties": {
+                "observation_pointer": {
+                  "type": "string",
+                  "maxLength": 1024,
+                  "pattern": "^(?:/(?:[^~/]|~[01])*)*$"
+                },
+                "target_ref_pointer": {
+                  "type": "string",
+                  "maxLength": 1024,
+                  "pattern": "^(?:/(?:[^~/]|~[01])*)*$"
+                },
+                "expected_commits_pointer": {
+                  "type": "string",
+                  "maxLength": 1024,
+                  "pattern": "^(?:/(?:[^~/]|~[01])*)*$"
+                }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "id",
+            "validator",
+            "phase",
+            "severity",
+            "on_unknown",
+            "parameters"
+          ],
+          "properties": {
+            "id": {
+              "type": "string",
+              "pattern": "^[a-z0-9]+(?:[._-][a-z0-9]+)*$",
+              "maxLength": 128
+            },
+            "validator": {
+              "const": "discovery_receipt_present"
+            },
+            "phase": {
+              "enum": [
+                "input",
+                "pre_action",
+                "post_action",
+                "completion"
+              ]
+            },
+            "severity": {
+              "enum": [
+                "required",
+                "informational"
+              ]
+            },
+            "on_unknown": {
+              "enum": [
+                "block",
+                "fail"
+              ]
+            },
+            "parameters": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "resource_kinds",
+                "require_prior_event",
+                "require_decision"
+              ],
+              "properties": {
+                "resource_kinds": {
+                  "type": "array",
+                  "items": {
+                    "enum": [
+                      "function",
+                      "helper",
+                      "class",
+                      "component",
+                      "api",
+                      "contract",
+                      "test",
+                      "skill",
+                      "role",
+                      "automation",
+                      "technical_resource"
+                    ]
+                  },
+                  "minItems": 1,
+                  "maxItems": 11,
+                  "uniqueItems": true
+                },
+                "require_prior_event": {
+                  "const": true
+                },
+                "require_decision": {
+                  "const": true
+                }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "id",
+            "validator",
+            "phase",
+            "severity",
+            "on_unknown",
+            "parameters"
+          ],
+          "properties": {
+            "id": {
+              "type": "string",
+              "pattern": "^[a-z0-9]+(?:[._-][a-z0-9]+)*$",
+              "maxLength": 128
+            },
+            "validator": {
+              "const": "test_execution_matches"
+            },
+            "phase": {
+              "enum": [
+                "post_action",
+                "completion"
+              ]
+            },
+            "severity": {
+              "enum": [
+                "required",
+                "informational"
+              ]
+            },
+            "on_unknown": {
+              "enum": [
+                "block",
+                "fail"
+              ]
+            },
+            "parameters": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "observation_pointer",
+                "expectation_slot"
+              ],
+              "properties": {
+                "observation_pointer": {
+                  "type": "string",
+                  "maxLength": 1024,
+                  "pattern": "^(?:/(?:[^~/]|~[01])*)*$"
+                },
+                "expectation_slot": {
+                  "type": "string",
+                  "pattern": "^[a-z0-9]+(?:[._-][a-z0-9]+)*$",
+                  "maxLength": 128
+                }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "id",
+            "validator",
+            "phase",
+            "severity",
+            "on_unknown",
+            "parameters"
+          ],
+          "properties": {
+            "id": {
+              "type": "string",
+              "pattern": "^[a-z0-9]+(?:[._-][a-z0-9]+)*$",
+              "maxLength": 128
+            },
+            "validator": {
+              "const": "claim_predicate_matches"
+            },
+            "phase": {
+              "enum": [
+                "post_action",
+                "completion"
+              ]
+            },
+            "severity": {
+              "enum": [
+                "required",
+                "informational"
+              ]
+            },
+            "on_unknown": {
+              "enum": [
+                "block",
+                "fail"
+              ]
+            },
+            "parameters": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "claim_pointer",
+                "expectation_slot",
+                "predicate_ref"
+              ],
+              "properties": {
+                "claim_pointer": {
+                  "type": "string",
+                  "maxLength": 1024,
+                  "pattern": "^(?:/(?:[^~/]|~[01])*)*$"
+                },
+                "expectation_slot": {
+                  "type": "string",
+                  "pattern": "^[a-z0-9]+(?:[._-][a-z0-9]+)*$",
+                  "maxLength": 128
+                },
+                "predicate_ref": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "id",
+                    "version"
+                  ],
+                  "properties": {
+                    "id": {
+                      "enum": [
+                        "process.exit_code",
+                        "test.expectation_satisfied"
+                      ]
+                    },
+                    "version": {
+                      "const": 1
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      ]
+    }
+  }
+}

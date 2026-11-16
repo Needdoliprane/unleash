@@ -1,0 +1,165 @@
+{
+  "schema_version": "unleash.skill.v1",
+  "skill_id": "skill.repository.patch",
+  "version": 1,
+  "name": "Préparer une modification de repository",
+  "description": "Fixture de skill multilangage sous scope ; contrôles observables de sortie et discovery.",
+  "scope": {
+    "kind": "repository",
+    "owner_id": "repo-ovpt-fixture"
+  },
+  "instructions": "Inspecter le scope et rechercher les ressources existantes avant création. Réutiliser, adapter ou justifier une création. Produire la modification demandée et référencer les artefacts observables. Ne déclarer un test exécuté que si son observation existe.",
+  "input_schema": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": [
+      "change_request",
+      "base_snapshot"
+    ],
+    "properties": {
+      "change_request": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 4096
+      },
+      "base_snapshot": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 256
+      }
+    }
+  },
+  "output_schema": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": [
+      "summary",
+      "patch_artifact",
+      "snapshot",
+      "discovery_receipt_id"
+    ],
+    "properties": {
+      "summary": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 4096
+      },
+      "patch_artifact": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 256
+      },
+      "snapshot": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 256
+      },
+      "discovery_receipt_id": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 256
+      }
+    }
+  },
+  "requested_capabilities": [
+    "workspace.read",
+    "workspace.write",
+    "git.inspect",
+    "registry.search"
+  ],
+  "tools": [
+    {
+      "id": "tool.workspace.read",
+      "version": 1,
+      "required": true
+    },
+    {
+      "id": "tool.workspace.write",
+      "version": 1,
+      "required": true
+    },
+    {
+      "id": "tool.git.inspect",
+      "version": 1,
+      "required": true
+    },
+    {
+      "id": "tool.registry.search",
+      "version": 1,
+      "required": true
+    }
+  ],
+  "contract": {
+    "contract_id": "contract.repository.patch",
+    "version": 1,
+    "rules": [
+      {
+        "id": "output-shape",
+        "validator": "json_schema",
+        "phase": "completion",
+        "severity": "required",
+        "on_unknown": "block",
+        "parameters": {
+          "target": "output"
+        }
+      },
+      {
+        "id": "patch-present",
+        "validator": "artifact_present",
+        "phase": "completion",
+        "severity": "required",
+        "on_unknown": "block",
+        "parameters": {
+          "output_pointer": "/output/patch_artifact"
+        }
+      },
+      {
+        "id": "discovery-prior",
+        "validator": "discovery_receipt_present",
+        "phase": "completion",
+        "severity": "required",
+        "on_unknown": "block",
+        "parameters": {
+          "resource_kinds": [
+            "function",
+            "helper",
+            "class",
+            "component",
+            "api",
+            "test"
+          ],
+          "require_prior_event": true,
+          "require_decision": true
+        }
+      }
+    ]
+  },
+  "resources": [],
+  "acl": {
+    "read_scopes": [
+      "repository"
+    ],
+    "requested_grants": [
+      "workspace.read",
+      "workspace.write",
+      "git.inspect",
+      "registry.search"
+    ]
+  },
+  "provenance": {
+    "author": "agent-n2-fixture",
+    "source_uri": null,
+    "license": "Apache-2.0",
+    "discovery_receipt_id": "fixture-discovery-patch",
+    "derived_from": []
+  },
+  "evaluation_policy": {
+    "required_checks": [
+      "schema",
+      "references",
+      "permissions",
+      "fixtures"
+    ],
+    "judge_policy": "none"
+  }
+}

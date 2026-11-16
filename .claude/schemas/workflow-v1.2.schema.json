@@ -1,0 +1,1284 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "workflow_id",
+    "version",
+    "name",
+    "description",
+    "bindings",
+    "budget",
+    "body",
+    "completion",
+    "model_policy"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "unleash.workflow.v1.2"
+    },
+    "workflow_id": {
+      "type": "string",
+      "pattern": "^[a-z0-9]+(?:[._-][a-z0-9]+)*$",
+      "maxLength": 128
+    },
+    "version": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9007199254740991
+    },
+    "name": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "description": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 8192
+    },
+    "bindings": {
+      "type": "object",
+      "minProperties": 0,
+      "maxProperties": 64,
+      "propertyNames": {
+        "type": "string",
+        "pattern": "^[a-z0-9]+(?:[._-][a-z0-9]+)*$",
+        "maxLength": 128
+      },
+      "additionalProperties": {
+        "$ref": "#/$defs/binding"
+      }
+    },
+    "budget": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "max_duration_seconds",
+        "max_step_activations",
+        "max_llm_calls",
+        "max_output_tokens",
+        "max_cost_microusd",
+        "max_agent_executions",
+        "max_concurrent_action_executions"
+      ],
+      "properties": {
+        "max_duration_seconds": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 2592000
+        },
+        "max_step_activations": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100000
+        },
+        "max_llm_calls": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 10000
+        },
+        "max_output_tokens": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 10000000
+        },
+        "max_cost_microusd": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "max_agent_executions": {
+          "description": "Nombre maximal d'invocations agentes simultanément actives du run : sous-plafond de concurrence soumis au pool global ; le cumul est borné par max_step_activations et max_llm_calls.",
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 50
+        },
+        "max_concurrent_action_executions": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 50
+        }
+      }
+    },
+    "body": {
+      "$ref": "#/$defs/node"
+    },
+    "completion": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "success_when"
+      ],
+      "properties": {
+        "success_when": {
+          "$ref": "#/$defs/guard"
+        }
+      }
+    },
+    "model_policy": {
+      "enum": [
+        "forbidden",
+        "allowed_bounded"
+      ]
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:ovpt:unleash:workflow:1.2",
+  "title": "Workflow OVPT Unleash v1.2 — itération bornée sur données immuables",
+  "description": "Contrat accepté (ADR-18) : ajoute for_each au reducer commun, sans modifier v1/v1.1. Validation sémantique, autorisations et preuves restent nécessaires.",
+  "$comment": "Proposition de conception, pas implémentation. Les entrées utilisent le profil entier sûr JSON.",
+  "$defs": {
+    "guard": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "op",
+            "path",
+            "value"
+          ],
+          "properties": {
+            "op": {
+              "const": "eq"
+            },
+            "path": {
+              "type": "string",
+              "maxLength": 1024,
+              "pattern": "^/(input|results|facts|items)(/(?:[^~/]|~[01])*)*$"
+            },
+            "value": {
+              "oneOf": [
+                {
+                  "type": "string",
+                  "maxLength": 8192
+                },
+                {
+                  "type": "integer",
+                  "minimum": -9007199254740991,
+                  "maximum": 9007199254740991
+                },
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "op",
+            "path",
+            "value"
+          ],
+          "properties": {
+            "op": {
+              "const": "ne"
+            },
+            "path": {
+              "type": "string",
+              "maxLength": 1024,
+              "pattern": "^/(input|results|facts|items)(/(?:[^~/]|~[01])*)*$"
+            },
+            "value": {
+              "oneOf": [
+                {
+                  "type": "string",
+                  "maxLength": 8192
+                },
+                {
+                  "type": "integer",
+                  "minimum": -9007199254740991,
+                  "maximum": 9007199254740991
+                },
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "op",
+            "path",
+            "value"
+          ],
+          "properties": {
+            "op": {
+              "const": "lt"
+            },
+            "path": {
+              "type": "string",
+              "maxLength": 1024,
+              "pattern": "^/(input|results|facts|items)(/(?:[^~/]|~[01])*)*$"
+            },
+            "value": {
+              "type": "integer",
+              "minimum": -9007199254740991,
+              "maximum": 9007199254740991
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "op",
+            "path",
+            "value"
+          ],
+          "properties": {
+            "op": {
+              "const": "lte"
+            },
+            "path": {
+              "type": "string",
+              "maxLength": 1024,
+              "pattern": "^/(input|results|facts|items)(/(?:[^~/]|~[01])*)*$"
+            },
+            "value": {
+              "type": "integer",
+              "minimum": -9007199254740991,
+              "maximum": 9007199254740991
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "op",
+            "path",
+            "value"
+          ],
+          "properties": {
+            "op": {
+              "const": "gt"
+            },
+            "path": {
+              "type": "string",
+              "maxLength": 1024,
+              "pattern": "^/(input|results|facts|items)(/(?:[^~/]|~[01])*)*$"
+            },
+            "value": {
+              "type": "integer",
+              "minimum": -9007199254740991,
+              "maximum": 9007199254740991
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "op",
+            "path",
+            "value"
+          ],
+          "properties": {
+            "op": {
+              "const": "gte"
+            },
+            "path": {
+              "type": "string",
+              "maxLength": 1024,
+              "pattern": "^/(input|results|facts|items)(/(?:[^~/]|~[01])*)*$"
+            },
+            "value": {
+              "type": "integer",
+              "minimum": -9007199254740991,
+              "maximum": 9007199254740991
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "op",
+            "path",
+            "values"
+          ],
+          "properties": {
+            "op": {
+              "const": "in"
+            },
+            "path": {
+              "type": "string",
+              "maxLength": 1024,
+              "pattern": "^/(input|results|facts|items)(/(?:[^~/]|~[01])*)*$"
+            },
+            "values": {
+              "type": "array",
+              "items": {
+                "oneOf": [
+                  {
+                    "type": "string",
+                    "maxLength": 8192
+                  },
+                  {
+                    "type": "integer",
+                    "minimum": -9007199254740991,
+                    "maximum": 9007199254740991
+                  },
+                  {
+                    "type": "boolean"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "minItems": 1,
+              "maxItems": 64
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "op",
+            "path"
+          ],
+          "properties": {
+            "op": {
+              "const": "exists"
+            },
+            "path": {
+              "type": "string",
+              "maxLength": 1024,
+              "pattern": "^/(input|results|facts|items)(/(?:[^~/]|~[01])*)*$"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "op",
+            "terms"
+          ],
+          "properties": {
+            "op": {
+              "const": "all"
+            },
+            "terms": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/guard"
+              },
+              "minItems": 1,
+              "maxItems": 64
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "op",
+            "terms"
+          ],
+          "properties": {
+            "op": {
+              "const": "any"
+            },
+            "terms": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/guard"
+              },
+              "minItems": 1,
+              "maxItems": 64
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "op",
+            "term"
+          ],
+          "properties": {
+            "op": {
+              "const": "not"
+            },
+            "term": {
+              "$ref": "#/$defs/guard"
+            }
+          }
+        }
+      ]
+    },
+    "node": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/task"
+        },
+        {
+          "$ref": "#/$defs/sequence"
+        },
+        {
+          "$ref": "#/$defs/parallel"
+        },
+        {
+          "$ref": "#/$defs/choice"
+        },
+        {
+          "$ref": "#/$defs/repeat"
+        },
+        {
+          "$ref": "#/$defs/fail"
+        },
+        {
+          "$ref": "#/$defs/action"
+        },
+        {
+          "$ref": "#/$defs/for_each"
+        }
+      ]
+    },
+    "task": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "kind",
+        "binding",
+        "task_type",
+        "scope_key",
+        "inputs",
+        "timeout_seconds",
+        "max_attempts"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[a-z0-9]+(?:[._-][a-z0-9]+)*$",
+          "maxLength": 128
+        },
+        "kind": {
+          "const": "task"
+        },
+        "binding": {
+          "type": "string",
+          "pattern": "^[a-z0-9]+(?:[._-][a-z0-9]+)*$",
+          "maxLength": 128
+        },
+        "task_type": {
+          "enum": [
+            "execute_skill",
+            "leader_decision",
+            "integrate"
+          ]
+        },
+        "scope_key": {
+          "type": "string",
+          "pattern": "^[a-z0-9]+(?:[._-][a-z0-9]+)*$",
+          "maxLength": 128
+        },
+        "inputs": {
+          "type": "object",
+          "maxProperties": 128
+        },
+        "timeout_seconds": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 86400
+        },
+        "max_attempts": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 10
+        }
+      }
+    },
+    "sequence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "kind",
+        "steps"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[a-z0-9]+(?:[._-][a-z0-9]+)*$",
+          "maxLength": 128
+        },
+        "kind": {
+          "const": "sequence"
+        },
+        "steps": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/node"
+          },
+          "minItems": 1,
+          "maxItems": 256
+        }
+      }
+    },
+    "parallel": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "kind",
+        "branches",
+        "join"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[a-z0-9]+(?:[._-][a-z0-9]+)*$",
+          "maxLength": 128
+        },
+        "kind": {
+          "const": "parallel"
+        },
+        "branches": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/node"
+          },
+          "minItems": 2,
+          "maxItems": 50
+        },
+        "join": {
+          "enum": [
+            "all",
+            "any_success",
+            "quorum"
+          ]
+        },
+        "required_successes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 50
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "join": {
+                "const": "quorum"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "required_successes"
+            ]
+          },
+          "else": {
+            "not": {
+              "required": [
+                "required_successes"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "choice": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "kind",
+        "cases",
+        "otherwise"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[a-z0-9]+(?:[._-][a-z0-9]+)*$",
+          "maxLength": 128
+        },
+        "kind": {
+          "const": "choice"
+        },
+        "cases": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "when",
+              "then"
+            ],
+            "properties": {
+              "when": {
+                "$ref": "#/$defs/guard"
+              },
+              "then": {
+                "$ref": "#/$defs/node"
+              }
+            }
+          },
+          "minItems": 1,
+          "maxItems": 64
+        },
+        "otherwise": {
+          "$ref": "#/$defs/node"
+        }
+      }
+    },
+    "repeat": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "kind",
+        "body",
+        "until",
+        "max_iterations"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[a-z0-9]+(?:[._-][a-z0-9]+)*$",
+          "maxLength": 128
+        },
+        "kind": {
+          "const": "repeat"
+        },
+        "body": {
+          "$ref": "#/$defs/node"
+        },
+        "until": {
+          "$ref": "#/$defs/guard"
+        },
+        "max_iterations": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100
+        }
+      }
+    },
+    "fail": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "kind",
+        "code",
+        "message"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[a-z0-9]+(?:[._-][a-z0-9]+)*$",
+          "maxLength": 128
+        },
+        "kind": {
+          "const": "fail"
+        },
+        "code": {
+          "type": "string",
+          "pattern": "^[A-Z][A-Z0-9_]+$",
+          "maxLength": 96
+        },
+        "message": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2048
+        }
+      }
+    },
+    "binding": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "mode",
+            "role"
+          ],
+          "properties": {
+            "mode": {
+              "const": "fixed"
+            },
+            "role": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "id",
+                "version"
+              ],
+              "properties": {
+                "id": {
+                  "type": "string",
+                  "pattern": "^[a-z0-9]+(?:[._-][a-z0-9]+)*$",
+                  "maxLength": 128
+                },
+                "version": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 9007199254740991
+                }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "mode",
+            "level",
+            "capability_ceiling",
+            "contract_profile"
+          ],
+          "properties": {
+            "mode": {
+              "const": "late"
+            },
+            "level": {
+              "enum": [
+                "N",
+                "N+1",
+                "N+2"
+              ]
+            },
+            "capability_ceiling": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "pattern": "^[a-z0-9]+(?:[._-][a-z0-9]+)*$",
+                "maxLength": 128
+              },
+              "minItems": 1,
+              "maxItems": 64,
+              "uniqueItems": true
+            },
+            "contract_profile": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "id",
+                "version"
+              ],
+              "properties": {
+                "id": {
+                  "type": "string",
+                  "pattern": "^[a-z0-9]+(?:[._-][a-z0-9]+)*$",
+                  "maxLength": 128
+                },
+                "version": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 9007199254740991
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "version_ref": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "version"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[a-z0-9]+(?:[._-][a-z0-9]+)*$",
+          "maxLength": 128
+        },
+        "version": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        }
+      }
+    },
+    "action_input": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "source",
+            "value"
+          ],
+          "properties": {
+            "source": {
+              "const": "literal"
+            },
+            "value": {}
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "source",
+            "path"
+          ],
+          "properties": {
+            "source": {
+              "const": "path"
+            },
+            "path": {
+              "type": "string",
+              "pattern": "^/(input|results|facts|items)(/(?:[^~/]|~[01])*)*$",
+              "maxLength": 1024
+            }
+          }
+        }
+      ]
+    },
+    "action": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "kind",
+        "operation",
+        "contract_profile",
+        "scope_key",
+        "inputs",
+        "timeout_seconds",
+        "max_attempts",
+        "retry_policy"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[a-z0-9]+(?:[._-][a-z0-9]+)*$",
+          "maxLength": 128
+        },
+        "kind": {
+          "const": "action"
+        },
+        "operation": {
+          "$ref": "#/$defs/version_ref"
+        },
+        "contract_profile": {
+          "$ref": "#/$defs/version_ref"
+        },
+        "scope_key": {
+          "type": "string",
+          "pattern": "^[a-z0-9]+(?:[._-][a-z0-9]+)*$",
+          "maxLength": 128
+        },
+        "inputs": {
+          "type": "object",
+          "maxProperties": 128,
+          "additionalProperties": {
+            "$ref": "#/$defs/action_input"
+          }
+        },
+        "timeout_seconds": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 86400
+        },
+        "max_attempts": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 10
+        },
+        "retry_policy": {
+          "enum": [
+            "never",
+            "read_only",
+            "idempotent",
+            "reconcile_before_retry"
+          ]
+        }
+      }
+    },
+    "machine_sequence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "kind",
+        "steps"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[a-z0-9]+(?:[._-][a-z0-9]+)*$",
+          "maxLength": 128
+        },
+        "kind": {
+          "const": "sequence"
+        },
+        "steps": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/machine_node"
+          },
+          "minItems": 1,
+          "maxItems": 256
+        }
+      }
+    },
+    "machine_parallel": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "kind",
+        "branches",
+        "join"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[a-z0-9]+(?:[._-][a-z0-9]+)*$",
+          "maxLength": 128
+        },
+        "kind": {
+          "const": "parallel"
+        },
+        "branches": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/machine_node"
+          },
+          "minItems": 2,
+          "maxItems": 50
+        },
+        "join": {
+          "enum": [
+            "all",
+            "any_success",
+            "quorum"
+          ]
+        },
+        "required_successes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 50
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "join": {
+                "const": "quorum"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "required_successes"
+            ]
+          },
+          "else": {
+            "not": {
+              "required": [
+                "required_successes"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "machine_choice": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "kind",
+        "cases",
+        "otherwise"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[a-z0-9]+(?:[._-][a-z0-9]+)*$",
+          "maxLength": 128
+        },
+        "kind": {
+          "const": "choice"
+        },
+        "cases": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "when",
+              "then"
+            ],
+            "properties": {
+              "when": {
+                "$ref": "#/$defs/guard"
+              },
+              "then": {
+                "$ref": "#/$defs/machine_node"
+              }
+            }
+          },
+          "minItems": 1,
+          "maxItems": 64
+        },
+        "otherwise": {
+          "$ref": "#/$defs/machine_node"
+        }
+      }
+    },
+    "machine_repeat": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "kind",
+        "body",
+        "until",
+        "max_iterations"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[a-z0-9]+(?:[._-][a-z0-9]+)*$",
+          "maxLength": 128
+        },
+        "kind": {
+          "const": "repeat"
+        },
+        "body": {
+          "$ref": "#/$defs/machine_node"
+        },
+        "until": {
+          "$ref": "#/$defs/guard"
+        },
+        "max_iterations": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100
+        }
+      }
+    },
+    "machine_fail": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "kind",
+        "code",
+        "message"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[a-z0-9]+(?:[._-][a-z0-9]+)*$",
+          "maxLength": 128
+        },
+        "kind": {
+          "const": "fail"
+        },
+        "code": {
+          "type": "string",
+          "pattern": "^[A-Z][A-Z0-9_]+$",
+          "maxLength": 96
+        },
+        "message": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2048
+        }
+      }
+    },
+    "machine_node": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/action"
+        },
+        {
+          "$ref": "#/$defs/machine_sequence"
+        },
+        {
+          "$ref": "#/$defs/machine_parallel"
+        },
+        {
+          "$ref": "#/$defs/machine_choice"
+        },
+        {
+          "$ref": "#/$defs/machine_repeat"
+        },
+        {
+          "$ref": "#/$defs/machine_fail"
+        },
+        {
+          "$ref": "#/$defs/machine_for_each"
+        }
+      ]
+    },
+    "for_each": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "kind",
+        "items",
+        "max_items",
+        "batch_size",
+        "body"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[a-z0-9]+(?:[._-][a-z0-9]+)*$",
+          "maxLength": 128
+        },
+        "kind": {
+          "const": "for_each"
+        },
+        "items": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "source",
+            "path"
+          ],
+          "properties": {
+            "source": {
+              "const": "path"
+            },
+            "path": {
+              "type": "string",
+              "maxLength": 1024,
+              "pattern": "^/(input|items)(/(?:[^~/]|~[01])*)*$"
+            }
+          }
+        },
+        "max_items": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 10000
+        },
+        "batch_size": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1000
+        },
+        "body": {
+          "$ref": "#/$defs/node"
+        },
+        "after_batch": {
+          "$ref": "#/$defs/node"
+        }
+      }
+    },
+    "machine_for_each": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "kind",
+        "items",
+        "max_items",
+        "batch_size",
+        "body"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[a-z0-9]+(?:[._-][a-z0-9]+)*$",
+          "maxLength": 128
+        },
+        "kind": {
+          "const": "for_each"
+        },
+        "items": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "source",
+            "path"
+          ],
+          "properties": {
+            "source": {
+              "const": "path"
+            },
+            "path": {
+              "type": "string",
+              "maxLength": 1024,
+              "pattern": "^/(input|items)(/(?:[^~/]|~[01])*)*$"
+            }
+          }
+        },
+        "max_items": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 10000
+        },
+        "batch_size": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1000
+        },
+        "body": {
+          "$ref": "#/$defs/machine_node"
+        },
+        "after_batch": {
+          "$ref": "#/$defs/machine_node"
+        }
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "model_policy": {
+            "const": "forbidden"
+          }
+        },
+        "required": [
+          "model_policy"
+        ]
+      },
+      "then": {
+        "properties": {
+          "body": {
+            "$ref": "#/$defs/machine_node"
+          },
+          "budget": {
+            "properties": {
+              "max_llm_calls": {
+                "const": 0
+              },
+              "max_output_tokens": {
+                "const": 0
+              },
+              "max_cost_microusd": {
+                "const": 0
+              },
+              "max_agent_executions": {
+                "const": 0
+              }
+            }
+          }
+        }
+      }
+    }
+  ]
+}

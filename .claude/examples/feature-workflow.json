@@ -1,0 +1,137 @@
+{
+  "schema_version": "unleash.workflow.v1",
+  "workflow_id": "workflow.feature",
+  "version": 1,
+  "name": "Feature parallèle et intégration décidée",
+  "description": "Fixture : deux travaux, jugement N+1 puis intégration ; aucun test ou audit universel ajouté. Slot intégrateur tardif et contraint.",
+  "bindings": {
+    "developer": {
+      "mode": "fixed",
+      "role": {
+        "id": "role.repository.developer",
+        "version": 1
+      }
+    },
+    "leader": {
+      "mode": "fixed",
+      "role": {
+        "id": "role.mission.leader",
+        "version": 1
+      }
+    },
+    "integrator": {
+      "mode": "late",
+      "level": "N",
+      "capability_ceiling": [
+        "git.inspect",
+        "git.integrate",
+        "registry.search"
+      ],
+      "contract_profile": {
+        "id": "contract.repository.integrate",
+        "version": 1
+      }
+    }
+  },
+  "budget": {
+    "max_duration_seconds": 14400,
+    "max_step_activations": 100,
+    "max_llm_calls": 100,
+    "max_output_tokens": 1000000,
+    "max_cost_microusd": 20000000,
+    "max_agent_executions": 5
+  },
+  "body": {
+    "id": "delivery",
+    "kind": "sequence",
+    "steps": [
+      {
+        "id": "build",
+        "kind": "parallel",
+        "join": "all",
+        "branches": [
+          {
+            "id": "develop-api",
+            "kind": "task",
+            "binding": "developer",
+            "task_type": "execute_skill",
+            "scope_key": "api",
+            "inputs": {
+              "change_request": "Modifier le composant API du scope",
+              "base_snapshot": "fixture-snapshot-base"
+            },
+            "timeout_seconds": 1800,
+            "max_attempts": 2
+          },
+          {
+            "id": "develop-ui",
+            "kind": "task",
+            "binding": "developer",
+            "task_type": "execute_skill",
+            "scope_key": "ui",
+            "inputs": {
+              "change_request": "Modifier le composant interface du scope",
+              "base_snapshot": "fixture-snapshot-base"
+            },
+            "timeout_seconds": 1800,
+            "max_attempts": 2
+          }
+        ]
+      },
+      {
+        "id": "leader-check",
+        "kind": "task",
+        "binding": "leader",
+        "task_type": "leader_decision",
+        "scope_key": "mission",
+        "inputs": {
+          "review_target": "build"
+        },
+        "timeout_seconds": 1800,
+        "max_attempts": 2
+      },
+      {
+        "id": "decision",
+        "kind": "choice",
+        "cases": [
+          {
+            "when": {
+              "op": "eq",
+              "path": "/results/leader-check/outputs/decision",
+              "value": "accept"
+            },
+            "then": {
+              "id": "merge",
+              "kind": "task",
+              "binding": "integrator",
+              "task_type": "integrate",
+              "scope_key": "integration",
+              "inputs": {
+                "source_missions": [
+                  "fixture-mission-api",
+                  "fixture-mission-ui"
+                ],
+                "target_ref": "refs/heads/main"
+              },
+              "timeout_seconds": 1800,
+              "max_attempts": 2
+            }
+          }
+        ],
+        "otherwise": {
+          "id": "reject",
+          "kind": "fail",
+          "code": "LEADER_REJECTED",
+          "message": "Une correction ou une escalade doit être décidée avant un autre run"
+        }
+      }
+    ]
+  },
+  "completion": {
+    "success_when": {
+      "op": "eq",
+      "path": "/results/delivery/outputs/integrated",
+      "value": true
+    }
+  }
+}

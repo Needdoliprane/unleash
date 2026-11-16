@@ -1,0 +1,163 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "profile_id",
+    "version",
+    "canonicalization",
+    "input_schema_sha256",
+    "output_schema_sha256",
+    "required_rules",
+    "allowed_extension_validators",
+    "execution_versions"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "unleash.contract-profile.v1"
+    },
+    "profile_id": {
+      "type": "string",
+      "pattern": "^[a-z0-9]+(?:[._-][a-z0-9]+)*$",
+      "maxLength": 128
+    },
+    "version": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9007199254740991
+    },
+    "canonicalization": {
+      "const": "RFC8785"
+    },
+    "input_schema_sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "output_schema_sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "required_rules": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 128,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "sha256"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^[a-z0-9]+(?:[._-][a-z0-9]+)*$",
+            "maxLength": 128
+          },
+          "sha256": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$"
+          }
+        }
+      }
+    },
+    "allowed_extension_validators": {
+      "type": "array",
+      "minItems": 0,
+      "maxItems": 13,
+      "uniqueItems": true,
+      "items": {
+        "enum": [
+          "json_schema",
+          "artifact_present",
+          "artifact_digest",
+          "path_within_scope",
+          "git_snapshot_matches",
+          "observed_process_exit",
+          "test_observation_matches",
+          "claim_evidence_links",
+          "diff_within_scope",
+          "integration_observed",
+          "discovery_receipt_present",
+          "test_execution_matches",
+          "claim_predicate_matches"
+        ]
+      }
+    },
+    "execution_versions": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "compiler",
+        "evaluator",
+        "validator_catalog"
+      ],
+      "properties": {
+        "compiler": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "id",
+            "version"
+          ],
+          "properties": {
+            "id": {
+              "type": "string",
+              "pattern": "^[a-z0-9]+(?:[._-][a-z0-9]+)*$",
+              "maxLength": 128
+            },
+            "version": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9007199254740991
+            }
+          }
+        },
+        "evaluator": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "id",
+            "version"
+          ],
+          "properties": {
+            "id": {
+              "type": "string",
+              "pattern": "^[a-z0-9]+(?:[._-][a-z0-9]+)*$",
+              "maxLength": 128
+            },
+            "version": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9007199254740991
+            }
+          }
+        },
+        "validator_catalog": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "id",
+            "version"
+          ],
+          "properties": {
+            "id": {
+              "type": "string",
+              "pattern": "^[a-z0-9]+(?:[._-][a-z0-9]+)*$",
+              "maxLength": 128
+            },
+            "version": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9007199254740991
+            }
+          }
+        }
+      }
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:ovpt:unleash:contract-profile:1",
+  "title": "Profil contractuel fermé OVPT Unleash — proposition V1",
+  "$comment": "Égalité exacte des schémas et règles ; extensions conjonctives seulement. Les nouvelles règles R6 exigent un catalogue résolu qui les implémente (validator-catalog v2, référence V1 depuis R7), pas seulement un numéro déclaré. Les profils v1 existants restent valides."
+}

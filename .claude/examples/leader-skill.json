@@ -1,0 +1,112 @@
+{
+  "schema_version": "unleash.skill.v1",
+  "skill_id": "skill.mission.decide",
+  "version": 1,
+  "name": "Décider sur un evidence bundle",
+  "description": "Fixture de jugement N+1 : acceptation, correction ou escalade, séparée des observations.",
+  "scope": {
+    "kind": "repository",
+    "owner_id": "repo-ovpt-fixture"
+  },
+  "instructions": "Examiner le bundle autorisé et sa fraîcheur. Produire une décision sur la révision examinée et une justification partageable. Ne pas altérer les observations ni contourner un refus de contrat.",
+  "input_schema": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": [
+      "review_target"
+    ],
+    "properties": {
+      "review_target": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 256
+      }
+    }
+  },
+  "output_schema": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": [
+      "decision",
+      "reason",
+      "evidence_bundle_id"
+    ],
+    "properties": {
+      "decision": {
+        "enum": [
+          "accept",
+          "correct",
+          "escalate"
+        ]
+      },
+      "reason": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 4096
+      },
+      "evidence_bundle_id": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 256
+      }
+    }
+  },
+  "requested_capabilities": [
+    "evidence.read",
+    "leader.decide"
+  ],
+  "tools": [
+    {
+      "id": "tool.evidence.read",
+      "version": 1,
+      "required": true
+    },
+    {
+      "id": "tool.leader.decide",
+      "version": 1,
+      "required": true
+    }
+  ],
+  "contract": {
+    "contract_id": "contract.mission.decide",
+    "version": 1,
+    "rules": [
+      {
+        "id": "output-shape",
+        "validator": "json_schema",
+        "phase": "completion",
+        "severity": "required",
+        "on_unknown": "block",
+        "parameters": {
+          "target": "output"
+        }
+      }
+    ]
+  },
+  "resources": [],
+  "acl": {
+    "read_scopes": [
+      "repository"
+    ],
+    "requested_grants": [
+      "evidence.read",
+      "leader.decide"
+    ]
+  },
+  "provenance": {
+    "author": "agent-n2-fixture",
+    "source_uri": null,
+    "license": "Apache-2.0",
+    "discovery_receipt_id": "fixture-discovery-decide",
+    "derived_from": []
+  },
+  "evaluation_policy": {
+    "required_checks": [
+      "schema",
+      "references",
+      "permissions",
+      "fixtures"
+    ],
+    "judge_policy": "none"
+  }
+}

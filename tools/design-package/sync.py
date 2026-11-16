@@ -175,9 +175,22 @@ cat["risks"] = [{"id": rid, "status": old_r.get(rid, {}).get("status", "identifi
                  "risk": c[0], "hypothesis_refs": c[1] if len(c) > 1 else "", "mitigation": c[2] if len(c) > 2 else "",
                  "verification_owner": c[3] if len(c) > 3 else ""} for rid, c in sorted(rs.items())]
 inv = rows((C / "brief/invariants.md").read_text(encoding="utf-8"), r"INV-\d{3}", 3)
+cov = {}
+for line in (C / "testing/invariant-coverage.md").read_text(encoding="utf-8").splitlines():
+    m = re.match(r"^\|\s*(INV-\d{3}) — .*?\|(.*)\|\s*$", line)
+    if m:
+        cells = [c.strip() for c in m.group(2).split(" | ")]
+        if len(cells) >= 6:
+            cov[m.group(1)] = cells
 for i in cat["invariants"]:
     if i["id"] in inv:
         i["statement"], i["origin"] = inv[i["id"]][0], inv[i["id"]][1]
+        if i["id"] in cov:
+            _st, spec, comp, feat, acc, lim = cov[i["id"]][:6]
+            refs = re.findall(r"\]\(\.\./([^)#]+)", spec)
+            if refs:
+                i["specification_refs"] = list(dict.fromkeys(refs))
+            i["component"], i["feature_text"], i["acceptance_text"], i["limits"] = comp, feat, acc, lim
     else:
         errors.append(f"invariant {i['id']} missing from invariants.md")
 

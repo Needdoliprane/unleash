@@ -1,0 +1,732 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:ovpt:unleash:discovery-receipt:1",
+  "title": "DiscoveryReceipt V1 proposé — provenance typée et validité temporelle",
+  "description": "Contrat cible non publié corrigé en R6 ; aucun objet produit déployé ni migration V2 supposés. Origine, sources et observations sont dérivées par le serveur, jamais une auto-attribution d’autorité du client.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "receipt_id",
+    "intent_id",
+    "origin",
+    "query_ids",
+    "catalog_revision",
+    "purpose",
+    "decision",
+    "strategy",
+    "candidate_ids",
+    "target_resource_id",
+    "target_version_ref",
+    "justification",
+    "source_refs",
+    "freshness",
+    "temporal_relation",
+    "validation_basis",
+    "recorded_at",
+    "supersedes_receipt_id",
+    "creation_use_id",
+    "coverage_ref"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "unleash.discovery.v1"
+    },
+    "receipt_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "intent_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "origin": {
+      "$ref": "#/$defs/discoveryOrigin"
+    },
+    "query_ids": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      },
+      "minItems": 1,
+      "uniqueItems": true
+    },
+    "catalog_revision": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "purpose": {
+      "enum": [
+        "pre_creation",
+        "completion_revalidation",
+        "posthoc_reconciliation"
+      ]
+    },
+    "decision": {
+      "enum": [
+        "reuse",
+        "create"
+      ]
+    },
+    "strategy": {
+      "enum": [
+        "use_existing",
+        "coordinate",
+        "wait",
+        "copy",
+        "adapt",
+        "new"
+      ]
+    },
+    "candidate_ids": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      },
+      "minItems": 0,
+      "uniqueItems": true
+    },
+    "target_resource_id": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "minLength": 1
+    },
+    "target_version_ref": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "minLength": 1
+    },
+    "justification": {
+      "type": "string",
+      "minLength": 1
+    },
+    "source_refs": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/typedSourceRef"
+      },
+      "minItems": 0,
+      "uniqueItems": true
+    },
+    "freshness": {
+      "enum": [
+        "valid",
+        "stale",
+        "unknown"
+      ],
+      "description": "Éligibilité observée à validation_basis.checked_at ; ce champ historique n’est pas réécrit par les invalidations ultérieures."
+    },
+    "temporal_relation": {
+      "enum": [
+        "before_creation",
+        "observed_after_creation"
+      ]
+    },
+    "validation_basis": {
+      "$ref": "#/$defs/validationBasis"
+    },
+    "recorded_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "supersedes_receipt_id": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "minLength": 1
+    },
+    "creation_use_id": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "minLength": 1
+    },
+    "coverage_ref": {
+      "type": "string",
+      "minLength": 1
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "decision": {
+            "const": "reuse"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "strategy": {
+            "enum": [
+              "use_existing",
+              "coordinate",
+              "wait",
+              "adapt"
+            ]
+          },
+          "target_resource_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "target_version_ref": {
+            "type": "string",
+            "minLength": 1
+          },
+          "candidate_ids": {
+            "minItems": 1
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "strategy": {
+            "enum": [
+              "copy",
+              "adapt",
+              "new"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "strategy": {
+            "enum": [
+              "adapt",
+              "copy"
+            ]
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "candidate_ids": {
+            "minItems": 1
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "purpose": {
+            "const": "pre_creation"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "temporal_relation": {
+            "const": "before_creation"
+          },
+          "creation_use_id": {
+            "type": "null"
+          }
+        },
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "decision": {
+                  "const": "create"
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "target_resource_id": {
+                  "type": "null"
+                },
+                "target_version_ref": {
+                  "type": "null"
+                }
+              }
+            }
+          }
+        ]
+      },
+      "else": {
+        "properties": {
+          "temporal_relation": {
+            "const": "observed_after_creation"
+          },
+          "target_resource_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "target_version_ref": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "purpose": {
+            "const": "completion_revalidation"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "supersedes_receipt_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "creation_use_id": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "purpose": {
+            "const": "posthoc_reconciliation"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "creation_use_id": {
+            "type": "null"
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "contentDigest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "algorithm",
+        "hex"
+      ],
+      "properties": {
+        "algorithm": {
+          "type": "string",
+          "minLength": 1
+        },
+        "hex": {
+          "type": "string",
+          "pattern": "^[0-9a-f]+$",
+          "minLength": 2
+        }
+      }
+    },
+    "eventCursor": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "stream_id",
+        "sequence"
+      ],
+      "properties": {
+        "stream_id": {
+          "type": "string",
+          "minLength": 1,
+          "format": "uuid"
+        },
+        "sequence": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "cause": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "id"
+      ],
+      "properties": {
+        "kind": {
+          "enum": [
+            "command_receipt",
+            "action",
+            "timer",
+            "event"
+          ]
+        },
+        "id": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "discoveryOrigin": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "origin_kind",
+            "principal_id",
+            "cause",
+            "invocation_id",
+            "attempt_id"
+          ],
+          "properties": {
+            "origin_kind": {
+              "const": "invocation"
+            },
+            "principal_id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "cause": {
+              "$ref": "#/$defs/cause"
+            },
+            "invocation_id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "attempt_id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "run_id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "step_id": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "dependentRequired": {
+            "run_id": [
+              "step_id"
+            ],
+            "step_id": [
+              "run_id"
+            ]
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "origin_kind",
+            "principal_id",
+            "cause",
+            "replay_worker_id",
+            "run_id",
+            "step_id"
+          ],
+          "properties": {
+            "origin_kind": {
+              "const": "replay"
+            },
+            "principal_id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "cause": {
+              "$ref": "#/$defs/cause"
+            },
+            "replay_worker_id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "run_id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "step_id": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "origin_kind",
+            "principal_id",
+            "cause",
+            "control_principal_id"
+          ],
+          "properties": {
+            "origin_kind": {
+              "const": "control_plane"
+            },
+            "principal_id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "cause": {
+              "$ref": "#/$defs/cause"
+            },
+            "control_principal_id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "source_run_id": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        }
+      ]
+    },
+    "typedSourceRef": {
+      "type": "object",
+      "allOf": [
+        {
+          "required": [
+            "source_id",
+            "version_id",
+            "content_digest",
+            "generation",
+            "access_policy_ref",
+            "acl_revision",
+            "observed_at"
+          ],
+          "properties": {
+            "source_id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "version_id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "content_digest": {
+              "$ref": "#/$defs/contentDigest"
+            },
+            "generation": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "access_policy_ref": {
+              "type": "string",
+              "minLength": 1
+            },
+            "acl_revision": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "observed_at": {
+              "type": "string",
+              "format": "date-time"
+            }
+          }
+        },
+        {
+          "oneOf": [
+            {
+              "type": "object",
+              "required": [
+                "source_kind",
+                "capture_consistency",
+                "repo_id",
+                "worktree_id"
+              ],
+              "properties": {
+                "source_kind": {
+                  "const": "git_snapshot"
+                },
+                "capture_consistency": {
+                  "enum": [
+                    "git_tree_coherent",
+                    "atomic_fs_coherent",
+                    "unverified",
+                    "inconsistent"
+                  ]
+                },
+                "repo_id": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "worktree_id": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "minLength": 1
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "source_kind",
+                "capture_consistency",
+                "source_binding_id",
+                "resource_ref_id"
+              ],
+              "properties": {
+                "source_kind": {
+                  "const": "resource_snapshot"
+                },
+                "capture_consistency": {
+                  "enum": [
+                    "immutable_version_coherent",
+                    "unverified",
+                    "inconsistent"
+                  ]
+                },
+                "source_binding_id": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "resource_ref_id": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "source_kind",
+                "capture_consistency",
+                "source_binding_id",
+                "root_ref"
+              ],
+              "properties": {
+                "source_kind": {
+                  "const": "file_snapshot"
+                },
+                "capture_consistency": {
+                  "enum": [
+                    "atomic_fs_coherent",
+                    "unverified",
+                    "inconsistent"
+                  ]
+                },
+                "source_binding_id": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "root_ref": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "source_kind",
+                "capture_consistency",
+                "registry_kind",
+                "resource_id",
+                "namespace",
+                "namespace_ref"
+              ],
+              "properties": {
+                "source_kind": {
+                  "const": "registry_version"
+                },
+                "capture_consistency": {
+                  "enum": [
+                    "immutable_version_coherent"
+                  ]
+                },
+                "registry_kind": {
+                  "enum": [
+                    "skill",
+                    "role",
+                    "contract",
+                    "automation",
+                    "technical_resource"
+                  ]
+                },
+                "resource_id": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "namespace": {
+                  "enum": [
+                    "global",
+                    "project",
+                    "repository"
+                  ]
+                },
+                "namespace_ref": {
+                  "type": "string",
+                  "minLength": 1,
+                  "description": "Vaut scope_owner_key du registre (ADR-06) : `global` pour la portée globale, l'identifiant de l'owner du namespace sinon."
+                }
+              }
+            }
+          ]
+        }
+      ],
+      "unevaluatedProperties": false,
+      "description": "Référence serveur vers une version exacte ; métadonnées observées au moment de la recherche. La politique et la fraîcheur courantes sont recontrôlées avant chaque usage."
+    },
+    "validationBasis": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "intent_revision",
+        "scope_ref",
+        "scope_revision",
+        "policy_version_ref",
+        "validator_version",
+        "event_cursor",
+        "checked_at",
+        "valid_until",
+        "max_age_ms"
+      ],
+      "properties": {
+        "intent_revision": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "scope_ref": {
+          "type": "string",
+          "minLength": 1
+        },
+        "scope_revision": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "policy_version_ref": {
+          "type": "string",
+          "minLength": 1
+        },
+        "validator_version": {
+          "type": "string",
+          "minLength": 1
+        },
+        "event_cursor": {
+          "$ref": "#/$defs/eventCursor"
+        },
+        "checked_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "valid_until": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "max_age_ms": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    }
+  }
+}

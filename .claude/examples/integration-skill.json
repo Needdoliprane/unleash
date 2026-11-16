@@ -1,0 +1,144 @@
+{
+  "schema_version": "unleash.skill.v1",
+  "skill_id": "skill.repository.integrate",
+  "version": 1,
+  "name": "Intégrer des contributions identifiées",
+  "description": "Fixture de compétence d’intégration spécialisée ; le merge est une observation, pas un claim.",
+  "scope": {
+    "kind": "repository",
+    "owner_id": "repo-ovpt-fixture"
+  },
+  "instructions": "Inspecter les références et commits autorisés. Réconcilier les effets inconnus avant toute répétition. Demander un arbitrage au propriétaire en cas de conflit métier. Rapporter l’intégration observée sur la cible exacte.",
+  "input_schema": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": [
+      "source_missions",
+      "target_ref"
+    ],
+    "properties": {
+      "source_missions": {
+        "type": "array",
+        "items": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "minItems": 1,
+        "maxItems": 16
+      },
+      "target_ref": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 512
+      }
+    }
+  },
+  "output_schema": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": [
+      "integrated",
+      "target_ref",
+      "commit",
+      "observation_id"
+    ],
+    "properties": {
+      "integrated": {
+        "type": "boolean"
+      },
+      "target_ref": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 512
+      },
+      "commit": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 256
+      },
+      "observation_id": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 256
+      }
+    }
+  },
+  "requested_capabilities": [
+    "git.inspect",
+    "git.integrate",
+    "registry.search"
+  ],
+  "tools": [
+    {
+      "id": "tool.git.inspect",
+      "version": 1,
+      "required": true
+    },
+    {
+      "id": "tool.git.integrate",
+      "version": 1,
+      "required": true
+    },
+    {
+      "id": "tool.registry.search",
+      "version": 1,
+      "required": true
+    }
+  ],
+  "contract": {
+    "contract_id": "contract.repository.integrate",
+    "version": 1,
+    "rules": [
+      {
+        "id": "output-shape",
+        "validator": "json_schema",
+        "phase": "completion",
+        "severity": "required",
+        "on_unknown": "block",
+        "parameters": {
+          "target": "output"
+        }
+      },
+      {
+        "id": "integration-observed",
+        "validator": "integration_observed",
+        "phase": "completion",
+        "severity": "required",
+        "on_unknown": "block",
+        "parameters": {
+          "observation_pointer": "/output/observation_id",
+          "target_ref_pointer": "/input/target_ref",
+          "expected_commits_pointer": "/context/source_commits"
+        }
+      }
+    ]
+  },
+  "resources": [],
+  "acl": {
+    "read_scopes": [
+      "repository"
+    ],
+    "requested_grants": [
+      "git.inspect",
+      "git.integrate",
+      "registry.search"
+    ]
+  },
+  "provenance": {
+    "author": "agent-n2-fixture",
+    "source_uri": null,
+    "license": "Apache-2.0",
+    "discovery_receipt_id": "fixture-discovery-integrate",
+    "derived_from": []
+  },
+  "evaluation_policy": {
+    "required_checks": [
+      "schema",
+      "references",
+      "permissions",
+      "fixtures"
+    ],
+    "judge_policy": "none"
+  }
+}

@@ -1,0 +1,85 @@
+{
+  "schema_version": "unleash.role.v1",
+  "role_id": "role.repository.integrator",
+  "version": 1,
+  "name": "Intégrer les contributions",
+  "scope": {
+    "kind": "repository",
+    "owner_id": "repo-ovpt-fixture"
+  },
+  "level": "N",
+  "objective": "Intégrer les contributions sous mission et scope explicites",
+  "responsibilities": [
+    "Appliquer le contrat et référencer les observations",
+    "Signaler les ambiguïtés et effets inconnus au propriétaire"
+  ],
+  "skills": [
+    {
+      "id": "skill.repository.integrate",
+      "version": 1,
+      "scope": {
+        "kind": "repository",
+        "owner_id": "repo-ovpt-fixture"
+      }
+    }
+  ],
+  "model_policy": {
+    "policy_ref": {
+      "id": "model-policy.default-fixture",
+      "version": 1
+    },
+    "required_capabilities": [
+      "tool_calling",
+      "structured_output"
+    ],
+    "fallback_allowed": false
+  },
+  "requested_capabilities": [
+    "git.inspect",
+    "git.integrate",
+    "registry.search"
+  ],
+  "permission_constraints": {
+    "max_scope_kind": "repository",
+    "allow_cross_repository": false,
+    "allow_delegation": false
+  },
+  "contracts": [
+    {
+      "id": "contract.repository.integrate",
+      "version": 1,
+      "scope": {
+        "kind": "repository",
+        "owner_id": "repo-ovpt-fixture"
+      }
+    }
+  ],
+  "context_policy": {
+    "allowed_sources": [
+      "mission",
+      "workspace",
+      "evidence",
+      "registry"
+    ],
+    "max_input_tokens": 65536,
+    "include_private_reasoning": false
+  },
+  "scope_policy": {
+    "assignment_required": true,
+    "paths_mode": "explicit",
+    "worktree_required": true
+  },
+  "provenance": {
+    "author": "agent-n1-fixture",
+    "discovery_receipt_id": "fixture-discovery-role.repository.integrator",
+    "derived_from": []
+  },
+  "entry_skill": {
+    "id": "skill.repository.integrate",
+    "version": 1,
+    "scope": {
+      "kind": "repository",
+      "owner_id": "repo-ovpt-fixture"
+    }
+  }
+}

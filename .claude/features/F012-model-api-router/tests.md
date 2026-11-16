@@ -1,0 +1,56 @@
+# F012 — stratégie de validation
+
+Harness de tests développé en Rust. Les scénarios utilisent horloge contrôlée, IDs stables de fixture, doubles réseau/processus et injection de fautes. Les essais réels cloud et locaux sont séparés, avec endpoint/compte dédiés lorsque nécessaires, plafonds de coût et de ressources, secrets hors rapport. Aucune suite produit ni inférence locale n’a été exécutée pendant la rédaction.
+
+| Test | Critère / exigence | Injection ou cas limite | Preuve attendue |
+| --- | --- | --- | --- |
+| T-F012-001 | AC-F012-001 / REQ-MODEL-001 | Désactiver tout binaire CLI ; capturer requêtes masquées. | EV-F012-001 : reçu, journal causal, assertions et versions du test |
+| T-F012-002 | AC-F012-002 / REQ-MODEL-002 | Permutation de maps ; bindings exacts par scope/version ; homonymes ; suppression ; mise à jour en file ; effort natif incompatible. | EV-F012-002 : snapshot de configuration, références de bindings/profils épinglées, provenance, conflit et zéro réseau interdit |
+| T-F012-003 | AC-F012-003 / REQ-MODEL-003 | Cas mock acceptant un champ mais l’ignorant. | EV-F012-003 : reçu, journal causal, assertions et versions du test |
+| T-F012-004 | AC-F012-004 / REQ-MODEL-004 | SSE incomplet, champs inconnus, buffers trop grands. | EV-F012-004 : reçu, journal causal, assertions et versions du test |
+| T-F012-005 | AC-F012-005 / REQ-MODEL-005 | Fixtures fournisseur versionnées et limites exactes. | EV-F012-005 : reçu, journal causal, assertions et versions du test |
+| T-F012-006 | AC-F012-006 / REQ-MODEL-006 | Barrière simultanée et panne entre dispatch et usage. | EV-F012-006 : reçu, journal causal, assertions et versions du test |
+| T-F012-007 | AC-F012-007 / REQ-MODEL-007 | Horloge virtuelle, backoff seed et retrait d’autorisation. | EV-F012-007 : reçu, journal causal, assertions et versions du test |
+| T-F012-008 | AC-F012-008 / REQ-MODEL-008 | Vérifier les destinations réseau réellement contactées. | EV-F012-008 : reçu, journal causal, assertions et versions du test |
+| T-F012-009 | AC-F012-009 / REQ-MODEL-009 | Hash payload/manifest ; deux compactions, récupération documentaire, purge/révocation et nouvelle invocation distante ; déclassification autorisée/refusée. | EV-F012-009 : graphe/politiques exacts, décisions d'autorité, exclusions, tombstones et capture des effets interdits absents |
+| T-F012-010 | AC-F012-010 / REQ-MODEL-010 | IDs distants comme métadonnées puis paramètres interdits ; crash/reconstruction explicite ; bloc opaque perdu ou antécédent exclu ; compaction Unleash d'un tour antérieur et resérialisation modifiée : aucun bloc opaque postérieur réémis. | EV-F012-010 : payload complet sans continuation, filiation opaque, refus pré-réseau et CONTEXT_INCOMPLETE lorsqu'applicable |
+| T-F012-011 | AC-F012-011 / REQ-MODEL-011 | Tarif long contexte, valeurs extrêmes, usage partiel et bloc opaque dont l'estimation est qualifiée puis non bornable ; tarif périmé (block/warn), tarif distant absent, profil local `pricing=none_local`, import user_import, nouveau catalogue en cours de run. | EV-F012-011 : entrées comptées, méthode/plafond, pricing_version, réserve et inconnus conservés |
+| T-F012-012 | AC-F012-012 / REQ-MODEL-012 | Fixtures 401/403/model unavailable, puis test live borné. | EV-F012-012 : reçu, journal causal, assertions et versions du test |
+| T-F012-013 | AC-F012-013 / REQ-MODEL-013 | Trois backends, modes d’authentification, redirection, HTTP hors loopback, secret canari. | EV-F012-013 : profils masqués, destinations, refus, preuve réelle par backend et versions |
+| T-F012-014 | AC-F012-014 / REQ-MODEL-014 | Handshake par tuple modèle/serveur/configuration, champ ignoré, stream partiel et changement de template. | EV-F012-014 : fixtures de capacités, snapshots, arguments finaux et absence d’actions interdites |
+| T-F012-015 | AC-F012-015 / REQ-MODEL-015 | Cloud via loopback, LM Link distant, proxy inconnu, fallback autorisé/interdit ; dérivé local dans une nouvelle invocation distante. | EV-F012-015 : politiques héritées, preuves de placement, canaris, refus, destinations et manifests distincts |
+| T-F012-016 | AC-F012-016 / REQ-MODEL-016 | Froid/chaud, concurrence, file, mémoire, délais et annulation sans arrêt confirmé. | EV-F012-016 : admissions, réservations, transitions, métriques disponibles et état incertain |
+| T-F012-017 | AC-F012-017 / REQ-MODEL-017 | Digest/build/quantification/usage manquants, alias modifié, redémarrage avant dispatch. | EV-F012-017 : manifest immuable, provenance, absences et coût non confondu avec zéro |
+| T-F012-018 | AC-F012-018 / REQ-MODEL-018 | Parité GUI/TUI, scopes, run forbidden tentant modèle local/embedding/préchauffage et checkpoint supervisé autorisé. | EV-F012-018 : mêmes reçus, capture réseau/processus, zéro effet modèle interdit et checkpoint borné |
+
+## Oracle et gestion des erreurs
+
+Une assertion porte sur le résultat engagé, les effets réellement captés et l’absence d’effet interdit. Les logs seuls ne sont pas l’oracle. Comparer l’état avant/après, les appels au double et les liens de preuve. Une panne injectée après dispatch exige un état de reprise explicable ; relancer le test jusqu’à obtenir un succès ne valide pas l’idempotence.
+
+Chaque preuve doit indiquer commit du produit, version de fixture, configuration effective, commandes Rust de test exécutées, code de sortie et artefacts. Les données sensibles sont remplacées par canaris. Les échecs attendus doivent aussi être persistés pour démontrer la frontière des garanties.
+
+
+## Complément de reprise et fallback — FINAL-04
+
+T-F012-008 inclut un fallback autorisé après erreur du premier fournisseur : même invocation_id et même hash d'InvocationBundle, deux action_id et model_call_id distincts, profils/contextes exacts dans chaque manifeste, cause liée, budget réservé pour chaque coût potentiel. Refaire après crash entre manifeste et dispatch ; aucun outil déjà engagé n'est dupliqué. Une compaction entre appels crée un nouveau contexte versionné sans effacer l'ancien. Un fallback hors politique figée est refusé jusqu'à nouvelle invocation autorisée. EV-F012-008 contient les deux hashes de payload et les trois états préparé/transmis/réception inconnue, pas seulement un log 'fallback OK'.
+
+## Complément modèles locaux
+
+Les variantes, étapes et critères de sortie T-F012-013 à 018 sont dans [local-model-tests](../../testing/local-model-tests.md). Une qualification doit distinguer le comportement du routeur testé sur double et l’intégration réellement observée de LM Studio, Ollama ou llama.cpp. Les sources primaires établissent des possibilités documentées, pas un résultat d’essai.
+
+Un `forbidden` refusé seulement après chargement d’un moteur ne satisfait pas T-F012-018. Un `local_only` accepté parce que l’URL contient localhost ne satisfait pas T-F012-015. Une erreur mémoire suivie d’un transfert cloud non autorisé échoue à la fois 015 et 016. Ces contrôles portent sur les effets captés et leur cause, y compris chemins auxiliaires et préchauffages.
+
+## Complément R6 E05 — statut produit `not_run`
+
+Les étapes suivantes sont à implémenter dans le harness Rust ; aucune exécution produit n'est attestée par les contrôles documentaires.
+
+1. **T-F012-002.** Créer deux versions et deux namespaces d'un skill homonyme, plus deux auxiliaires. Associer des profils synthétiques différents par scope de configuration ; résoudre sous un snapshot stable et permuter l'ordre de lecture. Modifier puis supprimer un binding pendant la file et après crash. Vérifier rôle > skill, choix exact repository/projet/global, historique inchangé, suppression explicite, conflit sur référence active invalide et rejet d'une option native inapplicable.
+2. **T-F012-009/015.** Placer un canari dans une source local_only, produire un résumé puis une nouvelle compaction, extraire le dérivé via un index et exclure ensuite l'original. Tenter l'appel distant dans une nouvelle invocation autorisée au cloud. Capturer réseau et stockage indépendamment : aucun dérivé non autorisé ne sort. Refaire avec purge, révocation entre préparation et dispatch, filiation tronquée/cyclique, contraintes de conservation incompatibles et déclassification expirée ou hors scope. Le cas autorisé conserve décision, politiques avant/après et hash exact ; un refus n'efface pas les preuves permises.
+3. **T-F012-010.** Reprendre depuis la session locale malgré des IDs distants inexistants dans ses métadonnées. Injecter les champs de continuation dans options normales puis extensions : aucun dispatch. Ajouter un bloc opaque synthétique qualifié, supprimer/exclure un antécédent, perdre ses octets puis changer de fournisseur. Comparer le payload à ses segments ; aucune dépendance interdite n'est réintroduite. Les données essentielles non reconstructibles produisent un blocage explicite.
+4. **T-F012-011.** Estimer les mêmes octets d'historique explicite, dont l'objet opaque, avec un profil d'estimation/version qualifié ; supprimer une métrique et provoquer un timeout après envoi. Distinguer estimation, réservation et usage réel inconnu. Un profil ne permettant aucun plafond applicable est refusé avant dispatch.
+
+La [fixture de contexte v2](../../examples/context-manifest.json) et le [schéma](../../schemas/context-manifest.schema.json) utilisent exclusivement identités, digests et tailles synthétiques : ils vérifient la forme, pas l'existence de contenus ni le calcul réel des hashes. Variantes documentaires négatives à vérifier en mémoire : version v1, mode distant, champ de continuation, politique manquante, filiation inconnue incluse, dérivé complet sans source, segment purgé inclus et opaque sans métadonnées. Les oracles sémantiques restent dans les futurs tests ci-dessus ; une fixture structurellement valide n'atteste aucune déclassification légitime.
+
+### R6 : T-F012-013/014/018
+
+Fixture d’installation vide puis validate_config/connect/inventory/generation_probe explicites. EV-F012-013/014/018 contient origine authentifiée, absence de session/agent factice, contexte synthétique exact, ledger partagé et résultat fournisseur de double. Tester saturation 5/50, fausse origine control_plane, source forbidden, coût inconnu, interruption après envoi et redelivery. Les tests de produit restent not_run ; ce corpus définit leur oracle.

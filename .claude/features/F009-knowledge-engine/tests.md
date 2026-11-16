@@ -1,0 +1,42 @@
+# F009 — Plan de tests et preuves attendues
+
+**Tests produit : not_run.** Les tests de production et utilitaires sont à écrire en Rust. Les serveurs et outils des projets de test peuvent être externes ; aucun script Python/JS interne Unleash n'est nécessaire. Les fixtures sont des dépôts ou sources sans Git temporaires déterministes, avec versions et contenus archivés dans le manifeste d'essai. Les contrôles de schéma documentaire exécutés en R6 sont distingués plus bas ; ils ne qualifient aucun runtime.
+
+| Test | Exigence et acceptation | Méthode significative | Preuve attendue |
+|---|---|---|---|
+| T-F009-001 | REQ-KNOW-001 / AC-F009-001 | Trois sources de même nom avec OID/dirty différents, document et fichiers sans Git ; comparer type/source/version/digest/génération, contexte consommateur et annotations | EV-F009-001 : réponses JSON + manifestes, sans OID/repo fabriqué |
+| T-F009-002 | REQ-KNOW-002 / AC-F009-002 | Barrières d'injection entre lectures, mutation et retour ABA ; comparaison avec capture de tree | EV-F009-002 : journal de capture et statut de cohérence |
+| T-F009-003 | REQ-KNOW-003 / AC-F009-003 | Matrice des cinq profils et workspace mixte ; outils présents, absents, versions incompatibles | EV-F009-003 : manifeste des versions/capacités et résultats par langue |
+| T-F009-004 | REQ-KNOW-004 / AC-F009-004 | Deux principaux, ACL différentes, cache chaud, révocation pendant requête | EV-F009-004 : réponses/exports filtrés et manifeste du contexte envoyé |
+| T-F009-005 | REQ-KNOW-005 / AC-F009-005 | Séquence recherche/admission/création/commit identique/clôture ; comparer retouche ultérieure, changement extérieur pertinent/hors scope, échéance, recul d'horloge, crash/stream et événement tardif | EV-F009-005 : preuve historique intacte, validations bornées et discovery de clôture quand requise |
+| T-F009-006 | REQ-KNOW-006 / AC-F009-006 | Corpus de références connues, cas ambigus, Unicode et configurations conditionnelles | EV-F009-006 : relations avec confiance, lacunes et encodage de positions |
+| T-F009-007 | REQ-KNOW-007 / AC-F009-007 | Deux missions et branches ; helper synonymique non local, ACL permise/interdite | EV-F009-007 : résultat candidat + disponibilité et propriétaire |
+| T-F009-008 | REQ-KNOW-008 / AC-F009-008 | Créations par catégorie et origine, patch opaque, contrôle de FKs/mandat/principal/cause ; tentative origine mixte, provenance falsifiée, seconde création sous même reçu et retry | EV-F009-008 : autorisations/usages, rejets, absence d'invocation fictive et chronologie avant/après |
+| T-F009-009 | REQ-KNOW-009 / AC-F009-009 | Faux ami sémantique avec décision de copie justifiée | EV-F009-009 : décision immuable et liens de provenance |
+| T-F009-010 | REQ-KNOW-010 / AC-F009-010 | Insertion concurrente de cycles à deux et trois missions, livraison de réveil dupliquée | EV-F009-010 : graphe admissible et événements dédupliqués |
+| T-F009-011 | REQ-KNOW-011 / AC-F009-011 | Corrompre projection, rebuild puis réponse tardive d'un profil ancien ; supprimer un segment d'historique et vérifier la réconciliation par variante | EV-F009-011 : digests requêtes/reçus/usages avant/après, génération active, unknown non masqué |
+| T-F009-012 | REQ-KNOW-012 / AC-F009-012 | Budget mémoire/processus/temps bas, fichiers géants, serveur bloqué et disque plein | EV-F009-012 : métriques, erreurs typées et admission bornée |
+
+## Oracles et critères d'échec
+
+Le corpus de symboles est défini manuellement par fixture et conserve les ambiguïtés attendues ; il ne compare pas uniquement l'index à lui-même. L'oracle de provenance lit les objets Git exacts ; l'oracle ACL vérifie aussi les compteurs, cache, logs et contexte. Le test de capture échoue dès qu'un scan séquentiel obtient le statut atomique. Le test de cycle échoue si la base accepte un graphe circulaire, même si un manager le débloque plus tard.
+
+Le test multilangage distingue capacité native du profil, capacité désactivée par politique et panne de configuration. Un succès lexical ne suffit pas à déclarer qualifiée la résolution sémantique promise par un profil. Les statistiques de précision/rappel seront publiées avec taille du corpus, version du profil et critères d'annotation ; aucune cible numérique n'est prétendue atteinte ici.
+
+L'oracle temporel sépare validité avant effet, usage historique et éligibilité actuelle. Il accepte recherche valide → création exacte observée → publication identique prouvée → clôture sans changement extérieur pertinent. Il exige nouvelle discovery si un concurrent modifie un candidat pertinent ou si le même auteur retouche ensuite la cible. Une mutation non pertinente n'est écartée qu'avec rapport du validateur épinglé. Il injecte un nouveau changement entre revalidation et transaction de clôture, une cible/version différente, une échéance dépassée, une ACL révoquée et un historique incomplet : aucun ne produit un pass silencieux. La seule appartenance au même commit/acteur/mission ne prouve pas l'effet propre.
+
+L'oracle d'autorité ne fait pas confiance à `origin` : il dérive l'origine du canal, retrouve les FKs et le mandat, puis compare le reçu. Human/control_plane et replay fonctionnent sans invocation ; un changement d'étiquette ne supprime jamais les politiques héritées du run. Les tests de sources couvrent file/resource/registry sans F010, évolution de digest/révision, révocation, timestamps d'observation, capture unverified et reprise.
+
+## Contrôles documentaires de schéma R6
+
+Le [schéma V1](../../schemas/discovery-receipt.schema.json) est un contrat cible non publié. Les [fixtures agente](../../examples/discovery-receipt.json), [humaine](../../examples/discovery-human.json), [replay](../../examples/discovery-replay.json) et [clôture](../../examples/discovery-completion.json) doivent être acceptées avec contrôle explicite des dates. Les mutations négatives retirent cause/principal/FK, mélangent origines, ajoutent des champs Git à une source sans Git, effacent couverture/version/base de validation ou contredisent purpose/antériorité/cible. Elles sont construites en mémoire pour ne pas présenter un exemple invalide comme fixture canonique.
+
+Contrôle exécuté le 16 novembre 2026 : métaschéma valide ; six cas positifs acceptés (quatre fichiers, variante registre, recherche vide avec couverture durable) et trente-deux mutations négatives rejetées. Le checker date-time optionnel natif était absent ; passer seulement `FormatChecker()` avait laissé passer `yesterday`. La campagne finale a ajouté un contrôle explicite de syntaxe et de calendrier sur le profil RFC3339 utilisé par les fixtures ; elle ne revendique pas une qualification exhaustive de tous les formats/variantes RFC3339. Les comparaisons temporelles entre champs restent des contrôles domaine à exécuter.
+
+La forme JSON ne prouve pas l'existence des références, l'égalité principal/control_principal, le calcul de la borne, l'ordre des événements ou l'autorité du canal. Ces contrôles appartiennent aux tests domaine Rust ci-dessus, toujours not_run. Les résultats documentaires effectivement observés sont consignés dans l'[addendum R6](../../audits/r6/expert-07-knowledge.md).
+
+## Reproductibilité et erreurs
+
+Chaque exécution conserve seed, version Git, serveurs, toolchains, configuration, limites, OID et ACL. Les temporisations reposent sur barrières déterministes autant que possible ; un simple sleep ne constitue pas une preuve de course. Les tests de faute tuent le processus ou interrompent l'effet à une frontière nommée. Si l'environnement ne permet pas de simuler une panne de courant, le rapport distingue crash processus et durabilité matérielle non vérifiée.
+
+Le harness de test nettoie uniquement ses ressources identifiées ; un worktree dirty de fixture est conservé à l'échec avec rétention bornée et secrets de test synthétiques. Les éléments de preuve attendus sont attachés au rapport [F016](../F016-reporting-observability/README.md) et au scénario d'intégration [D](../../testing/integration-tests.md).

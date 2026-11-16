@@ -1,0 +1,31 @@
+# F005 — Interfaces proposées
+
+Les libellés d’erreur métier de cette feature sont des `reason_code` dans l’enveloppe canonique [IPC](../../architecture/ipc-and-apis.md), sous une classe commune telle que InvalidArgument, ContractViolation, CapabilityDenied, RevisionConflict ou OutcomeUnknown ; ils ne définissent pas un transport concurrent.
+Toutes les mutations utilisent l'enveloppe commune avec `command_id`, `expected_revision` et acteur résolu serveur. Le payload de création de run est illustratif :
+
+```json
+{
+  "mission_id": "mission-feature-12",
+  "source": {"kind": "workflow_version", "id": "workflow.feature", "version": 1, "digest": "sha256:<hex>"},
+  "purpose": "operational",
+  "predecessor_run_id": null,
+  "selection_reason": "Version publiée sélectionnée par le plan de mission",
+  "input_ref": "artifact-input-12",
+  "scope_ref": "scope-feature-12",
+  "budget_ref": "budget-mission-12"
+}
+```
+
+Pour `kind=automation_version`, `source` porte la référence exacte `id`/`version`/`digest` de la version d'automatisation, `data_revision_ref` et `automation_mode` ; paramètres et limites restent dans le payload ([IPC](../../architecture/ipc-and-apis.md)).
+
+`CreateRun` accepte source.kind workflow_version ou automation_version, avec référence exacte et données lorsque applicables, puis retourne run, digest de définition, révision initiale, bindings résolus et slots non liés. Un `predecessor_run_id` désigne un successeur unique (Q-03) : CreateRun est refusé `ResourceBusy/PREDECESSOR_NOT_TERMINAL` (retry_class=after_refresh) tant que le prédécesseur n'est pas terminal, et `InvalidArgument/SUCCESSOR_EXISTS` si ce prédécesseur a déjà un successeur direct. `StartRun` vérifie préconditions et réserve les premiers budgets. Pour un Run `automation_version`, `StartRun` porte le digest de l'`EffectPreview` lu par `GetRun` sur le Run `prepared`, ou le `preview_digest` de `GetSetupPreview` pour une préparation guidée ; un changement de version, de données, de mandat ou de fait référencé invalide ce digest et `StartRun` est refusé `ContractViolation/STALE_EVIDENCE` ([aperçu](../../specs/reusable-automations.md#aperçu-autorisation-et-effets)). `PauseRun`, `ResumeRun` et `CancelRun` produisent un reçu avec état, intention et actions encore en réconciliation. `BindRole` exige slot vierge, référence exacte, discovery receipt et justification ; le retour inclut digests et événements RoleBound/SkillBound.
+
+`SubmitObservation` est réservé aux adaptateurs authentifiés. Il reçoit action, activation, principal d’exécution agent ou replay_worker, invocation optionnelle selon ce principal, epoch, type d'observation, références de contenu et état de résultat. Un worker ne peut se déclarer adaptateur Git pour fabriquer une observation de merge. `GetRun` retourne définition effective, état, activations, compteurs, bindings et blocages. `SubscribeEvents` avec filtre run doit reprendre depuis stream_id et after_sequence durables sans imposer une resynchronisation par conversation.
+
+Les événements comprennent RunCreated, RunStarted, NodeActivated, EffectRequested, ObservationRecorded, ContractEvaluated, BranchStopRequested, JoinClosed, RunBlocked et RunTerminated. La version d'un payload est portée par son `event_type` : un changement incompatible crée un nouveau type d'événement ([event-model](../../architecture/event-model.md#enveloppe-dévénement)) ; `schema_version` versionne l'enveloppe. Le reducer déduplique les événements entrants ; des noms identiques ne suffisent pas, une identité stable est requise.
+
+Une erreur contient code, run, activation éventuelle, révision courante et action recommandée. `UnresolvedEffect` retourne les références nécessaires à la réconciliation, sans autoriser la répétition. `BindingAlreadyEngaged` retourne la version effective et l'identifiant d'engagement. Les interfaces sont internes proposées ; aucune de ces méthodes n'est annoncée comme API existante d'un fournisseur.
+
+### Snapshot de qualification
+
+Une évaluation F019 utilise le Run commun de source workflow_version avec purpose=evaluation, candidat/digest et cible autorisée. Le snapshot immuable est marqué qualification_only dans les métadonnées de version ; il n’est pas une version publiée sélectionnable en exécution opérationnelle. Le broker vérifie cette visibilité et l’autorité de qualification avant CreateRun/StartRun. Les colonnes purpose/candidate_ref du Run et visibility du snapshot relient les preuves sans modifier les octets exécutés. Le contrat détaillé est dans [F019](../F019-reusable-automations/technical-design.md).

@@ -1,0 +1,66 @@
+{
+  "schema_version": "unleash.discovery.v1",
+  "receipt_id": "discovery-email-01",
+  "intent_id": "intent-email-01",
+  "origin": {
+    "origin_kind": "invocation",
+    "principal_id": "principal-frontend-01",
+    "cause": {
+      "kind": "command_receipt",
+      "id": "command-receipt-discovery-01"
+    },
+    "invocation_id": "invocation-example-01",
+    "attempt_id": "attempt-example-01"
+  },
+  "query_ids": [
+    "query-17"
+  ],
+  "catalog_revision": 89,
+  "purpose": "pre_creation",
+  "decision": "create",
+  "strategy": "adapt",
+  "candidate_ids": [
+    "symbol-normalize-email-7"
+  ],
+  "target_resource_id": null,
+  "target_version_ref": null,
+  "justification": "Nouveau contrat de domaine avec erreur typée ; provenance du candidat conservée.",
+  "source_refs": [
+    {
+      "source_kind": "git_snapshot",
+      "source_id": "source-feature-01",
+      "version_id": "snapshot-feature-42",
+      "content_digest": {
+        "algorithm": "sha256",
+        "hex": "1111111111111111111111111111111111111111111111111111111111111111"
+      },
+      "generation": 42,
+      "access_policy_ref": "policy-source-01",
+      "acl_revision": 3,
+      "observed_at": "2026-11-16T14:00:00Z",
+      "capture_consistency": "git_tree_coherent",
+      "repo_id": "repo-01",
+      "worktree_id": "worktree-feature-01"
+    }
+  ],
+  "freshness": "valid",
+  "temporal_relation": "before_creation",
+  "validation_basis": {
+    "intent_revision": 1,
+    "scope_ref": "scope-project-01",
+    "scope_revision": 4,
+    "policy_version_ref": "discovery-policy-v1",
+    "validator_version": "discovery-validator-v1",
+    "event_cursor": {
+      "stream_id": "00000000-0000-4000-8000-000000000201",
+      "sequence": 150
+    },
+    "checked_at": "2026-11-16T14:00:00Z",
+    "valid_until": "2026-11-16T14:05:00Z",
+    "max_age_ms": 300000
+  },
+  "recorded_at": "2026-11-16T14:00:01Z",
+  "supersedes_receipt_id": null,
+  "creation_use_id": null,
+  "coverage_ref": "coverage-query-17"
+}

@@ -1,0 +1,84 @@
+{
+  "schema_version": "unleash.role.v1",
+  "role_id": "role.automation.supervisor",
+  "version": 1,
+  "name": "Superviseur de procédure par blocs",
+  "scope": {
+    "kind": "project",
+    "owner_id": "project-automation-fixture"
+  },
+  "level": "N+1",
+  "objective": "Juger les résultats de blocs aux points de revue publiés",
+  "responsibilities": [
+    "Appliquer le contrat et référencer les observations",
+    "Signaler les ambiguïtés et effets inconnus au propriétaire"
+  ],
+  "skills": [
+    {
+      "id": "skill.automation.supervise",
+      "version": 1,
+      "scope": {
+        "kind": "project",
+        "owner_id": "project-automation-fixture"
+      }
+    }
+  ],
+  "model_policy": {
+    "policy_ref": {
+      "id": "model-policy.default-fixture",
+      "version": 1
+    },
+    "required_capabilities": [
+      "tool_calling",
+      "structured_output"
+    ],
+    "fallback_allowed": false
+  },
+  "requested_capabilities": [
+    "evidence.read",
+    "leader.decide"
+  ],
+  "permission_constraints": {
+    "max_scope_kind": "project",
+    "allow_cross_repository": false,
+    "allow_delegation": false
+  },
+  "contracts": [
+    {
+      "id": "contract.automation.supervise",
+      "version": 1,
+      "scope": {
+        "kind": "project",
+        "owner_id": "project-automation-fixture"
+      }
+    }
+  ],
+  "context_policy": {
+    "allowed_sources": [
+      "mission",
+      "workspace",
+      "evidence",
+      "registry"
+    ],
+    "max_input_tokens": 65536,
+    "include_private_reasoning": false
+  },
+  "scope_policy": {
+    "assignment_required": true,
+    "paths_mode": "explicit",
+    "worktree_required": false
+  },
+  "provenance": {
+    "author": "user-fixture",
+    "discovery_receipt_id": "fixture-discovery-automation-role",
+    "derived_from": []
+  },
+  "entry_skill": {
+    "id": "skill.automation.supervise",
+    "version": 1,
+    "scope": {
+      "kind": "project",
+      "owner_id": "project-automation-fixture"
+    }
+  }
+}

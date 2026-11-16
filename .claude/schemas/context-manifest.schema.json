@@ -1,0 +1,606 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:ovpt:unleash:context-manifest:2",
+  "title": "ContextManifest v2 immuable d'un appel d'invocation proposé",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "manifest_id",
+    "invocation_id",
+    "session_id",
+    "agent_id",
+    "role_binding_ref",
+    "workflow_run_ref",
+    "model_profile_ref",
+    "scope_revision",
+    "trigger_refs",
+    "segments",
+    "payload_hash",
+    "retention_policy_ref",
+    "model_call_id",
+    "action_id",
+    "invocation_bundle_digest",
+    "parent_manifest_id",
+    "provider_profile_ref",
+    "model_id",
+    "capability_snapshot_ref",
+    "context_mode"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "unleash.context.v2"
+    },
+    "manifest_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "invocation_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "session_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "agent_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "role_binding_ref": {
+      "type": "string"
+    },
+    "workflow_run_ref": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "model_profile_ref": {
+      "type": "string"
+    },
+    "scope_revision": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "trigger_refs": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "minItems": 1
+    },
+    "segments": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "kind",
+          "source_ref",
+          "source_revision",
+          "content_hash",
+          "selection",
+          "trust",
+          "availability",
+          "effective_data_policy_ref",
+          "lineage",
+          "size_bytes"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "kind": {
+            "enum": [
+              "instruction",
+              "role",
+              "skill",
+              "message",
+              "document",
+              "code",
+              "tool_result",
+              "summary",
+              "provider_opaque"
+            ]
+          },
+          "source_ref": {
+            "type": "string"
+          },
+          "source_revision": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "content_hash": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "pattern": "^sha256:[0-9a-f]{64}$"
+          },
+          "selection": {
+            "enum": [
+              "accessible",
+              "included",
+              "excluded"
+            ],
+            "description": "Placement dans le payload préparé ; transmission et réception sont des observations séparées du ModelCallRecord."
+          },
+          "trust": {
+            "enum": [
+              "control",
+              "user",
+              "repository",
+              "document",
+              "tool",
+              "provider"
+            ]
+          },
+          "availability": {
+            "enum": [
+              "retained",
+              "redacted",
+              "purged",
+              "opaque",
+              "missing"
+            ]
+          },
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "effective_data_policy_ref": {
+            "oneOf": [
+              {
+                "$ref": "#/$defs/policy_ref"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "lineage": {
+            "$ref": "#/$defs/lineage"
+          },
+          "size_bytes": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0,
+            "description": "Taille des octets du segment préparé lorsqu’elle est connue ; aucune estimation inventée."
+          },
+          "declassification_ref": {
+            "oneOf": [
+              {
+                "$ref": "#/$defs/policy_ref"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "opaque_metadata": {
+            "$ref": "#/$defs/opaque_metadata"
+          }
+        },
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "selection": {
+                  "const": "included"
+                }
+              },
+              "required": [
+                "selection"
+              ]
+            },
+            "then": {
+              "properties": {
+                "content_hash": {
+                  "type": "string",
+                  "pattern": "^sha256:[0-9a-f]{64}$"
+                },
+                "source_revision": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "effective_data_policy_ref": {
+                  "$ref": "#/$defs/policy_ref"
+                },
+                "lineage": {
+                  "properties": {
+                    "status": {
+                      "const": "complete"
+                    }
+                  }
+                },
+                "availability": {
+                  "enum": [
+                    "retained",
+                    "redacted",
+                    "opaque"
+                  ]
+                },
+                "size_bytes": {
+                  "type": "integer",
+                  "minimum": 0
+                }
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "selection": {
+                  "const": "excluded"
+                }
+              },
+              "required": [
+                "selection"
+              ]
+            },
+            "then": {
+              "required": [
+                "reason"
+              ],
+              "properties": {
+                "reason": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "kind": {
+                  "enum": [
+                    "summary",
+                    "provider_opaque"
+                  ]
+                }
+              },
+              "required": [
+                "kind"
+              ]
+            },
+            "then": {
+              "properties": {
+                "lineage": {
+                  "properties": {
+                    "kind": {
+                      "const": "derived"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "kind": {
+                  "const": "provider_opaque"
+                }
+              },
+              "required": [
+                "kind"
+              ]
+            },
+            "then": {
+              "required": [
+                "opaque_metadata"
+              ]
+            },
+            "else": {
+              "not": {
+                "required": [
+                  "opaque_metadata"
+                ]
+              }
+            }
+          }
+        ]
+      }
+    },
+    "payload_hash": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "retention_policy_ref": {
+      "type": "string",
+      "minLength": 1
+    },
+    "model_call_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "action_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "invocation_bundle_digest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "parent_manifest_id": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "format": "uuid"
+    },
+    "provider_profile_ref": {
+      "type": "string",
+      "minLength": 1
+    },
+    "model_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "capability_snapshot_ref": {
+      "type": "string",
+      "minLength": 1
+    },
+    "context_mode": {
+      "const": "explicit_unleash_history"
+    }
+  },
+  "$comment": "Variante invocation_context seulement ; ProviderProbeContext est un DTO distinct. La validation de domaine contrôle les références, la filiation, les politiques, les révocations et le payload natif. Une archive v1 ne devient pas conforme v2 par valeurs supposées.",
+  "$defs": {
+    "policy_ref": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "version",
+        "digest"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "version": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "digest": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        }
+      }
+    },
+    "lineage_source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "source_ref",
+        "source_revision",
+        "content_hash",
+        "data_policy_ref"
+      ],
+      "properties": {
+        "source_ref": {
+          "type": "string",
+          "minLength": 1
+        },
+        "source_revision": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1
+        },
+        "content_hash": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        "data_policy_ref": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/policy_ref"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "lineage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "status",
+        "source_refs",
+        "producer_action_ref"
+      ],
+      "properties": {
+        "kind": {
+          "enum": [
+            "source",
+            "derived"
+          ]
+        },
+        "status": {
+          "enum": [
+            "complete",
+            "unknown"
+          ]
+        },
+        "source_refs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/lineage_source"
+          },
+          "uniqueItems": true
+        },
+        "producer_action_ref": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "uuid"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "source"
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          },
+          "then": {
+            "properties": {
+              "source_refs": {
+                "maxItems": 0
+              },
+              "producer_action_ref": {
+                "type": "null"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "derived"
+              },
+              "status": {
+                "const": "complete"
+              }
+            },
+            "required": [
+              "kind",
+              "status"
+            ]
+          },
+          "then": {
+            "properties": {
+              "source_refs": {
+                "minItems": 1
+              },
+              "producer_action_ref": {
+                "type": "string",
+                "format": "uuid"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "complete"
+              }
+            },
+            "required": [
+              "status"
+            ]
+          },
+          "then": {
+            "properties": {
+              "source_refs": {
+                "items": {
+                  "properties": {
+                    "source_revision": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "content_hash": {
+                      "type": "string",
+                      "pattern": "^sha256:[0-9a-f]{64}$"
+                    },
+                    "data_policy_ref": {
+                      "$ref": "#/$defs/policy_ref"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "opaque_metadata": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "provider_profile_ref",
+        "dialect_ref",
+        "origin_model_call_id",
+        "content_ref",
+        "protocol_purpose",
+        "protocol_qualification_ref",
+        "dependency_manifest_refs"
+      ],
+      "properties": {
+        "provider_profile_ref": {
+          "type": "string",
+          "minLength": 1
+        },
+        "dialect_ref": {
+          "type": "string",
+          "minLength": 1
+        },
+        "origin_model_call_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "content_ref": {
+          "type": "string",
+          "minLength": 1
+        },
+        "protocol_purpose": {
+          "type": "string",
+          "minLength": 1
+        },
+        "protocol_qualification_ref": {
+          "$ref": "#/$defs/policy_ref"
+        },
+        "dependency_manifest_refs": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "manifest_id",
+              "digest"
+            ],
+            "properties": {
+              "manifest_id": {
+                "type": "string",
+                "format": "uuid"
+              },
+              "digest": {
+                "type": "string",
+                "pattern": "^sha256:[0-9a-f]{64}$"
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

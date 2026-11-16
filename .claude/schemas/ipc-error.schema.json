@@ -1,0 +1,81 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:ovpt:unleash:ipc-error:1",
+  "title": "Error",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "code",
+    "reason_code",
+    "message",
+    "retry_class",
+    "details_ref",
+    "command_id"
+  ],
+  "properties": {
+    "code": {
+      "enum": [
+        "InvalidArgument",
+        "AuthenticationFailed",
+        "CapabilityDenied",
+        "ScopeDenied",
+        "RevisionConflict",
+        "IdempotencyConflict",
+        "NotFoundOrHidden",
+        "ResourceBusy",
+        "BudgetExceeded",
+        "RateLimited",
+        "ProtocolIncompatible",
+        "StaleFence",
+        "IsolationUnavailable",
+        "ContractViolation",
+        "OutcomeUnknown",
+        "InternalFailure",
+        "ResyncRequired"
+      ],
+      "description": "Dix-sept classes communes (ADR-02). La saturation se sérialise ResourceBusy/BACKPRESSURE ; ResyncRequired répond seulement à une lecture incrémentale, jamais à une commande mutante."
+    },
+    "reason_code": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "pattern": "^[A-Z][A-Z0-9_]+$",
+      "description": "Clé toujours présente, null sans raison. Raison UPPER_SNAKE enregistrée sous une seule classe, jamais le nom d'une classe commune."
+    },
+    "message": {
+      "type": "string",
+      "maxLength": 4096
+    },
+    "retry_class": {
+      "enum": [
+        "never",
+        "after_backoff",
+        "after_refresh",
+        "after_reconciliation",
+        "after_human_decision"
+      ]
+    },
+    "details_ref": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "Clé toujours présente, null sans détail. Référence protégée, jamais un objet libre."
+    },
+    "command_id": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "format": "uuid",
+      "description": "Clé toujours présente, null si la commande est inconnue."
+    },
+    "current_revision": {
+      "description": "Facultatif : clé absente si non applicable.",
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    }
+  }
+}

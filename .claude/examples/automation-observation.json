@@ -1,0 +1,20 @@
+{
+  "schema_version": "unleash.automation-observation.v1",
+  "run_id": "fixture-run-automation",
+  "step_activation_id": "fixture-step-observe-1",
+  "observed_revision": 1,
+  "outcome": "observed",
+  "safe_to_continue": true,
+  "effect_state": "none",
+  "reason": "Les deux exports fictifs sont lisibles ; la collecte est complète. Le rapport final reste à produire.",
+  "action_refs": [
+    "fixture-read-left",
+    "fixture-read-right"
+  ],
+  "assertion_refs": [
+    "fixture-assert-columns",
+    "fixture-assert-input-revisions"
+  ],
+  "log_refs": [],
+  "capture_limits": []
+}

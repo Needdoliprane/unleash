@@ -1,0 +1,20 @@
+# F009 — Dépendances et frontières d'équipe
+
+| Dépendance | Contrat consommé | Conséquence d'indisponibilité |
+|---|---|---|
+| Persistance et recovery | Transactions courtes, générations, inbox/outbox, réconciliation | Les publications et reçus durables sont bloqués ; aucune simulation de succès |
+| [F010 Git](../F010-git-coordination/README.md) | Variante git_snapshot : identités repo/worktree, OID, captures et événements commit/merge/rebase/delete | Seules les sources Git concernées sont inconnues/périmées ; aucune obligation d'activer F010 pour un projet sans dépôt |
+| [F013 documents](../F013-document-connectors/README.md) et sources fichiers | ResourceSnapshot/extraction/révision, SourceBinding/racine, manifestes, événements et ACL ; projection TypedSourceRef | Sources concernées partielles/inconnues, sans fabriquer repo, worktree ou OID |
+| Registries skills et rôles | Recherche versionnée, scopes global/projet/repository et ACL | Discovery partielle explicite pour ces catégories |
+| Contrats et workflows | Créations identifiables, autorisation/observation d'usage préalable, contrôle courant puis discovery de clôture si changement extérieur pertinent | Pas de clôture prétendue conforme sans contrat effectif ; preuve historique non remplacée par une recherche tardive |
+| Broker sécurité/terminal | Processus LSP, fichiers, réseau, environnement et budgets | Mode de lecture réduit si un effet nécessaire est refusé |
+| [F016 preuve](../F016-reporting-observability/README.md) | Reçus immuables, sources typées, origines, usages/validations, contexte envoyé et rapports | Traces obligatoires avant effet ; éligibilité actuelle distincte de validité passée et inconnues explicites |
+| API/GUI/CLI/TUI | Requêtes, événements, curseurs et resynchronisation | Le daemon continue ; client déconnecté n'invalide pas les sources |
+
+Les serveurs de langage sont des dépendances externes de profils, pas des composants internes réécrits dans un autre langage. Rust-analyzer, gopls, JDT LS, Pyright et TypeScript Language Server sont les profils V1 documentés dans [la recherche](../../research/git-knowledge-sources.md). Selon Q-13 et [ADR-08](../../architecture/adr/ADR-08-knowledge-index.md) (R7), Unleash détecte les serveurs installés par l'utilisateur, ne les télécharge jamais implicitement et n'en distribue aucun ; une installation assistée n'a lieu que sur commande explicite, comme processus F011 catalogué ([règles](../../specs/shared-knowledge.md#couverture-des-langages-v1)). La qualification de licence, runtime, version minimale et compatibilité de protocole reste un travail V1. La bibliothèque tree-sitter et ses grammaires, qui portent le niveau `syntactic`, sont une dépendance native inventoriée (SBOM, NOTICES). Le produit ne prétend pas qu'un serveur est disponible simplement parce que son langage apparaît dans le dépôt.
+
+Les téléchargements de dépendances, scripts de construction et plugins d'analyse sont des effets contrôlés. Aucun index vectoriel, service cloud ou abonnement n'est requis pour la découverte de base. La recherche par embeddings est désactivée par défaut. Activée par projet, elle utilise une API autorisée avec clé utilisateur, consentement de périmètre, coût et provenance de modèle ; elle ne remplace pas le filtre d'ACL ni les reçus.
+
+La frontière propriétaire est claire : F009 recommande et enregistre ; N+1 juge l'adéquation ; N+2 arbitre les dépendances organisationnelles ; Git publie le code. Les choix de métier restent hors du classement de recherche. Cette séparation prévient un moteur de connaissance qui deviendrait un orchestrateur concurrent.
+
+Pour les décisions humaines ou mécaniques, le propriétaire autorisé et le contrat remplacent l'intervention d'un leader quand aucune invocation n'est nécessaire. Le broker dérive origine/principal/cause depuis le mandat et le writer vérifie les mêmes relations que pour les actions ; ni un reçu structurellement valide ni un fichier de fixture ne confèrent d'autorité. Le contrat corrigé reste V1 non publié.

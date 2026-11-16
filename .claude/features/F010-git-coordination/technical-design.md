@@ -1,0 +1,37 @@
+# F010 — Conception technique
+
+## Adaptateurs et stockage
+
+`GitRepositoryInspector`, `WorktreeAllocator`, `MutationCoordinator`, `IntegrationPreparer`, `RefPublisher` et `GitReconciler` sont des composants Rust proposés. Ils passent par le broker pour les processus et le writer commun pour les mutations de domaine. Aucun appel Git ne garde une transaction SQLite ouverte. Le registre des allocations contient identités durables, localisation, owner, scope, epoch et révision ; l'inventaire Git observé peut contredire ce registre et produire `needs_reconciliation`. `GitRepositoryInspector` sonde la version et les capacités du Git système à l'adoption : sous 2.39, minimum fixé par [ADR-09](../../architecture/adr/ADR-09-git-worktrees.md) en R7, il refuse `CapabilityDenied/GIT_VERSION_UNSUPPORTED` avant toute allocation. Aucune bibliothèque Git Rust n'effectue de mutation en V1.
+
+Les sorties Git sont consommées dans un format machine qualifié, avec séparateurs NUL pour les chemins. Les noms de refs sont validés et résolus comme données. Les commandes utilisent un vecteur d'arguments et un environnement explicite, sans interpolation de texte LLM dans un shell. Les hooks, helpers, filtres et autres programmes éventuellement invoqués sont intégrés au périmètre d'autorisation ou refusés selon politique visible.
+
+## Allocations et mutations
+
+Une mission de modification de code demande une branche nouvelle depuis un OID de base connu et un worktree unique. Si une branche existe déjà, l'opération ne la réutilise que par commande explicite et vérification d'identité ; une collision ne devient pas un écrasement. Un écrivain actif est assigné par défaut. Des lecteurs peuvent travailler sur captures, et des workers distincts peuvent produire des patchs appliqués séquentiellement sous hashes attendus.
+
+Un worker dépassant son scope demande une révision de contrat. Le broker contrôle les chemins effectivement touchés et l'epoch ; une opération qui produit des modifications imprévues est signalée et peut être interrompue selon son contrat. Cette coordination n'empêche pas un programme non médié du même compte d'agir : une différence extérieure marque la source inconnue et exige réconciliation, sans fausse affirmation de sandbox.
+
+## Candidat et publication
+
+Le préparateur résout sourceOID et oldOID cible, crée un worktree détaché et exécute la stratégie effective. Le candidat est identifié par newOID et conservé par une référence de préparation gérée ou une politique d'objets équivalente, afin que son contenu ne dépende pas d'une branche mobile. Cette référence de préparation est elle-même une mutation journalisée. Les parents, la stratégie et les validations sont associés au candidat.
+
+La publication prend une lease courte de cible et vérifie son epoch. Sous cette lease, immédiatement avant le CAS, elle relit l'inventaire des checkouts (`git worktree list --porcelain -z` et états rebase/bisect de chaque worktree) : une cible checkout donne `blocked_target_checkout` / `target_checked_out` (Q-10), jamais une mise à jour de la ref. Elle journalise ensuite l'intention oldOID/newOID. Le broker lance la primitive CAS Git, puis la cible et l'inventaire sont réobservés ; un checkout apparu pendant la fenêtre ou une divergence devient `outcome_unknown` ou incident, sans correction automatique. Si oldOID ne correspond plus, il retourne `target_moved` et l'essai devient `stale`; la préparation suivante est distincte. Une cible dans un autre worktree ne reçoit pas une mise à jour brute de ref laissant ses fichiers incohérents. Les remèdes sont ceux de la [spécification](../../specs/git-integration.md) : branche cible gérée non checkout proposée par défaut pour les Runs créés ensuite (un Run engagé garde sa cible, Q-03), ou libération du checkout par l'utilisateur selon les instructions exactes affichées, puis réobservation ; aucune avance rapide, reset, stash ou checkout forcé dans le worktree humain.
+
+L'action suit `requested → preparing → prepared → publishing → published`. `conflicted`, `blocked_target_checkout`, `stale`, `failed` et `outcome_unknown` sont des états explicites. Le candidat peut être prêt alors que sa publication est bloquée. Une mission ne devient done que lorsque la condition effective est satisfaite, y compris la cible précise.
+
+## Conflits et invalidation
+
+Le conflit textuel conserve base, côtés, fichiers et état Git. N+2 crée ou assigne l'agent intégrateur avec un mandat limité. Celui-ci produit une nouvelle résolution et les validations demandées. Un conflit sémantique potentiel est inscrit dans le rapport avec contexte ; un test prescrit peut fournir une observation de comportement. Le succès textuel seul n'apporte pas cette preuve.
+
+Un rebase est une nouvelle histoire. Les associations anciennes restent historiques, les nouvelles générations sont indexées et les dépendants reçoivent les événements pertinents. Les reçus discovery utilisant les OID réécrits deviennent à revalider. Même lorsque le diff semble équivalent, cette équivalence n'est pas présumée sans règle déclarée.
+
+## Reprise, erreurs et nettoyage
+
+Après crash en publication, le réconciliateur lit cible, candidat, processus connu et éléments de reflog disponibles (entrée `unleash:<action_id>` lorsque le reflog existe ; son absence ne prouve rien). `newOID` actuellement présent permet `desired_state_present`, pas nécessairement l'attribution causale au processus disparu. `oldOID` actuellement présent ne prouve pas qu'il n'y a jamais eu publication suivie d'un retour. Seul `effect_observed` publie automatiquement ; `desired_state_present`, `candidate_included`, `target_diverged` et `observation_unavailable` laissent l'essai en `outcome_unknown` jusqu'à `ReconcileAction` puis `ResolveActionOutcome` (F018).
+
+Une lease expirée ne suffit pas à tuer ou oublier un Git déjà lancé. La ressource reste en réconciliation jusqu'à issue observée ou stratégie d'arrêt autorisée. Le nettoyage, par `RetireWorktree` ou par le balayage de rétention, vérifie processus, dirty, publication du commit et références de conservation ; le délai de rétention de 7 jours ne s'applique qu'au balayage ; il ne force jamais la suppression d'un worktree humain inconnu. Par défaut ([Q-12](../../architecture/storage-model.md)), un worktree géré propre, sans processus, dont le commit est atteignable depuis une ref publiée, est retiré 7 jours après l'état terminal de sa mission ; sinon il est conservé. Chaque worktree alloué est verrouillé (`git worktree lock --reason unleash:<allocation_id>` ou équivalent sondé) jusqu'au retrait autorisé ; un verrou ou des métadonnées disparus, par exemple après un `git worktree prune` extérieur, font passer l'allocation en `needs_reconciliation` sans libérer la branche. Les erreurs disque, permissions, objet manquant, hook refusé, Git incompatible (`GIT_VERSION_UNSUPPORTED`) et journal indisponible sont distinctes et conservent leur contexte expurgé.
+
+## Profil Git R6
+
+Tous les sous-processus de capture/préparation/oracle/publication/reprise suivent le profil brut décrit dans [git-coordination](../../architecture/git-coordination.md), replacements désactivés, configuration/environnement contrôlés et version inventoriée. Cibles et refs de conservation doivent être directes ; création/CAS/suppression qualifiés sans déréférencement. Une mutation extérieure ambiguë bloque l’attribution plutôt que d’adopter silencieusement un référent. Les snapshots exposent git_profile_digest pour que F009 refuse une preuve de profil inconnu.

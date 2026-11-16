@@ -1,0 +1,60 @@
+{
+  "schema_version": "unleash.test-execution-observation.v1",
+  "observation_id": "observation-tests-fixture",
+  "producer_ref": {
+    "id": "adapter.process-fixture",
+    "version": 1
+  },
+  "action_id": "action-tests-fixture",
+  "execution_binding_id": "execution-binding-fixture",
+  "expectation_ref": {
+    "id": "expected-tests-fixture",
+    "version": 1,
+    "sha256": "71488d164fd911e6ffb9f65f7542827eb26286f62fa5f2dedd8fa2f971c0fe77"
+  },
+  "subject": {
+    "subject_id": "task-tests-fixture",
+    "subject_revision": 4,
+    "scope_id": "scope-repo-fixture",
+    "scope_revision": 2,
+    "snapshot_ref": {
+      "kind": "source_snapshot",
+      "id": "snapshot-fixture-17",
+      "sha256": "1111111111111111111111111111111111111111111111111111111111111111"
+    }
+  },
+  "observed_command": {
+    "tool_ref": {
+      "id": "tool.process.run",
+      "version": 1
+    },
+    "argv_sha256": "3e00b153bd1c8895215f7f11d730ce5c9b3c28e91d73513cfebbd8614666b2e5",
+    "cwd_resource_id": "resource-repository-root-fixture",
+    "environment_profile_ref": {
+      "id": "test-env-profile-fixture",
+      "version": 1,
+      "sha256": "3333333333333333333333333333333333333333333333333333333333333333"
+    },
+    "environment_sha256": "4444444444444444444444444444444444444444444444444444444444444444",
+    "suite_ref": {
+      "id": "suite-workspace-fixture",
+      "version": 1,
+      "sha256": "5555555555555555555555555555555555555555555555555555555555555555"
+    },
+    "parser_ref": {
+      "id": "parser.junit-xml",
+      "version": 1
+    }
+  },
+  "result": {
+    "process_state": "exited",
+    "exit_code": 0,
+    "parse_state": "complete",
+    "cases": {
+      "total": 2,
+      "passed": 2,
+      "failed": 0,
+      "skipped": 0
+    }
+  }
+}

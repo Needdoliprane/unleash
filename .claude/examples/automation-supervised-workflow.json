@@ -1,0 +1,129 @@
+{
+  "schema_version": "unleash.workflow.v1.1",
+  "workflow_id": "demo.supervised.report",
+  "version": 1,
+  "name": "Rapport avec revue de bloc",
+  "description": "Fixture v1.1 : observation typée, une revue N+1 et branche publiée ; opérations démonstratives non implémentées.",
+  "model_policy": "allowed_bounded",
+  "bindings": {
+    "supervisor": {
+      "mode": "fixed",
+      "role": {
+        "id": "role.automation.supervisor",
+        "version": 1
+      }
+    }
+  },
+  "budget": {
+    "max_duration_seconds": 120,
+    "max_step_activations": 10,
+    "max_llm_calls": 1,
+    "max_output_tokens": 2048,
+    "max_cost_microusd": 1000000,
+    "max_agent_executions": 1,
+    "max_concurrent_action_executions": 1
+  },
+  "body": {
+    "id": "supervised-report",
+    "kind": "sequence",
+    "steps": [
+      {
+        "id": "observe",
+        "kind": "action",
+        "operation": {
+          "id": "demo.data.observe",
+          "version": 1
+        },
+        "contract_profile": {
+          "id": "demo.contract.observe",
+          "version": 1
+        },
+        "scope_key": "selected.exports",
+        "inputs": {
+          "data_revision": {
+            "source": "path",
+            "path": "/input/data_revision_id"
+          }
+        },
+        "timeout_seconds": 30,
+        "max_attempts": 1,
+        "retry_policy": "read_only"
+      },
+      {
+        "id": "review",
+        "kind": "task",
+        "binding": "supervisor",
+        "task_type": "leader_decision",
+        "scope_key": "selected.exports",
+        "inputs": {
+          "review_target": "observe"
+        },
+        "timeout_seconds": 30,
+        "max_attempts": 1
+      },
+      {
+        "id": "decision",
+        "kind": "choice",
+        "cases": [
+          {
+            "when": {
+              "op": "all",
+              "terms": [
+                {
+                  "op": "eq",
+                  "path": "/results/review/outputs/decision",
+                  "value": "continue"
+                },
+                {
+                  "op": "eq",
+                  "path": "/results/observe/outputs/safe_to_continue",
+                  "value": true
+                },
+                {
+                  "op": "eq",
+                  "path": "/results/observe/outputs/effect_state",
+                  "value": "none"
+                }
+              ]
+            },
+            "then": {
+              "id": "render",
+              "kind": "action",
+              "operation": {
+                "id": "demo.data.render",
+                "version": 1
+              },
+              "contract_profile": {
+                "id": "demo.contract.render",
+                "version": 1
+              },
+              "scope_key": "selected.exports",
+              "inputs": {
+                "observation": {
+                  "source": "path",
+                  "path": "/results/observe/outputs"
+                }
+              },
+              "timeout_seconds": 30,
+              "max_attempts": 1,
+              "retry_policy": "never"
+            }
+          }
+        ],
+        "otherwise": {
+          "id": "hold",
+          "kind": "fail",
+          "code": "SUPERVISION_REQUIRES_FOLLOWUP",
+          "message": "Le résultat ou la décision demande une réconciliation, correction ou escalade distincte autorisée."
+        }
+      }
+    ]
+  },
+  "completion": {
+    "success_when": {
+      "op": "eq",
+      "path": "/results/supervised-report/outputs/report_complete",
+      "value": true
+    }
+  }
+}

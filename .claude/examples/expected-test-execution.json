@@ -1,0 +1,50 @@
+{
+  "schema_version": "unleash.expected-test-execution.v1",
+  "expectation_id": "expected-tests-fixture",
+  "version": 1,
+  "authority_ref": {
+    "kind": "execution_plan",
+    "id": "plan-tests-fixture",
+    "version": 3,
+    "sha256": "2222222222222222222222222222222222222222222222222222222222222222"
+  },
+  "subject": {
+    "subject_id": "task-tests-fixture",
+    "subject_revision": 4,
+    "scope_id": "scope-repo-fixture",
+    "scope_revision": 2,
+    "snapshot_ref": {
+      "kind": "source_snapshot",
+      "id": "snapshot-fixture-17",
+      "sha256": "1111111111111111111111111111111111111111111111111111111111111111"
+    }
+  },
+  "command": {
+    "tool_ref": {
+      "id": "tool.process.run",
+      "version": 1
+    },
+    "argv_sha256": "3e00b153bd1c8895215f7f11d730ce5c9b3c28e91d73513cfebbd8614666b2e5",
+    "cwd_resource_id": "resource-repository-root-fixture",
+    "environment_profile_ref": {
+      "id": "test-env-profile-fixture",
+      "version": 1,
+      "sha256": "3333333333333333333333333333333333333333333333333333333333333333"
+    },
+    "environment_sha256": "4444444444444444444444444444444444444444444444444444444444444444",
+    "suite_ref": {
+      "id": "suite-workspace-fixture",
+      "version": 1,
+      "sha256": "5555555555555555555555555555555555555555555555555555555555555555"
+    },
+    "parser_ref": {
+      "id": "parser.junit-xml",
+      "version": 1
+    }
+  },
+  "result_policy": {
+    "expected_exit_code": 0,
+    "min_cases": 1,
+    "require_all_passed": true
+  }
+}

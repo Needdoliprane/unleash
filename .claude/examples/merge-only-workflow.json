@@ -1,0 +1,72 @@
+{
+  "schema_version": "unleash.workflow.v1",
+  "workflow_id": "workflow.merge-only",
+  "version": 1,
+  "name": "Développement puis merge",
+  "description": "Fixture du done utilisateur Dev → Merge, sans test ni audit imposé. Les autorisations et preuves d’intégration restent requises.",
+  "bindings": {
+    "developer": {
+      "mode": "fixed",
+      "role": {
+        "id": "role.repository.developer",
+        "version": 1
+      }
+    },
+    "integrator": {
+      "mode": "fixed",
+      "role": {
+        "id": "role.repository.integrator",
+        "version": 1
+      }
+    }
+  },
+  "budget": {
+    "max_duration_seconds": 14400,
+    "max_step_activations": 100,
+    "max_llm_calls": 100,
+    "max_output_tokens": 1000000,
+    "max_cost_microusd": 20000000,
+    "max_agent_executions": 5
+  },
+  "body": {
+    "id": "delivery",
+    "kind": "sequence",
+    "steps": [
+      {
+        "id": "develop",
+        "kind": "task",
+        "binding": "developer",
+        "task_type": "execute_skill",
+        "scope_key": "implementation",
+        "inputs": {
+          "change_request": "Réaliser la modification du scope",
+          "base_snapshot": "fixture-snapshot-base"
+        },
+        "timeout_seconds": 1800,
+        "max_attempts": 2
+      },
+      {
+        "id": "merge",
+        "kind": "task",
+        "binding": "integrator",
+        "task_type": "integrate",
+        "scope_key": "integration",
+        "inputs": {
+          "source_missions": [
+            "fixture-mission-current"
+          ],
+          "target_ref": "refs/heads/main"
+        },
+        "timeout_seconds": 1800,
+        "max_attempts": 2
+      }
+    ]
+  },
+  "completion": {
+    "success_when": {
+      "op": "eq",
+      "path": "/results/delivery/outputs/integrated",
+      "value": true
+    }
+  }
+}

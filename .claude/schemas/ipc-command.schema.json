@@ -1,0 +1,76 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:ovpt:unleash:ipc-command:2",
+  "title": "CommandEnvelope v2 proposée",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "protocol_version",
+    "request_id",
+    "command_id",
+    "authority_generation",
+    "actor_ref",
+    "project_id",
+    "aggregate_id",
+    "expected_revision",
+    "command_type",
+    "payload"
+  ],
+  "properties": {
+    "protocol_version": {
+      "const": "unleash.ipc.v2"
+    },
+    "request_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "command_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "authority_generation": {
+      "type": "string",
+      "format": "uuid",
+      "description": "Lignée serveur épinglée lors de la création durable de la commande ; incluse au digest et conservée lors de tout retry, même après reconnexion. Une autre lignée est refusée avant recherche du receipt."
+    },
+    "actor_ref": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "maxLength": 256,
+      "description": "Identité résolue par serveur ; champ client non fiable"
+    },
+    "project_id": {
+      "anyOf": [
+        {
+          "type": "string",
+          "format": "uuid"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "aggregate_id": {
+      "type": "string",
+      "format": "uuid",
+      "description": "Agrégat visé, jamais omis : ID validé pour une création ; agrégat singleton pour une commande de service (StopDaemon : authority_generation active)."
+    },
+    "expected_revision": {
+      "description": "Révision courante de l'agrégat visé ; 0 pour une création.",
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    "command_type": {
+      "type": "string",
+      "pattern": "^[A-Z][A-Za-z0-9]+$",
+      "maxLength": 96
+    },
+    "payload": {
+      "type": "object"
+    }
+  }
+}
+

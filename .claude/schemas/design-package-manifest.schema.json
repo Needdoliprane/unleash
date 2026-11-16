@@ -1,0 +1,84 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:ovpt:unleash:design:package-manifest:1",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "const": "unleash.design.package.v1"
+    },
+    "package_id": {
+      "const": "ovpt.unleash.v1"
+    },
+    "revision": {
+      "type": "string",
+      "pattern": "^R[0-9]+$"
+    },
+    "scope": {
+      "const": "specification_only"
+    },
+    "excluded_paths": {
+      "const": [
+        "catalog/package-manifest.json",
+        "settings.local.json"
+      ]
+    },
+    "hash_algorithm": {
+      "const": "sha256"
+    },
+    "source_tree_digest": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "files": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "path": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))[^\\\\]+$"
+          },
+          "sha256": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$"
+          },
+          "bytes": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "media_type": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "required": [
+          "path",
+          "sha256",
+          "bytes",
+          "media_type"
+        ]
+      }
+    },
+    "excluded_prefixes": {
+      "const": [
+        "state/",
+        "worktrees/"
+      ]
+    }
+  },
+  "required": [
+    "schema_version",
+    "package_id",
+    "revision",
+    "scope",
+    "excluded_paths",
+    "excluded_prefixes",
+    "hash_algorithm",
+    "source_tree_digest",
+    "files"
+  ]
+}

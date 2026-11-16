@@ -1,0 +1,218 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "observation_id",
+    "producer_ref",
+    "action_id",
+    "execution_binding_id",
+    "expectation_ref",
+    "subject",
+    "observed_command",
+    "result"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "unleash.test-execution-observation.v1"
+    },
+    "observation_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "producer_ref": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "version"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[a-z0-9]+(?:[._-][a-z0-9]+)*$",
+          "maxLength": 128
+        },
+        "version": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        }
+      }
+    },
+    "action_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "execution_binding_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "expectation_ref": {
+      "$ref": "urn:ovpt:unleash:expected-test-execution:1#/$defs/exact_ref"
+    },
+    "subject": {
+      "$ref": "urn:ovpt:unleash:expected-test-execution:1#/$defs/subject"
+    },
+    "observed_command": {
+      "$ref": "urn:ovpt:unleash:expected-test-execution:1#/$defs/command"
+    },
+    "result": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "process_state",
+        "exit_code",
+        "parse_state",
+        "cases"
+      ],
+      "properties": {
+        "process_state": {
+          "enum": [
+            "exited",
+            "terminated",
+            "unknown"
+          ]
+        },
+        "exit_code": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": -2147483648,
+          "maximum": 2147483647
+        },
+        "parse_state": {
+          "enum": [
+            "complete",
+            "incomplete",
+            "unavailable"
+          ]
+        },
+        "cases": {
+          "oneOf": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "total",
+                "passed",
+                "failed",
+                "skipped"
+              ],
+              "properties": {
+                "total": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 1000000
+                },
+                "passed": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 1000000
+                },
+                "failed": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 1000000
+                },
+                "skipped": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 1000000
+                }
+              }
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "process_state": {
+                "const": "exited"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "exit_code": {
+                "type": "integer"
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "exit_code": {
+                "type": "null"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "parse_state": {
+                "const": "complete"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "cases": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "total",
+                  "passed",
+                  "failed",
+                  "skipped"
+                ],
+                "properties": {
+                  "total": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 1000000
+                  },
+                  "passed": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 1000000
+                  },
+                  "failed": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 1000000
+                  },
+                  "skipped": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 1000000
+                  }
+                }
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "cases": {
+                "type": "null"
+              }
+            }
+          }
+        }
+      ]
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:ovpt:unleash:test-execution-observation:1",
+  "title": "Projection authentifiée de test V1 — aucune autorité par forme JSON",
+  "$comment": "Action/binding/producteur viennent du journal du harness. La projection observed_command est collectée, jamais copiée depuis l’attendu. Le domaine vérifie total=passed+failed+skipped, collecte, identité et fraîcheur. Une composante exigée non collectée n'est jamais complétée depuis l'attendu : aucune projection V1 n'est émise et la correspondance vaut unknown."
+}

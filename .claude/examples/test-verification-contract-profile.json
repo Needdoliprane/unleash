@@ -1,0 +1,36 @@
+{
+  "schema_version": "unleash.contract-profile.v1",
+  "profile_id": "contract.repository.verify-tests",
+  "version": 1,
+  "canonicalization": "RFC8785",
+  "input_schema_sha256": "e42dc4a2c08d6426dca7e27728abbd34993a63e68099cb05a0490c9695946039",
+  "output_schema_sha256": "3e0b47059822f5be01a482bb479a2502cbb7dfd85c4f5a59835b1fb51599cf4c",
+  "required_rules": [
+    {
+      "id": "tests-required",
+      "sha256": "8c3b43cae5e8405b870f3bcdd41bdc15401f952bf333fe0148595ba78ae14f70"
+    },
+    {
+      "id": "claim-truth",
+      "sha256": "b1f64565d9f747434de0c5101b2d58006ef321a3bdd7de5ca550493172bd1ac7"
+    }
+  ],
+  "allowed_extension_validators": [
+    "claim_predicate_matches",
+    "test_execution_matches"
+  ],
+  "execution_versions": {
+    "compiler": {
+      "id": "workflow-compiler",
+      "version": 2
+    },
+    "evaluator": {
+      "id": "contract-evaluator",
+      "version": 2
+    },
+    "validator_catalog": {
+      "id": "validator-catalog",
+      "version": 2
+    }
+  }
+}

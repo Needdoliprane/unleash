@@ -54,7 +54,9 @@ tools/design-package/    sync.py, regen.py, validate.py (outillage du dossier)
 - **Choix du modèle** : l'agent root choisit pour chaque délégation le niveau `frontier`, `strong`, `standard` ou `fast` selon [le routage](.claude/dev/model-routing.md) et le consigne dans le journal.
 - **Worktrees** : uniquement sous `.claude/worktrees/<goal-id>-<task-id>`, nulle part ailleurs ([règle](.claude/rules/worktrees.md)). Un worktree = une tâche = un seul agent écrivain.
 - **Tests d'abord** pour chaque exigence `REQ-…` : écrire le test `T-…` du dossier, le voir échouer, implémenter ([règles de test](.claude/rules/testing.md)).
-- **Règles de code** : [Rust](.claude/rules/rust.md), [renderer GUI](.claude/rules/gui-renderer.md). Commits locaux au format Conventional Commits citant les `REQ-…`.
+- **Règles de code** : [Rust](.claude/rules/rust.md), [renderer GUI](.claude/rules/gui-renderer.md). Commits au format Conventional Commits citant les `REQ-…`.
+- **Git** : `main` = releases (jamais modifiée ni poussée sans demande de l'utilisateur) ; `dev` = intégration, poussée sur `origin` (GitHub) après chaque goal intégré et vert, jamais en force ; `goal/…` et `task/…` restent locales. Vérifier la CI de `dev` après chaque push.
+- **Tests payants** : uniquement des tests live marqués `#[ignore]`, lancés avec `UNLEASH_LIVE_TESTS=1`, sur les seuls modèles `claude-haiku-5-5` et `gpt-6-luna`, dans le plafond `UNLEASH_LIVE_TEST_BUDGET_USD` ; clés `UNLEASH_DEV_*` lues dans `.env` par le testkit (`dotenvy`), jamais affichées ni committées ; jamais en CI ; aucun test avec un modèle intelligent (sol, astra, fable, opus, sonnet).
 
 ## 8. Commandes
 
@@ -73,7 +75,7 @@ Ne jamais annoncer un passage sans avoir lu la sortie réelle de la commande.
 
 ## 9. Interdits sans demande explicite de l'utilisateur
 
-`git push`, publication ou release ; appel facturé à une API de modèle, OAuth réel, achat, envoi de message ; lecture ou écriture de secrets réels ; modification d'un invariant ; réécriture d'historique (`reset --hard` sur `main`, `push --force`) ; installation système (`sudo`, gestionnaires de paquets globaux) ; édition manuelle du manifest ou des checksums ; écriture d'état runtime du produit dans `.claude/`.
+push sur `main`, push forcé, tag, publication ou release ; appel payant à un modèle hors `claude-haiku-5-5`/`gpt-6-luna`, OAuth réel, achat, envoi de message ; affichage, copie ou commit d'un secret (`.env`) ; secrets autres que les clés de dev de `.env` ; modification d'un invariant ; réécriture d'historique (`reset --hard` sur `main`, `push --force`) ; installation système (`sudo`, gestionnaires de paquets globaux) ; édition manuelle du manifest ou des checksums ; écriture d'état runtime du produit dans `.claude/`.
 
 ## 10. Environnement de ce poste
 

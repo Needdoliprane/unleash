@@ -1,0 +1,115 @@
+{
+  "schema_version": "unleash.skill.v1",
+  "skill_id": "skill.repository.verify-tests",
+  "version": 1,
+  "name": "Vérifier une suite fixée par le plan",
+  "description": "Fixture R6 : observations de tests et claim typé, sans juge sémantique.",
+  "scope": {
+    "kind": "repository",
+    "owner_id": "repo-ovpt-fixture"
+  },
+  "instructions": "Exécuter uniquement la suite liée au slot workspace-tests du plan accepté. Référencer observation et claim ; aucune sortie ne choisit la commande attendue.",
+  "input_schema": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": [
+      "change_request"
+    ],
+    "properties": {
+      "change_request": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 4096
+      }
+    }
+  },
+  "output_schema": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": [
+      "observation_id",
+      "claim_id"
+    ],
+    "properties": {
+      "observation_id": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 256
+      },
+      "claim_id": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 256
+      }
+    }
+  },
+  "requested_capabilities": [
+    "process.run",
+    "workspace.read"
+  ],
+  "tools": [
+    {
+      "id": "tool.process.run",
+      "version": 1,
+      "required": true
+    }
+  ],
+  "contract": {
+    "contract_id": "contract.repository.verify-tests",
+    "version": 1,
+    "rules": [
+      {
+        "id": "tests-required",
+        "validator": "test_execution_matches",
+        "phase": "completion",
+        "severity": "required",
+        "on_unknown": "block",
+        "parameters": {
+          "observation_pointer": "/output/observation_id",
+          "expectation_slot": "workspace-tests"
+        }
+      },
+      {
+        "id": "claim-truth",
+        "validator": "claim_predicate_matches",
+        "phase": "completion",
+        "severity": "required",
+        "on_unknown": "block",
+        "parameters": {
+          "claim_pointer": "/output/claim_id",
+          "expectation_slot": "workspace-tests",
+          "predicate_ref": {
+            "id": "test.expectation_satisfied",
+            "version": 1
+          }
+        }
+      }
+    ]
+  },
+  "resources": [],
+  "acl": {
+    "read_scopes": [
+      "repository"
+    ],
+    "requested_grants": [
+      "process.run",
+      "workspace.read"
+    ]
+  },
+  "provenance": {
+    "author": "agent-n2-fixture",
+    "source_uri": null,
+    "license": "Apache-2.0",
+    "discovery_receipt_id": "fixture-discovery-verify-tests",
+    "derived_from": []
+  },
+  "evaluation_policy": {
+    "required_checks": [
+      "schema",
+      "references",
+      "permissions",
+      "fixtures"
+    ],
+    "judge_policy": "none"
+  }
+}

@@ -1,0 +1,39 @@
+{
+  "schema_version": "unleash.expected-execution-binding.v1",
+  "binding_id": "execution-binding-fixture",
+  "contract_ref": {
+    "id": "contract.repository.verify-tests",
+    "version": 1,
+    "sha256": "3b6dbb69c76f51ee65f27841027bd10994a423ab284377c2febaf5459c420d68"
+  },
+  "rule_ids": [
+    "tests-required",
+    "claim-truth"
+  ],
+  "expectation_slot": "workspace-tests",
+  "expectation_ref": {
+    "id": "expected-tests-fixture",
+    "version": 1,
+    "sha256": "71488d164fd911e6ffb9f65f7542827eb26286f62fa5f2dedd8fa2f971c0fe77"
+  },
+  "subject": {
+    "subject_id": "task-tests-fixture",
+    "subject_revision": 4,
+    "scope_id": "scope-repo-fixture",
+    "scope_revision": 2,
+    "snapshot_ref": {
+      "kind": "source_snapshot",
+      "id": "snapshot-fixture-17",
+      "sha256": "1111111111111111111111111111111111111111111111111111111111111111"
+    }
+  },
+  "activation_ref": {
+    "id": "activation-tests-fixture",
+    "revision": 4
+  },
+  "action_id": "action-tests-fixture",
+  "sealed_cursor": {
+    "stream_id": "00000000-0000-4000-8000-000000000202",
+    "sequence": 10
+  }
+}

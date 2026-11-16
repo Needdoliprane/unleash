@@ -1,0 +1,35 @@
+# R6 — Expert 13 : revue contradictoire indépendante
+
+**16 novembre 2026 — revue documentaire postcorrection, dans un sous-agent distinct.** Lecture des douze expertises R6 et des contrats consolidés : itération, états, lifecycle, reprise, connaissance, invocations, skills/preuves, ingestion et catalogues. Aucun produit Unleash exécuté ; tous les tests produit restent `not_run`. Les projections et empreintes encore en régénération ne sont pas qualifiées de défauts.
+
+## Verdict
+
+Un écart important a été **reproduit dans l’instrument de validation documentaire, corrigé puis recontrôlé indépendamment**. Aucun finding ne reste ouvert dans cette passe ; avis favorable à la poursuite de l’export sous contrôle final du paquet régénéré. Ce verdict ne transforme ni les contrats proposés ni les exemples conformes en garanties d’exécution.
+
+## R6-E13-01 — Élevé : résolution distante depuis un schéma du paquet
+
+**Statut : corrigé, vérifié par contrôles documentaires isolés.** Le [contrat d’ingestion, étape 3 et DOC-ING-006](../../specs/document-package-ingestion.md) impose une résolution de `$ref` exclusivement dans le catalogue local, sans téléchargement. Le helper de revue `_work/validate_r6_package.py`, fonction `validate`, construisait pourtant `Draft202012Validator` depuis les octets du schéma fourni sans registre fermé ni interdiction de récupération. Le [catalogue](../../catalog/README.md) est expressément une entrée documentaire ; son contenu ne doit pas recevoir cette autorité. Le constat a été transmis immédiatement au responsable de consolidation.
+
+**Reproduction observée, sans réseau ni modification du paquet.** Charger le helper par `runpy`, copier les fichiers en mémoire, ajouter `$ref: "https://e13.invalid/remote-schema.json"` au schéma `design-package-manifest.schema.json`, puis intercepter `urllib.request.urlopen` par un double retournant `{}`. La validation tente exactement une récupération de cette URL ; le double permet ensuite de conserver le même ensemble de diagnostics que le contrôle initial. Les contrôles de hashes ont été désactivés uniquement pour isoler ce comportement pendant la régénération : un manifest recalculé ne constituerait de toute façon pas une autorisation réseau. Aucun serveur n’a été contacté. Ce résultat établit un défaut du helper examiné, pas une exploitation du futur importeur.
+
+**Risque.** Un paquet recomposé peut déclencher un accès distant pendant son contrôle, avant toute décision explicite d’utiliser son contenu. Le refus éventuel de la validation après une erreur de téléchargement arrive trop tard pour respecter l’absence d’effet externe. L’intégrité d’un manifest ne confère ni confiance au schéma ni permission à ses références.
+
+**Solution.** Déterminer les schémas supportés depuis le profil de validation, précontrôler leurs références transitives, puis utiliser un registre ne contenant que les ressources locales autorisées avec un récupérateur explicitement refusant toute autre URI. Refuser aussi `file://`, références sortantes et identifiants locaux inconnus ; aucun fallback implicite. Les schémas embarqués restent contrôlés comme données, sans pouvoir remplacer silencieusement les règles de l’importeur.
+
+**Alternative.** Pour ce profil fermé, n’accepter que des schémas épinglés et des références internes préassemblées ; tout autre schéma produit un diagnostic de format non supporté. Cette solution réduit l’extensibilité, sans exécuter de contenu documentaire.
+
+**AC discriminants.** Paquet exact accepté ; variantes HTTP, `file://`, référence locale inconnue et traversée de chemin rejetées. Une sentinelle indépendante doit attester **zéro tentative réseau et zéro lecture hors paquet**, y compris lorsque les références sont transitives et les hashes recomposés. Le contrôle rend un échec non nul. Le rapport distingue cette validation du livrable des tests produit.
+
+**Relecture du correctif.** Le helper possède désormais un précontrôle des références et un `Registry` avec récupérateur refusant explicitement l’inconnu. Sur six mutations en mémoire avec manifest recalculé — HTTPS, fichier, chemin sortant, URN inconnue, référence locale transitivement distante et `$dynamicRef` distant — un diagnostic de rejet est observé dans les six cas ; sentinelles réseau et lecture fichier : **zéro tentative**. Empreinte SHA-256 de l’instrument relu : `977d70684b122d459e84e4698291190435ce8556e1db8ce82bb7629325a0b3c6`. Le contrôle positif de l’ensemble exporté et son exit code final restent à la consolidation après régénération ; ils ne sont pas revendiqués ici.
+
+## Contre-exemples examinés sans nouveau finding
+
+- **Connaissance entre worktrees.** [F009](../../specs/shared-knowledge.md) conserve identité de source, disponibilité pour le consommateur, cohérence de capture et ACL actuelles. Un helper découvert ailleurs n’est pas déclaré présent localement. L’usage historique d’un reçu et sa fraîcheur pour une nouvelle création sont séparés ; une revalidation finale n’antidate pas une recherche absente.
+- **Leaders et versions.** [Scheduling](../../specs/scheduling.md), [hiérarchie](../../specs/agent-hierarchy.md) et [sessions](../../architecture/session-model.md) rendent les slots après checkpoint sûr, conservent la chaîne et le compteur sans progrès, et épinglent les bindings engagés. Publication ou nouvel événement ne constituent pas seuls un réarmement.
+- **Effets et lots.** [For_each](../../architecture/workflow-data-iteration.md), [états](../../architecture/state-machines.md) et [reprise](../../architecture/failure-recovery.md) empêchent l’avancement d’une ligne inconnue vers un checkpoint encore inatteignable. Une route diagnostique doit être réellement atteignable et autorisée ; un avis `continue` ne lève pas la barrière. La restauration conserve une capsule des effets postérieurs et refuse les commandes d’une ancienne lignée.
+- **Claims.** [Le contrat consolidé](../../specs/contract-enforcement.md) sépare liens, vérité d’un prédicat fermé, commande effectivement exigée et qualité du livrable. L’attendu est scellé avant effet ; la sortie ne sélectionne pas une tentative favorable. Un claim honnête d’échec ne satisfait pas une obligation de réussite.
+- **Import.** [L’ingestion](../../specs/document-package-ingestion.md) n’autorise ni autostart, ni publication de skill, ni conversion des preuves attendues en résultats acquis. Les limites de génération de DTO sont annoncées, sans disparition d’une feature V1.
+
+## Vérifications réellement exécutées
+
+Reproduction isolée ci-dessus et validation de forme indépendante des cinq fixtures `automation-rows-workflow`, `contract-claim`, `expected-test-execution`, `expected-execution-binding` et `test-execution-observation`, avec formats actifs et registre local refusant les récupérations externes : **cinq conformes**. Ces contrôles n’exécutent ni reducer, ni compilateur sémantique, ni adaptateur d’observation. Qualification OS, autorités réelles, efficacité des guards, fraîcheur distante et comportement après crash restent **non vérifiés**, conformément aux gates du dossier.

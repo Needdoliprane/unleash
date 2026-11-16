@@ -1,0 +1,20 @@
+# Les octets du dossier de conception sont hachés (manifest et CHECKSUMS.sha256) :
+# aucune conversion de fin de ligne ni de filtre sur ces fichiers.
+/.claude/** -text
+/.agents/** -text
+/.codex/** -text
+/AGENTS.md -text
+/CLAUDE.md -text
+/GEMINI.md -text
+/LIRE-MOI.md -text
+/SYNTHESE.md -text
+/COMMENCER-ICI.html -text
+/CHECKSUMS.sha256 -text
+
+# Code et configuration
+*.rs text eol=lf
+*.toml text eol=lf
+*.ts text eol=lf
+*.tsx text eol=lf
+*.json text eol=lf
+Cargo.lock text eol=lf -diff

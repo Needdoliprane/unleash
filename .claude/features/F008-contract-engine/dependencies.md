@@ -1,0 +1,11 @@
+# F008 — Dépendances
+
+Le broker fournit actions typées et autorisation ; les adaptateurs Git, processus, tests et documents fournissent observations avec provenance. Le service de sessions lie invocation, rôle, workflow, contexte et livrables. Le knowledge fournit discovery receipts et statut des ressources. Le stockage conserve les preuves selon ACL et rétention, tandis que les index restent dérivés.
+
+F007 publie les bundles et contrats, sans leur donner de droits supplémentaires. F005 utilise les verdicts pour continuer ou bloquer. F004 fournit jugements N+1 et arbitrages N+2, qui restent distincts des observations. Les clients affichent raisons et preuves via le même service ; aucun client n'effectue seul un pass décisif sur un champ qu'il reçoit du modèle.
+
+Le [contrat normatif R6](../../specs/contract-enforcement.md) définit les deux validations nouvelles, le vocabulaire fermé de claims, les projections et l'attendu scellé avant effet. Le catalogue v2 doit être installé, chargé et épinglé ; les formats V1 nouveaux ne remplacent pas les bundles historiques. L'implémentation d'un validateur exige les fixtures positives, négatives et inconnues ainsi que limites de coût et de scope. Les adaptateurs de tests multilangages sont autorisés pour les repositories développés ; le code du moteur reste Rust. Une absence d'adaptateur pour un format ne peut être masquée par un parseur improvisé non versionné.
+
+F004/F005 fournissent la version autorisée du mandat/plan et le sujet ; F007/F006 conservent les exigences de slots et les digests de règles. L'admission crée les bindings d'exécution et actions avant effet. Les sorties modèles proposent des observations/claims, jamais le remplacement de ces attentes. F009 fournit `origin`, `source_refs`, bornes et `DiscoveryUseObservation`, sans invocation fictive pour le travail manuel. Ces raccords restent des contrats de conception, pas des adaptateurs déjà qualifiés.
+
+Les détails d'AI-Guard sont bloqués par l'absence de contrat externe, mais les interfaces locales et tests de non-contournement peuvent être spécifiés et réalisés. Aucune capacité distante n'est inventée. Le mécanisme d'observation ne prétend pas constituer une isolation OS complète ; les garanties effectives dépendent du broker, des permissions et des surfaces réellement contrôlées.

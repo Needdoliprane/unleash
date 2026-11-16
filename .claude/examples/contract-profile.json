@@ -1,0 +1,37 @@
+{
+  "schema_version": "unleash.contract-profile.v1",
+  "profile_id": "contract.repository.integrate",
+  "version": 1,
+  "canonicalization": "RFC8785",
+  "input_schema_sha256": "70dfe5d0b9fd93e59ef6e76e3608966adf004569bd4425a4eeb138de8a749c23",
+  "output_schema_sha256": "47a529f113516b86c3b3a6cd7e77b2326cff40afa46a52573e87755fd42dbf7c",
+  "required_rules": [
+    {
+      "id": "output-shape",
+      "sha256": "c8e9f624c8ad205212dd8df71d0333a6b1d6a063d1daa2553bebd295a167fa37"
+    },
+    {
+      "id": "integration-observed",
+      "sha256": "1ee219c1433b719f2bef34a5e6aef925d36603822e59ab8ab4389dfd5be5693c"
+    }
+  ],
+  "allowed_extension_validators": [
+    "git_snapshot_matches",
+    "diff_within_scope",
+    "discovery_receipt_present"
+  ],
+  "execution_versions": {
+    "compiler": {
+      "id": "workflow-compiler",
+      "version": 1
+    },
+    "evaluator": {
+      "id": "contract-evaluator",
+      "version": 1
+    },
+    "validator_catalog": {
+      "id": "validator-catalog",
+      "version": 1
+    }
+  }
+}

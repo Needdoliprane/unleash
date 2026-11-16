@@ -1,0 +1,136 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:ovpt:unleash:event:1",
+  "title": "Événement durable proposé",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "event_id",
+    "stream_id",
+    "sequence",
+    "event_type",
+    "schema_version",
+    "occurred_at",
+    "recorded_at",
+    "project_id",
+    "aggregate_id",
+    "aggregate_revision",
+    "actor_ref",
+    "correlation_id",
+    "causation",
+    "command_id",
+    "payload_hash",
+    "payload",
+    "sensitivity"
+  ],
+  "properties": {
+    "event_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "stream_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "sequence": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9007199254740991
+    },
+    "event_type": {
+      "type": "string",
+      "pattern": "^[A-Z][A-Za-z0-9]+$"
+    },
+    "schema_version": {
+      "const": 1,
+      "description": "Version de l'enveloppe. La version d'un payload est portée par event_type : un changement incompatible crée un nouveau type."
+    },
+    "occurred_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "recorded_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "project_id": {
+      "anyOf": [
+        {
+          "type": "string",
+          "format": "uuid"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "aggregate_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "aggregate_revision": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "actor_ref": {
+      "type": "string",
+      "maxLength": 256
+    },
+    "correlation_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "causation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "id"
+      ],
+      "properties": {
+        "kind": {
+          "enum": [
+            "command",
+            "event",
+            "action",
+            "timer",
+            "external"
+          ]
+        },
+        "id": {
+          "type": "string",
+          "maxLength": 256
+        }
+      },
+      "description": "Cause typée : kind=command implique id=receipt_id global serveur, résolu vers acteur+command_id ; jamais command_id brut à portée d'acteur."
+    },
+    "command_id": {
+      "anyOf": [
+        {
+          "type": "string",
+          "format": "uuid"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "payload_hash": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "payload": {
+      "type": "object",
+      "description": "Payload borné porté inline ; un contenu volumineux y figure comme référence adressée par contenu. L'enveloppe n'a pas de champ payload_ref."
+    },
+    "sensitivity": {
+      "enum": [
+        "public",
+        "project",
+        "confidential",
+        "restricted"
+      ]
+    }
+  }
+}
+
