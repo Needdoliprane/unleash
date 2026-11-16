@@ -1,0 +1,6 @@
+# Toolchain figée du workspace Unleash (décision R7, Q-11/GATE-RUST).
+# Monter de version = changement isolé avec CI verte ; mettre à jour rust-version du workspace.
+[toolchain]
+channel = "1.94.1"
+components = ["rustfmt", "clippy", "rust-src"]
+profile = "minimal"

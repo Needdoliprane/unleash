@@ -1,0 +1,9 @@
+# Seuils Clippy du workspace (les niveaux de lints sont dans [workspace.lints] du Cargo.toml racine).
+msrv = "1.94.1"
+cognitive-complexity-threshold = 25
+too-many-arguments-threshold = 7
+type-complexity-threshold = 300
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true
+allow-panic-in-tests = true
+allow-dbg-in-tests = true
