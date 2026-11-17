@@ -1,0 +1,29 @@
+[package]
+name = "unleash-protocol"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+repository.workspace = true
+description = "OVPT Unleash — Protocole wire IPC, DTOs stricts v2, codec de trames et types TypeScript"
+
+[lints]
+workspace = true
+
+[dependencies]
+unleash-domain.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serde_jcs.workspace = true
+thiserror.workspace = true
+uuid.workspace = true
+sha2.workspace = true
+hex.workspace = true
+chrono.workspace = true
+ts-rs.workspace = true
+
+[dev-dependencies]
+jsonschema.workspace = true
+referencing.workspace = true
+proptest.workspace = true

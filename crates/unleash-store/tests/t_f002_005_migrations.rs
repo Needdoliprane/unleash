@@ -1,0 +1,148 @@
+// T-F002-005 / AC-F002-005 / REQ-PERSIST-005
+//! Migrations versionnées, checksums, refus binaire ancien et sauvegarde préalable.
+
+use std::sync::Arc;
+use std::time::Duration;
+
+use unleash_store::{
+    BackupRetentionTier, CutpointObserver, MonotonicClockPort, PrepareBackupRequest, StoreConfig,
+    StoreCutpoint, StoreError, UnleashStore,
+};
+use unleash_testkit::{
+    Cutpoint, CutpointAction, CutpointController, DeterministicIdGenerator, ManualClock,
+    local_test_dir,
+};
+
+struct ClockAdapter(Arc<ManualClock>);
+impl MonotonicClockPort for ClockAdapter {
+    fn monotonic_now(&self) -> Duration {
+        self.0.monotonic_now()
+    }
+}
+
+struct CutpointAdapter(CutpointController);
+impl CutpointObserver for CutpointAdapter {
+    fn hit(&self, cutpoint: StoreCutpoint) -> Result<(), StoreError> {
+        if matches!(cutpoint, StoreCutpoint::C11MigrationInProgress) {
+            self.0
+                .hit(Cutpoint::C11)
+                .map_err(|e| StoreError::CutpointInjected {
+                    cutpoint: "C11".to_owned(),
+                    message: e.to_string(),
+                })?;
+        }
+        Ok(())
+    }
+}
+
+#[test]
+fn test_t_f002_005_migration_interrupt_older_binary_checksum_and_backup_gate() {
+    // 1. Interrompre la migration V001 via C11 (hit 1)
+    let dir_v1 = local_test_dir("f002-005-v1").unwrap();
+    let ctrl1 = CutpointController::new();
+    ctrl1
+        .set_action_on_hit(Cutpoint::C11, 1, CutpointAction::Fail("abort-v1"))
+        .unwrap();
+    let mut cfg1 = StoreConfig::new(dir_v1.path());
+    cfg1.cutpoints = Arc::new(CutpointAdapter(ctrl1));
+    assert!(UnleashStore::open(cfg1).is_err());
+
+    // 2. Simuler une migration V002 interrompue (state = 'applying') -> refus à l'ouverture ordinaire
+    let dir_v2 = local_test_dir("f002-005-v2").unwrap();
+    let clock = Arc::new(ManualClock::default());
+    let ids = Arc::new(DeterministicIdGenerator::new(0xF002_0005));
+    let mut cfg_base = StoreConfig::new(dir_v2.path());
+    cfg_base.clock = clock.clone();
+    cfg_base.monotonic_clock = Arc::new(ClockAdapter(Arc::clone(&clock)));
+    cfg_base.id_generator = ids.clone();
+
+    // Ouvrir d'abord à version 1 seulement
+    cfg_base.max_supported_schema_version = 1;
+    let store_v1 = UnleashStore::open(cfg_base.clone()).unwrap();
+
+    // Tenter une migration v1 -> v2 SANS sauvegarde vérifiée préalable -> refus MigrationBackupRequired
+    store_v1.shutdown().unwrap();
+    let mut cfg_v2_no_backup = cfg_base.clone();
+    cfg_v2_no_backup.max_supported_schema_version = 2;
+    assert!(matches!(
+        UnleashStore::open(cfg_v2_no_backup.clone()),
+        Err(StoreError::MigrationBackupRequired)
+    ));
+
+    // Produire une sauvegarde vérifiée sur la v1 puis tenter la montée v1 -> v2 avec interruption C11
+    let store_v1_again = UnleashStore::open(cfg_base.clone()).unwrap();
+    let backup = store_v1_again
+        .prepare_backup(PrepareBackupRequest {
+            destination_dir: dir_v2.path().join("backups/pre-mig"),
+            retention_tier: BackupRetentionTier::Manual,
+            coverage: "db_and_objects".to_owned(),
+        })
+        .unwrap();
+    store_v1_again.shutdown().unwrap();
+
+    let ctrl2 = CutpointController::new();
+    ctrl2
+        .set_action_on_hit(Cutpoint::C11, 1, CutpointAction::Fail("abort-v2"))
+        .unwrap();
+    let mut cfg_v2_interrupt = cfg_v2_no_backup.clone();
+    cfg_v2_interrupt.cutpoints = Arc::new(CutpointAdapter(ctrl2));
+    assert!(
+        UnleashStore::open_with_migration_backup(cfg_v2_interrupt, Some(backup.backup_id)).is_err()
+    );
+
+    // Ouverture propre avec sauvegarde validée -> passe en v2
+    let store_v2 =
+        UnleashStore::open_with_migration_backup(cfg_v2_no_backup.clone(), Some(backup.backup_id))
+            .unwrap();
+    assert_eq!(store_v2.daemon_state().unwrap().schema_version, 2);
+    store_v2.shutdown().unwrap();
+
+    // 3. Ouvrir une DB v2 avec un binaire plus ancien (max_supported_schema_version = 1) -> refus sans écriture !
+    let db_mtime_before = std::fs::metadata(dir_v2.path().join("unleash-authority.db"))
+        .unwrap()
+        .modified()
+        .unwrap();
+    let err_old_bin = UnleashStore::open(cfg_base.clone()).unwrap_err();
+    assert!(matches!(
+        err_old_bin,
+        StoreError::UnsupportedSchemaVersion {
+            found: 2,
+            supported_max: 1
+        }
+    ));
+    let db_mtime_after = std::fs::metadata(dir_v2.path().join("unleash-authority.db"))
+        .unwrap()
+        .modified()
+        .unwrap();
+    assert_eq!(db_mtime_before, db_mtime_after);
+
+    // 4. Altérer un checksum dans schema_migrations -> refus MigrationChecksumMismatch sans écriture !
+    let raw_conn = rusqlite::Connection::open(dir_v2.path().join("unleash-authority.db")).unwrap();
+    raw_conn
+        .execute(
+            "UPDATE schema_migrations SET checksum_sha256 = 'sha256:0000' WHERE version = 1",
+            [],
+        )
+        .unwrap();
+    drop(raw_conn);
+    let err_csum = UnleashStore::open(cfg_v2_no_backup.clone()).unwrap_err();
+    assert!(matches!(
+        err_csum,
+        StoreError::MigrationChecksumMismatch { version: 1, .. }
+    ));
+
+    // 5. Remettre une ligne en état 'applying' -> refus MigrationInterrupted sans écriture !
+    let raw_conn2 = rusqlite::Connection::open(dir_v2.path().join("unleash-authority.db")).unwrap();
+    raw_conn2
+        .execute(
+            "UPDATE schema_migrations SET state = 'applying' WHERE version = 2",
+            [],
+        )
+        .unwrap();
+    drop(raw_conn2);
+    let err_int = UnleashStore::open(cfg_v2_no_backup).unwrap_err();
+    assert!(matches!(
+        err_int,
+        StoreError::MigrationInterrupted { version: 2, .. }
+    ));
+}

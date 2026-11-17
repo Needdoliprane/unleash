@@ -49,7 +49,7 @@ jobs:
       - run: pnpm --dir apps/gui-renderer test
       - run: pnpm --dir apps/gui-renderer run build
       - name: Vérifier absence de dérive ts-rs
-        run: git diff --exit-code apps/gui-renderer/src/generated
+        run: git diff --exit-code apps/gui-renderer/src/generated apps/gui-renderer/src/generated-gui
 
   rust:
     name: Rust (${{ matrix.os }})
@@ -91,8 +91,8 @@ jobs:
         env:
           RUSTDOCFLAGS: -D warnings
       - name: Vérifier absence de dérive ts-rs après tests Rust
-        if: ${{ hashFiles('apps/gui-renderer/src/generated/**') != '' }}
-        run: git diff --exit-code apps/gui-renderer/src/generated
+        if: ${{ hashFiles('apps/gui-renderer/src/generated/**', 'apps/gui-renderer/src/generated-gui/**') != '' }}
+        run: git diff --exit-code apps/gui-renderer/src/generated apps/gui-renderer/src/generated-gui
 
   deny:
     name: Dépendances (cargo-deny)

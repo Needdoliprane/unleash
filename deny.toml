@@ -5,7 +5,10 @@ all-features = true
 [advisories]
 version = 2
 yanked = "deny"
-ignore = []
+ignore = [
+  { id = "RUSTSEC-2024-0370", reason = "proc-macro-error 1.0.4 (unmaintained, proc-macro de compilation sans CVE) est tiré transitivement par glib-macros 0.18.5 / gtk3-macros 0.18.2 <- gtk 0.18.2 <- tao/wry/tauri 2.12.6 sans mise à niveau disponible amont." },
+  { id = "RUSTSEC-2026-0543", reason = "chrono 0.4.45 (avis informatif unmaintained sans CVE ni correctif amont) est requis par ts-rs 12.0.1 (chrono-impl) et le formatage RFC 3339 d'unleash-protocol/unleash-store ; réévaluation prévue lors du support jiff/time par ts-rs." },
+]
 
 [licenses]
 version = 2

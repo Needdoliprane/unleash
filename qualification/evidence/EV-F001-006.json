@@ -1,0 +1,17 @@
+{
+  "evidence_id": "EV-F001-006",
+  "test_id": "T-F001-006",
+  "requirement_id": "REQ-CORE-006",
+  "commit": "54a94288eb6c2f35be59482f0d66a351488560ec",
+  "command": "cargo test -p unleash-daemon --all-features --no-fail-fast",
+  "environment": {
+    "os": "macOS 27.2.1 arm64",
+    "rustc": "rustc 1.94.1 (e408947bf 2026-03-25)"
+  },
+  "result": "passed",
+  "observed_at": "2026-11-17T20:30:30Z",
+  "artifacts": [
+    "crates/unleash-daemon/tests/t_f001_006_startup_barrier.rs"
+  ],
+  "limits": "Preuve interne passée sur macOS 27.2.1 arm64 (t_f001_006_startup_barrier_rejects_admission_during_recovering_and_unqualified_sqlite et t_f001_006_allows_stop_daemon_during_recovering). Partial/blocked pour M2/M7 EXT-OS : reprise coordonnée avec de vrais workers d'invocation et matrice Linux Ubuntu 24.04/26.04 restent pour M2/M7."
+}

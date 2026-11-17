@@ -1,0 +1,19 @@
+{
+  "evidence_id": "EV-F001-002",
+  "test_id": "T-F001-002",
+  "requirement_id": "REQ-CORE-002",
+  "commit": "54a94288eb6c2f35be59482f0d66a351488560ec",
+  "command": "cargo test -p unleash-daemon --all-features --no-fail-fast",
+  "environment": {
+    "os": "macOS 27.2.1 arm64",
+    "rustc": "rustc 1.94.1 (e408947bf 2026-03-25)"
+  },
+  "result": "passed",
+  "observed_at": "2026-11-17T20:30:30Z",
+  "artifacts": [
+    "crates/unleash-daemon/tests/t_f001_002_client_disconnect_continuity.rs",
+    "crates/unleash-daemon/tests/e2e_m0_surfaces.rs",
+    "qualification/m0/spike-ui.md"
+  ],
+  "limits": "Preuve interne passée sur fixture locale macOS 27.2.1 arm64 (t_f001_002_missions_survive_all_clients_disconnect_and_reopen avec clients IPC ClientKind::Gui/Tui/Cli et e2e_m0_cross_surface_cli_gui_tui_and_client_convergence avec GuiAppState/TestBackend). Partial/blocked pour M5/M7 EXT-OS : fermeture/réouverture d'une véritable fenêtre WebView OS Tauri (Wry/WebKit), enregistrement service utilisateur OS complet (SMAppService/LaunchAgent/systemd --user), continuité au logout et matrice Linux Ubuntu 24.04/26.04 restent à qualifier en M5/M7."
+}

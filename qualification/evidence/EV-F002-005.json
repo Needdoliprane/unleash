@@ -1,0 +1,18 @@
+{
+  "evidence_id": "EV-F002-005",
+  "test_id": "T-F002-005",
+  "requirement_id": "REQ-PERSIST-005",
+  "commit": "54a94288eb6c2f35be59482f0d66a351488560ec",
+  "command": "cargo test -p unleash-store --all-features --no-fail-fast",
+  "environment": {
+    "os": "macOS 27.2.1 arm64",
+    "rustc": "rustc 1.94.1 (e408947bf 2026-03-25)",
+    "sqlite": "3.54.1"
+  },
+  "result": "passed",
+  "observed_at": "2026-11-17T20:29:53Z",
+  "artifacts": [
+    "crates/unleash-store/tests/t_f002_005_migrations.rs"
+  ],
+  "limits": "Preuve interne passée sur fixture SQLite locale APFS macOS 27.2.1 arm64 (test_t_f002_005_migration_interrupt_older_binary_checksum_and_backup_gate : interruption C11, checksum SHA-256 divergent, refus binaire plus ancien sans altérer mtime). Partial/blocked pour M7 EXT-OS : tests de montée de version entre builds V1 publiés sur matrice ADR-14."
+}

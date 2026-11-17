@@ -1,0 +1,19 @@
+{
+  "evidence_id": "EV-F002-002",
+  "test_id": "T-F002-002",
+  "requirement_id": "REQ-PERSIST-002",
+  "commit": "54a94288eb6c2f35be59482f0d66a351488560ec",
+  "command": "cargo test -p unleash-store --all-features --no-fail-fast",
+  "environment": {
+    "os": "macOS 27.2.1 arm64",
+    "rustc": "rustc 1.94.1 (e408947bf 2026-03-25)",
+    "sqlite": "3.54.1"
+  },
+  "result": "passed",
+  "observed_at": "2026-11-17T20:29:53Z",
+  "artifacts": [
+    "crates/unleash-store/tests/t_f002_002_wal_profile_and_build.rs",
+    "qualification/m0/spike-sqlite.md"
+  ],
+  "limits": "Preuve interne passée sur APFS macOS 27.2.1 arm64 (fullfsync=ON, SQLite 3.54.1 bundled, sqlite_source_id vérifié, test_t_f002_002_build_matrix_and_source_id_check, test_t_f002_002_pragmas_queue_bound_and_tx_wal_growth_cap, test_t_f002_002_r6_wal_pressure_held_reader_and_export_quota ; benchmark spike-sqlite.md --release p95=6.05 ms). Partial/blocked pour EXT-OS : variante Linux ext4 fsync standard sous même charge non exécutée sur Ubuntu 24.04/26.04."
+}

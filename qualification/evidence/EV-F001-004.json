@@ -1,0 +1,18 @@
+{
+  "evidence_id": "EV-F001-004",
+  "test_id": "T-F001-004",
+  "requirement_id": "REQ-CORE-004",
+  "commit": "54a94288eb6c2f35be59482f0d66a351488560ec",
+  "command": "cargo test -p unleash-daemon --all-features --no-fail-fast",
+  "environment": {
+    "os": "macOS 27.2.1 arm64",
+    "rustc": "rustc 1.94.1 (e408947bf 2026-03-25)"
+  },
+  "result": "passed",
+  "observed_at": "2026-11-17T20:30:30Z",
+  "artifacts": [
+    "crates/unleash-daemon/tests/t_f001_004_auth_capabilities.rs",
+    "crates/unleash-daemon/src/auth.rs"
+  ],
+  "limits": "Preuve interne passée sur macOS 27.2.1 arm64 (t_f001_004_rejects_forged_actor_wrong_uid_worker_admin_and_out_of_scope et t_f001_004_subscribe_events_enforces_scope_denial_and_filtering : vérificateur UID simulé pour pair étranger et adaptateur espion SpyExecutorPort à 0 dispatch). Partial/blocked pour EXT-OS : vérification réelle SO_PEERCRED entre deux UID OS distincts sur Linux Ubuntu 24.04/26.04 et macOS 15/26 reste pour M7."
+}
