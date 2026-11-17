@@ -5,6 +5,7 @@ members = [
     "crates/unleash-protocol",
     "crates/unleash-platform",
     "crates/unleash-client",
+    "crates/unleash-store",
     "crates/unleash-testkit",
     "crates/unleash-browser",
 ]
@@ -48,10 +49,12 @@ codegen-units = 1
 unleash-domain = { version = "0.1.0", path = "crates/unleash-domain" }
 unleash-protocol = { version = "0.1.0", path = "crates/unleash-protocol" }
 unleash-platform = { version = "0.1.0", path = "crates/unleash-platform" }
+unleash-store = { version = "0.1.0", path = "crates/unleash-store" }
 unleash-testkit = { version = "0.1.0", path = "crates/unleash-testkit" }
 unleash-browser = { version = "0.1.0", path = "crates/unleash-browser" }
+rusqlite = { version = "0.43.0", features = ["bundled", "backup"] }
 fantoccini = { version = "0.22.2", default-features = false }
-tokio = { version = "1.53", features = ["rt", "rt-multi-thread", "net", "io-util", "sync", "time", "macros", "fs"] }
+tokio = { version = "1.54.1", features = ["rt", "rt-multi-thread", "net", "io-util", "sync", "time", "macros", "fs"] }
 rustix = { version = "1.1", features = ["fs", "process", "net"] }
 libc = "0.2"
 hyper = { version = "1.0", features = ["http1", "client", "server"] }
