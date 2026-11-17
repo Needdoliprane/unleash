@@ -8,7 +8,7 @@ use unleash_domain::{ActorId, ProjectId};
 use unleash_platform::{PeerCredentials, effective_uid, verify_peer_uid};
 use unleash_protocol::{
     ClientKind, CommandEnvelope, ErrorCode, HelloRequest, IpcError, QueryEnvelope, ReasonCode,
-    RetryClass,
+    RetryClass, SubscribeEventsRequest,
 };
 
 /// Capacité atomique vérifiée côté daemon pour chaque opération IPC.
@@ -258,4 +258,199 @@ pub fn authorize_query(
     }
 
     Ok(())
+}
+
+/// Vérifie la capacité `QueryState` et le périmètre projet d'un abonnement `SubscribeEvents`.
+///
+/// # Errors
+/// Retourne [`IpcError`] (`CapabilityDenied` ou `ScopeDenied`) en cas de rejet.
+pub fn authorize_subscription(
+    session: &AuthenticatedSession,
+    req: &SubscribeEventsRequest,
+) -> Result<(), IpcError> {
+    if !session.capabilities.contains(&Capability::QueryState) {
+        return Err(IpcError::from_reason(
+            ReasonCode::OperationNotAuthorized,
+            "Capacité QueryState requise pour SubscribeEvents",
+        ));
+    }
+
+    if let Some(ref allowed) = session.allowed_projects
+        && let Some(pid) = req.project_id
+        && !allowed.contains(&pid)
+    {
+        return Err(IpcError::from_reason(
+            ReasonCode::AccessDenied,
+            "Projet hors du périmètre autorisé pour SubscribeEvents",
+        ));
+    }
+
+    Ok(())
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing
+)]
+mod tests {
+    use serde_json::Map;
+    use unleash_domain::{AuthorityGeneration, CommandId, RequestId, Revision, Sequence, StreamId};
+    use unleash_protocol::{ProtocolVersion, SubscribeEventsRequest};
+
+    use super::*;
+
+    fn local_peer() -> PeerCredentials {
+        PeerCredentials {
+            uid: effective_uid(),
+            gid: 0,
+            pid: Some(std::process::id()),
+        }
+    }
+
+    #[test]
+    fn peer_uid_verifier_resolves_roles_and_rejects_bad_uid_or_revoked_caps() {
+        let v = PeerUidAuthVerifier;
+        let cli = v
+            .authenticate_peer(
+                local_peer(),
+                &HelloRequest {
+                    protocol_version: ProtocolVersion,
+                    client_kind: ClientKind::Cli,
+                    client_version: String::from("0.1.0"),
+                    capabilities: Vec::new(),
+                },
+            )
+            .unwrap();
+        assert_eq!(cli.actor_ref, format!("uid:{}", effective_uid()));
+        assert!(cli.capabilities.contains(&Capability::StopDaemon));
+        assert!(cli.allowed_projects.is_none());
+
+        let worker = v
+            .authenticate_peer(
+                local_peer(),
+                &HelloRequest {
+                    protocol_version: ProtocolVersion,
+                    client_kind: ClientKind::Worker,
+                    client_version: String::from("0.1.0"),
+                    capabilities: Vec::new(),
+                },
+            )
+            .unwrap();
+        assert!(worker.actor_ref.starts_with("worker:uid:"));
+        assert!(worker.capabilities.contains(&Capability::WorkerReport));
+        assert!(!worker.capabilities.contains(&Capability::StopDaemon));
+
+        let wrong_uid = v
+            .authenticate_peer(
+                PeerCredentials {
+                    uid: effective_uid().saturating_add(99),
+                    gid: 0,
+                    pid: None,
+                },
+                &HelloRequest {
+                    protocol_version: ProtocolVersion,
+                    client_kind: ClientKind::Cli,
+                    client_version: String::from("0.1.0"),
+                    capabilities: Vec::new(),
+                },
+            )
+            .unwrap_err();
+        assert_eq!(wrong_uid.code, ErrorCode::AuthenticationFailed);
+
+        let revoked = v
+            .authenticate_peer(
+                local_peer(),
+                &HelloRequest {
+                    protocol_version: ProtocolVersion,
+                    client_kind: ClientKind::Cli,
+                    client_version: String::from("0.1.0"),
+                    capabilities: vec![String::from("cap:revoked")],
+                },
+            )
+            .unwrap_err();
+        assert_eq!(revoked.code, ErrorCode::CapabilityDenied);
+        assert_eq!(
+            revoked.reason_code,
+            Some(ReasonCode::OperationNotAuthorized)
+        );
+    }
+
+    #[test]
+    fn authorize_command_query_and_subscription_enforce_identity_caps_and_scope() {
+        let p_ok = ProjectId::from_u128(0x10);
+        let p_bad = ProjectId::from_u128(0x20);
+        let mut caps = HashSet::new();
+        caps.insert(Capability::QueryState);
+        caps.insert(Capability::ManageMissions);
+        let mut allowed = HashSet::new();
+        allowed.insert(p_ok);
+
+        let session = AuthenticatedSession {
+            peer_creds: local_peer(),
+            client_kind: ClientKind::Cli,
+            actor_ref: String::from("scoped:uid:1"),
+            actor_id: ActorId::new("scoped:uid:1").unwrap(),
+            capabilities: caps,
+            allowed_projects: Some(allowed),
+        };
+
+        let forged = CommandEnvelope {
+            protocol_version: ProtocolVersion,
+            request_id: RequestId::from_u128(1),
+            command_id: CommandId::from_u128(2),
+            authority_generation: AuthorityGeneration::from_u128(3),
+            actor_ref: Some(String::from("root")),
+            project_id: Some(p_ok),
+            aggregate_id: uuid::Uuid::from_u128(4),
+            expected_revision: Revision::INITIAL,
+            command_type: String::from("PauseMission"),
+            payload: Map::new(),
+        };
+        assert_eq!(
+            authorize_command(&session, &forged).unwrap_err().code,
+            ErrorCode::AuthenticationFailed
+        );
+
+        let mut scoped_cmd = forged.clone();
+        scoped_cmd.actor_ref = None;
+        scoped_cmd.project_id = Some(p_bad);
+        assert_eq!(
+            authorize_command(&session, &scoped_cmd).unwrap_err().code,
+            ErrorCode::ScopeDenied
+        );
+        scoped_cmd.project_id = Some(p_ok);
+        assert!(authorize_command(&session, &scoped_cmd).is_ok());
+
+        let q_bad = QueryEnvelope {
+            protocol_version: ProtocolVersion,
+            request_id: RequestId::from_u128(5),
+            query_type: String::from("GetStateSnapshot"),
+            project_id: Some(p_bad),
+            payload: Map::new(),
+        };
+        assert_eq!(
+            authorize_query(&session, &q_bad).unwrap_err().code,
+            ErrorCode::ScopeDenied
+        );
+
+        let sub_bad = SubscribeEventsRequest {
+            stream_id: StreamId::from_u128(6),
+            after_sequence: Sequence::new(0),
+            project_id: Some(p_bad),
+            aggregate_id: None,
+            batch_limit: 16,
+        };
+        let sub_err = authorize_subscription(&session, &sub_bad).unwrap_err();
+        assert_eq!(sub_err.code, ErrorCode::ScopeDenied);
+        assert_eq!(sub_err.reason_code, Some(ReasonCode::AccessDenied));
+
+        let sub_none = SubscribeEventsRequest {
+            project_id: None,
+            ..sub_bad
+        };
+        assert!(authorize_subscription(&session, &sub_none).is_ok());
+    }
 }

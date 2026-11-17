@@ -12,7 +12,7 @@
 )]
 
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use serde_json::{Map, Value, json};
@@ -264,4 +264,128 @@ async fn t_f001_007_stop_distinguishes_complete_partial_and_unknown_outcomes() {
         vec![String::from("worker-unobservable-1")],
     )
     .await;
+}
+
+struct RecordingDrainController {
+    recorded_timeout: Mutex<Option<Duration>>,
+}
+
+impl ExecutorDrainPort for RecordingDrainController {
+    fn active_hosts_for_other_root(
+        &self,
+        _rendezvous_dir: &Path,
+        _requested_root: &Path,
+    ) -> Result<Option<(std::path::PathBuf, Vec<String>)>, DaemonError> {
+        Ok(None)
+    }
+
+    fn drain_on_stop(&self, _rendezvous_dir: &Path, timeout: Duration) -> DrainReport {
+        *self.recorded_timeout.lock().unwrap() = Some(timeout);
+        DrainReport {
+            outcome: StopOutcome::Complete,
+            retained_services: Vec::new(),
+            unknown_services: Vec::new(),
+        }
+    }
+}
+
+#[tokio::test]
+async fn t_f001_007_stop_daemon_propagates_drain_timeout_ms_override() {
+    let rdv = local_test_dir("f001-07t-rdv").unwrap();
+    std::fs::set_permissions(
+        rdv.path(),
+        std::os::unix::fs::PermissionsExt::from_mode(0o700),
+    )
+    .unwrap();
+    let data = local_test_dir("f001-07t-dat").unwrap();
+    let spy = Arc::new(RecordingDrainController {
+        recorded_timeout: Mutex::new(None),
+    });
+
+    let cfg = DaemonConfig {
+        data_root: Some(data.path().to_path_buf()),
+        rendezvous_dir: Some(rdv.path().to_path_buf()),
+        shutdown_drain_timeout: Duration::from_secs(30),
+        executor_controller: Arc::clone(&spy) as Arc<dyn ExecutorDrainPort>,
+        ..DaemonConfig::default()
+    };
+    let DaemonStartOutcome::Started(handle) = UnleashDaemon::start(cfg).await.unwrap() else {
+        panic!("Daemon attendu démarré");
+    };
+    let mut client = UnleashClient::connect(ClientConfig::new(
+        handle.socket_path().to_path_buf(),
+        ClientKind::Cli,
+        "0.1.0",
+    ))
+    .await
+    .unwrap();
+    let auth = client.hello().authority_generation;
+
+    let status = client
+        .query(&unleash_protocol::QueryEnvelope {
+            protocol_version: ProtocolVersion,
+            request_id: RequestId::from_u128(0x701),
+            query_type: String::from("GetDaemonStatus"),
+            project_id: None,
+            payload: Map::new(),
+        })
+        .await
+        .unwrap();
+    let daemon_rev = status
+        .result
+        .get("revision")
+        .and_then(Value::as_u64)
+        .unwrap();
+
+    // drain_timeout_ms invalide -> InvalidArgument sans arrêter le daemon
+    let bad_err = client
+        .send_command(&CommandEnvelope {
+            protocol_version: ProtocolVersion,
+            request_id: RequestId::from_u128(0x702),
+            command_id: CommandId::from_u128(0xC702),
+            authority_generation: auth,
+            actor_ref: None,
+            project_id: None,
+            aggregate_id: auth.as_uuid(),
+            expected_revision: Revision::new(daemon_rev),
+            command_type: String::from("StopDaemon"),
+            payload: match json!({ "drain_timeout_ms": -5 }) {
+                Value::Object(m) => m,
+                _ => Map::new(),
+            },
+        })
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        bad_err,
+        ClientError::Remote(ref e) if e.code == ErrorCode::InvalidArgument
+    ));
+
+    // drain_timeout_ms valide -> propagé jusqu'à ExecutorDrainPort::drain_on_stop
+    let ok_rcpt = client
+        .send_command(&CommandEnvelope {
+            protocol_version: ProtocolVersion,
+            request_id: RequestId::from_u128(0x703),
+            command_id: CommandId::from_u128(0xC703),
+            authority_generation: auth,
+            actor_ref: None,
+            project_id: None,
+            aggregate_id: auth.as_uuid(),
+            expected_revision: Revision::new(daemon_rev),
+            command_type: String::from("StopDaemon"),
+            payload: match json!({ "reason": "custom drain timeout", "drain_timeout_ms": 345 }) {
+                Value::Object(m) => m,
+                _ => Map::new(),
+            },
+        })
+        .await
+        .unwrap();
+    assert_eq!(ok_rcpt.state, ReceiptState::Accepted);
+
+    let report = handle.wait_stopped().await.unwrap();
+    assert_eq!(report.outcome, StopOutcome::Complete);
+    assert_eq!(
+        *spy.recorded_timeout.lock().unwrap(),
+        Some(Duration::from_millis(345))
+    );
 }

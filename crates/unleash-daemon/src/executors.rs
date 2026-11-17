@@ -213,3 +213,210 @@ fn load_hosts_manifest(path: &Path) -> Result<HostsManifest, DaemonError> {
         None => Ok(HostsManifest::default()),
     }
 }
+
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing
+)]
+mod tests {
+    use std::os::unix::fs::PermissionsExt;
+
+    use unleash_platform::{BootIdentity, current_process_identity};
+    use unleash_testkit::local_test_dir;
+
+    use super::*;
+
+    fn mk_rdv(tag: &str) -> tempfile::TempDir {
+        let dir = local_test_dir(tag).unwrap();
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        dir
+    }
+
+    #[test]
+    fn upsert_registration_creates_0600_manifest_and_is_idempotent() {
+        let rdv = mk_rdv("exec-upsert");
+        let root_a = local_test_dir("exec-root-a").unwrap();
+
+        RendezvousExecutorController::upsert_registration(
+            rdv.path(),
+            ExecutorRegistration {
+                executor_id: String::from("host-1"),
+                data_root: root_a.path().to_path_buf(),
+                pid: Some(1234),
+                boot_identity: None,
+                start_identity: None,
+                os_identity: None,
+                state: ExecutorState::Active,
+            },
+        )
+        .unwrap();
+
+        let manifest_path = rdv.path().join(HOSTS_MANIFEST_FILENAME);
+        let mode = std::fs::metadata(&manifest_path)
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600);
+
+        RendezvousExecutorController::upsert_registration(
+            rdv.path(),
+            ExecutorRegistration {
+                executor_id: String::from("host-1"),
+                data_root: root_a.path().to_path_buf(),
+                pid: Some(1234),
+                boot_identity: None,
+                start_identity: None,
+                os_identity: None,
+                state: ExecutorState::Neutralized,
+            },
+        )
+        .unwrap();
+
+        let loaded = load_hosts_manifest(&manifest_path).unwrap();
+        assert_eq!(loaded.executors.len(), 1);
+        assert_eq!(loaded.executors[0].state, ExecutorState::Neutralized);
+    }
+
+    #[test]
+    fn active_hosts_for_other_root_blocks_live_host_and_auto_neutralizes_stale_host() {
+        let rdv = mk_rdv("exec-other-root");
+        let root_old = local_test_dir("exec-old").unwrap();
+        let root_new = local_test_dir("exec-new").unwrap();
+        let ctrl = RendezvousExecutorController;
+
+        assert!(
+            ctrl.active_hosts_for_other_root(rdv.path(), root_new.path())
+                .unwrap()
+                .is_none()
+        );
+
+        let mut stale_os = current_process_identity().unwrap();
+        stale_os.boot_identity = BootIdentity::new("stale-boot-identity-before-reboot").unwrap();
+
+        RendezvousExecutorController::upsert_registration(
+            rdv.path(),
+            ExecutorRegistration {
+                executor_id: String::from("host-stale"),
+                data_root: root_old.path().to_path_buf(),
+                pid: Some(stale_os.pid),
+                boot_identity: None,
+                start_identity: None,
+                os_identity: Some(stale_os),
+                state: ExecutorState::Active,
+            },
+        )
+        .unwrap();
+
+        // Le processus identifié sur un autre boot est auto-neutralisé sans bloquer le changement.
+        assert!(
+            ctrl.active_hosts_for_other_root(rdv.path(), root_new.path())
+                .unwrap()
+                .is_none()
+        );
+        let manifest_after_stale =
+            load_hosts_manifest(&rdv.path().join(HOSTS_MANIFEST_FILENAME)).unwrap();
+        assert_eq!(
+            manifest_after_stale.executors[0].state,
+            ExecutorState::Neutralized
+        );
+
+        // Un processus vivant identifié sur une autre racine bloque le basculement.
+        let live_os = current_process_identity().unwrap();
+        RendezvousExecutorController::upsert_registration(
+            rdv.path(),
+            ExecutorRegistration {
+                executor_id: String::from("host-live"),
+                data_root: root_old.path().to_path_buf(),
+                pid: Some(live_os.pid),
+                boot_identity: Some(live_os.boot_identity.to_string()),
+                start_identity: Some(live_os.start_identity.to_string()),
+                os_identity: Some(live_os),
+                state: ExecutorState::Active,
+            },
+        )
+        .unwrap();
+
+        let blocked = ctrl
+            .active_hosts_for_other_root(rdv.path(), root_new.path())
+            .unwrap()
+            .expect("hôte actif sur autre racine doit bloquer");
+        assert_eq!(blocked.1, vec![String::from("host-live")]);
+
+        // Même racine ne bloque pas elle-même.
+        assert!(
+            ctrl.active_hosts_for_other_root(rdv.path(), root_old.path())
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn drain_on_stop_classifies_complete_partial_unknown_and_corrupt_manifest() {
+        let rdv = mk_rdv("exec-drain");
+        let root = local_test_dir("exec-drain-root").unwrap();
+        let ctrl = RendezvousExecutorController;
+
+        let empty_rep = ctrl.drain_on_stop(rdv.path(), Duration::from_secs(1));
+        assert_eq!(empty_rep.outcome, StopOutcome::Complete);
+        assert!(empty_rep.retained_services.is_empty());
+        assert!(empty_rep.unknown_services.is_empty());
+
+        RendezvousExecutorController::upsert_registration(
+            rdv.path(),
+            ExecutorRegistration {
+                executor_id: String::from("svc-active"),
+                data_root: root.path().to_path_buf(),
+                pid: None,
+                boot_identity: None,
+                start_identity: None,
+                os_identity: None,
+                state: ExecutorState::Active,
+            },
+        )
+        .unwrap();
+        let partial_rep = ctrl.drain_on_stop(rdv.path(), Duration::from_secs(1));
+        assert_eq!(partial_rep.outcome, StopOutcome::Partial);
+        assert_eq!(
+            partial_rep.retained_services,
+            vec![String::from("svc-active")]
+        );
+        assert!(partial_rep.unknown_services.is_empty());
+
+        RendezvousExecutorController::upsert_registration(
+            rdv.path(),
+            ExecutorRegistration {
+                executor_id: String::from("svc-unknown"),
+                data_root: root.path().to_path_buf(),
+                pid: None,
+                boot_identity: None,
+                start_identity: None,
+                os_identity: None,
+                state: ExecutorState::Unknown,
+            },
+        )
+        .unwrap();
+        let unknown_rep = ctrl.drain_on_stop(rdv.path(), Duration::from_secs(1));
+        assert_eq!(unknown_rep.outcome, StopOutcome::Unknown);
+        assert_eq!(
+            unknown_rep.retained_services,
+            vec![String::from("svc-active")]
+        );
+        assert_eq!(
+            unknown_rep.unknown_services,
+            vec![String::from("svc-unknown")]
+        );
+
+        let manifest_path = rdv.path().join(HOSTS_MANIFEST_FILENAME);
+        write_private_file_atomic(&manifest_path, b"{invalid-json").unwrap();
+        let corrupt_rep = ctrl.drain_on_stop(rdv.path(), Duration::from_secs(1));
+        assert_eq!(corrupt_rep.outcome, StopOutcome::Unknown);
+        assert_eq!(
+            corrupt_rep.unknown_services,
+            vec![String::from("hosts_manifest_unreadable")]
+        );
+    }
+}

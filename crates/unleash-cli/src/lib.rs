@@ -8,6 +8,9 @@
 //! - `#![forbid(unsafe_code)]` strict.
 //! - Aucune dépendance vers `rusqlite`, `unleash-store` ou `unleash-daemon`.
 //! - Aucune règle métier locale : toute transition et révision appartient au daemon.
+//! - `unleash-protocol`, `unleash-domain` et `unleash-platform` sont importés uniquement pour les
+//!   DTO de transport, types d'identifiants et résolution du chemin socket canonique en attendant
+//!   leur réexport éventuel par `unleash-client`.
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
@@ -236,7 +239,11 @@ pub enum DaemonCommand {
 /// # Errors
 /// Retourne [`CliError`] en cas d'erreur de transport, protocole ou argument.
 pub async fn run_cli(cli: &Cli) -> Result<Value, CliError> {
-    let socket_path = resolve_socket_path(cli.socket.as_deref())?;
+    let explicit_socket = cli.socket.clone();
+    let socket_path =
+        tokio::task::spawn_blocking(move || resolve_socket_path(explicit_socket.as_deref()))
+            .await
+            .map_err(|e| CliError::InvalidArgument(format!("Join error socket resolve: {e}")))??;
     let timeout = Duration::from_millis(cli.timeout_ms.max(100));
     let client_cfg = ClientConfig::new(socket_path, ClientKind::Cli, env!("CARGO_PKG_VERSION"))
         .with_timeouts(timeout, timeout);
@@ -493,8 +500,15 @@ async fn run_daemon_command(
         .watermark
         .map_or(Sequence::new(0), |wm| wm.sequence);
 
+    let status_mode = status_resp
+        .result
+        .get("mode")
+        .and_then(Value::as_str)
+        .unwrap_or("ready");
+
     // Ouvrir l'abonnement AVANT StopDaemon afin d'observer DaemonStopped de façon déterministe
-    let sub_reader: Option<EventStreamReader> = if *no_wait {
+    // (hors mode `recovering`, qui n'autorise que `GetDaemonStatus` en lecture avant arrêt).
+    let sub_reader: Option<EventStreamReader> = if *no_wait || status_mode == "recovering" {
         None
     } else {
         Some(

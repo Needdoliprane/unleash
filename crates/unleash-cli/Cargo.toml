@@ -17,12 +17,13 @@ workspace = true
 
 [dependencies]
 unleash-client.workspace = true
+# Dépendances DTO/chemins transitoires tant que `unleash-client` ne réexporte pas
+# les enveloppes IPC, identifiants domaine et le chemin de rendez-vous canonique.
 unleash-protocol.workspace = true
 unleash-domain.workspace = true
 unleash-platform.workspace = true
 tokio.workspace = true
 clap.workspace = true
-serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 uuid.workspace = true

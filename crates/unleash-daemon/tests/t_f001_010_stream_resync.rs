@@ -24,8 +24,8 @@ use unleash_domain::{
     ActorId, CommandId, DaemonMode, ProjectId, RequestId, Revision, Sha256Digest, TimestampMs,
 };
 use unleash_protocol::{
-    ClientKind, CommandEnvelope, ErrorCode, ProtocolVersion, QueryEnvelope,
-    compute_command_digest_v2,
+    ClientKind, CommandEnvelope, ErrorCode, ProtocolVersion, QueryEnvelope, SubscribeEventsFrame,
+    SubscribeEventsRequest, compute_command_digest_v2,
 };
 use unleash_store::{
     EmptyExecutorNeutralizer, PrepareBackupRequest, RestoreBackupRequest, StoreConfig, UnleashStore,
@@ -456,4 +456,131 @@ fn ev_purge_or_stop(
         }
         _ => None,
     }
+}
+
+#[tokio::test]
+async fn t_f001_010_concurrent_commits_deliver_all_live_events_in_sequence_order() {
+    let rdv = local_test_dir("f001-10c-rdv").unwrap();
+    std::fs::set_permissions(
+        rdv.path(),
+        std::os::unix::fs::PermissionsExt::from_mode(0o700),
+    )
+    .unwrap();
+    let data = local_test_dir("f001-10c-dat").unwrap();
+
+    let cfg = DaemonConfig {
+        data_root: Some(data.path().to_path_buf()),
+        rendezvous_dir: Some(rdv.path().to_path_buf()),
+        max_in_flight_mutations: 32,
+        subscriber_queue_capacity: 64,
+        store_overrides: StoreOverrides {
+            writer_queue_capacity: Some(32),
+            ..StoreOverrides::default()
+        },
+        ..DaemonConfig::default()
+    };
+    let DaemonStartOutcome::Started(handle) = UnleashDaemon::start(cfg).await.unwrap() else {
+        panic!("Daemon attendu démarré");
+    };
+    let sock = handle.socket_path().to_path_buf();
+    let stream_id = handle.stream_id();
+    let auth = handle.authority_generation();
+
+    let mut admin =
+        UnleashClient::connect(ClientConfig::new(sock.clone(), ClientKind::Cli, "0.1.0"))
+            .await
+            .unwrap();
+    let status = admin
+        .query(&QueryEnvelope {
+            protocol_version: ProtocolVersion,
+            request_id: RequestId::from_u128(0xA00),
+            query_type: String::from("GetDaemonStatus"),
+            project_id: None,
+            payload: Map::new(),
+        })
+        .await
+        .unwrap();
+    let start_seq = status.watermark.unwrap().sequence;
+
+    let mut reader = admin
+        .subscribe_events(&SubscribeEventsRequest {
+            stream_id,
+            after_sequence: start_seq,
+            project_id: None,
+            aggregate_id: None,
+            batch_limit: 4,
+        })
+        .await
+        .unwrap();
+
+    // Lancer 12 mutations concurrentes depuis des connexions parallèles synchronisées après Hello
+    let total = 12_u128;
+    let barrier = Arc::new(tokio::sync::Barrier::new(total as usize));
+    let mut expected_pids = std::collections::HashSet::new();
+    let mut join_set = tokio::task::JoinSet::new();
+    for idx in 1..=total {
+        let pid = ProjectId::from_u128(0xB000 + idx);
+        expected_pids.insert(pid);
+        let sock_c = sock.clone();
+        let barrier_c = Arc::clone(&barrier);
+        join_set.spawn(async move {
+            let mut c = UnleashClient::connect(ClientConfig::new(sock_c, ClientKind::Cli, "0.1.0"))
+                .await
+                .unwrap();
+            barrier_c.wait().await;
+            c.send_command(&CommandEnvelope {
+                protocol_version: ProtocolVersion,
+                request_id: RequestId::from_u128(0xC000 + idx),
+                command_id: CommandId::from_u128(0xD000 + idx),
+                authority_generation: auth,
+                actor_ref: None,
+                project_id: Some(pid),
+                aggregate_id: pid.as_uuid(),
+                expected_revision: Revision::INITIAL,
+                command_type: String::from("CreateProject"),
+                payload: match json!({ "name": format!("Conc-{idx}"), "weight": 1 }) {
+                    Value::Object(m) => m,
+                    _ => Map::new(),
+                },
+            })
+            .await
+            .unwrap()
+        });
+    }
+    while let Some(res) = join_set.join_next().await {
+        res.unwrap();
+    }
+
+    let mut received_pids = Vec::new();
+    let mut prev_seq = start_seq.as_u64();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while received_pids.len() < total as usize {
+            let Some(frame) = reader.next_frame().await.unwrap() else {
+                panic!("Flux SubscribeEvents fermé avant réception complète");
+            };
+            if let SubscribeEventsFrame::Events { events, .. } = frame {
+                for ev in events {
+                    let seq = ev.sequence.as_u64();
+                    assert!(
+                        seq > prev_seq,
+                        "Séquence non strictement croissante : {seq} après {prev_seq}"
+                    );
+                    prev_seq = seq;
+                    if ev.event_type == "ProjectCreated" {
+                        received_pids.push(ev.project_id.unwrap());
+                    }
+                }
+            }
+        }
+    })
+    .await
+    .expect("timeout réception de tous les événements concurrents");
+
+    let received_set: std::collections::HashSet<ProjectId> =
+        received_pids.iter().copied().collect();
+    assert_eq!(received_pids.len(), total as usize);
+    assert_eq!(received_set, expected_pids);
+
+    drop(reader);
+    handle.shutdown_graceful("done-concurrent").await.unwrap();
 }

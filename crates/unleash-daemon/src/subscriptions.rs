@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Hub borné d'abonnements `SubscribeEvents` avec backpressure et `ResyncRequired` (`REQ-CORE-009`, `REQ-CORE-010`).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
@@ -9,7 +9,7 @@ use std::time::Duration;
 use tokio::net::UnixStream;
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::error::TrySendError;
-use unleash_domain::Sequence;
+use unleash_domain::{ProjectId, Sequence};
 use unleash_protocol::{
     ErrorCode, EventCursor, EventEnvelope, IpcError, RetryClass, SubscribeEventsFrame,
     SubscribeEventsRequest,
@@ -129,9 +129,10 @@ impl SubscriptionHub {
 }
 
 /// Exécute la boucle d'envoi `SubscribeEvents` sur `stream` depuis le curseur demandé.
-pub async fn run_subscription_stream(
+pub async fn run_subscription_stream<S: std::hash::BuildHasher>(
     stream: &mut UnixStream,
     req: SubscribeEventsRequest,
+    allowed_projects: Option<HashSet<ProjectId, S>>,
     store: Arc<UnleashStore>,
     hub: Arc<SubscriptionHub>,
     write_timeout: Duration,
@@ -150,7 +151,15 @@ pub async fn run_subscription_stream(
     // Enregistrer l'abonné AVANT le rattrapage pour ne manquer aucun événement concurrent.
     let (sub_id, mut rx, abort_flag) = hub.register();
 
-    let Some(mut sent_after) = catch_up_replay(stream, &req, &store, write_timeout).await else {
+    let Some(mut sent_after) = catch_up_replay(
+        stream,
+        &req,
+        allowed_projects.as_ref(),
+        &store,
+        write_timeout,
+    )
+    .await
+    else {
         hub.unregister(sub_id);
         return;
     };
@@ -158,6 +167,7 @@ pub async fn run_subscription_stream(
     stream_live_batches(
         stream,
         &req,
+        allowed_projects.as_ref(),
         &store,
         &mut rx,
         &abort_flag,
@@ -169,9 +179,10 @@ pub async fn run_subscription_stream(
     hub.unregister(sub_id);
 }
 
-async fn catch_up_replay(
+async fn catch_up_replay<S: std::hash::BuildHasher>(
     stream: &mut UnixStream,
     req: &SubscribeEventsRequest,
+    allowed_projects: Option<&HashSet<ProjectId, S>>,
     store: &Arc<UnleashStore>,
     write_timeout: Duration,
 ) -> Option<u64> {
@@ -221,7 +232,7 @@ async fn catch_up_replay(
                     .unwrap_or(sent_after);
                 let filtered: Vec<EventEnvelope> = events
                     .into_iter()
-                    .filter(|ev| matches_filter(ev, req))
+                    .filter(|ev| matches_filter(ev, req, allowed_projects))
                     .collect();
                 sent_after = sent_after.max(max_scanned);
                 if !filtered.is_empty() {
@@ -241,9 +252,14 @@ async fn catch_up_replay(
     }
 }
 
-async fn stream_live_batches(
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Boucle de diffusion live recevant flux Unix, filtre scope/requête, store, canal et curseur"
+)]
+async fn stream_live_batches<S: std::hash::BuildHasher>(
     stream: &mut UnixStream,
     req: &SubscribeEventsRequest,
+    allowed_projects: Option<&HashSet<ProjectId, S>>,
     store: &Arc<UnleashStore>,
     rx: &mut mpsc::Receiver<Vec<EventEnvelope>>,
     abort_flag: &tokio::sync::Notify,
@@ -260,7 +276,17 @@ async fn stream_live_batches(
                 let Some(batch) = maybe_batch else {
                     return;
                 };
-                let Ok(filtered) = filter_live_batch(stream, req, store, batch, sent_after, write_timeout).await else {
+                let Ok(filtered) = filter_live_batch(
+                    stream,
+                    req,
+                    allowed_projects,
+                    store,
+                    batch,
+                    sent_after,
+                    write_timeout,
+                )
+                .await
+                else {
                     return;
                 };
                 for chunk in filtered.chunks(req.batch_limit as usize) {
@@ -289,38 +315,46 @@ async fn stream_live_batches(
     }
 }
 
-async fn filter_live_batch(
+async fn filter_live_batch<S: std::hash::BuildHasher>(
     stream: &mut UnixStream,
     req: &SubscribeEventsRequest,
+    allowed_projects: Option<&HashSet<ProjectId, S>>,
     store: &Arc<UnleashStore>,
-    batch: Vec<EventEnvelope>,
+    mut batch: Vec<EventEnvelope>,
     sent_after: &mut u64,
     write_timeout: Duration,
 ) -> Result<Vec<EventEnvelope>, ()> {
+    batch.sort_by_key(|ev| ev.sequence.as_u64());
+
     let mut filtered = Vec::new();
     let mut highest = *sent_after;
     for ev in batch {
         if ev.stream_id != req.stream_id {
-            if let Ok(ReadEventsOutcome::ResyncRequired {
-                stream_id,
-                current_watermark,
-                reason,
-            }) = store.read_events(req.stream_id, Sequence::new(*sent_after), 1, None)
-            {
-                let frame = SubscribeEventsFrame::ResyncRequired {
-                    stream_id,
-                    current_watermark,
-                    reason,
-                };
-                let _ = write_json_frame_timeout(stream, &frame, write_timeout).await;
-            }
+            emit_resync_if_needed(stream, store, req.stream_id, *sent_after, write_timeout).await;
             return Err(());
         }
-        if ev.sequence.as_u64() <= *sent_after {
+        let seq = ev.sequence.as_u64();
+        if seq <= highest {
             continue;
         }
-        highest = highest.max(ev.sequence.as_u64());
-        if matches_filter(&ev, req) {
+        if seq > highest.saturating_add(1) {
+            catch_up_gap_before_sequence(
+                stream,
+                req,
+                allowed_projects,
+                store,
+                &mut highest,
+                seq,
+                &mut filtered,
+                write_timeout,
+            )
+            .await?;
+            if seq <= highest {
+                continue;
+            }
+        }
+        highest = highest.max(seq);
+        if matches_filter(&ev, req, allowed_projects) {
             filtered.push(ev);
         }
     }
@@ -328,7 +362,112 @@ async fn filter_live_batch(
     Ok(filtered)
 }
 
-fn matches_filter(ev: &EventEnvelope, req: &SubscribeEventsRequest) -> bool {
+async fn emit_resync_if_needed(
+    stream: &mut UnixStream,
+    store: &Arc<UnleashStore>,
+    stream_id: unleash_domain::StreamId,
+    after_seq: u64,
+    write_timeout: Duration,
+) {
+    let store_ref = Arc::clone(store);
+    let outcome = tokio::task::spawn_blocking(move || {
+        store_ref.read_events(stream_id, Sequence::new(after_seq), 1, None)
+    })
+    .await;
+    if let Ok(Ok(ReadEventsOutcome::ResyncRequired {
+        stream_id,
+        current_watermark,
+        reason,
+    })) = outcome
+    {
+        let frame = SubscribeEventsFrame::ResyncRequired {
+            stream_id,
+            current_watermark,
+            reason,
+        };
+        let _ = write_json_frame_timeout(stream, &frame, write_timeout).await;
+    }
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Rattrapage ciblé de trou de séquence hors thread Tokio avant émission live"
+)]
+async fn catch_up_gap_before_sequence<S: std::hash::BuildHasher>(
+    stream: &mut UnixStream,
+    req: &SubscribeEventsRequest,
+    allowed_projects: Option<&HashSet<ProjectId, S>>,
+    store: &Arc<UnleashStore>,
+    highest: &mut u64,
+    target_seq: u64,
+    out_filtered: &mut Vec<EventEnvelope>,
+    write_timeout: Duration,
+) -> Result<(), ()> {
+    while *highest < target_seq.saturating_sub(1) {
+        let after = *highest;
+        let stream_id = req.stream_id;
+        let span = target_seq.saturating_sub(after).clamp(1, 256);
+        let limit = u32::try_from(span).unwrap_or(256);
+        let store_ref = Arc::clone(store);
+        let outcome = tokio::task::spawn_blocking(move || {
+            store_ref.read_events(stream_id, Sequence::new(after), limit, None)
+        })
+        .await
+        .map_err(|_| ())?
+        .map_err(|_| ())?;
+
+        match outcome {
+            ReadEventsOutcome::ResyncRequired {
+                stream_id,
+                current_watermark,
+                reason,
+            } => {
+                let frame = SubscribeEventsFrame::ResyncRequired {
+                    stream_id,
+                    current_watermark,
+                    reason,
+                };
+                let _ = write_json_frame_timeout(stream, &frame, write_timeout).await;
+                return Err(());
+            }
+            ReadEventsOutcome::Events { events, .. } => {
+                if events.is_empty() {
+                    break;
+                }
+                let mut progressed = false;
+                for gev in events {
+                    let gseq = gev.sequence.as_u64();
+                    if gseq <= *highest {
+                        continue;
+                    }
+                    if gseq >= target_seq {
+                        return Ok(());
+                    }
+                    *highest = gseq;
+                    progressed = true;
+                    if matches_filter(&gev, req, allowed_projects) {
+                        out_filtered.push(gev);
+                    }
+                }
+                if !progressed {
+                    break;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn matches_filter<S: std::hash::BuildHasher>(
+    ev: &EventEnvelope,
+    req: &SubscribeEventsRequest,
+    allowed_projects: Option<&HashSet<ProjectId, S>>,
+) -> bool {
+    if let Some(allowed) = allowed_projects
+        && ev.project_id.is_none_or(|pid| !allowed.contains(&pid))
+    {
+        return false;
+    }
     if let Some(proj) = req.project_id
         && ev.project_id != Some(proj)
     {
@@ -340,4 +479,262 @@ fn matches_filter(ev: &EventEnvelope, req: &SubscribeEventsRequest) -> bool {
         return false;
     }
     true
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing
+)]
+mod tests {
+    use serde_json::Map;
+    use tokio::io::AsyncReadExt;
+    use unleash_domain::{ActorId, CommandId, RequestId, Revision, Sha256Digest, StreamId};
+    use unleash_protocol::{
+        CommandEnvelope, EventCausation, EventCausationKind, ProtocolVersion, ReceiptState,
+        Sensitivity, from_json_str_strict,
+    };
+    use unleash_store::{
+        AggregateKind, CommandMutation, CommitCommandRequest, EventAppendSpec, StoreConfig,
+    };
+    use unleash_testkit::local_test_dir;
+    use uuid::Uuid;
+
+    use super::*;
+
+    fn mk_event(
+        stream_id: StreamId,
+        seq: u64,
+        project_id: Option<ProjectId>,
+        agg: Uuid,
+    ) -> EventEnvelope {
+        EventEnvelope {
+            event_id: Uuid::from_u128(u128::from(seq) + 1000),
+            stream_id,
+            sequence: Sequence::new(seq),
+            event_type: String::from("ProjectCreated"),
+            schema_version: 1,
+            occurred_at: chrono::DateTime::UNIX_EPOCH,
+            recorded_at: chrono::DateTime::UNIX_EPOCH,
+            project_id,
+            aggregate_id: agg,
+            aggregate_revision: Revision::new(1),
+            actor_ref: String::from("uid:1"),
+            correlation_id: Uuid::from_u128(1),
+            causation: EventCausation {
+                kind: EventCausationKind::Command,
+                id: String::from("1"),
+            },
+            command_id: None,
+            payload_hash: Sha256Digest::from_bytes(b"{}"),
+            payload: Map::new(),
+            sensitivity: Sensitivity::Project,
+        }
+    }
+
+    #[test]
+    fn matches_filter_enforces_allowed_projects_and_explicit_filters() {
+        let sid = StreamId::from_u128(1);
+        let p1 = ProjectId::from_u128(0x1);
+        let p2 = ProjectId::from_u128(0x2);
+        let agg1 = Uuid::from_u128(0xA1);
+        let mut allowed = HashSet::new();
+        allowed.insert(p1);
+
+        let req_all = SubscribeEventsRequest {
+            stream_id: sid,
+            after_sequence: Sequence::new(0),
+            project_id: None,
+            aggregate_id: None,
+            batch_limit: 16,
+        };
+
+        assert!(matches_filter(
+            &mk_event(sid, 1, Some(p1), agg1),
+            &req_all,
+            Some(&allowed)
+        ));
+        assert!(!matches_filter(
+            &mk_event(sid, 2, Some(p2), agg1),
+            &req_all,
+            Some(&allowed)
+        ));
+        assert!(!matches_filter(
+            &mk_event(sid, 3, None, agg1),
+            &req_all,
+            Some(&allowed)
+        ));
+        assert!(matches_filter(
+            &mk_event(sid, 4, None, agg1),
+            &req_all,
+            None::<&HashSet<ProjectId>>
+        ));
+
+        let req_proj = SubscribeEventsRequest {
+            project_id: Some(p2),
+            aggregate_id: Some(agg1),
+            ..req_all
+        };
+        assert!(matches_filter(
+            &mk_event(sid, 5, Some(p2), agg1),
+            &req_proj,
+            None::<&HashSet<ProjectId>>
+        ));
+        assert!(!matches_filter(
+            &mk_event(sid, 6, Some(p2), Uuid::from_u128(0xA2)),
+            &req_proj,
+            None::<&HashSet<ProjectId>>
+        ));
+    }
+
+    #[test]
+    fn subscription_hub_backpressure_disconnects_slow_subscriber_only() {
+        let hub = SubscriptionHub::new(1);
+        let (_id_slow, mut rx_slow, abort_slow) = hub.register();
+        let (_id_fast, mut rx_fast, _abort_fast) = hub.register();
+        let sid = StreamId::from_u128(7);
+
+        hub.publish_events(&[mk_event(sid, 1, None, Uuid::from_u128(1))]);
+        let ev_fast_1 = rx_fast.try_recv().unwrap();
+        assert_eq!(ev_fast_1[0].sequence, Sequence::new(1));
+
+        // La file de slow (capacité 1) déborde au second publish, fast reçoit normalement.
+        hub.publish_events(&[mk_event(sid, 2, None, Uuid::from_u128(2))]);
+        let ev_fast_2 = rx_fast.try_recv().unwrap();
+        assert_eq!(ev_fast_2[0].sequence, Sequence::new(2));
+
+        // Purge du buffer résiduel de slow puis vérification que hub l'a désenregistré.
+        let _ = rx_slow.try_recv();
+        drop(abort_slow);
+        hub.publish_events(&[mk_event(sid, 3, None, Uuid::from_u128(3))]);
+        let ev_fast_3 = rx_fast.try_recv().unwrap();
+        assert_eq!(ev_fast_3[0].sequence, Sequence::new(3));
+        assert!(rx_slow.try_recv().is_err());
+    }
+
+    fn create_two_test_projects_store(
+        dir_path: &std::path::Path,
+    ) -> (Arc<UnleashStore>, StreamId, EventEnvelope, EventEnvelope) {
+        let store = Arc::new(UnleashStore::open(StoreConfig::new(dir_path)).unwrap());
+        store.register_principal("uid:1", "user", "uid:1").unwrap();
+        let d = store.daemon_state().unwrap();
+        let auth = d.authority_generation;
+        let sid = d.stream_id;
+
+        for idx in 1_u128..=2_u128 {
+            let pid = ProjectId::from_u128(idx);
+            store
+                .commit_command(CommitCommandRequest {
+                    actor_id: ActorId::new("uid:1").unwrap(),
+                    envelope: CommandEnvelope {
+                        protocol_version: ProtocolVersion,
+                        request_id: RequestId::from_u128(idx),
+                        command_id: CommandId::from_u128(idx + 100),
+                        authority_generation: auth,
+                        actor_ref: None,
+                        project_id: Some(pid),
+                        aggregate_id: pid.as_uuid(),
+                        expected_revision: Revision::INITIAL,
+                        command_type: String::from("CreateProject"),
+                        payload: Map::new(),
+                    },
+                    target_aggregate: AggregateKind::Project,
+                    operation_id: None,
+                    receipt_state: ReceiptState::Accepted,
+                    result_ref: None,
+                    retention_days_override: None,
+                    fence_assertion: None,
+                    mutation: CommandMutation::CreateProject {
+                        project_id: pid,
+                        name: format!("P-{idx}"),
+                        weight: 1,
+                    },
+                    events: vec![EventAppendSpec {
+                        event_type: String::from("ProjectCreated"),
+                        aggregate_type: AggregateKind::Project,
+                        aggregate_id: pid.as_uuid(),
+                        aggregate_revision: Revision::new(1),
+                        project_id: Some(pid),
+                        correlation_id: pid.as_uuid(),
+                        causation_kind: EventCausationKind::Command,
+                        causation_id: None,
+                        payload: Map::new(),
+                        sensitivity: Sensitivity::Project,
+                        outbox_destinations: Vec::new(),
+                    }],
+                    capacity_reservations: Vec::new(),
+                    budget_reservations: Vec::new(),
+                })
+                .unwrap();
+        }
+        let ReadEventsOutcome::Events { events, .. } =
+            store.read_events(sid, Sequence::new(0), 16, None).unwrap()
+        else {
+            panic!("events attendus");
+        };
+        (store, sid, events[0].clone(), events[1].clone())
+    }
+
+    #[tokio::test]
+    async fn out_of_order_live_batches_recover_missing_sequence_without_loss() {
+        let dir = local_test_dir("sub-ooo").unwrap();
+        let dir_path = dir.path().to_path_buf();
+        let (store, stream_id, ev1, ev2) =
+            tokio::task::spawn_blocking(move || create_two_test_projects_store(&dir_path))
+                .await
+                .unwrap();
+
+        let (mut server_stream, mut client_stream) = UnixStream::pair().unwrap();
+        let hub = SubscriptionHub::new(8);
+        let req = SubscribeEventsRequest {
+            stream_id,
+            after_sequence: Sequence::new(0),
+            project_id: None,
+            aggregate_id: None,
+            batch_limit: 16,
+        };
+
+        let (_, mut rx, abort_flag) = hub.register();
+        let mut sent_after = 0_u64;
+        // Injecte délibérément ev2 (seq=2) AVANT ev1 (seq=1) pour vérifier le rattrapage sans perte.
+        hub.publish_events(&[ev2]);
+        hub.publish_events(&[ev1]);
+
+        let server_task = tokio::spawn(async move {
+            stream_live_batches(
+                &mut server_stream,
+                &req,
+                None::<&HashSet<ProjectId>>,
+                &store,
+                &mut rx,
+                &abort_flag,
+                &mut sent_after,
+                Duration::from_secs(2),
+            )
+            .await;
+            let _ = tokio::task::spawn_blocking(move || drop(store)).await;
+        });
+
+        let mut hdr = [0u8; 4];
+        client_stream.read_exact(&mut hdr).await.unwrap();
+        let len = u32::from_be_bytes(hdr) as usize;
+        let mut body = vec![0u8; len];
+        client_stream.read_exact(&mut body).await.unwrap();
+        let frame =
+            from_json_str_strict::<SubscribeEventsFrame>(std::str::from_utf8(&body).unwrap())
+                .unwrap();
+
+        match frame {
+            SubscribeEventsFrame::Events { events, .. } => {
+                let seqs: Vec<u64> = events.iter().map(|e| e.sequence.as_u64()).collect();
+                assert_eq!(seqs, vec![1, 2]);
+            }
+            other => panic!("trame inattendue : {other:?}"),
+        }
+
+        hub.close_all();
+        let _ = server_task.await;
+    }
 }

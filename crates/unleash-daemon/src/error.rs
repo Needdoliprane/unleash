@@ -177,3 +177,58 @@ pub fn domain_error_to_ipc_error(
     }
     ipc
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod tests {
+    use unleash_domain::Revision;
+
+    use super::*;
+
+    #[test]
+    fn platform_error_to_ipc_error_maps_security_and_path_variants() {
+        let auth = platform_error_to_ipc_error(&PlatformError::PeerUidMismatch {
+            expected_uid: 501,
+            actual_uid: 0,
+        });
+        assert_eq!(auth.code, ErrorCode::AuthenticationFailed);
+
+        let forbidden = platform_error_to_ipc_error(&PlatformError::ForbiddenDocumentationPath {
+            path: String::from("/tmp/.claude"),
+        });
+        assert_eq!(forbidden.code, ErrorCode::InvalidArgument);
+
+        let perm = platform_error_to_ipc_error(&PlatformError::PermissionDenied {
+            context: String::from("0777"),
+        });
+        assert_eq!(perm.code, ErrorCode::CapabilityDenied);
+        assert_eq!(perm.reason_code, Some(ReasonCode::OperationNotAuthorized));
+    }
+
+    #[test]
+    fn domain_and_store_errors_preserve_command_id_and_map_codes() {
+        let cid = CommandId::from_u128(0xABCD);
+        let dom = domain_error_to_ipc_error(
+            &DomainTransitionError::InvalidTransition {
+                entity: "Daemon",
+                from: String::from("stopped"),
+                to: String::from("ready"),
+                reason: String::from("interdit"),
+            },
+            Some(cid),
+        );
+        assert_eq!(dom.command_id, Some(cid));
+        assert_eq!(dom.reason_code, Some(ReasonCode::ContractRejected));
+
+        let st = store_error_to_ipc_error(
+            &StoreError::RevisionConflict {
+                current_revision: Revision::new(4),
+                expected_revision: Revision::new(2),
+                command_id: None,
+            },
+            Some(cid),
+        );
+        assert_eq!(st.code, ErrorCode::RevisionConflict);
+        assert_eq!(st.command_id, Some(cid));
+    }
+}

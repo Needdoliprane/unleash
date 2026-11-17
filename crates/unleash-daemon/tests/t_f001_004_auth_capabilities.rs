@@ -23,11 +23,13 @@ use unleash_daemon::{
     AuthVerifierPort, AuthenticatedSession, Capability, DaemonConfig, DaemonError,
     DaemonStartOutcome, DrainReport, ExecutorDrainPort, PeerUidAuthVerifier, UnleashDaemon,
 };
-use unleash_domain::{ActorId, CommandId, MissionId, ProjectId, RequestId, Revision, StopOutcome};
+use unleash_domain::{
+    ActorId, CommandId, MissionId, ProjectId, RequestId, Revision, Sequence, StopOutcome,
+};
 use unleash_platform::PeerCredentials;
 use unleash_protocol::{
     ClientKind, CommandEnvelope, ErrorCode, HelloRequest, IpcError, ProtocolVersion, ReasonCode,
-    RetryClass,
+    RetryClass, SubscribeEventsFrame, SubscribeEventsRequest,
 };
 use unleash_testkit::local_test_dir;
 
@@ -310,4 +312,172 @@ async fn t_f001_004_rejects_forged_actor_wrong_uid_worker_admin_and_out_of_scope
     assert_eq!(spy.dispatch_count(), 0);
 
     handle.shutdown_graceful("done").await.unwrap();
+}
+
+#[tokio::test]
+async fn t_f001_004_subscribe_events_enforces_scope_denial_and_filtering() {
+    let rdv = local_test_dir("f001-04s-rdv").unwrap();
+    std::fs::set_permissions(
+        rdv.path(),
+        std::os::unix::fs::PermissionsExt::from_mode(0o700),
+    )
+    .unwrap();
+    let data = local_test_dir("f001-04s-dat").unwrap();
+
+    let allowed_proj = ProjectId::from_u128(0x2411);
+    let forbidden_proj = ProjectId::from_u128(0x2422);
+    let verifier = Arc::new(RejectingForeignUidOrTokenVerifier {
+        allowed_project: allowed_proj,
+    });
+
+    let cfg = DaemonConfig {
+        data_root: Some(data.path().to_path_buf()),
+        rendezvous_dir: Some(rdv.path().to_path_buf()),
+        auth_verifier: verifier,
+        ..DaemonConfig::default()
+    };
+    let DaemonStartOutcome::Started(handle) = UnleashDaemon::start(cfg).await.unwrap() else {
+        panic!("Daemon attendu démarré");
+    };
+    let sock = handle.socket_path().to_path_buf();
+    let stream_id = handle.stream_id();
+
+    let mut admin =
+        UnleashClient::connect(ClientConfig::new(sock.clone(), ClientKind::Cli, "0.1.0"))
+            .await
+            .unwrap();
+    let auth = admin.hello().authority_generation;
+
+    for (idx, (pid, name)) in [
+        (allowed_proj, "AllowedSub"),
+        (forbidden_proj, "ForbiddenSub"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        admin
+            .send_command(&CommandEnvelope {
+                protocol_version: ProtocolVersion,
+                request_id: RequestId::from_u128(idx as u128 + 1),
+                command_id: CommandId::from_u128(0xE100 + idx as u128),
+                authority_generation: auth,
+                actor_ref: None,
+                project_id: Some(pid),
+                aggregate_id: pid.as_uuid(),
+                expected_revision: Revision::INITIAL,
+                command_type: String::from("CreateProject"),
+                payload: match json!({ "name": name, "weight": 1 }) {
+                    Value::Object(m) => m,
+                    _ => Map::new(),
+                },
+            })
+            .await
+            .unwrap();
+    }
+
+    let scoped = UnleashClient::connect(
+        ClientConfig::new(sock.clone(), ClientKind::Cli, "0.1.0")
+            .with_capabilities(vec![String::from("scope:restricted")]),
+    )
+    .await
+    .unwrap();
+
+    // 1. Abonnement ciblant explicitement un projet interdit -> ScopeDenied / AccessDenied
+    let mut forbidden_sub = scoped
+        .subscribe_events(&SubscribeEventsRequest {
+            stream_id,
+            after_sequence: Sequence::new(0),
+            project_id: Some(forbidden_proj),
+            aggregate_id: None,
+            batch_limit: 16,
+        })
+        .await
+        .unwrap();
+    let err = forbidden_sub.next_frame().await.unwrap_err();
+    assert!(matches!(
+        err,
+        ClientError::Remote(ref e)
+            if e.code == ErrorCode::ScopeDenied
+            && e.reason_code == Some(ReasonCode::AccessDenied)
+    ));
+
+    // 2. Abonnement sans project_id ne révèle ni événements système (None) ni forbidden_proj
+    let mut wildcard_sub = scoped
+        .subscribe_events(&SubscribeEventsRequest {
+            stream_id,
+            after_sequence: Sequence::new(0),
+            project_id: None,
+            aggregate_id: None,
+            batch_limit: 16,
+        })
+        .await
+        .unwrap();
+
+    let live_forbidden_mission = MissionId::from_u128(0x4411);
+    let live_allowed_mission = MissionId::from_u128(0x4422);
+    admin
+        .send_command(&CommandEnvelope {
+            protocol_version: ProtocolVersion,
+            request_id: RequestId::from_u128(10),
+            command_id: CommandId::from_u128(0xE201),
+            authority_generation: auth,
+            actor_ref: None,
+            project_id: Some(forbidden_proj),
+            aggregate_id: live_forbidden_mission.as_uuid(),
+            expected_revision: Revision::INITIAL,
+            command_type: String::from("AssignMission"),
+            payload: match json!({ "completion_policy": "mechanical", "state": "active" }) {
+                Value::Object(m) => m,
+                _ => Map::new(),
+            },
+        })
+        .await
+        .unwrap();
+    admin
+        .send_command(&CommandEnvelope {
+            protocol_version: ProtocolVersion,
+            request_id: RequestId::from_u128(11),
+            command_id: CommandId::from_u128(0xE202),
+            authority_generation: auth,
+            actor_ref: None,
+            project_id: Some(allowed_proj),
+            aggregate_id: live_allowed_mission.as_uuid(),
+            expected_revision: Revision::INITIAL,
+            command_type: String::from("AssignMission"),
+            payload: match json!({ "completion_policy": "mechanical", "state": "active" }) {
+                Value::Object(m) => m,
+                _ => Map::new(),
+            },
+        })
+        .await
+        .unwrap();
+
+    let mut seen_aggregates = Vec::new();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !seen_aggregates.contains(&live_allowed_mission.as_uuid()) {
+            let Some(frame) = wildcard_sub.next_frame().await.unwrap() else {
+                panic!("Flux fermé prématurément");
+            };
+            if let SubscribeEventsFrame::Events { events, .. } = frame {
+                for ev in events {
+                    assert_eq!(
+                        ev.project_id,
+                        Some(allowed_proj),
+                        "Fuite d'événement hors scope projet : {ev:?}",
+                    );
+                    seen_aggregates.push(ev.aggregate_id);
+                }
+            }
+        }
+    })
+    .await
+    .expect("timeout réception événement autorisé");
+
+    assert!(seen_aggregates.contains(&allowed_proj.as_uuid()));
+    assert!(seen_aggregates.contains(&live_allowed_mission.as_uuid()));
+    assert!(!seen_aggregates.contains(&forbidden_proj.as_uuid()));
+    assert!(!seen_aggregates.contains(&live_forbidden_mission.as_uuid()));
+
+    drop(wildcard_sub);
+    handle.shutdown_graceful("done-sub-scope").await.unwrap();
 }

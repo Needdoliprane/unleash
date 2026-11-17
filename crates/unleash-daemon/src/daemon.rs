@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
-use tokio::sync::{Notify, Semaphore, mpsc, watch};
+use tokio::sync::{Mutex as AsyncMutex, Notify, Semaphore, mpsc, watch};
 use unleash_browser::LocalInventorySearchPaths;
 use unleash_domain::{
     AuthorityGeneration, DaemonEpoch, DaemonInstanceId, DaemonMode, Revision, StreamId,
@@ -28,7 +28,10 @@ use unleash_store::{StoreConfig, UnleashStore, WriteCriticality};
 use crate::config::DaemonConfig;
 use crate::error::DaemonError;
 use crate::executors::{DrainReport, ExecutorDrainPort};
-use crate::ipc::{DaemonRuntimeState, StopRequest, spawn_accept_loop, write_json_frame_timeout};
+use crate::ipc::{
+    DaemonRuntimeState, StopRequest, publish_committed_events_ordered, spawn_accept_loop,
+    write_json_frame_timeout,
+};
 use crate::recovery::{
     classify_and_finish_recovery, enter_recovering_and_emit_event, insert_system_event_tx,
     read_daemon_state_row_tx,
@@ -146,6 +149,7 @@ impl DaemonHandle {
         let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
         let req = StopRequest {
             reason: reason.to_owned(),
+            drain_timeout_override: None,
             ack: Some(ack_tx),
         };
         if self.stop_tx.send(req).await.is_err() {
@@ -183,9 +187,46 @@ impl Drop for DaemonHandle {
     fn drop(&mut self) {
         let _ = self.stop_tx.try_send(StopRequest {
             reason: String::from("handle_dropped"),
+            drain_timeout_override: None,
             ack: None,
         });
     }
+}
+
+fn resolve_paths_and_acquire_lock_blocking(
+    explicit_data_root: Option<PathBuf>,
+    explicit_rdv_dir: Option<PathBuf>,
+) -> Result<
+    (
+        PlatformPaths,
+        PathBuf,
+        PathBuf,
+        Result<AuthorityLock, PlatformError>,
+    ),
+    DaemonError,
+> {
+    let platform_paths = PlatformPaths::resolve()?;
+    let data_root = explicit_data_root.unwrap_or_else(|| platform_paths.data_dir.clone());
+    assert_not_under_claude(&data_root)?;
+
+    let rdv_dir = match explicit_rdv_dir {
+        Some(p) => p,
+        None => canonical_rendezvous_dir()?,
+    };
+    assert_not_under_claude(&rdv_dir)?;
+
+    let lock_res = AuthorityLock::acquire_in(&rdv_dir, &data_root);
+    Ok((platform_paths, data_root, rdv_dir, lock_res))
+}
+
+fn prepare_socket_listener_blocking(
+    lock: AuthorityLock,
+) -> Result<(AuthorityLock, std::os::unix::net::UnixListener, PathBuf), DaemonError> {
+    lock.remove_stale_socket()?;
+    let socket_path = lock.socket_path().to_path_buf();
+    let std_listener = bind_private_unix_listener(&socket_path)?;
+    std_listener.set_nonblocking(true)?;
+    Ok((lock, std_listener, socket_path))
 }
 
 /// Orchestrateur principal du daemon utilisateur Unleash.
@@ -202,21 +243,19 @@ impl UnleashDaemon {
         reason = "Séquence ordonnée de démarrage : chemins, verrou OS, store SQLite, recovery, socket IPC"
     )]
     pub async fn start(config: DaemonConfig) -> Result<DaemonStartOutcome, DaemonError> {
-        let platform_paths = PlatformPaths::resolve()?;
-        let data_root = match config.data_root.clone() {
-            Some(p) => p,
-            None => platform_paths.data_dir.clone(),
-        };
-        assert_not_under_claude(&data_root)?;
-
-        let rdv_dir = match config.rendezvous_dir.clone() {
-            Some(p) => p,
-            None => canonical_rendezvous_dir()?,
-        };
-        assert_not_under_claude(&rdv_dir)?;
+        let cfg_data_root = config.data_root.clone();
+        let cfg_rdv_dir = config.rendezvous_dir.clone();
+        let (platform_paths, data_root, rdv_dir, lock_res) =
+            tokio::task::spawn_blocking(move || {
+                resolve_paths_and_acquire_lock_blocking(cfg_data_root, cfg_rdv_dir)
+            })
+            .await
+            .map_err(|e| {
+                DaemonError::InvalidConfiguration(format!("Join error lock acquire: {e}"))
+            })??;
 
         // 1. Verrou OS exclusif d'autorité par UID effectif
-        let lock = match AuthorityLock::acquire_in(&rdv_dir, &data_root) {
+        let lock = match lock_res {
             Ok(l) => l,
             Err(PlatformError::AuthorityAlreadyActive {
                 active_data_root,
@@ -255,9 +294,17 @@ impl UnleashDaemon {
             controller.active_hosts_for_other_root(&rdv_check, &data_check)
         })
         .await
-        .map_err(|e| DaemonError::InvalidConfiguration(format!("Join error hosts check: {e}")))??;
+        .map_err(|e| DaemonError::InvalidConfiguration(format!("Join error hosts check: {e}")))?;
+        let blocking = match blocking {
+            Ok(b) => b,
+            Err(err) => {
+                let _ = tokio::task::spawn_blocking(move || drop(lock)).await;
+                return Err(err);
+            }
+        };
 
         if let Some((active_data_root, active_hosts)) = blocking {
+            let _ = tokio::task::spawn_blocking(move || drop(lock)).await;
             return Err(DaemonError::AuthoritySwitchBlocked {
                 active_data_root,
                 requested_data_root: data_root,
@@ -266,48 +313,62 @@ impl UnleashDaemon {
         }
 
         // 3. Ouvrir et qualifier UnleashStore AVANT de lier le socket IPC (`T-F001-006`)
-        let boot_id = current_boot_identity()?.as_str().to_owned();
-        let uid = effective_uid();
         let mut store_cfg = StoreConfig::new(&data_root);
-        store_cfg.owner_uid = uid;
-        store_cfg.boot_identity = boot_id.clone();
         store_cfg.consumer_version = config.consumer_version.clone();
         apply_store_overrides(&mut store_cfg, &config);
 
-        let local_principal = format!("uid:{uid}");
-        let boot_for_rec = boot_id.clone();
-        let (store, recovery_row, prev_mode, started_ev) =
-            tokio::task::spawn_blocking(move || -> Result<_, DaemonError> {
-                let opened = UnleashStore::open(store_cfg)?;
-                opened.register_principal(&local_principal, "user", &local_principal)?;
-                let new_inst = DaemonInstanceId::from_uuid(opened.config().id_generator.new_uuid());
-                let (row, prev_mode, started_ev) =
-                    enter_recovering_and_emit_event(&opened, &boot_for_rec, new_inst)?;
-                Ok((Arc::new(opened), row, prev_mode, started_ev))
-            })
-            .await
-            .map_err(|e| {
-                DaemonError::InvalidConfiguration(format!("Join error store init: {e}"))
-            })??;
+        let store_init_res = tokio::task::spawn_blocking(move || -> Result<_, DaemonError> {
+            let boot_id = current_boot_identity()?.as_str().to_owned();
+            let uid = effective_uid();
+            store_cfg.owner_uid = uid;
+            store_cfg.boot_identity.clone_from(&boot_id);
+            let local_principal = format!("uid:{uid}");
+            let opened = UnleashStore::open(store_cfg)?;
+            opened.register_principal(&local_principal, "user", &local_principal)?;
+            let new_inst = DaemonInstanceId::from_uuid(opened.config().id_generator.new_uuid());
+            let (row, prev_mode, started_ev) =
+                enter_recovering_and_emit_event(&opened, &boot_id, new_inst)?;
+            Ok((Arc::new(opened), row, prev_mode, started_ev))
+        })
+        .await
+        .map_err(|e| DaemonError::InvalidConfiguration(format!("Join error store init: {e}")))?;
 
-        // 5. Nettoyage éventuel de socket orphelin et ouverture socket Unix privé (`0600`)
-        lock.remove_stale_socket()?;
-        let socket_path = lock.socket_path().to_path_buf();
-        let std_listener = match bind_private_unix_listener(&socket_path) {
-            Ok(l) => l,
+        let (store, recovery_row, prev_mode, started_ev) = match store_init_res {
+            Ok(tuple) => tuple,
             Err(err) => {
-                let _ = tokio::task::spawn_blocking(move || drop(store)).await;
-                return Err(DaemonError::Platform(err));
+                let _ = tokio::task::spawn_blocking(move || drop(lock)).await;
+                return Err(err);
             }
         };
-        if let Err(err) = std_listener.set_nonblocking(true) {
-            let _ = tokio::task::spawn_blocking(move || drop(store)).await;
-            return Err(DaemonError::Io(err));
-        }
+
+        // 5. Nettoyage éventuel de socket orphelin et ouverture socket Unix privé (`0600`)
+        let store_for_cleanup = Arc::clone(&store);
+        let socket_prep = tokio::task::spawn_blocking(move || {
+            let res = prepare_socket_listener_blocking(lock);
+            if res.is_err() {
+                drop(store_for_cleanup);
+            }
+            res
+        })
+        .await
+        .map_err(|e| DaemonError::InvalidConfiguration(format!("Join error socket bind: {e}")))?;
+
+        let (lock, std_listener, socket_path) = match socket_prep {
+            Ok(ok) => ok,
+            Err(err) => {
+                let _ = tokio::task::spawn_blocking(move || drop(store)).await;
+                return Err(err);
+            }
+        };
+
         let tokio_listener = match tokio::net::UnixListener::from_std(std_listener) {
             Ok(l) => l,
             Err(err) => {
-                let _ = tokio::task::spawn_blocking(move || drop(store)).await;
+                let _ = tokio::task::spawn_blocking(move || {
+                    drop(store);
+                    drop(lock);
+                })
+                .await;
                 return Err(DaemonError::Io(err));
             }
         };
@@ -325,6 +386,7 @@ impl UnleashDaemon {
         let (stop_tx, stop_rx) = mpsc::channel::<StopRequest>(4);
         let (ready_tx, ready_rx) = watch::channel(None::<Result<(), String>>);
         let (stopped_tx, stopped_rx) = watch::channel(None::<DrainReport>);
+        let (drain_started_tx, _drain_started_rx) = watch::channel(false);
         let shared_mode = Arc::new(RwLock::new(DaemonMode::Recovering));
 
         let state = Arc::new(DaemonRuntimeState {
@@ -338,11 +400,16 @@ impl UnleashDaemon {
             auth_verifier: Arc::clone(&config.auth_verifier),
             post_commit_hook: config.post_commit_hook.clone(),
             subscriptions: Arc::clone(&subscriptions),
+            last_published_seq: AsyncMutex::new(Some((
+                recovery_row.stream_id,
+                started_ev.sequence.as_u64(),
+            ))),
             subscriber_write_timeout: config.subscriber_write_timeout,
             in_flight_mutations: Arc::new(Semaphore::new(config.max_in_flight_mutations.max(1))),
             conn_permits: Arc::new(Semaphore::new(config.max_connections.max(1))),
             accepting: AtomicBool::new(true),
             shutdown_notify: Arc::new(Notify::new()),
+            drain_started_tx,
             stop_tx: stop_tx.clone(),
         });
 
@@ -352,6 +419,31 @@ impl UnleashDaemon {
             Arc::clone(&state),
             Arc::clone(&active_conns),
         );
+
+        let started_event_id = started_ev.event_id;
+        let has_recovery_gate = config.recovery_gate.is_some();
+        let recovery_handle = config.recovery_gate.map(|gate| {
+            let state_for_rec = Arc::clone(&state);
+            let ready_tx_gate = ready_tx.clone();
+            tokio::spawn(async move {
+                let mut drain_rx = state_for_rec.subscribe_drain_started();
+                let cancelled_early = tokio::select! {
+                    biased;
+                    _ = drain_rx.wait_for(|&started| started) => true,
+                    () = gate.enter_and_wait() => false,
+                };
+                let cancelled = cancelled_early || *drain_rx.borrow();
+                if cancelled || !matches!(state_for_rec.current_mode(), DaemonMode::Recovering) {
+                    drop(state_for_rec);
+                    let _ = ready_tx_gate
+                        .send(Some(Err(String::from("arrêt demandé pendant recovering"))));
+                    return;
+                }
+                let res = finish_recovery_step(&state_for_rec, prev_mode, started_event_id).await;
+                drop(state_for_rec);
+                let _ = ready_tx_gate.send(Some(res.map_err(|e| e.to_string())));
+            })
+        });
 
         // 6. Coordinateur d'arrêt propriétaire du Store, du Verrou OS et des tâches actives
         spawn_drain_coordinator(DrainCoordinatorParams {
@@ -366,10 +458,9 @@ impl UnleashDaemon {
             drain_timeout: config.shutdown_drain_timeout,
             accept_handle,
             active_conns,
+            recovery_handle,
         });
 
-        let state_for_rec = Arc::clone(&state);
-        let started_event_id = started_ev.event_id;
         let handle = DaemonHandle {
             socket_path,
             data_root,
@@ -384,15 +475,10 @@ impl UnleashDaemon {
             stop_tx,
         };
 
-        if let Some(gate) = config.recovery_gate {
-            tokio::spawn(async move {
-                gate.enter_and_wait().await;
-                let res = finish_recovery_step(&state_for_rec, prev_mode, started_event_id).await;
-                let _ = ready_tx.send(Some(res.map_err(|e| e.to_string())));
-            });
+        if has_recovery_gate {
             Ok(DaemonStartOutcome::Started(handle))
         } else {
-            let res = finish_recovery_step(&state_for_rec, prev_mode, started_event_id).await;
+            let res = finish_recovery_step(&state, prev_mode, started_event_id).await;
             match res {
                 Ok(()) => {
                     let _ = ready_tx.send(Some(Ok(())));
@@ -420,7 +506,16 @@ async fn finish_recovery_step(
     .map_err(|e| DaemonError::InvalidConfiguration(format!("Join error recovery finish: {e}")))??;
 
     state.set_mode(row.mode);
-    state.subscriptions.publish_events(&emitted);
+    if let Some(last_ev) = emitted.last() {
+        publish_committed_events_ordered(
+            state,
+            last_ev.stream_id,
+            last_ev.sequence.as_u64(),
+            emitted.len(),
+            &emitted,
+        )
+        .await;
+    }
     Ok(())
 }
 
@@ -436,6 +531,7 @@ struct DrainCoordinatorParams {
     drain_timeout: Duration,
     accept_handle: tokio::task::JoinHandle<()>,
     active_conns: Arc<Mutex<Vec<tokio::task::JoinHandle<()>>>>,
+    recovery_handle: Option<tokio::task::JoinHandle<()>>,
 }
 
 fn spawn_drain_coordinator(params: DrainCoordinatorParams) {
@@ -445,6 +541,7 @@ fn spawn_drain_coordinator(params: DrainCoordinatorParams) {
         let mut store_opt = Some(params.store);
         let mut lock_opt = Some(params.lock);
         let mut accept_opt = Some(params.accept_handle);
+        let mut recovery_opt = params.recovery_handle;
 
         if let Some(req) = stop_rx.recv().await
             && let (Some(state), Some(store)) = (
@@ -452,13 +549,18 @@ fn spawn_drain_coordinator(params: DrainCoordinatorParams) {
                 store_opt.as_ref().map(Arc::clone),
             )
         {
-            state.set_mode(DaemonMode::Draining);
+            state.mark_draining();
+            if let Some(recovery_handle) = recovery_opt.take() {
+                let _ = recovery_handle.await;
+            }
+            let effective_drain_timeout =
+                req.drain_timeout_override.unwrap_or(params.drain_timeout);
             let res = execute_drain_and_stop(
                 &state,
                 &store,
                 &params.rdv_dir,
                 &params.controller,
-                params.drain_timeout,
+                effective_drain_timeout,
                 &req.reason,
             )
             .await;
@@ -476,19 +578,21 @@ fn spawn_drain_coordinator(params: DrainCoordinatorParams) {
                             tokio::time::timeout(Duration::from_millis(250), accept_handle).await;
                     }
 
-                    drain_active_connections(&params.active_conns, params.drain_timeout).await;
+                    drain_active_connections(&params.active_conns, effective_drain_timeout).await;
 
-                    let _ = std::fs::remove_file(&params.socket_path);
-                    // Libérer state + UnleashStore hors thread Tokio runtime (StoreWriterHandle::drop
-                    // appelle blocking_recv()) AVANT le verrou OS `flock` et AVANT d'annoncer l'arrêt.
+                    // Libérer socket + state + UnleashStore + verrou OS flock hors thread Tokio runtime
+                    // (StoreWriterHandle::drop appelle blocking_recv()).
+                    let sock_drop = params.socket_path.clone();
                     let state_drop = state_opt.take();
                     let store_drop = store_opt.take();
+                    let lock_drop = lock_opt.take();
                     let _ = tokio::task::spawn_blocking(move || {
+                        let _ = std::fs::remove_file(&sock_drop);
                         drop(state_drop);
                         drop(store_drop);
+                        drop(lock_drop);
                     })
                     .await;
-                    drop(lock_opt.take());
 
                     let _ = params.stopped_tx.send(Some(report.clone()));
                     if let Some(ack) = req.ack {
@@ -508,16 +612,20 @@ fn spawn_drain_coordinator(params: DrainCoordinatorParams) {
                 }
             }
         }
+        if let Some(recovery_handle) = recovery_opt.take() {
+            recovery_handle.abort();
+        }
         let state_drop = state_opt.take();
         let store_drop = store_opt.take();
-        if state_drop.is_some() || store_drop.is_some() {
+        let lock_drop = lock_opt.take();
+        if state_drop.is_some() || store_drop.is_some() || lock_drop.is_some() {
             let _ = tokio::task::spawn_blocking(move || {
                 drop(state_drop);
                 drop(store_drop);
+                drop(lock_drop);
             })
             .await;
         }
-        drop(lock_opt);
     });
 }
 
@@ -558,7 +666,9 @@ async fn execute_drain_and_stop(
     )
     .await?
     {
-        state.subscriptions.publish_events(&[ev]);
+        let end_seq = ev.sequence.as_u64();
+        let sid = ev.stream_id;
+        publish_committed_events_ordered(state, sid, end_seq, 1, &[ev]).await;
     }
 
     let ctrl_ref = Arc::clone(controller);
@@ -590,7 +700,9 @@ async fn execute_drain_and_stop(
     if let Some(ev) =
         persist_daemon_mode_event(store, DaemonMode::Stopped, "DaemonStopped", stop_payload).await?
     {
-        state.subscriptions.publish_events(&[ev]);
+        let end_seq = ev.sequence.as_u64();
+        let sid = ev.stream_id;
+        publish_committed_events_ordered(state, sid, end_seq, 1, &[ev]).await;
     }
 
     Ok(report)
@@ -684,7 +796,12 @@ fn apply_store_overrides(cfg: &mut StoreConfig, daemon_cfg: &DaemonConfig) {
 }
 
 async fn probe_live_daemon_hello(socket_path: &Path) -> Result<HelloResponse, DaemonError> {
-    validate_socket_file(socket_path)?;
+    let sock_for_val = socket_path.to_path_buf();
+    tokio::task::spawn_blocking(move || validate_socket_file(&sock_for_val))
+        .await
+        .map_err(|e| {
+            DaemonError::InvalidConfiguration(format!("Join error validate socket: {e}"))
+        })??;
     let mut stream = tokio::time::timeout(PROBE_CONNECT_TIMEOUT, UnixStream::connect(socket_path))
         .await
         .map_err(|_| {

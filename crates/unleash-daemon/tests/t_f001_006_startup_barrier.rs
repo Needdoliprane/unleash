@@ -13,6 +13,7 @@
 )]
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use serde_json::{Map, Value, json};
 use unleash_client::{ClientConfig, ClientError, UnleashClient};
@@ -21,9 +22,12 @@ use unleash_daemon::{
 };
 use unleash_domain::{
     AccountId, ActionId, ActorId, CommandId, DaemonMode, IdGeneratorPort, MicrosAmount, ProjectId,
-    RequestId, Revision, Sha256Digest,
+    RequestId, Revision, Sha256Digest, StopOutcome,
 };
-use unleash_protocol::{ClientKind, CommandEnvelope, ErrorCode, ProtocolVersion, ReasonCode};
+use unleash_protocol::{
+    ClientKind, CommandEnvelope, ErrorCode, ProtocolVersion, QueryEnvelope, ReasonCode,
+    ReceiptState,
+};
 use unleash_store::{
     AcquireLeaseRequest, AggregateKind, BudgetScopeType, CommandMutation, CommitCommandRequest,
     EventAppendSpec, SqliteBuildPolicy, StoreConfig, StoreError, UnleashStore, WriteCriticality,
@@ -372,4 +376,83 @@ async fn t_f001_006_startup_barrier_rejects_admission_during_recovering_and_unqu
     assert_eq!(lease_state, "suspect");
     assert_eq!(act_state, "outcome_unknown");
     assert_eq!(res_state, "unknown");
+}
+
+#[tokio::test]
+async fn t_f001_006_allows_stop_daemon_during_recovering() {
+    let rdv = local_test_dir("f001-06-stop-rdv").unwrap();
+    std::fs::set_permissions(
+        rdv.path(),
+        std::os::unix::fs::PermissionsExt::from_mode(0o700),
+    )
+    .unwrap();
+    let data = local_test_dir("f001-06-stop-dat").unwrap();
+
+    let gate = RecoveryGate::new();
+    let cfg = DaemonConfig {
+        data_root: Some(data.path().to_path_buf()),
+        rendezvous_dir: Some(rdv.path().to_path_buf()),
+        recovery_gate: Some(Arc::clone(&gate)),
+        ..DaemonConfig::default()
+    };
+    let DaemonStartOutcome::Started(handle) = UnleashDaemon::start(cfg).await.unwrap() else {
+        panic!("Daemon attendu en cours de démarrage");
+    };
+    gate.wait_until_entered().await;
+    assert_eq!(handle.mode(), DaemonMode::Recovering);
+
+    let sock = handle.socket_path().to_path_buf();
+    let mut client =
+        UnleashClient::connect(ClientConfig::new(sock.clone(), ClientKind::Cli, "0.1.0"))
+            .await
+            .unwrap();
+    let auth = client.hello().authority_generation;
+
+    let status = client
+        .query(&QueryEnvelope {
+            protocol_version: ProtocolVersion,
+            request_id: RequestId::from_u128(0x601),
+            query_type: String::from("GetDaemonStatus"),
+            project_id: None,
+            payload: Map::new(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        status.result.get("mode").and_then(Value::as_str),
+        Some("recovering")
+    );
+    let rev = status
+        .result
+        .get("revision")
+        .and_then(Value::as_u64)
+        .unwrap();
+
+    // StopDaemon doit être accepté directement en mode `recovering` sans libérer le RecoveryGate
+    let rcpt = client
+        .send_command(&CommandEnvelope {
+            protocol_version: ProtocolVersion,
+            request_id: RequestId::from_u128(0x602),
+            command_id: CommandId::from_u128(0xC602),
+            authority_generation: auth,
+            actor_ref: None,
+            project_id: None,
+            aggregate_id: auth.as_uuid(),
+            expected_revision: Revision::new(rev),
+            command_type: String::from("StopDaemon"),
+            payload: match json!({ "reason": "stop during recovering" }) {
+                Value::Object(m) => m,
+                _ => Map::new(),
+            },
+        })
+        .await
+        .unwrap();
+    assert_eq!(rcpt.state, ReceiptState::Accepted);
+
+    let report = tokio::time::timeout(Duration::from_secs(5), handle.wait_stopped())
+        .await
+        .expect("timeout arrêt pendant recovering")
+        .expect("rapport d'arrêt attendu");
+    assert_eq!(report.outcome, StopOutcome::Complete);
+    assert!(!sock.exists());
 }

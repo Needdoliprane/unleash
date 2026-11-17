@@ -11,7 +11,7 @@ use serde::Serialize;
 use serde_json::{Map, Value, json};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{UnixListener, UnixStream};
-use tokio::sync::{Notify, Semaphore, mpsc, oneshot};
+use tokio::sync::{Mutex as AsyncMutex, Notify, Semaphore, mpsc, oneshot, watch};
 use unleash_browser::LocalInventorySearchPaths;
 use unleash_domain::{
     AuthorityGeneration, CommandId, CompletionPolicy, DaemonEpoch, DaemonInstanceId, DaemonMode,
@@ -33,6 +33,7 @@ use uuid::Uuid;
 
 use crate::auth::{
     AuthVerifierPort, AuthenticatedSession, Capability, authorize_command, authorize_query,
+    authorize_subscription,
 };
 use crate::config::PostCommitAction;
 use crate::config::PostCommitHook;
@@ -51,6 +52,7 @@ const RESPONSE_WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 #[derive(Debug)]
 pub(crate) struct StopRequest {
     pub(crate) reason: String,
+    pub(crate) drain_timeout_override: Option<Duration>,
     pub(crate) ack: Option<oneshot::Sender<Result<DrainReport, DaemonError>>>,
 }
 
@@ -66,11 +68,13 @@ pub(crate) struct DaemonRuntimeState {
     pub(crate) auth_verifier: Arc<dyn AuthVerifierPort>,
     pub(crate) post_commit_hook: Option<Arc<dyn PostCommitHook>>,
     pub(crate) subscriptions: Arc<SubscriptionHub>,
+    pub(crate) last_published_seq: AsyncMutex<Option<(StreamId, u64)>>,
     pub(crate) subscriber_write_timeout: Duration,
     pub(crate) in_flight_mutations: Arc<Semaphore>,
     pub(crate) conn_permits: Arc<Semaphore>,
     pub(crate) accepting: AtomicBool,
     pub(crate) shutdown_notify: Arc<Notify>,
+    pub(crate) drain_started_tx: watch::Sender<bool>,
     pub(crate) stop_tx: mpsc::Sender<StopRequest>,
 }
 
@@ -82,6 +86,15 @@ impl DaemonRuntimeState {
     pub(crate) fn set_mode(&self, next: DaemonMode) {
         let mut guard = self.mode.write().unwrap_or_else(PoisonError::into_inner);
         *guard = next;
+    }
+
+    pub(crate) fn mark_draining(&self) {
+        self.set_mode(DaemonMode::Draining);
+        let _ = self.drain_started_tx.send(true);
+    }
+
+    pub(crate) fn subscribe_drain_started(&self) -> watch::Receiver<bool> {
+        self.drain_started_tx.subscribe()
     }
 
     pub(crate) fn is_accepting(&self) -> bool {
@@ -354,11 +367,7 @@ async fn handle_subscribe_frame(
         }
     };
 
-    if !session.capabilities.contains(&Capability::QueryState) {
-        let ipc = IpcError::from_reason(
-            ReasonCode::OperationNotAuthorized,
-            "Capacité QueryState requise pour SubscribeEvents",
-        );
+    if let Err(ipc) = authorize_subscription(session, &sub_req) {
         let _ = write_json_frame_timeout(stream, &ipc, RESPONSE_WRITE_TIMEOUT).await;
         return;
     }
@@ -376,6 +385,7 @@ async fn handle_subscribe_frame(
     run_subscription_stream(
         stream,
         sub_req,
+        session.allowed_projects.clone(),
         Arc::clone(&state.store),
         Arc::clone(&state.subscriptions),
         state.subscriber_write_timeout,
@@ -660,6 +670,34 @@ async fn query_command_receipt(
     }
 }
 
+fn validate_command_mode(mode: DaemonMode, cmd: &CommandEnvelope) -> Result<(), IpcError> {
+    if mode == DaemonMode::Starting
+        || (mode == DaemonMode::Recovering && cmd.command_type != "StopDaemon")
+    {
+        return Err(IpcError::from_reason(
+            ReasonCode::RecoveryInProgress,
+            format!(
+                "Commande '{}' refusée tant que le daemon est en mode '{mode}'",
+                cmd.command_type
+            ),
+        )
+        .with_command_id(cmd.command_id));
+    }
+    if matches!(mode, DaemonMode::Draining | DaemonMode::Stopped) {
+        return Err(IpcError::new(
+            ErrorCode::ResourceBusy,
+            None,
+            format!(
+                "Commande '{}' refusée : arrêt du daemon en cours ({mode})",
+                cmd.command_type
+            ),
+            RetryClass::Never,
+        )
+        .with_command_id(cmd.command_id));
+    }
+    Ok(())
+}
+
 /// Retourne `true` si le hook `PostCommitAction::DropConnection` demande de couper la connexion sans réponse.
 async fn handle_command_frame(
     stream: &mut UnixStream,
@@ -672,35 +710,9 @@ async fn handle_command_frame(
         return false;
     }
 
-    let mode = state.current_mode();
-    match mode {
-        DaemonMode::Starting | DaemonMode::Recovering => {
-            let ipc = IpcError::from_reason(
-                ReasonCode::RecoveryInProgress,
-                format!(
-                    "Commande '{}' refusée tant que le daemon est en mode '{mode}'",
-                    cmd.command_type
-                ),
-            )
-            .with_command_id(cmd.command_id);
-            let _ = write_json_frame_timeout(stream, &ipc, RESPONSE_WRITE_TIMEOUT).await;
-            return false;
-        }
-        DaemonMode::Draining | DaemonMode::Stopped => {
-            let ipc = IpcError::new(
-                ErrorCode::ResourceBusy,
-                None,
-                format!(
-                    "Commande '{}' refusée : arrêt du daemon en cours ({mode})",
-                    cmd.command_type
-                ),
-                RetryClass::Never,
-            )
-            .with_command_id(cmd.command_id);
-            let _ = write_json_frame_timeout(stream, &ipc, RESPONSE_WRITE_TIMEOUT).await;
-            return false;
-        }
-        DaemonMode::Ready | DaemonMode::Degraded | DaemonMode::ReadOnlyRecovery => {}
+    if let Err(ipc) = validate_command_mode(state.current_mode(), &cmd) {
+        let _ = write_json_frame_timeout(stream, &ipc, RESPONSE_WRITE_TIMEOUT).await;
+        return false;
     }
 
     // Backpressure immédiate côté serveur IPC avant attente
@@ -760,9 +772,10 @@ async fn handle_command_frame(
     }
 
     if newly_committed && let Some(stop_reason) = prepared.stop_reason.take() {
-        state.set_mode(DaemonMode::Draining);
+        state.mark_draining();
         let _ = state.stop_tx.try_send(StopRequest {
             reason: stop_reason,
+            drain_timeout_override: prepared.stop_drain_timeout.take(),
             ack: None,
         });
     }
@@ -780,6 +793,7 @@ async fn handle_command_frame(
 struct PreparedCommand {
     req: CommitCommandRequest,
     stop_reason: Option<String>,
+    stop_drain_timeout: Option<Duration>,
 }
 
 async fn ensure_principal_registered(
@@ -920,9 +934,11 @@ fn prepare_create_project(
             budget_reservations: Vec::new(),
         },
         stop_reason: None,
+        stop_drain_timeout: None,
     })
 }
 
+#[derive(Debug)]
 struct AssignMissionFields {
     project_id: ProjectId,
     mission_id: MissionId,
@@ -1052,7 +1068,39 @@ fn prepare_assign_mission(
             budget_reservations: Vec::new(),
         },
         stop_reason: None,
+        stop_drain_timeout: None,
     })
+}
+
+pub(crate) fn validate_stop_drain_timeout_ms(
+    payload: &Map<String, Value>,
+    cid: CommandId,
+) -> Result<Option<Duration>, IpcError> {
+    let Some(val) = payload.get("drain_timeout_ms") else {
+        return Ok(None);
+    };
+    if val.is_null() {
+        return Ok(None);
+    }
+    let Some(ms) = val.as_u64() else {
+        return Err(IpcError::new(
+            ErrorCode::InvalidArgument,
+            None,
+            "StopDaemon : drain_timeout_ms doit être un entier positif ou nul en millisecondes",
+            RetryClass::Never,
+        )
+        .with_command_id(cid));
+    };
+    if ms > 3_600_000 {
+        return Err(IpcError::new(
+            ErrorCode::InvalidArgument,
+            None,
+            "StopDaemon : drain_timeout_ms dépasse la borne maximale de 3600000 ms",
+            RetryClass::Never,
+        )
+        .with_command_id(cid));
+    }
+    Ok(Some(Duration::from_millis(ms)))
 }
 
 fn prepare_stop_daemon(
@@ -1071,6 +1119,7 @@ fn prepare_stop_daemon(
         )
         .with_command_id(cid));
     }
+    let drain_timeout_override = validate_stop_drain_timeout_ms(&cmd.payload, cid)?;
     let reason = cmd
         .payload
         .get("reason")
@@ -1085,6 +1134,10 @@ fn prepare_stop_daemon(
         String::from("operation_id"),
         Value::String(op_id.to_string()),
     );
+    if let Some(dur) = drain_timeout_override {
+        let ms = u64::try_from(dur.as_millis()).unwrap_or(u64::MAX);
+        ev_payload.insert(String::from("drain_timeout_ms"), Value::from(ms));
+    }
 
     Ok(PreparedCommand {
         req: CommitCommandRequest {
@@ -1116,6 +1169,7 @@ fn prepare_stop_daemon(
             budget_reservations: Vec::new(),
         },
         stop_reason: Some(reason),
+        stop_drain_timeout: drain_timeout_override,
     })
 }
 
@@ -1187,6 +1241,7 @@ async fn prepare_mission_transition_command(
             budget_reservations: Vec::new(),
         },
         stop_reason: None,
+        stop_drain_timeout: None,
     })
 }
 
@@ -1283,23 +1338,126 @@ async fn publish_committed_events_for_command(
     receipt: &unleash_protocol::CommandReceipt,
     num_events: usize,
 ) {
+    publish_committed_events_ordered(
+        state,
+        receipt.event_cursor.stream_id,
+        receipt.event_cursor.sequence.as_u64(),
+        num_events,
+        &[],
+    )
+    .await;
+}
+
+fn is_contiguous_direct_batch(
+    batch: &[EventEnvelope],
+    prev_opt: Option<u64>,
+    target_end_seq: u64,
+) -> bool {
+    let Some(prev) = prev_opt else {
+        return false;
+    };
+    let mut iter = batch.iter();
+    let Some(first) = iter.next() else {
+        return false;
+    };
+    let mut expected = prev.saturating_add(1);
+    if first.sequence.as_u64() != expected {
+        return false;
+    }
+    for ev in iter {
+        expected = expected.saturating_add(1);
+        if ev.sequence.as_u64() != expected {
+            return false;
+        }
+    }
+    expected >= target_end_seq
+}
+
+/// Publie les événements engagés jusqu'à `target_end_seq` dans l'ordre strict de `sequence`
+/// afin qu'aucun commit concurrent ne soit perdu par avance prématurée de curseur.
+pub(crate) async fn publish_committed_events_ordered(
+    state: &DaemonRuntimeState,
+    stream_id: StreamId,
+    target_end_seq: u64,
+    num_events_hint: usize,
+    direct_fallback: &[EventEnvelope],
+) {
+    let mut guard = state.last_published_seq.lock().await;
+    let prev_opt = match *guard {
+        Some((sid, s)) if sid == stream_id => Some(s),
+        _ => None,
+    };
+    if prev_opt.is_some_and(|p| target_end_seq <= p) {
+        return;
+    }
+
+    if is_contiguous_direct_batch(direct_fallback, prev_opt, target_end_seq) {
+        let max_seq = direct_fallback
+            .last()
+            .map_or(target_end_seq, |ev| ev.sequence.as_u64());
+        state.subscriptions.publish_events(direct_fallback);
+        *guard = Some((stream_id, max_seq));
+        return;
+    }
+
+    let after_seq = prev_opt.unwrap_or_else(|| {
+        target_end_seq.saturating_sub(u64::try_from(num_events_hint.max(1)).unwrap_or(1))
+    });
     let store = Arc::clone(&state.store);
-    let stream_id = receipt.event_cursor.stream_id;
-    let end_seq = receipt.event_cursor.sequence.as_u64();
-    let after_seq = Sequence::new(end_seq.saturating_sub(u64::try_from(num_events).unwrap_or(1)));
-    let limit = u32::try_from(num_events.saturating_add(8)).unwrap_or(32);
-    let target_cmd_id = receipt.command_id;
+    let read_res =
+        tokio::task::spawn_blocking(move || -> Result<Option<Vec<EventEnvelope>>, StoreError> {
+            let mut cursor_seq = after_seq;
+            let mut collected = Vec::new();
+            while cursor_seq < target_end_seq {
+                match store.read_events(stream_id, Sequence::new(cursor_seq), 256, None)? {
+                    ReadEventsOutcome::ResyncRequired { .. } => return Ok(None),
+                    ReadEventsOutcome::Events { events, .. } => {
+                        if events.is_empty() {
+                            break;
+                        }
+                        let mut advanced = false;
+                        for ev in events {
+                            let s = ev.sequence.as_u64();
+                            if s > cursor_seq {
+                                cursor_seq = s;
+                                advanced = true;
+                                collected.push(ev);
+                            }
+                        }
+                        if !advanced {
+                            break;
+                        }
+                    }
+                }
+            }
+            Ok(Some(collected))
+        })
+        .await;
 
-    let res =
-        tokio::task::spawn_blocking(move || store.read_events(stream_id, after_seq, limit, None))
-            .await;
-
-    if let Ok(Ok(ReadEventsOutcome::Events { events, .. })) = res {
-        let matching: Vec<EventEnvelope> = events
-            .into_iter()
-            .filter(|ev| ev.command_id == Some(target_cmd_id))
-            .collect();
-        state.subscriptions.publish_events(&matching);
+    match read_res {
+        Ok(Ok(Some(mut collected))) if !collected.is_empty() => {
+            collected.sort_by_key(|ev| ev.sequence.as_u64());
+            let max_seq = collected
+                .last()
+                .map_or(target_end_seq, |ev| ev.sequence.as_u64());
+            state.subscriptions.publish_events(&collected);
+            *guard = Some((stream_id, max_seq));
+        }
+        _ => {
+            let mut fallback: Vec<EventEnvelope> = direct_fallback
+                .iter()
+                .filter(|ev| prev_opt.is_none_or(|p| ev.sequence.as_u64() > p))
+                .cloned()
+                .collect();
+            fallback.sort_by_key(|ev| ev.sequence.as_u64());
+            if !fallback.is_empty() {
+                let max_seq = fallback
+                    .last()
+                    .map_or(target_end_seq, |ev| ev.sequence.as_u64());
+                state.subscriptions.publish_events(&fallback);
+                *guard = Some((stream_id, max_seq));
+            }
+        }
     }
 }
 
@@ -1701,4 +1859,86 @@ async fn read_raw_frame_no_timeout(
         ));
     }
     Ok(Some(payload))
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing
+)]
+mod tests {
+    use unleash_domain::RequestId;
+
+    use super::*;
+
+    #[test]
+    fn detect_v1_protocol_error_rejects_v1_and_allows_v2() {
+        let v1 = r#"{"protocol_version":"unleash.ipc.v1","query_type":"GetDaemonStatus"}"#;
+        let err = detect_v1_protocol_error(v1).expect("v1 doit être rejeté");
+        assert_eq!(err.code, ErrorCode::ProtocolIncompatible);
+
+        let v2 = r#"{"protocol_version":"unleash.ipc.v2","query_type":"GetDaemonStatus"}"#;
+        assert!(detect_v1_protocol_error(v2).is_none());
+    }
+
+    #[test]
+    fn validate_stop_drain_timeout_ms_enforces_types_and_bounds() {
+        let cid = CommandId::from_u128(0x501);
+        let mut p = Map::new();
+        assert_eq!(validate_stop_drain_timeout_ms(&p, cid).unwrap(), None);
+
+        p.insert(String::from("drain_timeout_ms"), Value::Null);
+        assert_eq!(validate_stop_drain_timeout_ms(&p, cid).unwrap(), None);
+
+        p.insert(String::from("drain_timeout_ms"), Value::from(450));
+        assert_eq!(
+            validate_stop_drain_timeout_ms(&p, cid).unwrap(),
+            Some(Duration::from_millis(450))
+        );
+
+        p.insert(String::from("drain_timeout_ms"), Value::from(-5));
+        assert_eq!(
+            validate_stop_drain_timeout_ms(&p, cid).unwrap_err().code,
+            ErrorCode::InvalidArgument
+        );
+
+        p.insert(String::from("drain_timeout_ms"), Value::from(4_000_000));
+        assert_eq!(
+            validate_stop_drain_timeout_ms(&p, cid).unwrap_err().code,
+            ErrorCode::InvalidArgument
+        );
+    }
+
+    #[test]
+    fn parse_assign_mission_fields_validates_payload() {
+        let pid = ProjectId::from_u128(0x11);
+        let mut payload = Map::new();
+        payload.insert(String::from("completion_policy"), Value::from("human"));
+        payload.insert(String::from("state"), Value::from("ready"));
+        let cmd = CommandEnvelope {
+            protocol_version: ProtocolVersion,
+            request_id: RequestId::from_u128(1),
+            command_id: CommandId::from_u128(2),
+            authority_generation: AuthorityGeneration::from_u128(3),
+            actor_ref: None,
+            project_id: Some(pid),
+            aggregate_id: Uuid::from_u128(4),
+            expected_revision: Revision::INITIAL,
+            command_type: String::from("AssignMission"),
+            payload,
+        };
+        let fields = parse_assign_mission_fields(&cmd).unwrap();
+        assert_eq!(fields.completion_policy, CompletionPolicy::Human);
+        assert_eq!(fields.initial_state, MissionState::Ready);
+
+        let mut bad = cmd;
+        bad.payload
+            .insert(String::from("state"), Value::from("unknown_state"));
+        assert_eq!(
+            parse_assign_mission_fields(&bad).unwrap_err().code,
+            ErrorCode::InvalidArgument
+        );
+    }
 }
