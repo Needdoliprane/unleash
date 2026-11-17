@@ -34,7 +34,9 @@ pub use envelopes::{
     ProtocolVersion, QueryEnvelope, QueryResponse, ReceiptState, Sensitivity, SubscribeEventsFrame,
     SubscribeEventsRequest,
 };
-pub use errors::{ErrorCode, IpcError, ProtocolError, ReasonCode, RetryClass};
+pub use errors::{
+    ErrorCode, IpcError, ProtocolError, ReasonCode, RetryClass, UnknownReasonCodeError,
+};
 pub use operations::{OperationKind, OperationName, UnknownOperationError};
 pub use strict_json::{from_json_str_strict, parse_json_value_strict};
 pub use ts_export::{generate_all_ts_files, write_ts_bindings};

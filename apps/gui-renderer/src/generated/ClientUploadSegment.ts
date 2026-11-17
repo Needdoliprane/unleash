@@ -17,7 +17,7 @@ total_segments: number,
 /**
  * Position de départ en octets dans le fichier source.
  */
-byte_offset: bigint, 
+byte_offset: number, 
 /**
  * Longueur de ce segment en octets.
  */

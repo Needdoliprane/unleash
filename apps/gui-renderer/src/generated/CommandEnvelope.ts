@@ -39,6 +39,6 @@ expected_revision: number,
  */
 command_type: string, 
 /**
- * Charge utile métier de la commande.
+ * Charge utile métier de la commande (objet JSON).
  */
 payload: Record<string, unknown>, };

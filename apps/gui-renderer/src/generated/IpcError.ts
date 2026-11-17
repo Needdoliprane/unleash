@@ -29,4 +29,4 @@ command_id: string | null,
 /**
  * Révision courante de l'agrégat (présente uniquement lors de conflits de révision).
  */
-current_revision?: number | null, };
+current_revision?: number, };

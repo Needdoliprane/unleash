@@ -99,9 +99,9 @@ pub struct CommandEnvelope {
     pub expected_revision: Revision,
     /// Nom canonique de l'opération (ex: `PauseMission`).
     pub command_type: String,
-    /// Charge utile métier de la commande.
+    /// Charge utile métier de la commande (objet JSON).
     #[ts(type = "Record<string, unknown>")]
-    pub payload: serde_json::Value,
+    pub payload: serde_json::Map<String, serde_json::Value>,
 }
 
 impl CommandEnvelope {
@@ -313,9 +313,9 @@ pub struct EventEnvelope {
     /// Empreinte canonique SHA-256 du payload (`sha256:<hex64>`).
     #[ts(type = "string")]
     pub payload_hash: Sha256Digest,
-    /// Charge utile métier de l'événement.
+    /// Charge utile métier de l'événement (objet JSON).
     #[ts(type = "Record<string, unknown>")]
-    pub payload: serde_json::Value,
+    pub payload: serde_json::Map<String, serde_json::Value>,
     /// Niveau de sensibilité de l'événement.
     pub sensitivity: Sensitivity,
 }
@@ -334,9 +334,9 @@ pub struct QueryEnvelope {
     /// Périmètre projet optionnel.
     #[ts(type = "string | null")]
     pub project_id: Option<ProjectId>,
-    /// Paramètres typés de la lecture.
+    /// Paramètres typés de la lecture (objet JSON).
     #[ts(type = "Record<string, unknown>")]
-    pub payload: serde_json::Value,
+    pub payload: serde_json::Map<String, serde_json::Value>,
 }
 
 /// Réponse à une requête de lecture (`ipc-query-response.schema.json`).
@@ -408,6 +408,7 @@ pub struct HelloResponse {
     /// Taille suggérée des segments pour les uploads découpés (ex: 1 MiB).
     pub suggested_segment_bytes: u32,
     /// Durée de conservation garantie des réponses d'idempotence en secondes (ex: 7 jours).
+    #[ts(type = "number")]
     pub idempotency_retention_seconds: u64,
     /// Capacités exposées par le daemon.
     pub capabilities: Vec<String>,
@@ -471,6 +472,7 @@ pub struct ClientUploadSegment {
     /// Nombre total de segments attendus.
     pub total_segments: u32,
     /// Position de départ en octets dans le fichier source.
+    #[ts(type = "number")]
     pub byte_offset: u64,
     /// Longueur de ce segment en octets.
     pub byte_length: u32,

@@ -24,16 +24,23 @@ fn test_typescript_bindings_in_sync_with_repository() {
     let temp_path = std::env::temp_dir().join(format!("unleash-ts-test-{}", std::process::id()));
     write_ts_bindings(&temp_path).expect("Écriture des bindings TS dans le dossier temporaire");
 
-    // Si demandé explicitement ou si le dossier cible n'existe pas encore dans apps/,
-    // on synchronise apps/gui-renderer/src/generated
-    if std::env::var("UPDATE_TS_BINDINGS").is_ok() || !generated_dir.exists() {
+    // Régénérer uniquement si UPDATE_TS_BINDINGS est explicitement positionné (non vide et != "0")
+    let update_requested =
+        std::env::var_os("UPDATE_TS_BINDINGS").is_some_and(|v| !v.is_empty() && v != "0");
+    if update_requested {
         fs::create_dir_all(&generated_dir).expect("Création de apps/gui-renderer/src/generated");
         write_ts_bindings(&generated_dir).expect("Écriture des bindings TS dans apps/gui-renderer");
     }
 
+    assert!(
+        generated_dir.is_dir(),
+        "Le dossier {} est absent ; exécuter avec UPDATE_TS_BINDINGS=1 pour le régénérer",
+        generated_dir.display()
+    );
+
     let expected_files = generate_all_ts_files();
 
-    // Garde-fou : s'assurer que serde-compat et l'override de ProtocolVersion restent actifs
+    // Garde-fous : s'assurer que serde-compat, les types JS sûrs et le catalogue fermé restent conformes
     assert!(
         expected_files["ProtocolVersion.ts"].contains("\"unleash.ipc.v2\""),
         "ProtocolVersion.ts doit exposer le littéral \"unleash.ipc.v2\""
@@ -41,6 +48,46 @@ fn test_typescript_bindings_in_sync_with_repository() {
     assert!(
         expected_files["ReasonCode.ts"].contains("\"PUBLICATION_CONFLICT\""),
         "ReasonCode.ts doit respecter #[serde(rename = \"UPPER_SNAKE\")]"
+    );
+    assert!(
+        !expected_files["ReasonCode.ts"].contains("\"STREAM_RESYNC_REQUIRED\""),
+        "ReasonCode.ts ne doit pas contenir STREAM_RESYNC_REQUIRED"
+    );
+    for required_reason in [
+        "\"UNAUTHORIZED_ACTION\"",
+        "\"ACCESS_DENIED\"",
+        "\"PORT_IN_USE\"",
+        "\"GUARD_DENIED\"",
+        "\"AMBIGUOUS_REFERENCE\"",
+    ] {
+        assert!(
+            expected_files["ReasonCode.ts"].contains(required_reason),
+            "ReasonCode.ts doit contenir {required_reason}"
+        );
+    }
+    assert!(
+        expected_files["HelloResponse.ts"].contains("idempotency_retention_seconds: number,"),
+        "HelloResponse.ts doit typer idempotency_retention_seconds en number"
+    );
+    assert!(
+        !expected_files["HelloResponse.ts"].contains("bigint"),
+        "HelloResponse.ts ne doit pas exposer bigint"
+    );
+    assert!(
+        expected_files["ClientUploadSegment.ts"].contains("byte_offset: number,"),
+        "ClientUploadSegment.ts doit typer byte_offset en number"
+    );
+    assert!(
+        !expected_files["ClientUploadSegment.ts"].contains("bigint"),
+        "ClientUploadSegment.ts ne doit pas exposer bigint"
+    );
+    assert!(
+        expected_files["IpcError.ts"].contains("current_revision?: number,"),
+        "IpcError.ts doit typer current_revision?: number sans | null"
+    );
+    assert!(
+        !expected_files["IpcError.ts"].contains("current_revision?: number | null"),
+        "IpcError.ts ne doit pas autoriser null sur current_revision"
     );
     assert!(
         expected_files["SubscribeEventsFrame.ts"].contains("\"kind\": \"events\""),

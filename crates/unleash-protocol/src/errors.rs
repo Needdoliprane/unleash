@@ -184,6 +184,15 @@ pub enum ReasonCode {
     /// Conflit de version lors de l'application d'un contrat.
     #[serde(rename = "CONTRACT_VERSION_CONFLICT")]
     ContractVersionConflict,
+    /// La cible Git a bougé depuis l'état attendu (`oldOID` divergent).
+    #[serde(rename = "TARGET_MOVED")]
+    TargetMoved,
+    /// La référence ou l'objet source Git a changé depuis sa résolution.
+    #[serde(rename = "SOURCE_CHANGED")]
+    SourceChanged,
+    /// La cible Git créée avec précondition `ref_absent` existe déjà.
+    #[serde(rename = "TARGET_ALREADY_EXISTS")]
+    TargetAlreadyExists,
 
     // --- StaleFence ---
     /// Époque d'exécution, de tentative ou de lease obsolète.
@@ -287,11 +296,65 @@ pub enum ReasonCode {
     /// Délai d'assertion dépassé.
     #[serde(rename = "ASSERTION_TIMEOUT")]
     AssertionTimeout,
+    /// Rôle incompatible avec le profil d'entrée ou les contraintes contractuelles.
+    #[serde(rename = "INCOMPATIBLE_ROLE")]
+    IncompatibleRole,
+    /// Préconditions du reçu de découverte modifiées avant effet ou à la clôture.
+    #[serde(rename = "RECEIPT_STALE")]
+    ReceiptStale,
+    /// Borne temporelle de validité du reçu de découverte expirée.
+    #[serde(rename = "RECEIPT_VALIDATION_EXPIRED")]
+    ReceiptValidationExpired,
+    /// Chronologie de découverte ou réconciliation historique insuffisante.
+    #[serde(rename = "DISCOVERY_HISTORY_UNKNOWN")]
+    DiscoveryHistoryUnknown,
+    /// Dépendance entre missions introduisant un cycle dans le graphe.
+    #[serde(rename = "DEPENDENCY_CYCLE")]
+    DependencyCycle,
+    /// Conflit textuel lors de la préparation d'une intégration Git.
+    #[serde(rename = "MERGE_CONFLICT")]
+    MergeConflict,
+    /// Validation obligatoire absente ou rattachée à un ancien candidat.
+    #[serde(rename = "VALIDATION_MISSING")]
+    ValidationMissing,
+    /// Conflit de configuration de modèle ou de sélection.
+    #[serde(rename = "MODEL_CONFIGURATION_CONFLICT")]
+    ModelConfigurationConflict,
+    /// Filiation de contexte incomplète pour satisfaire la politique d'inclusion.
+    #[serde(rename = "CONTEXT_LINEAGE_INCOMPLETE")]
+    ContextLineageIncomplete,
+    /// Politiques de données inconciliables entre sources et destination.
+    #[serde(rename = "DATA_POLICY_CONFLICT")]
+    DataPolicyConflict,
+    /// Requête refusée par le fournisseur de modèle (`ModelOutcome::refusal`).
+    #[serde(rename = "PROVIDER_REFUSED")]
+    ProviderRefused,
+    /// Sortie modèle tronquée avant achèvement contractuel (`ModelOutcome::truncated`).
+    #[serde(rename = "OUTPUT_TRUNCATED")]
+    OutputTruncated,
+    /// Snapshot de capacités locales périmé ou invalidé.
+    #[serde(rename = "CAPABILITY_SNAPSHOT_STALE")]
+    CapabilitySnapshotStale,
+    /// Format de ressource documentaire non pris en charge.
+    #[serde(rename = "UNSUPPORTED_FORMAT")]
+    UnsupportedFormat,
 
     // --- OutcomeUnknown ---
     /// Effet externe sans observation probante : statut incertain.
     #[serde(rename = "UNRESOLVED_EFFECT")]
     UnresolvedEffect,
+    /// Effet Git possiblement accompli mais non attribuable avec certitude.
+    #[serde(rename = "GIT_OUTCOME_UNKNOWN")]
+    GitOutcomeUnknown,
+    /// Issue de lancement d'un processus ou terminal inconnue après coupure.
+    #[serde(rename = "LAUNCH_OUTCOME_UNKNOWN")]
+    LaunchOutcomeUnknown,
+    /// Issue d'envoi d'entrée vers un terminal inconnue après interruption.
+    #[serde(rename = "TERMINAL_INPUT_UNKNOWN")]
+    TerminalInputUnknown,
+    /// Issue d'un appel fournisseur modèle inconnue après envoi réseau.
+    #[serde(rename = "MODEL_CALL_OUTCOME_UNKNOWN")]
+    ModelCallOutcomeUnknown,
 
     // --- CapabilityDenied ---
     /// Capacité ou runtime manquant.
@@ -312,6 +375,98 @@ pub enum ReasonCode {
     /// Identité du pair ou de l'exécuteur non vérifiable.
     #[serde(rename = "IDENTITY_UNVERIFIED")]
     IdentityUnverified,
+    /// Tentative d'élargissement de permissions par un auteur ou une version.
+    #[serde(rename = "PERMISSION_EXPANSION_DENIED")]
+    PermissionExpansionDenied,
+    /// Inadéquation entre les capacités du rôle et le plafond du slot.
+    #[serde(rename = "CAPABILITY_MISMATCH")]
+    CapabilityMismatch,
+    /// Action non autorisée par le moteur de contrats ou les capacités du slot.
+    #[serde(rename = "UNAUTHORIZED_ACTION")]
+    UnauthorizedAction,
+    /// Serveur ou profil d'analyse de connaissances inutilisable.
+    #[serde(rename = "PROFILE_UNAVAILABLE")]
+    ProfileUnavailable,
+    /// Politique Git ou stratégie demandée refusée.
+    #[serde(rename = "POLICY_REFUSED")]
+    PolicyRefused,
+    /// Cible ou référence de conservation Git symbolique non supportée.
+    #[serde(rename = "SYMBOLIC_TARGET_UNSUPPORTED")]
+    SymbolicTargetUnsupported,
+    /// Version de Git système inférieure au minimum requis (2.39).
+    #[serde(rename = "GIT_VERSION_UNSUPPORTED")]
+    GitVersionUnsupported,
+    /// Outil externe requis non disponible pour le pool de terminaux.
+    #[serde(rename = "TOOL_UNAVAILABLE")]
+    ToolUnavailable,
+    /// Autorité humaine manquante sur les sources ou destination pour déclassifier.
+    #[serde(rename = "DECLASSIFICATION_AUTHORITY_REQUIRED")]
+    DeclassificationAuthorityRequired,
+    /// Référence distante de continuation de contexte interdite en V1.
+    #[serde(rename = "REMOTE_CONTEXT_REFERENCE_FORBIDDEN")]
+    RemoteContextReferenceForbidden,
+    /// Violation de la politique de localité des données (`local_only`).
+    #[serde(rename = "DATA_LOCALITY_VIOLATION")]
+    DataLocalityViolation,
+    /// Lieu réel d'inférence inconnu sous une politique exigeant la localité.
+    #[serde(rename = "INFERENCE_LOCALITY_UNKNOWN")]
+    InferenceLocalityUnknown,
+    /// Authentification du connecteur documentaire requise.
+    #[serde(rename = "CONNECTOR_AUTH_REQUIRED")]
+    ConnectorAuthRequired,
+    /// Accès du connecteur documentaire révoqué.
+    #[serde(rename = "CONNECTOR_ACCESS_REVOKED")]
+    ConnectorAccessRevoked,
+    /// Accès du connecteur documentaire non vérifiable (403 de raison inconnue).
+    #[serde(rename = "CONNECTOR_ACCESS_UNVERIFIED")]
+    ConnectorAccessUnverified,
+    /// Application cliente non autorisée sur la ressource du connecteur.
+    #[serde(rename = "CONNECTOR_APP_NOT_AUTHORIZED")]
+    ConnectorAppNotAuthorized,
+    /// Identité du compte de connecteur différente de la liaison attendue.
+    #[serde(rename = "ACCOUNT_IDENTITY_MISMATCH")]
+    AccountIdentityMismatch,
+    /// Trousseau ou coffre de secrets verrouillé.
+    #[serde(rename = "SECRET_STORE_LOCKED")]
+    SecretStoreLocked,
+    /// Accès au secret refusé par la politique d'autorisation.
+    #[serde(rename = "SECRET_ACCESS_DENIED")]
+    SecretAccessDenied,
+    /// Action refusée par la politique locale de sécurité.
+    #[serde(rename = "POLICY_DENIED")]
+    PolicyDenied,
+    /// Action refusée par le port AI-Guard.
+    #[serde(rename = "GUARD_DENIED")]
+    GuardDenied,
+    /// Réponse Allow d'AI-Guard porteuse d'une obligation non satisfaite ou non acceptée.
+    #[serde(rename = "GUARD_OBLIGATION_UNSATISFIED")]
+    GuardObligationUnsatisfied,
+    /// Approbation humaine requise par AI-Guard sur le scope et digest exacts.
+    #[serde(rename = "GUARD_APPROVAL_REQUIRED")]
+    GuardApprovalRequired,
+    /// Demande d'approbation AI-Guard non prise en charge par le profil de mapping.
+    #[serde(rename = "GUARD_APPROVAL_UNSUPPORTED")]
+    GuardApprovalUnsupported,
+    /// Service AI-Guard indisponible, en timeout ou réponse malformée.
+    #[serde(rename = "GUARD_UNAVAILABLE")]
+    GuardUnavailable,
+    /// Sujet suspendu localement (ou via AI-Guard).
+    #[serde(rename = "SUBJECT_SUSPENDED")]
+    SubjectSuspended,
+    /// Sujet définitivement révoqué.
+    #[serde(rename = "SUBJECT_REVOKED")]
+    SubjectRevoked,
+
+    // --- ScopeDenied ---
+    /// Source ou ressource hors autorisation du scope courant.
+    #[serde(rename = "ACCESS_DENIED")]
+    AccessDenied,
+    /// Origine ou attribution du reçu de découverte incompatible avec le canal ou mandat.
+    #[serde(rename = "DISCOVERY_ORIGIN_MISMATCH")]
+    DiscoveryOriginMismatch,
+    /// Autorisation d'accès aux preuves ou rapports révoquée.
+    #[serde(rename = "ACCESS_REVOKED")]
+    AccessRevoked,
 
     // --- BudgetExceeded ---
     /// Budget monétaire ou de tokens épuisé.
@@ -320,6 +475,20 @@ pub enum ReasonCode {
     /// Budget alloué à la supervision atteint.
     #[serde(rename = "SUPERVISION_BUDGET_EXHAUSTED")]
     SupervisionBudgetExhausted,
+    /// Budget de taille de contexte dépassé sans compaction possible.
+    #[serde(rename = "CONTEXT_BUDGET_EXCEEDED")]
+    ContextBudgetExceeded,
+    /// Catalogue tarifaire périmé sous politique `pricing_stale_policy = block`.
+    #[serde(rename = "PRICING_STALE")]
+    PricingStale,
+    /// Modèle distant sans tarif applicable dans le catalogue.
+    #[serde(rename = "PRICING_UNKNOWN")]
+    PricingUnknown,
+
+    // --- RateLimited ---
+    /// Limite de débit atteinte auprès d'un fournisseur externe (429/529 ou quota).
+    #[serde(rename = "PROVIDER_RATE_LIMITED")]
+    ProviderRateLimited,
 
     // --- ResourceBusy ---
     /// Le prédécesseur du Run n'a pas encore atteint un état terminal.
@@ -355,6 +524,51 @@ pub enum ReasonCode {
     /// Intervention humaine obligatoire avant de poursuivre l'automatisation.
     #[serde(rename = "AUTOMATION_HUMAN_STEP_REQUIRED")]
     AutomationHumanStepRequired,
+    /// Mutation détectée pendant la capture d'un snapshot de connaissances.
+    #[serde(rename = "SNAPSHOT_INCONSISTENT")]
+    SnapshotInconsistent,
+    /// Génération de l'index de connaissances en retard sur la source requise.
+    #[serde(rename = "INDEX_STALE")]
+    IndexStale,
+    /// Génération de la source avancée avant publication de l'index.
+    #[serde(rename = "SOURCE_ADVANCED")]
+    SourceAdvanced,
+    /// La branche cible Git est actuellement checkout dans un worktree.
+    #[serde(rename = "TARGET_CHECKED_OUT")]
+    TargetCheckedOut,
+    /// Chemin d'allocation de worktree déjà occupé.
+    #[serde(rename = "PATH_OCCUPIED")]
+    PathOccupied,
+    /// Branche Git déjà checkout ou allouée à un autre worktree.
+    #[serde(rename = "BRANCH_IN_USE")]
+    BranchInUse,
+    /// Worktree contenant du travail non committé ou non atteignable.
+    #[serde(rename = "DIRTY_WORKTREE")]
+    DirtyWorktree,
+    /// Un processus actif utilise encore le worktree ciblé.
+    #[serde(rename = "ACTIVE_PROCESS")]
+    ActiveProcess,
+    /// Terminal momentanément indisponible ou en attente de réconciliation.
+    #[serde(rename = "TERMINAL_UNAVAILABLE")]
+    TerminalUnavailable,
+    /// Port réseau déjà utilisé lors de l'allocation d'un service local.
+    #[serde(rename = "PORT_IN_USE")]
+    PortInUse,
+    /// Fournisseur de modèle distant momentanément indisponible.
+    #[serde(rename = "PROVIDER_UNAVAILABLE")]
+    ProviderUnavailable,
+    /// Modèle ou serveur d'inférence local momentanément indisponible.
+    #[serde(rename = "LOCAL_MODEL_UNAVAILABLE")]
+    LocalModelUnavailable,
+    /// File d'attente d'inférence du serveur local pleine.
+    #[serde(rename = "LOCAL_QUEUE_FULL")]
+    LocalQueueFull,
+    /// Délai de chargement du modèle local dépassé.
+    #[serde(rename = "LOCAL_LOAD_TIMEOUT")]
+    LocalLoadTimeout,
+    /// Ressources matérielles locales épuisées (ex: mémoire / VRAM).
+    #[serde(rename = "LOCAL_RESOURCE_EXHAUSTED")]
+    LocalResourceExhausted,
 
     // --- InvalidArgument ---
     /// Le prédécesseur a déjà un successeur direct.
@@ -381,6 +595,18 @@ pub enum ReasonCode {
     /// Taille ou complexité du document dépassant la limite autorisée.
     #[serde(rename = "SCHEMA_LIMIT_EXCEEDED")]
     SchemaLimitExceeded,
+    /// Référence non qualifiée correspondant à plusieurs entrées de registre.
+    #[serde(rename = "AMBIGUOUS_REFERENCE")]
+    AmbiguousReference,
+    /// Dépôt ou branche source unborn sans commit candidat à intégrer.
+    #[serde(rename = "SOURCE_NOT_COMMITTED")]
+    SourceNotCommitted,
+    /// Configuration ou dialecte de profil modèle invalide.
+    #[serde(rename = "INVALID_MODEL_CONFIG")]
+    InvalidModelConfig,
+    /// Classe d'effet inconnue dans l'`ActionIntent`.
+    #[serde(rename = "EFFECTS_CLASS_UNKNOWN")]
+    EffectsClassUnknown,
 
     // --- InternalFailure ---
     /// Disque plein lors de l'écriture en base (`SQLITE_FULL`).
@@ -398,34 +624,72 @@ pub enum ReasonCode {
     /// Invariant de domaine critique violé en base.
     #[serde(rename = "INVARIANT_VIOLATION")]
     InvariantViolation,
+    /// Journal durable d'événements ou d'audit indisponible en écriture.
+    #[serde(rename = "JOURNAL_UNAVAILABLE")]
+    JournalUnavailable,
+    /// Backend du coffre de secrets momentanément indisponible.
+    #[serde(rename = "SECRET_STORE_UNAVAILABLE")]
+    SecretStoreUnavailable,
 
     // --- NotFoundOrHidden ---
     /// Preuve obligatoire introuvable dans le journal.
     #[serde(rename = "EVIDENCE_MISSING")]
     EvidenceMissing,
+    /// Dépendance de skill ou version requise absente ou masquée.
+    #[serde(rename = "MISSING_DEPENDENCY")]
+    MissingDependency,
+    /// Bundle d'évaluation ou de version épinglé indisponible à la reprise.
+    #[serde(rename = "BUNDLE_UNAVAILABLE")]
+    BundleUnavailable,
+    /// Source de connaissances ou référence Git absente, purgée ou introuvable.
+    #[serde(rename = "SOURCE_MISSING")]
+    SourceMissing,
+    /// Ressource documentaire absente ou masquée par contrôle d'accès.
+    #[serde(rename = "RESOURCE_MISSING_OR_HIDDEN")]
+    ResourceMissingOrHidden,
+    /// Rapport ou archive historique absent ou purgé.
+    #[serde(rename = "HISTORY_UNAVAILABLE")]
+    HistoryUnavailable,
+    /// Référence de secret introuvable dans le coffre.
+    #[serde(rename = "SECRET_REF_NOT_FOUND")]
+    SecretRefNotFound,
 
     // --- IsolationUnavailable ---
     /// Profil d'isolation navigateur ou système non disponible.
     #[serde(rename = "AUTOMATION_PROFILE_UNAVAILABLE")]
     AutomationProfileUnavailable,
+    /// Backend d'isolation OS requis absent ou en échec en mode strict.
+    #[serde(rename = "ISOLATION_BACKEND_MISSING")]
+    IsolationBackendMissing,
+    /// Obligation d'isolation requise non imposable par le backend OS actif.
+    #[serde(rename = "ISOLATION_OBLIGATION_UNENFORCEABLE")]
+    IsolationObligationUnenforceable,
+
+    // --- ProtocolIncompatible ---
+    /// Capacité ou version de protocole AI-Guard non négociée ou incompatible.
+    #[serde(rename = "GUARD_PROTOCOL_UNSUPPORTED")]
+    GuardProtocolUnsupported,
 
     // --- ResyncRequired ---
     /// Curseur de lecture incrémentale expiré.
     #[serde(rename = "CURSOR_EXPIRED")]
     CursorExpired,
-    /// Stream d'événements resynchronisé après bascule ou restauration.
-    #[serde(rename = "STREAM_RESYNC_REQUIRED")]
-    StreamResyncRequired,
 }
 
 impl ReasonCode {
     /// Renvoie la classe d'erreur unique [`ErrorCode`] associée à cette raison.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "Correspondance exhaustive des 156 ReasonCode canoniques enregistrés"
+    )]
     #[must_use]
     pub const fn error_code(&self) -> ErrorCode {
         match self {
-            Self::PublicationConflict | Self::ContractVersionConflict => {
-                ErrorCode::RevisionConflict
-            }
+            Self::PublicationConflict
+            | Self::ContractVersionConflict
+            | Self::TargetMoved
+            | Self::SourceChanged
+            | Self::TargetAlreadyExists => ErrorCode::RevisionConflict,
 
             Self::StaleEpoch | Self::OwnerEpochChanged | Self::StaleAuthorityGeneration => {
                 ErrorCode::StaleFence
@@ -460,18 +724,73 @@ impl ReasonCode {
             | Self::AutomationAccountMismatch
             | Self::ExternalStateChanged
             | Self::ActionabilityTimeout
-            | Self::AssertionTimeout => ErrorCode::ContractViolation,
+            | Self::AssertionTimeout
+            | Self::IncompatibleRole
+            | Self::ReceiptStale
+            | Self::ReceiptValidationExpired
+            | Self::DiscoveryHistoryUnknown
+            | Self::DependencyCycle
+            | Self::MergeConflict
+            | Self::ValidationMissing
+            | Self::ModelConfigurationConflict
+            | Self::ContextLineageIncomplete
+            | Self::DataPolicyConflict
+            | Self::ProviderRefused
+            | Self::OutputTruncated
+            | Self::CapabilitySnapshotStale
+            | Self::UnsupportedFormat => ErrorCode::ContractViolation,
 
-            Self::UnresolvedEffect => ErrorCode::OutcomeUnknown,
+            Self::UnresolvedEffect
+            | Self::GitOutcomeUnknown
+            | Self::LaunchOutcomeUnknown
+            | Self::TerminalInputUnknown
+            | Self::ModelCallOutcomeUnknown => ErrorCode::OutcomeUnknown,
 
             Self::CapabilityUnavailable
             | Self::DecisionAuthorityRequired
             | Self::DefinitionRevoked
             | Self::ModelCallsForbidden
             | Self::OperationNotAuthorized
-            | Self::IdentityUnverified => ErrorCode::CapabilityDenied,
+            | Self::IdentityUnverified
+            | Self::PermissionExpansionDenied
+            | Self::CapabilityMismatch
+            | Self::UnauthorizedAction
+            | Self::ProfileUnavailable
+            | Self::PolicyRefused
+            | Self::SymbolicTargetUnsupported
+            | Self::GitVersionUnsupported
+            | Self::ToolUnavailable
+            | Self::DeclassificationAuthorityRequired
+            | Self::RemoteContextReferenceForbidden
+            | Self::DataLocalityViolation
+            | Self::InferenceLocalityUnknown
+            | Self::ConnectorAuthRequired
+            | Self::ConnectorAccessRevoked
+            | Self::ConnectorAccessUnverified
+            | Self::ConnectorAppNotAuthorized
+            | Self::AccountIdentityMismatch
+            | Self::SecretStoreLocked
+            | Self::SecretAccessDenied
+            | Self::PolicyDenied
+            | Self::GuardDenied
+            | Self::GuardObligationUnsatisfied
+            | Self::GuardApprovalRequired
+            | Self::GuardApprovalUnsupported
+            | Self::GuardUnavailable
+            | Self::SubjectSuspended
+            | Self::SubjectRevoked => ErrorCode::CapabilityDenied,
 
-            Self::BudgetExhausted | Self::SupervisionBudgetExhausted => ErrorCode::BudgetExceeded,
+            Self::AccessDenied | Self::DiscoveryOriginMismatch | Self::AccessRevoked => {
+                ErrorCode::ScopeDenied
+            }
+
+            Self::BudgetExhausted
+            | Self::SupervisionBudgetExhausted
+            | Self::ContextBudgetExceeded
+            | Self::PricingStale
+            | Self::PricingUnknown => ErrorCode::BudgetExceeded,
+
+            Self::ProviderRateLimited => ErrorCode::RateLimited,
 
             Self::PredecessorNotTerminal
             | Self::ObjectDeleting
@@ -483,7 +802,22 @@ impl ReasonCode {
             | Self::DaemonAlreadyRunning
             | Self::RestorationBlocked
             | Self::AccountingMismatch
-            | Self::AutomationHumanStepRequired => ErrorCode::ResourceBusy,
+            | Self::AutomationHumanStepRequired
+            | Self::SnapshotInconsistent
+            | Self::IndexStale
+            | Self::SourceAdvanced
+            | Self::TargetCheckedOut
+            | Self::PathOccupied
+            | Self::BranchInUse
+            | Self::DirtyWorktree
+            | Self::ActiveProcess
+            | Self::TerminalUnavailable
+            | Self::PortInUse
+            | Self::ProviderUnavailable
+            | Self::LocalModelUnavailable
+            | Self::LocalQueueFull
+            | Self::LocalLoadTimeout
+            | Self::LocalResourceExhausted => ErrorCode::ResourceBusy,
 
             Self::SuccessorExists
             | Self::ClientUploadMismatch
@@ -492,40 +826,75 @@ impl ReasonCode {
             | Self::UnknownValidator
             | Self::InvalidRuleParameters
             | Self::UnknownClaimPredicate
-            | Self::SchemaLimitExceeded => ErrorCode::InvalidArgument,
+            | Self::SchemaLimitExceeded
+            | Self::AmbiguousReference
+            | Self::SourceNotCommitted
+            | Self::InvalidModelConfig
+            | Self::EffectsClassUnknown => ErrorCode::InvalidArgument,
 
             Self::StorageFull
             | Self::StorageUnavailable
             | Self::StorageCorrupt
             | Self::StorageBuildUnqualified
-            | Self::InvariantViolation => ErrorCode::InternalFailure,
+            | Self::InvariantViolation
+            | Self::JournalUnavailable
+            | Self::SecretStoreUnavailable => ErrorCode::InternalFailure,
 
-            Self::EvidenceMissing => ErrorCode::NotFoundOrHidden,
+            Self::EvidenceMissing
+            | Self::MissingDependency
+            | Self::BundleUnavailable
+            | Self::SourceMissing
+            | Self::ResourceMissingOrHidden
+            | Self::HistoryUnavailable
+            | Self::SecretRefNotFound => ErrorCode::NotFoundOrHidden,
 
-            Self::AutomationProfileUnavailable => ErrorCode::IsolationUnavailable,
+            Self::AutomationProfileUnavailable
+            | Self::IsolationBackendMissing
+            | Self::IsolationObligationUnenforceable => ErrorCode::IsolationUnavailable,
 
-            Self::CursorExpired | Self::StreamResyncRequired => ErrorCode::ResyncRequired,
+            Self::GuardProtocolUnsupported => ErrorCode::ProtocolIncompatible,
+
+            Self::CursorExpired => ErrorCode::ResyncRequired,
         }
     }
 
     /// Renvoie la politique de reprise par défaut ([`RetryClass`]) stipulée par le contrat canonique.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "Correspondance exhaustive des 156 ReasonCode canoniques enregistrés"
+    )]
     #[must_use]
     pub const fn default_retry_class(&self) -> RetryClass {
         match self {
             Self::PublicationConflict
             | Self::ContractVersionConflict
+            | Self::TargetMoved
+            | Self::SourceChanged
+            | Self::TargetAlreadyExists
             | Self::OwnerEpochChanged
             | Self::StaleEvidence
             | Self::EvidenceSnapshotMismatch
+            | Self::ReceiptStale
+            | Self::SnapshotInconsistent
+            | Self::IndexStale
+            | Self::SourceAdvanced
+            | Self::PricingStale
+            | Self::ConnectorAccessUnverified
             | Self::PredecessorNotTerminal
             | Self::ObjectDeleting
-            | Self::CursorExpired
-            | Self::StreamResyncRequired => RetryClass::AfterRefresh,
+            | Self::CursorExpired => RetryClass::AfterRefresh,
 
             Self::StaleEpoch
             | Self::UnresolvedEffect
+            | Self::GitOutcomeUnknown
+            | Self::LaunchOutcomeUnknown
+            | Self::TerminalInputUnknown
+            | Self::ModelCallOutcomeUnknown
             | Self::IdentityUnverified
-            | Self::ExternalStateChanged => RetryClass::AfterReconciliation,
+            | Self::ExternalStateChanged
+            | Self::ReceiptValidationExpired
+            | Self::DiscoveryHistoryUnknown
+            | Self::TerminalUnavailable => RetryClass::AfterReconciliation,
 
             Self::Backpressure
             | Self::StorageBusy
@@ -533,7 +902,16 @@ impl ReasonCode {
             | Self::AuthorityAlreadyActive
             | Self::StorageUnavailable
             | Self::ActionabilityTimeout
-            | Self::AssertionTimeout => RetryClass::AfterBackoff,
+            | Self::AssertionTimeout
+            | Self::PortInUse
+            | Self::ProviderRateLimited
+            | Self::ProviderUnavailable
+            | Self::LocalModelUnavailable
+            | Self::LocalQueueFull
+            | Self::LocalLoadTimeout
+            | Self::JournalUnavailable
+            | Self::SecretStoreUnavailable
+            | Self::GuardUnavailable => RetryClass::AfterBackoff,
 
             Self::DoneNotMet
             | Self::LoopExhausted
@@ -548,16 +926,52 @@ impl ReasonCode {
             | Self::BusinessConstraintViolated
             | Self::BusinessPostconditionFailed
             | Self::AutomationAccountMismatch
+            | Self::MergeConflict
+            | Self::ValidationMissing
+            | Self::ModelConfigurationConflict
+            | Self::ContextLineageIncomplete
+            | Self::DataPolicyConflict
+            | Self::ProviderRefused
+            | Self::OutputTruncated
+            | Self::CapabilitySnapshotStale
             | Self::CapabilityUnavailable
             | Self::DecisionAuthorityRequired
+            | Self::CapabilityMismatch
+            | Self::ProfileUnavailable
+            | Self::PolicyRefused
+            | Self::GitVersionUnsupported
+            | Self::ToolUnavailable
+            | Self::DeclassificationAuthorityRequired
+            | Self::InferenceLocalityUnknown
+            | Self::ConnectorAuthRequired
+            | Self::ConnectorAppNotAuthorized
+            | Self::AccountIdentityMismatch
+            | Self::SecretStoreLocked
+            | Self::GuardApprovalRequired
+            | Self::SubjectSuspended
+            | Self::AccessRevoked
             | Self::BudgetExhausted
             | Self::SupervisionBudgetExhausted
+            | Self::ContextBudgetExceeded
+            | Self::PricingUnknown
             | Self::StorageLowSpace
             | Self::RestorationBlocked
             | Self::AccountingMismatch
             | Self::AutomationHumanStepRequired
+            | Self::TargetCheckedOut
+            | Self::PathOccupied
+            | Self::BranchInUse
+            | Self::DirtyWorktree
+            | Self::ActiveProcess
+            | Self::LocalResourceExhausted
+            | Self::SourceNotCommitted
             | Self::StorageFull
-            | Self::AutomationProfileUnavailable => RetryClass::AfterHumanDecision,
+            | Self::MissingDependency
+            | Self::BundleUnavailable
+            | Self::SourceMissing
+            | Self::AutomationProfileUnavailable
+            | Self::IsolationBackendMissing
+            | Self::IsolationObligationUnenforceable => RetryClass::AfterHumanDecision,
 
             Self::StaleAuthorityGeneration
             | Self::BindingAlreadyEngaged
@@ -572,9 +986,26 @@ impl ReasonCode {
             | Self::DiscoveryEvidenceMissing
             | Self::EvidenceUnavailable
             | Self::AutomationModePolicyMismatch
+            | Self::IncompatibleRole
+            | Self::DependencyCycle
+            | Self::UnsupportedFormat
             | Self::DefinitionRevoked
             | Self::ModelCallsForbidden
             | Self::OperationNotAuthorized
+            | Self::PermissionExpansionDenied
+            | Self::UnauthorizedAction
+            | Self::SymbolicTargetUnsupported
+            | Self::RemoteContextReferenceForbidden
+            | Self::DataLocalityViolation
+            | Self::ConnectorAccessRevoked
+            | Self::SecretAccessDenied
+            | Self::PolicyDenied
+            | Self::GuardDenied
+            | Self::GuardObligationUnsatisfied
+            | Self::GuardApprovalUnsupported
+            | Self::SubjectRevoked
+            | Self::AccessDenied
+            | Self::DiscoveryOriginMismatch
             | Self::DaemonAlreadyRunning
             | Self::SuccessorExists
             | Self::ClientUploadMismatch
@@ -584,19 +1015,33 @@ impl ReasonCode {
             | Self::InvalidRuleParameters
             | Self::UnknownClaimPredicate
             | Self::SchemaLimitExceeded
+            | Self::AmbiguousReference
+            | Self::InvalidModelConfig
+            | Self::EffectsClassUnknown
             | Self::StorageCorrupt
             | Self::StorageBuildUnqualified
             | Self::InvariantViolation
-            | Self::EvidenceMissing => RetryClass::Never,
+            | Self::EvidenceMissing
+            | Self::ResourceMissingOrHidden
+            | Self::HistoryUnavailable
+            | Self::SecretRefNotFound
+            | Self::GuardProtocolUnsupported => RetryClass::Never,
         }
     }
 
     /// Renvoie la chaîne textuelle wire canonique (`UPPER_SNAKE`).
+    #[expect(
+        clippy::too_many_lines,
+        reason = "Correspondance exhaustive des 156 ReasonCode canoniques enregistrés"
+    )]
     #[must_use]
     pub const fn as_str(&self) -> &'static str {
         match self {
             Self::PublicationConflict => "PUBLICATION_CONFLICT",
             Self::ContractVersionConflict => "CONTRACT_VERSION_CONFLICT",
+            Self::TargetMoved => "TARGET_MOVED",
+            Self::SourceChanged => "SOURCE_CHANGED",
+            Self::TargetAlreadyExists => "TARGET_ALREADY_EXISTS",
             Self::StaleEpoch => "STALE_EPOCH",
             Self::OwnerEpochChanged => "OWNER_EPOCH_CHANGED",
             Self::StaleAuthorityGeneration => "STALE_AUTHORITY_GENERATION",
@@ -630,15 +1075,67 @@ impl ReasonCode {
             Self::ExternalStateChanged => "EXTERNAL_STATE_CHANGED",
             Self::ActionabilityTimeout => "ACTIONABILITY_TIMEOUT",
             Self::AssertionTimeout => "ASSERTION_TIMEOUT",
+            Self::IncompatibleRole => "INCOMPATIBLE_ROLE",
+            Self::ReceiptStale => "RECEIPT_STALE",
+            Self::ReceiptValidationExpired => "RECEIPT_VALIDATION_EXPIRED",
+            Self::DiscoveryHistoryUnknown => "DISCOVERY_HISTORY_UNKNOWN",
+            Self::DependencyCycle => "DEPENDENCY_CYCLE",
+            Self::MergeConflict => "MERGE_CONFLICT",
+            Self::ValidationMissing => "VALIDATION_MISSING",
+            Self::ModelConfigurationConflict => "MODEL_CONFIGURATION_CONFLICT",
+            Self::ContextLineageIncomplete => "CONTEXT_LINEAGE_INCOMPLETE",
+            Self::DataPolicyConflict => "DATA_POLICY_CONFLICT",
+            Self::ProviderRefused => "PROVIDER_REFUSED",
+            Self::OutputTruncated => "OUTPUT_TRUNCATED",
+            Self::CapabilitySnapshotStale => "CAPABILITY_SNAPSHOT_STALE",
+            Self::UnsupportedFormat => "UNSUPPORTED_FORMAT",
             Self::UnresolvedEffect => "UNRESOLVED_EFFECT",
+            Self::GitOutcomeUnknown => "GIT_OUTCOME_UNKNOWN",
+            Self::LaunchOutcomeUnknown => "LAUNCH_OUTCOME_UNKNOWN",
+            Self::TerminalInputUnknown => "TERMINAL_INPUT_UNKNOWN",
+            Self::ModelCallOutcomeUnknown => "MODEL_CALL_OUTCOME_UNKNOWN",
             Self::CapabilityUnavailable => "CAPABILITY_UNAVAILABLE",
             Self::DecisionAuthorityRequired => "DECISION_AUTHORITY_REQUIRED",
             Self::DefinitionRevoked => "DEFINITION_REVOKED",
             Self::ModelCallsForbidden => "MODEL_CALLS_FORBIDDEN",
             Self::OperationNotAuthorized => "OPERATION_NOT_AUTHORIZED",
             Self::IdentityUnverified => "IDENTITY_UNVERIFIED",
+            Self::PermissionExpansionDenied => "PERMISSION_EXPANSION_DENIED",
+            Self::CapabilityMismatch => "CAPABILITY_MISMATCH",
+            Self::UnauthorizedAction => "UNAUTHORIZED_ACTION",
+            Self::ProfileUnavailable => "PROFILE_UNAVAILABLE",
+            Self::PolicyRefused => "POLICY_REFUSED",
+            Self::SymbolicTargetUnsupported => "SYMBOLIC_TARGET_UNSUPPORTED",
+            Self::GitVersionUnsupported => "GIT_VERSION_UNSUPPORTED",
+            Self::ToolUnavailable => "TOOL_UNAVAILABLE",
+            Self::DeclassificationAuthorityRequired => "DECLASSIFICATION_AUTHORITY_REQUIRED",
+            Self::RemoteContextReferenceForbidden => "REMOTE_CONTEXT_REFERENCE_FORBIDDEN",
+            Self::DataLocalityViolation => "DATA_LOCALITY_VIOLATION",
+            Self::InferenceLocalityUnknown => "INFERENCE_LOCALITY_UNKNOWN",
+            Self::ConnectorAuthRequired => "CONNECTOR_AUTH_REQUIRED",
+            Self::ConnectorAccessRevoked => "CONNECTOR_ACCESS_REVOKED",
+            Self::ConnectorAccessUnverified => "CONNECTOR_ACCESS_UNVERIFIED",
+            Self::ConnectorAppNotAuthorized => "CONNECTOR_APP_NOT_AUTHORIZED",
+            Self::AccountIdentityMismatch => "ACCOUNT_IDENTITY_MISMATCH",
+            Self::SecretStoreLocked => "SECRET_STORE_LOCKED",
+            Self::SecretAccessDenied => "SECRET_ACCESS_DENIED",
+            Self::PolicyDenied => "POLICY_DENIED",
+            Self::GuardDenied => "GUARD_DENIED",
+            Self::GuardObligationUnsatisfied => "GUARD_OBLIGATION_UNSATISFIED",
+            Self::GuardApprovalRequired => "GUARD_APPROVAL_REQUIRED",
+            Self::GuardApprovalUnsupported => "GUARD_APPROVAL_UNSUPPORTED",
+            Self::GuardUnavailable => "GUARD_UNAVAILABLE",
+            Self::SubjectSuspended => "SUBJECT_SUSPENDED",
+            Self::SubjectRevoked => "SUBJECT_REVOKED",
+            Self::AccessDenied => "ACCESS_DENIED",
+            Self::DiscoveryOriginMismatch => "DISCOVERY_ORIGIN_MISMATCH",
+            Self::AccessRevoked => "ACCESS_REVOKED",
             Self::BudgetExhausted => "BUDGET_EXHAUSTED",
             Self::SupervisionBudgetExhausted => "SUPERVISION_BUDGET_EXHAUSTED",
+            Self::ContextBudgetExceeded => "CONTEXT_BUDGET_EXCEEDED",
+            Self::PricingStale => "PRICING_STALE",
+            Self::PricingUnknown => "PRICING_UNKNOWN",
+            Self::ProviderRateLimited => "PROVIDER_RATE_LIMITED",
             Self::PredecessorNotTerminal => "PREDECESSOR_NOT_TERMINAL",
             Self::ObjectDeleting => "OBJECT_DELETING",
             Self::Backpressure => "BACKPRESSURE",
@@ -650,6 +1147,21 @@ impl ReasonCode {
             Self::RestorationBlocked => "RESTORATION_BLOCKED",
             Self::AccountingMismatch => "ACCOUNTING_MISMATCH",
             Self::AutomationHumanStepRequired => "AUTOMATION_HUMAN_STEP_REQUIRED",
+            Self::SnapshotInconsistent => "SNAPSHOT_INCONSISTENT",
+            Self::IndexStale => "INDEX_STALE",
+            Self::SourceAdvanced => "SOURCE_ADVANCED",
+            Self::TargetCheckedOut => "TARGET_CHECKED_OUT",
+            Self::PathOccupied => "PATH_OCCUPIED",
+            Self::BranchInUse => "BRANCH_IN_USE",
+            Self::DirtyWorktree => "DIRTY_WORKTREE",
+            Self::ActiveProcess => "ACTIVE_PROCESS",
+            Self::TerminalUnavailable => "TERMINAL_UNAVAILABLE",
+            Self::PortInUse => "PORT_IN_USE",
+            Self::ProviderUnavailable => "PROVIDER_UNAVAILABLE",
+            Self::LocalModelUnavailable => "LOCAL_MODEL_UNAVAILABLE",
+            Self::LocalQueueFull => "LOCAL_QUEUE_FULL",
+            Self::LocalLoadTimeout => "LOCAL_LOAD_TIMEOUT",
+            Self::LocalResourceExhausted => "LOCAL_RESOURCE_EXHAUSTED",
             Self::SuccessorExists => "SUCCESSOR_EXISTS",
             Self::ClientUploadMismatch => "CLIENT_UPLOAD_MISMATCH",
             Self::ControlReserveIncoherent => "CONTROL_RESERVE_INCOHERENT",
@@ -658,16 +1170,197 @@ impl ReasonCode {
             Self::InvalidRuleParameters => "INVALID_RULE_PARAMETERS",
             Self::UnknownClaimPredicate => "UNKNOWN_CLAIM_PREDICATE",
             Self::SchemaLimitExceeded => "SCHEMA_LIMIT_EXCEEDED",
+            Self::AmbiguousReference => "AMBIGUOUS_REFERENCE",
+            Self::SourceNotCommitted => "SOURCE_NOT_COMMITTED",
+            Self::InvalidModelConfig => "INVALID_MODEL_CONFIG",
+            Self::EffectsClassUnknown => "EFFECTS_CLASS_UNKNOWN",
             Self::StorageFull => "STORAGE_FULL",
             Self::StorageUnavailable => "STORAGE_UNAVAILABLE",
             Self::StorageCorrupt => "STORAGE_CORRUPT",
             Self::StorageBuildUnqualified => "STORAGE_BUILD_UNQUALIFIED",
             Self::InvariantViolation => "INVARIANT_VIOLATION",
+            Self::JournalUnavailable => "JOURNAL_UNAVAILABLE",
+            Self::SecretStoreUnavailable => "SECRET_STORE_UNAVAILABLE",
             Self::EvidenceMissing => "EVIDENCE_MISSING",
+            Self::MissingDependency => "MISSING_DEPENDENCY",
+            Self::BundleUnavailable => "BUNDLE_UNAVAILABLE",
+            Self::SourceMissing => "SOURCE_MISSING",
+            Self::ResourceMissingOrHidden => "RESOURCE_MISSING_OR_HIDDEN",
+            Self::HistoryUnavailable => "HISTORY_UNAVAILABLE",
+            Self::SecretRefNotFound => "SECRET_REF_NOT_FOUND",
             Self::AutomationProfileUnavailable => "AUTOMATION_PROFILE_UNAVAILABLE",
+            Self::IsolationBackendMissing => "ISOLATION_BACKEND_MISSING",
+            Self::IsolationObligationUnenforceable => "ISOLATION_OBLIGATION_UNENFORCEABLE",
+            Self::GuardProtocolUnsupported => "GUARD_PROTOCOL_UNSUPPORTED",
             Self::CursorExpired => "CURSOR_EXPIRED",
-            Self::StreamResyncRequired => "STREAM_RESYNC_REQUIRED",
         }
+    }
+
+    /// Renvoie la liste exhaustive des 156 raisons d'erreur canoniques enregistrées.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "Catalogue exhaustif des 156 ReasonCode canoniques enregistrés"
+    )]
+    #[must_use]
+    pub const fn all_reasons() -> &'static [Self] {
+        &[
+            Self::PublicationConflict,
+            Self::ContractVersionConflict,
+            Self::TargetMoved,
+            Self::SourceChanged,
+            Self::TargetAlreadyExists,
+            Self::StaleEpoch,
+            Self::OwnerEpochChanged,
+            Self::StaleAuthorityGeneration,
+            Self::BindingAlreadyEngaged,
+            Self::StaleEvidence,
+            Self::DoneNotMet,
+            Self::LoopExhausted,
+            Self::ContractRejected,
+            Self::TerminalImmutable,
+            Self::IdempotencyWindowExpired,
+            Self::AppliedDraftConflict,
+            Self::AppliedDraftImmutable,
+            Self::ExpectedExecutionMissing,
+            Self::EvidenceExecutionMismatch,
+            Self::EvidenceProjectionInvalid,
+            Self::EvidenceAmbiguous,
+            Self::EvidenceSnapshotMismatch,
+            Self::ClaimContradicted,
+            Self::DiscoveryRequired,
+            Self::DiscoveryEvidenceMissing,
+            Self::RestoreIncomplete,
+            Self::EvidenceUnavailable,
+            Self::AutomationModePolicyMismatch,
+            Self::AutomationBundleUnavailable,
+            Self::AutomationTargetMissing,
+            Self::AutomationTargetAmbiguous,
+            Self::AutomationTargetDrift,
+            Self::BusinessConstraintViolated,
+            Self::BusinessPostconditionFailed,
+            Self::AutomationAccountMismatch,
+            Self::ExternalStateChanged,
+            Self::ActionabilityTimeout,
+            Self::AssertionTimeout,
+            Self::IncompatibleRole,
+            Self::ReceiptStale,
+            Self::ReceiptValidationExpired,
+            Self::DiscoveryHistoryUnknown,
+            Self::DependencyCycle,
+            Self::MergeConflict,
+            Self::ValidationMissing,
+            Self::ModelConfigurationConflict,
+            Self::ContextLineageIncomplete,
+            Self::DataPolicyConflict,
+            Self::ProviderRefused,
+            Self::OutputTruncated,
+            Self::CapabilitySnapshotStale,
+            Self::UnsupportedFormat,
+            Self::UnresolvedEffect,
+            Self::GitOutcomeUnknown,
+            Self::LaunchOutcomeUnknown,
+            Self::TerminalInputUnknown,
+            Self::ModelCallOutcomeUnknown,
+            Self::CapabilityUnavailable,
+            Self::DecisionAuthorityRequired,
+            Self::DefinitionRevoked,
+            Self::ModelCallsForbidden,
+            Self::OperationNotAuthorized,
+            Self::IdentityUnverified,
+            Self::PermissionExpansionDenied,
+            Self::CapabilityMismatch,
+            Self::UnauthorizedAction,
+            Self::ProfileUnavailable,
+            Self::PolicyRefused,
+            Self::SymbolicTargetUnsupported,
+            Self::GitVersionUnsupported,
+            Self::ToolUnavailable,
+            Self::DeclassificationAuthorityRequired,
+            Self::RemoteContextReferenceForbidden,
+            Self::DataLocalityViolation,
+            Self::InferenceLocalityUnknown,
+            Self::ConnectorAuthRequired,
+            Self::ConnectorAccessRevoked,
+            Self::ConnectorAccessUnverified,
+            Self::ConnectorAppNotAuthorized,
+            Self::AccountIdentityMismatch,
+            Self::SecretStoreLocked,
+            Self::SecretAccessDenied,
+            Self::PolicyDenied,
+            Self::GuardDenied,
+            Self::GuardObligationUnsatisfied,
+            Self::GuardApprovalRequired,
+            Self::GuardApprovalUnsupported,
+            Self::GuardUnavailable,
+            Self::SubjectSuspended,
+            Self::SubjectRevoked,
+            Self::AccessDenied,
+            Self::DiscoveryOriginMismatch,
+            Self::AccessRevoked,
+            Self::BudgetExhausted,
+            Self::SupervisionBudgetExhausted,
+            Self::ContextBudgetExceeded,
+            Self::PricingStale,
+            Self::PricingUnknown,
+            Self::ProviderRateLimited,
+            Self::PredecessorNotTerminal,
+            Self::ObjectDeleting,
+            Self::Backpressure,
+            Self::StorageBusy,
+            Self::StorageLowSpace,
+            Self::RecoveryInProgress,
+            Self::AuthorityAlreadyActive,
+            Self::DaemonAlreadyRunning,
+            Self::RestorationBlocked,
+            Self::AccountingMismatch,
+            Self::AutomationHumanStepRequired,
+            Self::SnapshotInconsistent,
+            Self::IndexStale,
+            Self::SourceAdvanced,
+            Self::TargetCheckedOut,
+            Self::PathOccupied,
+            Self::BranchInUse,
+            Self::DirtyWorktree,
+            Self::ActiveProcess,
+            Self::TerminalUnavailable,
+            Self::PortInUse,
+            Self::ProviderUnavailable,
+            Self::LocalModelUnavailable,
+            Self::LocalQueueFull,
+            Self::LocalLoadTimeout,
+            Self::LocalResourceExhausted,
+            Self::SuccessorExists,
+            Self::ClientUploadMismatch,
+            Self::ControlReserveIncoherent,
+            Self::AutomationInputInvalid,
+            Self::UnknownValidator,
+            Self::InvalidRuleParameters,
+            Self::UnknownClaimPredicate,
+            Self::SchemaLimitExceeded,
+            Self::AmbiguousReference,
+            Self::SourceNotCommitted,
+            Self::InvalidModelConfig,
+            Self::EffectsClassUnknown,
+            Self::StorageFull,
+            Self::StorageUnavailable,
+            Self::StorageCorrupt,
+            Self::StorageBuildUnqualified,
+            Self::InvariantViolation,
+            Self::JournalUnavailable,
+            Self::SecretStoreUnavailable,
+            Self::EvidenceMissing,
+            Self::MissingDependency,
+            Self::BundleUnavailable,
+            Self::SourceMissing,
+            Self::ResourceMissingOrHidden,
+            Self::HistoryUnavailable,
+            Self::SecretRefNotFound,
+            Self::AutomationProfileUnavailable,
+            Self::IsolationBackendMissing,
+            Self::IsolationObligationUnenforceable,
+            Self::GuardProtocolUnsupported,
+            Self::CursorExpired,
+        ]
     }
 }
 
@@ -685,10 +1378,17 @@ pub struct UnknownReasonCodeError(pub String);
 impl FromStr for ReasonCode {
     type Err = UnknownReasonCodeError;
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "Correspondance exhaustive des 156 ReasonCode canoniques enregistrés"
+    )]
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
             "PUBLICATION_CONFLICT" => Ok(Self::PublicationConflict),
             "CONTRACT_VERSION_CONFLICT" => Ok(Self::ContractVersionConflict),
+            "TARGET_MOVED" => Ok(Self::TargetMoved),
+            "SOURCE_CHANGED" => Ok(Self::SourceChanged),
+            "TARGET_ALREADY_EXISTS" => Ok(Self::TargetAlreadyExists),
             "STALE_EPOCH" => Ok(Self::StaleEpoch),
             "OWNER_EPOCH_CHANGED" => Ok(Self::OwnerEpochChanged),
             "STALE_AUTHORITY_GENERATION" => Ok(Self::StaleAuthorityGeneration),
@@ -722,15 +1422,67 @@ impl FromStr for ReasonCode {
             "EXTERNAL_STATE_CHANGED" => Ok(Self::ExternalStateChanged),
             "ACTIONABILITY_TIMEOUT" => Ok(Self::ActionabilityTimeout),
             "ASSERTION_TIMEOUT" => Ok(Self::AssertionTimeout),
+            "INCOMPATIBLE_ROLE" => Ok(Self::IncompatibleRole),
+            "RECEIPT_STALE" => Ok(Self::ReceiptStale),
+            "RECEIPT_VALIDATION_EXPIRED" => Ok(Self::ReceiptValidationExpired),
+            "DISCOVERY_HISTORY_UNKNOWN" => Ok(Self::DiscoveryHistoryUnknown),
+            "DEPENDENCY_CYCLE" => Ok(Self::DependencyCycle),
+            "MERGE_CONFLICT" => Ok(Self::MergeConflict),
+            "VALIDATION_MISSING" => Ok(Self::ValidationMissing),
+            "MODEL_CONFIGURATION_CONFLICT" => Ok(Self::ModelConfigurationConflict),
+            "CONTEXT_LINEAGE_INCOMPLETE" => Ok(Self::ContextLineageIncomplete),
+            "DATA_POLICY_CONFLICT" => Ok(Self::DataPolicyConflict),
+            "PROVIDER_REFUSED" => Ok(Self::ProviderRefused),
+            "OUTPUT_TRUNCATED" => Ok(Self::OutputTruncated),
+            "CAPABILITY_SNAPSHOT_STALE" => Ok(Self::CapabilitySnapshotStale),
+            "UNSUPPORTED_FORMAT" => Ok(Self::UnsupportedFormat),
             "UNRESOLVED_EFFECT" => Ok(Self::UnresolvedEffect),
+            "GIT_OUTCOME_UNKNOWN" => Ok(Self::GitOutcomeUnknown),
+            "LAUNCH_OUTCOME_UNKNOWN" => Ok(Self::LaunchOutcomeUnknown),
+            "TERMINAL_INPUT_UNKNOWN" => Ok(Self::TerminalInputUnknown),
+            "MODEL_CALL_OUTCOME_UNKNOWN" => Ok(Self::ModelCallOutcomeUnknown),
             "CAPABILITY_UNAVAILABLE" => Ok(Self::CapabilityUnavailable),
             "DECISION_AUTHORITY_REQUIRED" => Ok(Self::DecisionAuthorityRequired),
             "DEFINITION_REVOKED" => Ok(Self::DefinitionRevoked),
             "MODEL_CALLS_FORBIDDEN" => Ok(Self::ModelCallsForbidden),
             "OPERATION_NOT_AUTHORIZED" => Ok(Self::OperationNotAuthorized),
             "IDENTITY_UNVERIFIED" => Ok(Self::IdentityUnverified),
+            "PERMISSION_EXPANSION_DENIED" => Ok(Self::PermissionExpansionDenied),
+            "CAPABILITY_MISMATCH" => Ok(Self::CapabilityMismatch),
+            "UNAUTHORIZED_ACTION" => Ok(Self::UnauthorizedAction),
+            "PROFILE_UNAVAILABLE" => Ok(Self::ProfileUnavailable),
+            "POLICY_REFUSED" => Ok(Self::PolicyRefused),
+            "SYMBOLIC_TARGET_UNSUPPORTED" => Ok(Self::SymbolicTargetUnsupported),
+            "GIT_VERSION_UNSUPPORTED" => Ok(Self::GitVersionUnsupported),
+            "TOOL_UNAVAILABLE" => Ok(Self::ToolUnavailable),
+            "DECLASSIFICATION_AUTHORITY_REQUIRED" => Ok(Self::DeclassificationAuthorityRequired),
+            "REMOTE_CONTEXT_REFERENCE_FORBIDDEN" => Ok(Self::RemoteContextReferenceForbidden),
+            "DATA_LOCALITY_VIOLATION" => Ok(Self::DataLocalityViolation),
+            "INFERENCE_LOCALITY_UNKNOWN" => Ok(Self::InferenceLocalityUnknown),
+            "CONNECTOR_AUTH_REQUIRED" => Ok(Self::ConnectorAuthRequired),
+            "CONNECTOR_ACCESS_REVOKED" => Ok(Self::ConnectorAccessRevoked),
+            "CONNECTOR_ACCESS_UNVERIFIED" => Ok(Self::ConnectorAccessUnverified),
+            "CONNECTOR_APP_NOT_AUTHORIZED" => Ok(Self::ConnectorAppNotAuthorized),
+            "ACCOUNT_IDENTITY_MISMATCH" => Ok(Self::AccountIdentityMismatch),
+            "SECRET_STORE_LOCKED" => Ok(Self::SecretStoreLocked),
+            "SECRET_ACCESS_DENIED" => Ok(Self::SecretAccessDenied),
+            "POLICY_DENIED" => Ok(Self::PolicyDenied),
+            "GUARD_DENIED" => Ok(Self::GuardDenied),
+            "GUARD_OBLIGATION_UNSATISFIED" => Ok(Self::GuardObligationUnsatisfied),
+            "GUARD_APPROVAL_REQUIRED" => Ok(Self::GuardApprovalRequired),
+            "GUARD_APPROVAL_UNSUPPORTED" => Ok(Self::GuardApprovalUnsupported),
+            "GUARD_UNAVAILABLE" => Ok(Self::GuardUnavailable),
+            "SUBJECT_SUSPENDED" => Ok(Self::SubjectSuspended),
+            "SUBJECT_REVOKED" => Ok(Self::SubjectRevoked),
+            "ACCESS_DENIED" => Ok(Self::AccessDenied),
+            "DISCOVERY_ORIGIN_MISMATCH" => Ok(Self::DiscoveryOriginMismatch),
+            "ACCESS_REVOKED" => Ok(Self::AccessRevoked),
             "BUDGET_EXHAUSTED" => Ok(Self::BudgetExhausted),
             "SUPERVISION_BUDGET_EXHAUSTED" => Ok(Self::SupervisionBudgetExhausted),
+            "CONTEXT_BUDGET_EXCEEDED" => Ok(Self::ContextBudgetExceeded),
+            "PRICING_STALE" => Ok(Self::PricingStale),
+            "PRICING_UNKNOWN" => Ok(Self::PricingUnknown),
+            "PROVIDER_RATE_LIMITED" => Ok(Self::ProviderRateLimited),
             "PREDECESSOR_NOT_TERMINAL" => Ok(Self::PredecessorNotTerminal),
             "OBJECT_DELETING" => Ok(Self::ObjectDeleting),
             "BACKPRESSURE" => Ok(Self::Backpressure),
@@ -742,6 +1494,21 @@ impl FromStr for ReasonCode {
             "RESTORATION_BLOCKED" => Ok(Self::RestorationBlocked),
             "ACCOUNTING_MISMATCH" => Ok(Self::AccountingMismatch),
             "AUTOMATION_HUMAN_STEP_REQUIRED" => Ok(Self::AutomationHumanStepRequired),
+            "SNAPSHOT_INCONSISTENT" => Ok(Self::SnapshotInconsistent),
+            "INDEX_STALE" => Ok(Self::IndexStale),
+            "SOURCE_ADVANCED" => Ok(Self::SourceAdvanced),
+            "TARGET_CHECKED_OUT" => Ok(Self::TargetCheckedOut),
+            "PATH_OCCUPIED" => Ok(Self::PathOccupied),
+            "BRANCH_IN_USE" => Ok(Self::BranchInUse),
+            "DIRTY_WORKTREE" => Ok(Self::DirtyWorktree),
+            "ACTIVE_PROCESS" => Ok(Self::ActiveProcess),
+            "TERMINAL_UNAVAILABLE" => Ok(Self::TerminalUnavailable),
+            "PORT_IN_USE" => Ok(Self::PortInUse),
+            "PROVIDER_UNAVAILABLE" => Ok(Self::ProviderUnavailable),
+            "LOCAL_MODEL_UNAVAILABLE" => Ok(Self::LocalModelUnavailable),
+            "LOCAL_QUEUE_FULL" => Ok(Self::LocalQueueFull),
+            "LOCAL_LOAD_TIMEOUT" => Ok(Self::LocalLoadTimeout),
+            "LOCAL_RESOURCE_EXHAUSTED" => Ok(Self::LocalResourceExhausted),
             "SUCCESSOR_EXISTS" => Ok(Self::SuccessorExists),
             "CLIENT_UPLOAD_MISMATCH" => Ok(Self::ClientUploadMismatch),
             "CONTROL_RESERVE_INCOHERENT" => Ok(Self::ControlReserveIncoherent),
@@ -750,17 +1517,39 @@ impl FromStr for ReasonCode {
             "INVALID_RULE_PARAMETERS" => Ok(Self::InvalidRuleParameters),
             "UNKNOWN_CLAIM_PREDICATE" => Ok(Self::UnknownClaimPredicate),
             "SCHEMA_LIMIT_EXCEEDED" => Ok(Self::SchemaLimitExceeded),
+            "AMBIGUOUS_REFERENCE" => Ok(Self::AmbiguousReference),
+            "SOURCE_NOT_COMMITTED" => Ok(Self::SourceNotCommitted),
+            "INVALID_MODEL_CONFIG" => Ok(Self::InvalidModelConfig),
+            "EFFECTS_CLASS_UNKNOWN" => Ok(Self::EffectsClassUnknown),
             "STORAGE_FULL" => Ok(Self::StorageFull),
             "STORAGE_UNAVAILABLE" => Ok(Self::StorageUnavailable),
             "STORAGE_CORRUPT" => Ok(Self::StorageCorrupt),
             "STORAGE_BUILD_UNQUALIFIED" => Ok(Self::StorageBuildUnqualified),
             "INVARIANT_VIOLATION" => Ok(Self::InvariantViolation),
+            "JOURNAL_UNAVAILABLE" => Ok(Self::JournalUnavailable),
+            "SECRET_STORE_UNAVAILABLE" => Ok(Self::SecretStoreUnavailable),
             "EVIDENCE_MISSING" => Ok(Self::EvidenceMissing),
+            "MISSING_DEPENDENCY" => Ok(Self::MissingDependency),
+            "BUNDLE_UNAVAILABLE" => Ok(Self::BundleUnavailable),
+            "SOURCE_MISSING" => Ok(Self::SourceMissing),
+            "RESOURCE_MISSING_OR_HIDDEN" => Ok(Self::ResourceMissingOrHidden),
+            "HISTORY_UNAVAILABLE" => Ok(Self::HistoryUnavailable),
+            "SECRET_REF_NOT_FOUND" => Ok(Self::SecretRefNotFound),
             "AUTOMATION_PROFILE_UNAVAILABLE" => Ok(Self::AutomationProfileUnavailable),
+            "ISOLATION_BACKEND_MISSING" => Ok(Self::IsolationBackendMissing),
+            "ISOLATION_OBLIGATION_UNENFORCEABLE" => Ok(Self::IsolationObligationUnenforceable),
+            "GUARD_PROTOCOL_UNSUPPORTED" => Ok(Self::GuardProtocolUnsupported),
             "CURSOR_EXPIRED" => Ok(Self::CursorExpired),
-            "STREAM_RESYNC_REQUIRED" => Ok(Self::StreamResyncRequired),
             _ => Err(UnknownReasonCodeError(s.to_owned())),
         }
+    }
+}
+
+impl TryFrom<&str> for ReasonCode {
+    type Error = UnknownReasonCodeError;
+
+    fn try_from(s: &str) -> Result<Self, Self::Error> {
+        s.parse()
     }
 }
 
@@ -787,9 +1576,20 @@ pub struct IpcError {
     #[ts(type = "string | null")]
     pub command_id: Option<CommandId>,
     /// Révision courante de l'agrégat (présente uniquement lors de conflits de révision).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[ts(type = "number | null")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_present_revision"
+    )]
+    #[ts(type = "number")]
     pub current_revision: Option<Revision>,
+}
+
+fn deserialize_present_revision<'de, D>(deserializer: D) -> Result<Option<Revision>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Revision::deserialize(deserializer).map(Some)
 }
 
 impl IpcError {

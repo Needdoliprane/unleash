@@ -12,7 +12,7 @@
 )]
 
 use chrono::{DateTime, Utc};
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 use std::fs;
 use std::path::Path;
 use unleash_domain::{
@@ -26,6 +26,13 @@ use unleash_protocol::{
     QueryResponse, ReasonCode, ReceiptState, RetryClass, Sensitivity, SubscribeEventsFrame,
     SubscribeEventsRequest, from_json_str_strict,
 };
+
+fn json_obj(value: Value) -> Map<String, Value> {
+    match value {
+        Value::Object(map) => map,
+        other => panic!("La fixture de test doit être un objet JSON, obtenu : {other:?}"),
+    }
+}
 
 fn load_schema(rel_path: &str) -> Value {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
@@ -114,12 +121,35 @@ fn test_validate_ipc_command_schema() {
     assert!(matches!(bad_uuid_res, Err(ProtocolError::Json(_))));
 
     // 6. Cas négatif : champ inconnu rejeté
-    let mut unknown_field = fixture_val;
+    let mut unknown_field = fixture_val.clone();
     unknown_field["extra_privileged_flag"] = json!(true);
     assert!(!validator.is_valid(&unknown_field));
     let unknown_res: Result<CommandEnvelope, _> =
         from_json_str_strict(&serde_json::to_string(&unknown_field).unwrap());
     assert!(matches!(unknown_res, Err(ProtocolError::Json(_))));
+
+    // 7. Cas négatif : payload non-objet rejeté par le schéma ET par from_json_str_strict
+    for invalid_payload in [
+        json!([]),
+        json!([1, 2]),
+        json!("texte"),
+        json!(42),
+        json!(true),
+        Value::Null,
+    ] {
+        let mut bad_payload = fixture_val.clone();
+        bad_payload["payload"] = invalid_payload;
+        assert!(
+            !validator.is_valid(&bad_payload),
+            "Un payload non-objet doit être rejeté par ipc-command.schema.json"
+        );
+        let res: Result<CommandEnvelope, _> =
+            from_json_str_strict(&serde_json::to_string(&bad_payload).unwrap());
+        assert!(
+            matches!(res, Err(ProtocolError::Json(_))),
+            "CommandEnvelope doit rejeter tout payload non-objet, obtenu : {res:?}"
+        );
+    }
 }
 
 #[test]
@@ -214,6 +244,20 @@ fn test_validate_ipc_error_schema() {
     assert_eq!(err_conflict_val["current_revision"], 42);
     assert!(validator.is_valid(&err_conflict_val));
 
+    // Cas négatif : current_revision: null rejeté par le schéma ET par from_json_str_strict
+    let mut null_rev_val = err_val;
+    null_rev_val["current_revision"] = Value::Null;
+    assert!(
+        !validator.is_valid(&null_rev_val),
+        "current_revision: null doit être rejeté par ipc-error.schema.json"
+    );
+    let null_rev_res: Result<IpcError, _> =
+        from_json_str_strict(&serde_json::to_string(&null_rev_val).unwrap());
+    assert!(
+        matches!(null_rev_res, Err(ProtocolError::Json(_))),
+        "IpcError doit rejeter current_revision: null, obtenu : {null_rev_res:?}"
+    );
+
     // Vérifier les 17 ErrorCode et 5 RetryClass
     for code in [
         ErrorCode::InvalidArgument,
@@ -268,12 +312,12 @@ fn sample_event_envelope() -> EventEnvelope {
         payload_hash: "sha256:396829e2a6811b428d99e673f23edf4797fd06a2b78736afd2b92ba42fc77cc7"
             .parse::<Sha256Digest>()
             .unwrap(),
-        payload: json!({
+        payload: json_obj(json!({
             "attempt_id": "00000000-0000-4000-8000-000000000021",
             "authority_generation": "00000000-0000-4000-8000-000000000018",
             "daemon_epoch": 12,
             "slot_reservation_id": "00000000-0000-4000-8000-000000000022"
-        }),
+        })),
         sensitivity: Sensitivity::Project,
     }
 }
@@ -293,6 +337,28 @@ fn test_validate_event_schema() {
         validator.is_valid(&event_val),
         "InvocationAdmitted doit valider event.schema.json"
     );
+
+    // Cas négatif : payload non-objet rejeté par le schéma ET par from_json_str_strict
+    for invalid_payload in [
+        json!([]),
+        json!("texte"),
+        json!(99),
+        json!(false),
+        Value::Null,
+    ] {
+        let mut bad_event = event_val.clone();
+        bad_event["payload"] = invalid_payload;
+        assert!(
+            !validator.is_valid(&bad_event),
+            "EventEnvelope doit refuser payload non-objet dans event.schema.json"
+        );
+        let res: Result<EventEnvelope, _> =
+            from_json_str_strict(&serde_json::to_string(&bad_event).unwrap());
+        assert!(
+            matches!(res, Err(ProtocolError::Json(_))),
+            "EventEnvelope doit rejeter tout payload non-objet, obtenu : {res:?}"
+        );
+    }
 }
 
 #[test]
@@ -306,7 +372,7 @@ fn test_validate_ipc_query_schemas() {
         project_id: Some(ProjectId::from_uuid(uuid::uuid!(
             "00000000-0000-4000-8000-000000000003"
         ))),
-        payload: json!({ "agent_id": "00000000-0000-4000-8000-000000000050" }),
+        payload: json_obj(json!({ "agent_id": "00000000-0000-4000-8000-000000000050" })),
     };
 
     let query_val = serde_json::to_value(&query).unwrap();
@@ -314,6 +380,28 @@ fn test_validate_ipc_query_schemas() {
         query_validator.is_valid(&query_val),
         "QueryEnvelope doit valider ipc-query.schema.json"
     );
+
+    // Cas négatif : payload non-objet rejeté par ipc-query.schema.json ET par from_json_str_strict
+    for invalid_payload in [
+        json!([]),
+        json!("texte"),
+        json!(1),
+        json!(true),
+        Value::Null,
+    ] {
+        let mut bad_query = query_val.clone();
+        bad_query["payload"] = invalid_payload;
+        assert!(
+            !query_validator.is_valid(&bad_query),
+            "QueryEnvelope doit refuser payload non-objet dans ipc-query.schema.json"
+        );
+        let res: Result<QueryEnvelope, _> =
+            from_json_str_strict(&serde_json::to_string(&bad_query).unwrap());
+        assert!(
+            matches!(res, Err(ProtocolError::Json(_))),
+            "QueryEnvelope doit rejeter tout payload non-objet, obtenu : {res:?}"
+        );
+    }
 
     let resp_validator = build_validator("ipc-query-response.schema.json");
     let stream_id = StreamId::from_uuid(uuid::uuid!("00000000-0000-4000-8000-000000000006"));

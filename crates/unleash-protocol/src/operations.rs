@@ -5,8 +5,6 @@
 //!
 //! Invariant : bijection exacte 1-à-1 avec le catalogue de conception.
 
-#![allow(clippy::too_many_lines, clippy::match_same_arms)]
-
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::str::FromStr;
@@ -443,6 +441,10 @@ pub enum OperationName {
 
 impl OperationName {
     /// Renvoie le nom textuel canonique de l'opération.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "Table exhaustive 1-à-1 des 204 opérations du catalogue"
+    )]
     #[must_use]
     pub const fn as_str(&self) -> &'static str {
         match self {
@@ -654,6 +656,11 @@ impl OperationName {
     }
 
     /// Renvoie la nature (kind) de l'opération.
+    #[expect(
+        clippy::too_many_lines,
+        clippy::match_same_arms,
+        reason = "Table exhaustive 1-à-1 des 204 opérations du catalogue"
+    )]
     #[must_use]
     pub const fn kind(&self) -> OperationKind {
         match self {
@@ -865,6 +872,11 @@ impl OperationName {
     }
 
     /// Renvoie les identifiants de groupes de parité GUI/TUI associés.
+    #[expect(
+        clippy::too_many_lines,
+        clippy::match_same_arms,
+        reason = "Table exhaustive 1-à-1 des 204 opérations du catalogue"
+    )]
     #[must_use]
     pub const fn parity_group_ids(&self) -> &'static [&'static str] {
         match self {
@@ -1154,6 +1166,10 @@ impl OperationName {
     }
 
     /// Renvoie la liste ordonnée des 204 opérations.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "Liste exhaustive des 204 opérations du catalogue"
+    )]
     #[must_use]
     pub const fn all_operations() -> &'static [Self] {
         &[
@@ -1379,6 +1395,10 @@ pub struct UnknownOperationError(pub String);
 impl FromStr for OperationName {
     type Err = UnknownOperationError;
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "Table exhaustive 1-à-1 des 204 opérations du catalogue"
+    )]
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
             "AcceptStep" => Ok(Self::AcceptStep),

@@ -52,7 +52,7 @@ struct CommandDigestV2Payload<'a> {
     authority_generation: &'a AuthorityGeneration,
     command_type: &'a str,
     expected_revision: Revision,
-    payload: &'a serde_json::Value,
+    payload: &'a serde_json::Map<String, serde_json::Value>,
     project_id: Option<ProjectId>,
     protocol_version: &'a str,
 }

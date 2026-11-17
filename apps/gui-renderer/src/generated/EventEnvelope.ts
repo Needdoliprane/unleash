@@ -63,7 +63,7 @@ command_id: string | null,
  */
 payload_hash: string, 
 /**
- * Charge utile métier de l'événement.
+ * Charge utile métier de l'événement (objet JSON).
  */
 payload: Record<string, unknown>, 
 /**

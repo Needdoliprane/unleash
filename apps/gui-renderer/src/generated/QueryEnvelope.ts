@@ -19,6 +19,6 @@ query_type: string,
  */
 project_id: string | null, 
 /**
- * Paramètres typés de la lecture.
+ * Paramètres typés de la lecture (objet JSON).
  */
 payload: Record<string, unknown>, };

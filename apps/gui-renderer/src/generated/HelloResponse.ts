@@ -33,7 +33,7 @@ suggested_segment_bytes: number,
 /**
  * Durée de conservation garantie des réponses d'idempotence en secondes (ex: 7 jours).
  */
-idempotency_retention_seconds: bigint, 
+idempotency_retention_seconds: number, 
 /**
  * Capacités exposées par le daemon.
  */

@@ -10,7 +10,7 @@
     clippy::cast_possible_truncation
 )]
 
-use serde_json::json;
+use serde_json::{Map, Value, json};
 use unleash_domain::{
     AuthorityGeneration, CommandId, ProjectId, RequestId, Revision, Sha256Digest,
 };
@@ -18,6 +18,13 @@ use unleash_protocol::{
     CommandEnvelope, ProtocolVersion, canonical_sha256, canonicalize_to_string,
     compute_command_digest_v2,
 };
+
+fn json_obj(value: Value) -> Map<String, Value> {
+    match value {
+        Value::Object(map) => map,
+        other => panic!("La fixture de test doit être un objet JSON, obtenu : {other:?}"),
+    }
+}
 
 #[test]
 fn test_rfc8785_canonicalization_vectors() {
@@ -102,10 +109,10 @@ fn test_compute_command_digest_v2_stability_and_sensitivity() {
         aggregate_id: uuid::uuid!("00000000-0000-4000-8000-000000000004"),
         expected_revision: Revision::new(8),
         command_type: "PauseMission".to_string(),
-        payload: json!({
+        payload: json_obj(json!({
             "reason": "inspection utilisateur",
             "metadata": { "b": 2, "a": 1 }
-        }),
+        })),
     };
 
     let base_digest = compute_command_digest_v2(&base_envelope).expect("Digest original");
@@ -137,10 +144,10 @@ fn test_compute_command_digest_v2_stability_and_sensitivity() {
 
     // 3. Stabilité par rapport à l'ordre des clés dans le payload JSON (normalisation JCS)
     let mut reordered_payload_envelope = base_envelope.clone();
-    reordered_payload_envelope.payload = json!({
+    reordered_payload_envelope.payload = json_obj(json!({
         "metadata": { "a": 1, "b": 2 },
         "reason": "inspection utilisateur"
-    });
+    }));
     assert_eq!(
         base_digest,
         compute_command_digest_v2(&reordered_payload_envelope).unwrap(),
@@ -176,7 +183,7 @@ fn test_compute_command_digest_v2_stability_and_sensitivity() {
 
     // 4f. payload
     let mut diff_payload = base_envelope.clone();
-    diff_payload.payload = json!({ "reason": "autre raison" });
+    diff_payload.payload = json_obj(json!({ "reason": "autre raison" }));
     assert_ne!(
         base_digest,
         compute_command_digest_v2(&diff_payload).unwrap()

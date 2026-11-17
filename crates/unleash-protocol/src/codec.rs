@@ -10,13 +10,12 @@
 //! - Protection `DoS` : toute trame annonçant une taille supérieure à 8 MiB est immédiatement
 //!   rejetée **avant** toute allocation mémoire proportionnelle.
 
-#![allow(clippy::cast_possible_truncation, clippy::indexing_slicing)]
-
 use crate::errors::ProtocolError;
 use std::io::{Read, Write};
 
 /// Taille maximale d'une trame en octets (8 MiB = 8 * 1024 * 1024 = `8_388_608`).
 pub const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
+const MAX_FRAME_BYTES_U32: u32 = 8 * 1024 * 1024;
 
 /// Lit une trame complète depuis un lecteur synchrone [`std::io::Read`].
 ///
@@ -31,8 +30,11 @@ pub fn read_frame<R: Read>(reader: &mut R) -> Result<Option<Vec<u8>>, ProtocolEr
     let mut header = [0u8; 4];
     let mut bytes_read = 0;
 
-    while bytes_read < 4 {
-        match reader.read(&mut header[bytes_read..]) {
+    while let Some(buf) = header.get_mut(bytes_read..) {
+        if buf.is_empty() {
+            break;
+        }
+        match reader.read(buf) {
             Ok(0) => {
                 if bytes_read == 0 {
                     return Ok(None);
@@ -46,18 +48,27 @@ pub fn read_frame<R: Read>(reader: &mut R) -> Result<Option<Vec<u8>>, ProtocolEr
     }
 
     let length = u32::from_be_bytes(header);
-    if (length as usize) > MAX_FRAME_BYTES {
+    let Ok(length_usize) = usize::try_from(length) else {
         return Err(ProtocolError::FrameTooLarge {
             length,
-            max: MAX_FRAME_BYTES as u32,
+            max: MAX_FRAME_BYTES_U32,
+        });
+    };
+    if length_usize > MAX_FRAME_BYTES {
+        return Err(ProtocolError::FrameTooLarge {
+            length,
+            max: MAX_FRAME_BYTES_U32,
         });
     }
 
-    let mut payload = vec![0u8; length as usize];
+    let mut payload = vec![0u8; length_usize];
     let mut payload_read = 0;
 
-    while payload_read < length as usize {
-        match reader.read(&mut payload[payload_read..]) {
+    while let Some(buf) = payload.get_mut(payload_read..) {
+        if buf.is_empty() {
+            break;
+        }
+        match reader.read(buf) {
             Ok(0) => return Err(ProtocolError::UnexpectedEof),
             Ok(n) => payload_read += n,
             Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
@@ -76,12 +87,15 @@ pub fn read_frame<R: Read>(reader: &mut R) -> Result<Option<Vec<u8>>, ProtocolEr
 pub fn write_frame<W: Write>(writer: &mut W, payload: &[u8]) -> Result<(), ProtocolError> {
     if payload.len() > MAX_FRAME_BYTES {
         return Err(ProtocolError::FrameTooLarge {
-            length: payload.len() as u32,
-            max: MAX_FRAME_BYTES as u32,
+            length: u32::try_from(payload.len()).unwrap_or(u32::MAX),
+            max: MAX_FRAME_BYTES_U32,
         });
     }
 
-    let length = payload.len() as u32;
+    let length = u32::try_from(payload.len()).map_err(|_| ProtocolError::FrameTooLarge {
+        length: u32::MAX,
+        max: MAX_FRAME_BYTES_U32,
+    })?;
     writer.write_all(&length.to_be_bytes())?;
     writer.write_all(payload)?;
     writer.flush()?;
@@ -114,28 +128,39 @@ impl FrameBuffer {
     /// # Errors
     /// Renvoie [`ProtocolError::FrameTooLarge`] si la longueur annoncée par l'en-tête dépasse 8 MiB.
     pub fn next_frame(&mut self) -> Result<Option<Vec<u8>>, ProtocolError> {
-        if self.buffer.len() < 4 {
+        let Some(header_slice) = self.buffer.get(..4) else {
             return Ok(None);
-        }
-
-        let mut header = [0u8; 4];
-        header.copy_from_slice(&self.buffer[..4]);
-        let length = u32::from_be_bytes(header) as usize;
+        };
+        let header: [u8; 4] = header_slice
+            .try_into()
+            .map_err(|_| ProtocolError::Validation("En-tête de trame IPC invalide".to_owned()))?;
+        let length_u32 = u32::from_be_bytes(header);
+        let Ok(length) = usize::try_from(length_u32) else {
+            return Err(ProtocolError::FrameTooLarge {
+                length: length_u32,
+                max: MAX_FRAME_BYTES_U32,
+            });
+        };
 
         if length > MAX_FRAME_BYTES {
             return Err(ProtocolError::FrameTooLarge {
-                length: length as u32,
-                max: MAX_FRAME_BYTES as u32,
+                length: length_u32,
+                max: MAX_FRAME_BYTES_U32,
             });
         }
 
-        let total_needed = 4 + length;
-        if self.buffer.len() < total_needed {
+        let Some(total_needed) = 4_usize.checked_add(length) else {
+            return Err(ProtocolError::FrameTooLarge {
+                length: length_u32,
+                max: MAX_FRAME_BYTES_U32,
+            });
+        };
+        let Some(frame_slice) = self.buffer.get(4..total_needed) else {
             return Ok(None);
-        }
+        };
 
         // Extrait la trame et retire les octets consommés
-        let frame = self.buffer[4..total_needed].to_vec();
+        let frame = frame_slice.to_vec();
         self.buffer.drain(..total_needed);
         Ok(Some(frame))
     }
