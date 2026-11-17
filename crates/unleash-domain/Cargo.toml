@@ -1,0 +1,24 @@
+[package]
+name = "unleash-domain"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+repository.workspace = true
+description = "OVPT Unleash — Types de domaine, identités, machines à états et transitions pures sans I/O"
+
+[lints]
+workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+uuid.workspace = true
+sha2.workspace = true
+hex.workspace = true
+chrono.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
