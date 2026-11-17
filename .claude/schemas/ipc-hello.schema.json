@@ -1,0 +1,117 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:ovpt:unleash:ipc-hello:1",
+  "title": "Handshake Hello proposé",
+  "description": "Trames de négociation Hello client-serveur (HelloRequest ou HelloResponse).",
+  "oneOf": [
+    {
+      "$ref": "#/$defs/HelloRequest"
+    },
+    {
+      "$ref": "#/$defs/HelloResponse"
+    }
+  ],
+  "$defs": {
+    "HelloRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "protocol_version",
+        "client_kind",
+        "client_version",
+        "capabilities"
+      ],
+      "properties": {
+        "protocol_version": {
+          "type": "string",
+          "enum": [
+            "unleash.ipc.v2"
+          ]
+        },
+        "client_kind": {
+          "type": "string",
+          "enum": [
+            "cli",
+            "tui",
+            "gui",
+            "worker",
+            "probe"
+          ]
+        },
+        "client_version": {
+          "type": "string",
+          "maxLength": 64
+        },
+        "capabilities": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "maxLength": 128
+          }
+        }
+      }
+    },
+    "HelloResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "protocol_version",
+        "authority_generation",
+        "daemon_epoch",
+        "daemon_instance_id",
+        "stream_id",
+        "max_frame_bytes",
+        "suggested_segment_bytes",
+        "idempotency_retention_seconds",
+        "capabilities"
+      ],
+      "properties": {
+        "protocol_version": {
+          "type": "string",
+          "enum": [
+            "unleash.ipc.v2"
+          ]
+        },
+        "authority_generation": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "daemon_epoch": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "daemon_instance_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "stream_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "max_frame_bytes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 8388608
+        },
+        "suggested_segment_bytes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 8388608
+        },
+        "idempotency_retention_seconds": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 315360000
+        },
+        "capabilities": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "maxLength": 128
+          }
+        }
+      }
+    }
+  }
+}
