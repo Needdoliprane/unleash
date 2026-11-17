@@ -6,6 +6,7 @@ members = [
     "crates/unleash-platform",
     "crates/unleash-client",
     "crates/unleash-testkit",
+    "crates/unleash-browser",
 ]
 exclude = ["spikes"]
 
@@ -48,9 +49,18 @@ unleash-domain = { version = "0.1.0", path = "crates/unleash-domain" }
 unleash-protocol = { version = "0.1.0", path = "crates/unleash-protocol" }
 unleash-platform = { version = "0.1.0", path = "crates/unleash-platform" }
 unleash-testkit = { version = "0.1.0", path = "crates/unleash-testkit" }
+unleash-browser = { version = "0.1.0", path = "crates/unleash-browser" }
+fantoccini = { version = "0.22.2", default-features = false }
 tokio = { version = "1.53", features = ["rt", "rt-multi-thread", "net", "io-util", "sync", "time", "macros", "fs"] }
 rustix = { version = "1.1", features = ["fs", "process", "net"] }
 libc = "0.2"
+hyper = { version = "1.0", features = ["http1", "client", "server"] }
+hyper-util = { version = "0.1", features = ["tokio", "http1", "client", "client-legacy", "server", "server-auto"] }
+http = "1.0"
+http-body-util = "0.1"
+bytes = "1"
+url = { version = "2.5", features = ["serde"] }
+tracing = "0.1"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 serde_jcs = "0.2.0"
