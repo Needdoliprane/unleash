@@ -1,0 +1,18 @@
+{
+  "evidence_id": "EV-F002-008",
+  "test_id": "T-F002-008",
+  "requirement_id": "REQ-PERSIST-008",
+  "commit": "54a94288eb6c2f35be59482f0d66a351488560ec",
+  "command": "cargo test -p unleash-store --all-features --no-fail-fast",
+  "environment": {
+    "os": "macOS 27.2.1 arm64",
+    "rustc": "rustc 1.94.1 (e408947bf 2026-03-25)",
+    "sqlite": "3.54.1"
+  },
+  "result": "passed",
+  "observed_at": "2026-11-17T20:29:53Z",
+  "artifacts": [
+    "crates/unleash-store/tests/t_f002_008_budgets_capacity.rs"
+  ],
+  "limits": "Preuve interne passée sur fixture SQLite locale APFS macOS 27.2.1 arm64 (test_t_f002_008_atomic_multi_account_budgets_unknown_and_capacity_pool : budgets atomiques multi-comptes, unknown non libéré, pool 5/50 soft/hard, réadmission après waiting_durable). Partial/blocked pour M2/M7 EXT-OS : couplage avec le scheduler complet M2 et matrice Linux Ubuntu 24.04/26.04."
+}

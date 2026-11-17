@@ -1,0 +1,18 @@
+{
+  "evidence_id": "EV-F002-010",
+  "test_id": "T-F002-010",
+  "requirement_id": "REQ-PERSIST-010",
+  "commit": "54a94288eb6c2f35be59482f0d66a351488560ec",
+  "command": "cargo test -p unleash-store --all-features --no-fail-fast",
+  "environment": {
+    "os": "macOS 27.2.1 arm64",
+    "rustc": "rustc 1.94.1 (e408947bf 2026-03-25)",
+    "sqlite": "3.54.1"
+  },
+  "result": "passed",
+  "observed_at": "2026-11-17T20:29:53Z",
+  "artifacts": [
+    "crates/unleash-store/tests/t_f002_010_backup_restore.rs"
+  ],
+  "limits": "Preuve interne passée sur fixture SQLite locale APFS macOS 27.2.1 arm64 (test_t_f002_010_backup_c11_rotation_event_tombstone_and_hostile_restore et prop_store_fences_budgets_and_receipts_never_regress : Online Backup API, C11a..d, rotation 7+4, restore offline hostile avec neutralisation synthétique, capsule inbox/actions/budgets, rollback C11RestoreBeforeActivate, RestorationBlocked, tombstone). Partial/blocked pour M2/M7 EXT-OS : neutralisation sur vrais processus process-host distribués et matrice Linux ext4."
+}

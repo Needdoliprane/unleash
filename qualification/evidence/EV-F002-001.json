@@ -1,0 +1,18 @@
+{
+  "evidence_id": "EV-F002-001",
+  "test_id": "T-F002-001",
+  "requirement_id": "REQ-PERSIST-001",
+  "commit": "54a94288eb6c2f35be59482f0d66a351488560ec",
+  "command": "cargo test -p unleash-store --all-features --no-fail-fast",
+  "environment": {
+    "os": "macOS 27.2.1 arm64",
+    "rustc": "rustc 1.94.1 (e408947bf 2026-03-25)",
+    "sqlite": "3.54.1"
+  },
+  "result": "passed",
+  "observed_at": "2026-11-17T20:29:53Z",
+  "artifacts": [
+    "crates/unleash-store/tests/t_f002_001_atomic_commit.rs"
+  ],
+  "limits": "Preuve interne passée sur SQLite locale APFS macOS 27.2.1 arm64 sous $TMPDIR (t001_child_crash_entrypoint, test_t_f002_001_c0_c1_c2_atomic_commit_and_cutpoints, test_t_f002_001_sigkill_at_c1_and_c2_real_child : coupures C0/C1/C2 et SIGKILL processus enfant réel avec oracle indépendant). Partial/blocked pour EXT-OS : ne qualifie ni une panne matérielle d'alimentation (power loss) ni ext4 sur Linux Ubuntu 24.04/26.04."
+}

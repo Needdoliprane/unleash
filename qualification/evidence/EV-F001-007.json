@@ -1,0 +1,18 @@
+{
+  "evidence_id": "EV-F001-007",
+  "test_id": "T-F001-007",
+  "requirement_id": "REQ-CORE-007",
+  "commit": "54a94288eb6c2f35be59482f0d66a351488560ec",
+  "command": "cargo test -p unleash-daemon --all-features --no-fail-fast",
+  "environment": {
+    "os": "macOS 27.2.1 arm64",
+    "rustc": "rustc 1.94.1 (e408947bf 2026-03-25)"
+  },
+  "result": "passed",
+  "observed_at": "2026-11-17T20:30:30Z",
+  "artifacts": [
+    "crates/unleash-daemon/tests/t_f001_007_pause_stop_outcomes.rs",
+    "crates/unleash-daemon/src/executors.rs"
+  ],
+  "limits": "Preuve interne passée sur fixture locale macOS 27.2.1 arm64 (t_f001_007_stop_distinguishes_complete_partial_and_unknown_outcomes et t_f001_007_stop_daemon_propagates_drain_timeout_ms_override via contrôleurs synthétiques FixedDrainController/RecordingDrainController). Partial/blocked pour M2/M7 EXT-OS : intégration bout en bout daemon <-> unleash-process-host réel à chaque cutpoint sous SIGKILL et qualification Linux Ubuntu 24.04/26.04."
+}
