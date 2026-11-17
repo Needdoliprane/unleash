@@ -9,6 +9,8 @@ members = [
     "crates/unleash-testkit",
     "crates/unleash-browser",
     "crates/unleash-process-host",
+    "crates/unleash-daemon",
+    "crates/unleash-cli",
 ]
 exclude = ["spikes"]
 
@@ -50,14 +52,16 @@ codegen-units = 1
 unleash-domain = { version = "0.1.0", path = "crates/unleash-domain" }
 unleash-protocol = { version = "0.1.0", path = "crates/unleash-protocol" }
 unleash-platform = { version = "0.1.0", path = "crates/unleash-platform" }
+unleash-client = { version = "0.1.0", path = "crates/unleash-client" }
 unleash-store = { version = "0.1.0", path = "crates/unleash-store" }
 unleash-testkit = { version = "0.1.0", path = "crates/unleash-testkit" }
 unleash-browser = { version = "0.1.0", path = "crates/unleash-browser" }
 unleash-process-host = { version = "0.1.0", path = "crates/unleash-process-host" }
 portable-pty = "0.9.0"
+unleash-daemon = { version = "0.1.0", path = "crates/unleash-daemon" }
 rusqlite = { version = "0.43.0", features = ["bundled", "backup"] }
 fantoccini = { version = "0.22.2", default-features = false }
-tokio = { version = "1.54.1", features = ["rt", "rt-multi-thread", "net", "io-util", "sync", "time", "macros", "fs"] }
+tokio = { version = "1.54.1", features = ["rt", "rt-multi-thread", "net", "io-util", "sync", "time", "macros", "fs", "signal"] }
 rustix = { version = "1.1", features = ["fs", "process", "net"] }
 libc = "0.2"
 hyper = { version = "1.0", features = ["http1", "client", "server"] }
@@ -83,3 +87,5 @@ dotenvy = "0.15.7"
 secrecy = "0.10.3"
 zeroize = "1.9.1"
 tempfile = "3.27.0"
+clap = { version = "4", features = ["derive"] }
+anyhow = "1.0"

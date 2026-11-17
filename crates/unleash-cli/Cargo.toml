@@ -1,0 +1,32 @@
+[package]
+name = "unleash-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+repository.workspace = true
+description = "OVPT Unleash — Interface en ligne de commande stricte passant exclusivement par unleash-client (zéro accès SQLite)"
+
+[[bin]]
+name = "unleash"
+path = "src/main.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+unleash-client.workspace = true
+# Dépendances DTO/chemins transitoires tant que `unleash-client` ne réexporte pas
+# les enveloppes IPC, identifiants domaine et le chemin de rendez-vous canonique.
+unleash-protocol.workspace = true
+unleash-domain.workspace = true
+unleash-platform.workspace = true
+tokio.workspace = true
+clap.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+unleash-testkit.workspace = true
