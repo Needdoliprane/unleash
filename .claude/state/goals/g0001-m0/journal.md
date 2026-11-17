@@ -100,3 +100,9 @@ La fusion automatique a échoué ; réglez les conflits et validez le résultat.
 - 2026-11-17T19:20:27Z | vérification | t05b → verifier indépendant (`pro`) sur `/Volumes/personal_folder/Unleash/.claude/worktrees/g0001-m0-t05b`
 - 2026-11-17T19:20:27Z | délégation | t07 → UI Implementer, modèle `pro`, worktree `.claude/worktrees/g0001-m0-t07` (branche `task/g0001-m0/t07`)
 - 2026-11-17T19:25:25Z | vérification | t05b verifier `pro` : accepté — Vérification indépendante de la tâche t05b (task/g0001-m0/t05b @ 08864c9) acceptée : toutes les exigences F001 (REQ-CORE-001..010), les tests T-F001-001..010 + e2e_m0_daemon_cli + 13 tests unitaires unleash-daemon, les 6 correctifs de 2b5250f, la synchro deny.toml et toutes les gates Rust/cargo-deny/validate.py passent sans erreur (157/157 tests workspace verts, 0 fail, 0 ignored).
+- 2026-11-17T19:25:49Z | conflit | t05b conflit de fusion détecté (Fusion automatique de Cargo.lock
+CONFLIT (contenu) : Conflit de fusion dans Cargo.lock
+Fusion automatique de Cargo.toml
+CONFLIT (contenu) : Conflit de fusion dans Cargo.toml
+La fusion automatique a échoué ; réglez les conflits et validez le résultat.), délégation à integrator (pro)
+- 2026-11-17T19:36:06Z | intégration | t05b fusionnée dans goal/g0001-m0 (`1af299a`), worktree g0001-m0-t05b supprimé, gates vertes : Vérification indépendante de la tâche t05b (task/g0001-m0/t05b @ 08864c9) acceptée : toutes les exigences F001 (REQ-CORE-001..010), les tests T-F001-001..010 + e2e_m0_daemon_cli + 13 tests unitaires unleash-daemon, les 6 correctifs de 2b5250f, la synchro deny.toml et toutes les gates Rust/cargo-deny/validate.py passent sans erreur (157/157 tests workspace verts, 0 fail, 0 ignored).
