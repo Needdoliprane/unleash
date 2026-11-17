@@ -3,6 +3,8 @@ resolver = "3"
 members = [
     "crates/unleash-domain",
     "crates/unleash-protocol",
+    "crates/unleash-platform",
+    "crates/unleash-client",
     "crates/unleash-testkit",
 ]
 exclude = ["spikes"]
@@ -43,7 +45,13 @@ codegen-units = 1
 
 [workspace.dependencies]
 unleash-domain = { version = "0.1.0", path = "crates/unleash-domain" }
+unleash-protocol = { version = "0.1.0", path = "crates/unleash-protocol" }
+unleash-platform = { version = "0.1.0", path = "crates/unleash-platform" }
 unleash-testkit = { version = "0.1.0", path = "crates/unleash-testkit" }
+tokio = { version = "1.53", features = ["rt", "rt-multi-thread", "net", "io-util", "sync", "time", "macros", "fs"] }
+rustix = { version = "1.1", features = ["fs", "process", "net"] }
+libc = "0.2"
+tracing = "0.1"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 serde_jcs = "0.2.0"
