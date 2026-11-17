@@ -56,6 +56,10 @@ pub enum CliError {
     /// Erreur I/O locale.
     #[error("Erreur I/O CLI : {0}")]
     Io(#[from] std::io::Error),
+
+    /// Erreur de cycle de vie terminal lors du lancement de `unleash tui`.
+    #[error("Erreur TUI : {0}")]
+    Tui(#[from] unleash_tui::TerminalLifecycleError),
 }
 
 /// Options et sous-commandes de la CLI `unleash`.
@@ -114,6 +118,21 @@ pub enum Commands {
         /// Action sur le daemon.
         #[command(subcommand)]
         action: DaemonCommand,
+    },
+    /// Lance l'interface terminal plein écran (`unleash-tui`).
+    Tui {
+        /// Désactive les couleurs (`NO_COLOR`).
+        #[arg(long)]
+        no_color: bool,
+        /// Utilise uniquement des bordures ASCII (`TERM=dumb`).
+        #[arg(long)]
+        ascii: bool,
+        /// Active la capture souris optionnelle.
+        #[arg(long)]
+        mouse: bool,
+        /// Active le mode lecture linéaire accessible (`VoiceOver`/Orca).
+        #[arg(long)]
+        linear: bool,
     },
 }
 
@@ -245,6 +264,16 @@ pub async fn run_cli(cli: &Cli) -> Result<Value, CliError> {
             .await
             .map_err(|e| CliError::InvalidArgument(format!("Join error socket resolve: {e}")))??;
     let timeout = Duration::from_millis(cli.timeout_ms.max(100));
+    if let Commands::Tui {
+        no_color,
+        ascii,
+        mouse,
+        linear,
+    } = &cli.command
+    {
+        return run_tui_command(socket_path, timeout, *no_color, *ascii, *mouse, *linear).await;
+    }
+
     let client_cfg = ClientConfig::new(socket_path, ClientKind::Cli, env!("CARGO_PKG_VERSION"))
         .with_timeouts(timeout, timeout);
     let mut client = UnleashClient::connect(client_cfg).await?;
@@ -311,7 +340,39 @@ pub async fn run_cli(cli: &Cli) -> Result<Value, CliError> {
         }
         Commands::Mission { action } => run_mission_command(&mut client, action).await,
         Commands::Daemon { action } => run_daemon_command(&mut client, action).await,
+        Commands::Tui { .. } => Ok(json!({ "status": "exited" })),
     }
+}
+
+#[expect(
+    clippy::fn_params_excessive_bools,
+    reason = "Drapeaux booléens issus directement des options CLI clap de `unleash tui`"
+)]
+async fn run_tui_command(
+    socket_path: PathBuf,
+    timeout: Duration,
+    no_color: bool,
+    ascii: bool,
+    mouse: bool,
+    linear: bool,
+) -> Result<Value, CliError> {
+    let mut caps = unleash_tui::TerminalCapabilities::detect_from_env();
+    if no_color {
+        caps.no_color = true;
+    }
+    if ascii {
+        caps.ascii_only = true;
+    }
+    if mouse {
+        caps.enable_mouse = true;
+    }
+    if linear {
+        caps.linear_reader_mode = true;
+    }
+    let tui_cfg = ClientConfig::new(socket_path, ClientKind::Tui, env!("CARGO_PKG_VERSION"))
+        .with_timeouts(timeout, timeout);
+    unleash_tui::run_tui(Some(tui_cfg), caps).await?;
+    Ok(json!({ "status": "exited" }))
 }
 
 async fn run_mission_command(
@@ -691,6 +752,48 @@ mod tests {
                 action: DaemonCommand::Stop { no_wait: true, .. }
             }
         ));
+
+        let tui = Cli::try_parse_from([
+            "unleash",
+            "--socket",
+            "/tmp/test-daemon.sock",
+            "tui",
+            "--no-color",
+            "--ascii",
+            "--mouse",
+            "--linear",
+        ])
+        .expect("parse tui");
+        assert!(matches!(
+            tui.command,
+            Commands::Tui {
+                no_color: true,
+                ascii: true,
+                mouse: true,
+                linear: true,
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn run_cli_tui_refuses_non_tty_cleanly() {
+        if !std::io::IsTerminal::is_terminal(&std::io::stdout()) {
+            let parsed = Cli::try_parse_from([
+                "unleash",
+                "--socket",
+                "/tmp/nonexistent-unleash.sock",
+                "tui",
+                "--no-color",
+            ])
+            .expect("parse tui");
+            let err = run_cli(&parsed)
+                .await
+                .expect_err("`unleash tui` doit refuser un terminal non-TTY");
+            assert!(matches!(
+                err,
+                CliError::Tui(unleash_tui::TerminalLifecycleError::NotATty)
+            ));
+        }
     }
 
     #[test]

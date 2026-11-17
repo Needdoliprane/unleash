@@ -5540,6 +5540,7 @@ dependencies = [
  "unleash-platform",
  "unleash-protocol",
  "unleash-testkit",
+ "unleash-tui",
  "uuid",
 ]
 
@@ -5566,9 +5567,13 @@ version = "0.1.0"
 dependencies = [
  "chrono",
  "clap",
+ "crossterm",
+ "futures-core",
+ "ratatui",
  "rusqlite",
  "serde",
  "serde_json",
+ "tauri",
  "tempfile",
  "thiserror 2.0.21",
  "tokio",
@@ -5576,10 +5581,12 @@ dependencies = [
  "unleash-browser",
  "unleash-client",
  "unleash-domain",
+ "unleash-gui",
  "unleash-platform",
  "unleash-protocol",
  "unleash-store",
  "unleash-testkit",
+ "unleash-tui",
  "uuid",
 ]
 

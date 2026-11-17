@@ -61,6 +61,8 @@ unleash-browser = { version = "0.1.0", path = "crates/unleash-browser" }
 unleash-process-host = { version = "0.1.0", path = "crates/unleash-process-host" }
 portable-pty = "0.9.0"
 unleash-daemon = { version = "0.1.0", path = "crates/unleash-daemon" }
+unleash-gui = { version = "0.1.0", path = "crates/unleash-gui" }
+unleash-tui = { version = "0.1.0", path = "crates/unleash-tui" }
 pulldown-cmark = { version = "0.13.6", default-features = false }
 tauri = { version = "2.12.6" }
 tauri-build = { version = "2.7.5" }

@@ -9,7 +9,7 @@ use std::process::ExitCode;
 
 use clap::Parser;
 use serde_json::json;
-use unleash_cli::{Cli, run_cli};
+use unleash_cli::{Cli, Commands, run_cli};
 
 #[tokio::main]
 async fn main() -> ExitCode {
@@ -17,9 +17,12 @@ async fn main() -> ExitCode {
     let emit_json = cli.json;
     match run_cli(&cli).await {
         Ok(val) => {
-            let mut out = std::io::stdout().lock();
-            let rendered = serde_json::to_string_pretty(&val).unwrap_or_else(|_| "{}".to_owned());
-            let _ = writeln!(out, "{rendered}");
+            if !matches!(cli.command, Commands::Tui { .. }) || emit_json {
+                let mut out = std::io::stdout().lock();
+                let rendered =
+                    serde_json::to_string_pretty(&val).unwrap_or_else(|_| "{}".to_owned());
+                let _ = writeln!(out, "{rendered}");
+            }
             ExitCode::SUCCESS
         }
         Err(err) => {
