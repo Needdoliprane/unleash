@@ -34,4 +34,10 @@ clap.workspace = true
 [dev-dependencies]
 unleash-client.workspace = true
 unleash-testkit.workspace = true
+unleash-tui.workspace = true
+unleash-gui.workspace = true
+ratatui.workspace = true
+crossterm.workspace = true
+futures-core.workspace = true
+tauri.workspace = true
 tempfile.workspace = true

@@ -17,6 +17,7 @@ workspace = true
 
 [dependencies]
 unleash-client.workspace = true
+unleash-tui.workspace = true
 # Dépendances DTO/chemins transitoires tant que `unleash-client` ne réexporte pas
 # les enveloppes IPC, identifiants domaine et le chemin de rendez-vous canonique.
 unleash-protocol.workspace = true
