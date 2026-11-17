@@ -736,10 +736,6 @@ fn run_wal_checkpoint(conn: &Connection, truncate: bool) -> Option<(i32, i32)> {
 fn wal_bytes_from_checkpoint(physical: u64, ckpt_res: Option<(i32, i32)>) -> u64 {
     match ckpt_res {
         Some((n_log, n_ckpt)) if n_ckpt >= n_log => 0,
-        Some((n_log, n_ckpt)) if n_ckpt > 0 => u64::try_from(n_log.saturating_sub(n_ckpt))
-            .unwrap_or(0)
-            .saturating_mul(4120)
-            .min(physical),
         _ => physical,
     }
 }
