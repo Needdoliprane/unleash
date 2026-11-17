@@ -1,0 +1,10 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "main-capability",
+  "description": "Capacités strictement restreintes à la fenêtre principale de OVPT Unleash (aucun plugin shell/fs/http)",
+  "windows": ["main"],
+  "permissions": [
+    "core:default",
+    "default"
+  ]
+}

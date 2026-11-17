@@ -8,6 +8,8 @@ members = [
     "crates/unleash-store",
     "crates/unleash-testkit",
     "crates/unleash-browser",
+    "crates/unleash-gui",
+    "crates/unleash-tui",
 ]
 exclude = ["spikes"]
 
@@ -52,6 +54,18 @@ unleash-platform = { version = "0.1.0", path = "crates/unleash-platform" }
 unleash-store = { version = "0.1.0", path = "crates/unleash-store" }
 unleash-testkit = { version = "0.1.0", path = "crates/unleash-testkit" }
 unleash-browser = { version = "0.1.0", path = "crates/unleash-browser" }
+unleash-client = { version = "0.1.0", path = "crates/unleash-client" }
+pulldown-cmark = { version = "0.13.6", default-features = false }
+tauri = { version = "2.12.6" }
+tauri-build = { version = "2.7.5" }
+ratatui = { version = "0.30.2", features = ["crossterm_0_29"] }
+crossterm = { version = "0.29.0", features = ["event-stream"] }
+ropey = "1.6.1"
+unicode-segmentation = "1.13.3"
+unicode-width = "0.2"
+vt100 = "0.16.2"
+tui-term = "0.3.4"
+futures-core = "0.3"
 rusqlite = { version = "0.43.0", features = ["bundled", "backup"] }
 fantoccini = { version = "0.22.2", default-features = false }
 tokio = { version = "1.54.1", features = ["rt", "rt-multi-thread", "net", "io-util", "sync", "time", "macros", "fs"] }
