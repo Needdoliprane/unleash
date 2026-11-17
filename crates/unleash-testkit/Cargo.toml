@@ -1,0 +1,23 @@
+[package]
+name = "unleash-testkit"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+repository.workspace = true
+description = "OVPT Unleash — Harnais de test déterministe, horloge/IDs injectables, cutpoints C0-C12, crash harness et garde live"
+
+[lints]
+workspace = true
+
+[dependencies]
+unleash-domain.workspace = true
+thiserror.workspace = true
+uuid.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+dotenvy.workspace = true
+secrecy.workspace = true
+zeroize.workspace = true
+tempfile.workspace = true
