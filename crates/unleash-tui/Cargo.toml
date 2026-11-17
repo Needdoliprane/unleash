@@ -1,0 +1,36 @@
+[package]
+name = "unleash-tui"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+repository.workspace = true
+description = "OVPT Unleash — Interface terminal plein écran Ratatui 0.30 + Crossterm 0.29 à parité fonctionnelle avec la GUI"
+
+[lints]
+workspace = true
+
+[dependencies]
+unleash-domain.workspace = true
+unleash-protocol.workspace = true
+unleash-client.workspace = true
+ratatui.workspace = true
+crossterm.workspace = true
+tokio.workspace = true
+futures-core.workspace = true
+ropey.workspace = true
+unicode-segmentation.workspace = true
+unicode-width.workspace = true
+vt100.workspace = true
+tui-term.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+unleash-platform.workspace = true
+unleash-testkit.workspace = true
+tempfile.workspace = true
+tokio.workspace = true
