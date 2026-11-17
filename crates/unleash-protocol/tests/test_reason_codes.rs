@@ -37,14 +37,21 @@ const ALL_ERROR_CODES: [ErrorCode; 17] = [
     ErrorCode::ResyncRequired,
 ];
 
-fn collect_markdown_files(dir: &Path, out: &mut Vec<PathBuf>) {
+fn collect_markdown_files(claude_dir: &Path, dir: &Path, out: &mut Vec<PathBuf>) {
     let entries = fs::read_dir(dir)
         .unwrap_or_else(|e| panic!("Impossible de lire le dossier {}: {e}", dir.display()));
     for entry in entries {
         let entry = entry.expect("Entrée de répertoire valide");
         let path = entry.path();
         if path.is_dir() {
-            collect_markdown_files(&path, out);
+            let dir_name = path.file_name().and_then(|s| s.to_str());
+            if dir_name == Some(".git") {
+                continue;
+            }
+            if dir == claude_dir && matches!(dir_name, Some("state" | "worktrees")) {
+                continue;
+            }
+            collect_markdown_files(claude_dir, &path, out);
         } else if path.extension().and_then(|s| s.to_str()) == Some("md") {
             out.push(path);
         }
@@ -108,8 +115,23 @@ fn test_reason_codes_bijection_with_dossier_registries() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let claude_dir = root.join(".claude");
     let mut md_files = Vec::new();
-    collect_markdown_files(&claude_dir, &mut md_files);
+    collect_markdown_files(&claude_dir, &claude_dir, &mut md_files);
     md_files.sort();
+
+    let excluded_state = claude_dir.join("state");
+    let excluded_worktrees = claude_dir.join("worktrees");
+    for path in &md_files {
+        assert!(
+            !path.starts_with(&excluded_state),
+            "Le chemin {} ne doit pas provenir de .claude/state/",
+            path.display()
+        );
+        assert!(
+            !path.starts_with(&excluded_worktrees),
+            "Le chemin {} ne doit pas provenir de .claude/worktrees/",
+            path.display()
+        );
+    }
 
     let mut expected_pairs: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     for path in &md_files {
@@ -253,4 +275,57 @@ fn test_reason_codes_bijection_with_dossier_registries() {
         from_json_str_strict::<ReasonCode>("\"STREAM_RESYNC_REQUIRED\""),
         Err(ProtocolError::Json(_))
     ));
+}
+
+struct TempDirGuard(PathBuf);
+
+impl Drop for TempDirGuard {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
+}
+
+#[test]
+fn test_collect_markdown_files_excludes_state_worktrees_and_git() {
+    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+    let seq = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let unique_nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("Horloge système postérieure à UNIX_EPOCH")
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!(
+        "unleash-test-reason-codes-{}-{unique_nanos}-{seq}",
+        std::process::id()
+    ));
+    let _guard = TempDirGuard(root.clone());
+
+    let brief_dir = root.join("brief");
+    let state_dir = root.join("state");
+    let worktrees_dir = root.join("worktrees/g0001-m0-t02b");
+    let root_git_dir = root.join(".git");
+    let nested_git_dir = root.join("features/.git");
+
+    fs::create_dir_all(&brief_dir).expect("Création dossier brief");
+    fs::create_dir_all(&state_dir).expect("Création dossier state");
+    fs::create_dir_all(&worktrees_dir).expect("Création dossier worktrees");
+    fs::create_dir_all(&root_git_dir).expect("Création dossier .git racine");
+    fs::create_dir_all(&nested_git_dir).expect("Création dossier .git imbriqué");
+
+    let expected_md = brief_dir.join("doc.md");
+    fs::write(&expected_md, "# Conception\n").expect("Écriture brief/doc.md");
+    fs::write(state_dir.join("journal.md"), "ScopeDenied/ACCESS_DENIED\n")
+        .expect("Écriture state/journal.md");
+    fs::write(worktrees_dir.join("notes.md"), "Worktree note\n")
+        .expect("Écriture worktrees/notes.md");
+    fs::write(root_git_dir.join("ignored.md"), "Git root note\n")
+        .expect("Écriture .git/ignored.md");
+    fs::write(nested_git_dir.join("ignored.md"), "Git nested note\n")
+        .expect("Écriture features/.git/ignored.md");
+
+    let mut collected = Vec::new();
+    collect_markdown_files(&root, &root, &mut collected);
+    collected.sort();
+
+    assert_eq!(collected, vec![expected_md]);
 }
