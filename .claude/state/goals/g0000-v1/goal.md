@@ -35,8 +35,8 @@ Jalons : M0 → M7 — Features : F001–F019 — Exigences : 239 REQ — Invari
 ## Plan du programme (Sous-goals)
 | Sous-goal | Jalon | Objectif | Rapport de sortie | Statut |
 | --- | --- | --- | --- | --- |
-| g0001-m0 | M0 | Workspace Cargo, contrats partagés (domain, protocol, testkit) & 5 spikes (SQLite, UI, Runtime, Contrats/Connaissance, Navigateur) | `qualification/m0/exit.md` | in_progress |
-| g0002-m1 | M1 | Cœur durable & autorité locale : F001, F002 complet, F017 broker interne, squelette F018 | `qualification/m1/exit.md` | pending |
+| g0001-m0 | M0 | Workspace Cargo, contrats partagés (domain, protocol, testkit) & 5 spikes (SQLite, UI, Runtime, Contrats/Connaissance, Navigateur) | `qualification/m0/exit.md` | done |
+| g0002-m1 | M1 | Cœur durable & autorité locale : F001, F002 complet, F017 broker interne, squelette F018 | `qualification/m1/exit.md` | in_progress |
 | g0003-m2 | M2 | Exécutions, router modèles API/locaux & processus : F003, F011, F012 | `qualification/m2/exit.md` | pending |
 | g0004-m3 | M3 | Workflows, contrats, compétences, hiérarchie & automatisations : F005, F008, F006, F007, F004, F019 | `qualification/m3/exit.md` | pending |
 | g0005-m4 | M4 | Travail réel dans les repositories : F010, F009, enrichissement F016 | `qualification/m4/exit.md` | pending |

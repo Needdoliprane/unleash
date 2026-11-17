@@ -4,3 +4,4 @@
 - 2026-11-16T23:46:47Z | baseline | Corrections de préflight appliquées (`m0-kickoff.md`, `goal-protocol.md`, `definition-of-done.md`, `goal-journal-template.md`, `.github/workflows/ci.yml`), `regen.py` + `uv run --with jsonschema validate.py .` → `0 errors, 0 warnings` ; `cargo-deny 0.21.0` installé dans `~/.cargo/bin`.
 - 2026-11-16T23:49:30Z | git | Branche `dev` créée depuis `main@a8a4379` et baseline R7 (426 fichiers, zéro `.env` ni `.DS_Store`) préparée pour commit et push sur `origin/dev`.
 - 2026-11-16T23:50:00Z | programme | Ouverture du goal parent `g0000-v1` et du premier sous-goal `g0001-m0` (Jalon M0).
+- 2026-11-17T20:54:37Z | jalon | g0001-m0 → done (dev `59564f2`) ; passage à g0002-m1.
