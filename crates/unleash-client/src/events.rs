@@ -160,8 +160,8 @@ impl EventSynchronizer {
         let (snapshot, watermark) = self
             .fetch_snapshot_with_watermark(query_conn, request_id)
             .await?;
-        self.reset_cursor_atomically(watermark);
         let reader = self.open_stream_at(watermark).await?;
+        self.reset_cursor_atomically(watermark);
         Ok((
             EventSyncUpdate::SnapshotLoaded {
                 watermark,
@@ -179,11 +179,12 @@ impl EventSynchronizer {
     /// en `Some(new_stream)` et doit remplacer `stream` pour les appels suivants.
     ///
     /// # Sûreté à l'annulation
-    /// Le curseur local n'est mis à jour qu'une fois les données valides décodées (ou après le
-    /// nouveau `GetStateSnapshot` complet lors d'un `ResyncRequired`).
+    /// Le curseur local n'est mis à jour qu'une fois les données valides décodées (et, lors d'un
+    /// `ResyncRequired`, qu'après le nouveau `GetStateSnapshot` et la réouverture réussie du flux).
     ///
     /// # Errors
-    /// Retourne [`ClientError::Disconnected`] si le flux se ferme sans `ResyncRequired`, ou
+    /// Retourne [`ClientError::Disconnected`] si le flux se ferme sans `ResyncRequired`,
+    /// [`ClientError::UnexpectedResponse`] si un lot arrive avec un `stream_id` incohérent, ou
     /// [`ClientError::MissingSnapshotWatermark`] / erreurs réseau et protocole.
     pub async fn poll_next<F>(
         &mut self,
@@ -196,7 +197,7 @@ impl EventSynchronizer {
     {
         match stream.next_frame().await {
             Ok(Some(SubscribeEventsFrame::Events { events, cursor })) => {
-                let filtered = self.filter_and_advance(events, cursor);
+                let filtered = self.filter_and_advance(events, cursor)?;
                 Ok((
                     EventSyncUpdate::Events {
                         events: filtered,
@@ -233,8 +234,8 @@ impl EventSynchronizer {
         let (snapshot, new_watermark) = self
             .fetch_snapshot_with_watermark(query_conn, request_id)
             .await?;
-        self.reset_cursor_atomically(new_watermark);
         let new_reader = self.open_stream_at(new_watermark).await?;
+        self.reset_cursor_atomically(new_watermark);
         Ok((
             EventSyncUpdate::SnapshotLoaded {
                 watermark: new_watermark,
@@ -294,9 +295,21 @@ impl EventSynchronizer {
         &mut self,
         events: Vec<EventEnvelope>,
         batch_cursor: EventCursor,
-    ) -> Vec<EventEnvelope> {
-        let mut accepted = Vec::with_capacity(events.len());
+    ) -> Result<Vec<EventEnvelope>, ClientError> {
         let active_stream: Option<StreamId> = self.cursor.map(|c| c.stream_id);
+        if let Some(stream) = active_stream
+            && batch_cursor.stream_id != stream
+        {
+            return Err(ClientError::UnexpectedResponse {
+                expected: "Events (stream_id cohérent)",
+                detail: format!(
+                    "stream_id reçu {:?} différent du flux actif {:?}",
+                    batch_cursor.stream_id, stream
+                ),
+            });
+        }
+
+        let mut accepted = Vec::with_capacity(events.len());
         let mut highest_seq = self.cursor.map_or(0, |c| c.sequence.as_u64());
 
         for ev in events {
@@ -320,7 +333,7 @@ impl EventSynchronizer {
             batch_cursor.stream_id,
             unleash_domain::Sequence::new(new_seq),
         ));
-        accepted
+        Ok(accepted)
     }
 
     fn record_seen_event_id(&mut self, event_id: Uuid) -> bool {
@@ -334,5 +347,90 @@ impl EventSynchronizer {
             }
         }
         true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use chrono::{DateTime, Utc};
+    use serde_json::Map;
+    use unleash_domain::{ReceiptId, Revision, Sequence, Sha256Digest, StreamId};
+    use unleash_protocol::{ClientKind, EventCausation, EventCursor, EventEnvelope, Sensitivity};
+    use uuid::Uuid;
+
+    use super::{EventFollowerConfig, EventSynchronizer};
+    use crate::errors::ClientError;
+    use crate::transport::ClientConfig;
+
+    fn sample_event(stream_id: StreamId, seq: u64, event_id: u128) -> EventEnvelope {
+        let ts: DateTime<Utc> = DateTime::from_timestamp(1_700_000_000, 0).unwrap_or_default();
+        EventEnvelope {
+            event_id: Uuid::from_u128(event_id),
+            stream_id,
+            sequence: Sequence::new(seq),
+            event_type: String::from("StepUpdated"),
+            schema_version: 1,
+            occurred_at: ts,
+            recorded_at: ts,
+            project_id: None,
+            aggregate_id: Uuid::from_u128(0xA001),
+            aggregate_revision: Revision::new(seq),
+            actor_ref: String::from("daemon"),
+            correlation_id: Uuid::from_u128(0xC001),
+            causation: EventCausation::from_command_receipt(ReceiptId::from_u128(0xB001)),
+            command_id: None,
+            payload_hash: Sha256Digest::from_bytes(b"{}"),
+            payload: Map::new(),
+            sensitivity: Sensitivity::Project,
+        }
+    }
+
+    #[test]
+    fn filter_and_advance_rejects_mismatched_stream_id_without_mutating_state() {
+        let mut sync = EventSynchronizer::new(
+            ClientConfig::new(
+                PathBuf::from("/tmp/unleash-unused.sock"),
+                ClientKind::Cli,
+                "0.1.0",
+            ),
+            EventFollowerConfig::default(),
+        );
+        let s1 = StreamId::from_u128(0x1111);
+        let s2 = StreamId::from_u128(0x2222);
+        let initial_cursor = EventCursor::new(s1, Sequence::new(5));
+        sync.reset_cursor_atomically(initial_cursor);
+
+        let ev_in_active_stream = sample_event(s1, 6, 0xE006);
+        let err = sync
+            .filter_and_advance(
+                vec![ev_in_active_stream],
+                EventCursor::new(s2, Sequence::new(10)),
+            )
+            .expect_err("Un curseur sur le mauvais stream_id doit être rejeté");
+
+        assert!(matches!(err, ClientError::UnexpectedResponse { .. }));
+        assert_eq!(sync.current_cursor(), Some(initial_cursor));
+        assert!(sync.seen_ids.is_empty());
+        assert!(sync.seen_order.is_empty());
+
+        // Sur le stream actif, l'événement rejeté plus haut n'a pas pollué seen_ids et passe normalement
+        let accepted = sync
+            .filter_and_advance(
+                vec![
+                    sample_event(s1, 6, 0xE006),
+                    sample_event(s1, 7, 0xE006),
+                    sample_event(s1, 8, 0xE008),
+                ],
+                EventCursor::new(s1, Sequence::new(8)),
+            )
+            .expect("Un curseur cohérent doit être accepté");
+
+        assert_eq!(accepted.len(), 2);
+        assert_eq!(
+            sync.current_cursor(),
+            Some(EventCursor::new(s1, Sequence::new(8)))
+        );
     }
 }

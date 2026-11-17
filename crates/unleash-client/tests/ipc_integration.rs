@@ -1105,3 +1105,76 @@ async fn test_client_upload_segmented_and_mismatch_rejection() {
             && e.reason_code == Some(ReasonCode::ClientUploadMismatch)
     ));
 }
+
+#[tokio::test]
+async fn test_event_sync_preserves_cursor_when_stream_open_fails() {
+    let mut init = TestServerState::new(0x1000, 0x61_u128);
+    init.push_event(1, "MissionCreated", json!({ "n": 1 }));
+    init.push_event(2, "MissionStarted", json!({ "n": 2 }));
+    let daemon = TestDaemon::start(init);
+
+    let mut query_client = UnleashClient::connect(daemon.client_config())
+        .await
+        .unwrap();
+    let mut sync = EventSynchronizer::new(daemon.client_config(), EventFollowerConfig::default());
+
+    // 1. Si open_stream_at échoue après GetStateSnapshot dans sync_initial, le curseur reste None
+    daemon.state.lock().unwrap().faults.next_fault = Some(OneShotFault::V1Hello);
+    let init_err = sync
+        .sync_initial(query_client.connection_mut(), RequestId::from_u128(0xF001))
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        init_err,
+        ClientError::Remote(ref e) if e.code == ErrorCode::ProtocolIncompatible
+    ));
+    assert_eq!(sync.current_cursor(), None);
+
+    // Reprise saine sans défaut : établit le curseur initial sur S1
+    let (_, mut stream) = sync
+        .sync_initial(query_client.connection_mut(), RequestId::from_u128(0xF002))
+        .await
+        .unwrap();
+    let s1 = StreamId::from_u128(0x61_u128);
+    let s1_cursor = EventCursor::new(s1, Sequence::new(2));
+    assert_eq!(sync.current_cursor(), Some(s1_cursor));
+
+    // 2. Sur ResyncRequired -> perform_atomic_resync : si open_stream_at échoue après le nouveau
+    // GetStateSnapshot sur S2, le curseur courant reste figé sur S1 au lieu d'avancer à S2
+    let s2 = StreamId::from_u128(0x62_u128);
+    {
+        let mut st = daemon.state.lock().unwrap();
+        st.stream_id = s2;
+        st.events.clear();
+        st.push_event(10, "SnapshotRestored", json!({ "restored": true }));
+        st.faults.next_fault = Some(OneShotFault::V1Hello);
+    }
+    daemon.notify.notify_waiters();
+
+    let resync_err = sync
+        .poll_next(&mut stream, query_client.connection_mut(), || {
+            RequestId::from_u128(0xF003)
+        })
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        resync_err,
+        ClientError::Remote(ref e) if e.code == ErrorCode::ProtocolIncompatible
+    ));
+    assert_eq!(sync.current_cursor(), Some(s1_cursor));
+
+    // Reprise ultérieure sur S2 rétablit normalement le nouveau watermark
+    let (recovered, _stream2) = sync
+        .sync_initial(query_client.connection_mut(), RequestId::from_u128(0xF004))
+        .await
+        .unwrap();
+    assert!(matches!(
+        recovered,
+        EventSyncUpdate::SnapshotLoaded { watermark, .. }
+            if watermark == EventCursor::new(s2, Sequence::new(10))
+    ));
+    assert_eq!(
+        sync.current_cursor(),
+        Some(EventCursor::new(s2, Sequence::new(10)))
+    );
+}

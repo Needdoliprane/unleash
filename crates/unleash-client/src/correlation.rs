@@ -305,7 +305,9 @@ impl CommandCorrelationQueue {
     /// - Sinon, passe en [`CorrelationState::Failed`].
     ///
     /// # Errors
-    /// Retourne [`ClientError::UnknownCommand`] si absente ou erreur de persistance.
+    /// Retourne [`ClientError::UnknownCommand`] si absente, [`ClientError::StaleLineageLocked`]
+    /// si l'entrée est déjà verrouillée en [`CorrelationState::StaleLineageRejected`], ou une
+    /// erreur de persistance.
     pub fn record_error(
         &mut self,
         command_id: CommandId,
@@ -318,6 +320,12 @@ impl CommandCorrelationQueue {
                 .entries
                 .get_mut(&command_id)
                 .ok_or(ClientError::UnknownCommand { command_id })?;
+            if matches!(entry.state, CorrelationState::StaleLineageRejected { .. }) {
+                return Err(ClientError::StaleLineageLocked {
+                    command_id,
+                    pinned_generation: entry.envelope.authority_generation,
+                });
+            }
             entry.updated_at_ms = now_ms;
 
             if error.code == ErrorCode::StaleFence
@@ -471,5 +479,62 @@ mod tests {
         let link_path = dir.path().join("link.json");
         symlink(&real_file, &link_path).unwrap();
         assert!(CommandCorrelationQueue::open_or_create(link_path).is_err());
+    }
+
+    #[test]
+    fn record_error_refuses_to_overwrite_stale_lineage_rejected() {
+        let mut q = CommandCorrelationQueue::in_memory();
+        let cmd_id = CommandId::from_u128(0x2222);
+        let env = sample_envelope(cmd_id, "pinned");
+        let pinned_gen = env.authority_generation;
+        q.enqueue(env, 100).unwrap();
+
+        let observed_gen = AuthorityGeneration::from_u128(0x999);
+        let stale_err = IpcError::new(
+            ErrorCode::StaleFence,
+            Some(ReasonCode::StaleAuthorityGeneration),
+            "génération obsolète",
+            RetryClass::Never,
+        );
+        q.record_error(cmd_id, stale_err, Some(observed_gen), 200)
+            .unwrap();
+
+        let retryable_err = IpcError::new(
+            ErrorCode::ResourceBusy,
+            None,
+            "temporaire",
+            RetryClass::AfterBackoff,
+        );
+        assert!(matches!(
+            q.record_error(cmd_id, retryable_err, None, 300),
+            Err(ClientError::StaleLineageLocked {
+                command_id,
+                pinned_generation,
+            }) if command_id == cmd_id && pinned_generation == pinned_gen
+        ));
+
+        let permanent_err = IpcError::new(
+            ErrorCode::InvalidArgument,
+            None,
+            "tardif",
+            RetryClass::Never,
+        );
+        assert!(matches!(
+            q.record_error(cmd_id, permanent_err, None, 400),
+            Err(ClientError::StaleLineageLocked {
+                command_id,
+                pinned_generation,
+            }) if command_id == cmd_id && pinned_generation == pinned_gen
+        ));
+
+        let entry = q.get(cmd_id).unwrap();
+        assert_eq!(entry.updated_at_ms, 200);
+        assert!(matches!(
+            entry.state,
+            CorrelationState::StaleLineageRejected {
+                observed_daemon_generation: Some(obs),
+                ..
+            } if obs == observed_gen
+        ));
     }
 }

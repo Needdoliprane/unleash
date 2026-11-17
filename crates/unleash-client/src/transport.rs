@@ -96,7 +96,7 @@ impl IpcConnection {
     /// # Errors
     /// - [`ClientError::Platform`] si le répertoire `0700`, le socket `0600` ou le peer UID échoue.
     /// - [`ClientError::Timeout`] si la connexion ou le handshake dépasse `connect_timeout`.
-    /// - [`ClientError::Remote`] / [`ClientError::ProtocolIncompatible`] si le serveur rejette v2.
+    /// - [`ClientError::Remote`] / [`ClientError::Protocol`] si le serveur rejette v2.
     pub async fn connect(config: &ClientConfig) -> Result<Self, ClientError> {
         if config.verify_socket_security {
             validate_socket_file(&config.socket_path)?;

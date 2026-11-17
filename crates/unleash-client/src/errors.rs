@@ -23,15 +23,6 @@ pub enum ClientError {
     #[error("Erreur distante daemon ({}) : {}", .0.code, .0.message)]
     Remote(IpcError),
 
-    /// Version de protocole incompatible négociée ou observée au handshake.
-    #[error("Version de protocole incompatible : attendu '{expected}', observé '{observed}'")]
-    ProtocolIncompatible {
-        /// Version attendue (`unleash.ipc.v2`).
-        expected: String,
-        /// Version observée.
-        observed: String,
-    },
-
     /// Réponse inattendue ou violation de contrat de cadrage de la part du serveur.
     #[error("Réponse IPC inattendue (attendu {expected}) : {detail}")]
     UnexpectedResponse {
