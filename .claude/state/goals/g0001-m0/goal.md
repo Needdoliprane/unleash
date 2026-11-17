@@ -28,8 +28,8 @@ Jalon : M0 (T2–T13 de `m0-kickoff.md`) — Features : F001, F002, F008/F009/F0
 ## Plan
 | Tâche | Objectif | Écriture exclusive | Dépend de | Rôle | Niveau / modèle | Vérification | Statut |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| t01 | Workspace Cargo + `unleash-domain` (IDs, fences, ports, machines à états, proptest) | `Cargo.toml`, `Cargo.lock`, `crates/unleash-domain/**` | — | systems-implementer | strong / pro | fmt/clippy/test/doc/deny | pending |
-| t02 | `unleash-protocol` (JCS, IPC v2, 204 ops, ts-rs, 4 schémas M0) | `Cargo.*`, `crates/unleash-protocol/**`, `apps/gui-renderer/src/generated/**`, `.claude/schemas/*` | t01 | systems-implementer | strong / pro | fmt/clippy/test/doc + validate.py | pending |
+| t01 | Workspace Cargo + `unleash-domain` (IDs, fences, ports, machines à états, proptest) | `Cargo.toml`, `Cargo.lock`, `crates/unleash-domain/**` | — | systems-implementer | strong / pro | fmt/clippy/test/doc/deny | done (`d54d335`, fusion `cf8443f`) |
+| t02 | `unleash-protocol` (JCS, IPC v2, 204 ops, ts-rs, 4 schémas M0) | `Cargo.*`, `crates/unleash-protocol/**`, `apps/gui-renderer/src/generated/**`, `.claude/schemas/*` | t01 | systems-implementer | strong / pro | fmt/clippy/test/doc + validate.py | in_progress |
 | t03 | `unleash-testkit` (horloge/IDs, cutpoints C0–C12, crash harness, LiveTestGuard) | `Cargo.*`, `crates/unleash-testkit/**` | t02 | systems-implementer | strong / pro | fmt/clippy/test/doc | pending |
 | t04 | `unleash-store` + spike SQLite (`T-F002-001..010`, `spike-sqlite.md`) | `crates/unleash-store/**`, `qualification/m0/spike-sqlite.md` | t03 | systems-implementer | strong / pro | fmt/clippy/test/doc | pending |
 | t05 | `unleash-platform`, `unleash-client`, `unleash-daemon`, `unleash-cli` (`T-F001-001..010`) | `crates/unleash-{platform,client,daemon,cli}/**` | t04 | systems-implementer | strong / pro | fmt/clippy/test/doc | pending |
