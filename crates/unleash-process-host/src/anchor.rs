@@ -40,9 +40,8 @@ pub struct SigchldQualification {
 
 static SIGCHLD_NOTIFIED: AtomicBool = AtomicBool::new(false);
 
-#[allow(unsafe_code)]
 extern "C" fn sigchld_handler(_sig: libc::c_int) {
-    // SAFETY: Opération asynchrone-signal-safe pure sur variable atomique statique (`store` Relaxed).
+    // Opération asynchrone-signal-safe pure sur variable atomique statique (`store` Relaxed).
     SIGCHLD_NOTIFIED.store(true, Ordering::Relaxed);
 }
 
@@ -211,13 +210,14 @@ fn list_group_members_os(pgid: u32) -> Vec<OsProcessIdentity> {
             .saturating_mul(std::mem::size_of::<libc::c_int>()),
     )
     .unwrap_or(libc::c_int::MAX);
-    // SAFETY: `pids` dispose d'au moins `buf_bytes` octets alloués et alignés.
-    let actual_bytes =
+    // SAFETY: `pids` dispose d'au moins `buf_bytes` octets alloués et alignés ; `proc_listallpids`
+    // retourne le nombre de PIDs écrits ou -1.
+    let pid_count =
         unsafe { libc::proc_listallpids(pids.as_mut_ptr().cast::<libc::c_void>(), buf_bytes) };
-    if actual_bytes <= 0 {
+    if pid_count <= 0 {
         return Vec::new();
     }
-    let filled = usize::try_from(actual_bytes).unwrap_or(0).min(pids.len());
+    let filled = usize::try_from(pid_count).unwrap_or(0).min(pids.len());
     let mut members = Vec::new();
     for &raw_pid in pids.get(..filled).unwrap_or(&[]) {
         if let Ok(pid_u32) = u32::try_from(raw_pid)

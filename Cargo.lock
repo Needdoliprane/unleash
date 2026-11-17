@@ -1986,7 +1986,6 @@ dependencies = [
 name = "unleash-process-host"
 version = "0.1.0"
 dependencies = [
- "chrono",
  "hex",
  "libc",
  "portable-pty",
@@ -1994,10 +1993,8 @@ dependencies = [
  "rustix",
  "secrecy",
  "serde",
- "serde_jcs",
  "serde_json",
  "sha2",
- "tempfile",
  "thiserror 2.0.21",
  "tracing",
  "unleash-domain",

@@ -69,7 +69,7 @@ pub enum ProcessHostError {
         "Backend d'isolation OS '{backend}' absent (ISOLATION_BACKEND_MISSING) : {remediation}"
     )]
     IsolationBackendMissing {
-        /// Backend requis (`macos-seatbelt` ou `linux-bubblewrap-seccomp`).
+        /// Backend requis (`macos-seatbelt` ou `linux-bubblewrap`).
         backend: String,
         /// Remédiation explicite pour l'utilisateur.
         remediation: String,

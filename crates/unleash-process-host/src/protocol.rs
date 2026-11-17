@@ -296,4 +296,82 @@ mod tests {
         assert!(!dbg.contains("ULTRA_SECRET_TOKEN_NEW"));
         assert!(dbg.contains("[REDACTED]"));
     }
+
+    proptest::proptest! {
+        #[test]
+        fn prop_host_request_debug_never_leaks_random_secrets_and_roundtrips(
+            s_a in "[A-Za-z0-9_-]{8,24}",
+            s_b in "[A-Za-z0-9_-]{8,24}",
+            seq in 1_u64..=10_000,
+            rows in 1_u16..=500,
+            cols in 1_u16..=500,
+            epoch in 1_u64..=500,
+            fence in 1_u64..=500,
+        ) {
+            let secret = format!("sec-cur-{s_a}");
+            let next_secret = format!("sec-rot-{s_b}");
+            let header = HostCommandHeader {
+                protocol_version: 1,
+                process_run_uuid: ProcessRunUuid::from_u128(11),
+                authority_generation: AuthorityGeneration::from_u128(22),
+                daemon_epoch: DaemonEpoch::new(epoch),
+                resource_fence: Fence::new(fence),
+                command_id: CommandId::from_u128(u128::from(seq)),
+                action_id: ActionId::from_u128(u128::from(seq) + 1),
+                payload_hash: Sha256Digest::from_bytes(secret.as_bytes()),
+            };
+            let variants = [
+                HostRequest::Handshake {
+                    header: header.clone(),
+                    current_secret: secret.clone(),
+                    rotate_to_secret: Some(next_secret.clone()),
+                    require_higher_epoch: true,
+                },
+                HostRequest::SendInput {
+                    header: header.clone(),
+                    secret: secret.clone(),
+                    input_seq: seq,
+                    payload_bytes: vec![b'a', b'\n'],
+                    now_ms: TimestampMs::new(i64::try_from(seq * 10).unwrap()),
+                },
+                HostRequest::Resize {
+                    header: header.clone(),
+                    secret: secret.clone(),
+                    rows,
+                    cols,
+                },
+                HostRequest::ReadLog {
+                    header: header.clone(),
+                    secret: secret.clone(),
+                    after_offset: seq,
+                    max_bytes: usize::from(cols) * 16,
+                    strict_cursor: true,
+                },
+                HostRequest::Stop {
+                    header: header.clone(),
+                    secret: secret.clone(),
+                    escalate_to_sigkill: true,
+                    known_descendant_pids: vec![u32::from(rows)],
+                },
+                HostRequest::Reconcile {
+                    header: header.clone(),
+                    secret: secret.clone(),
+                },
+                HostRequest::Shutdown {
+                    header,
+                    secret: secret.clone(),
+                },
+            ];
+            for req in variants {
+                let dbg = format!("{req:?}");
+                proptest::prop_assert!(!dbg.contains(&secret));
+                proptest::prop_assert!(!dbg.contains(&next_secret));
+                let json = serde_json::to_string(&req).unwrap();
+                let decoded: HostRequest = serde_json::from_str(&json).unwrap();
+                proptest::prop_assert_eq!(decoded, req);
+                let tampered = format!("{},\"unexpected_unknown_field\":1}}", json.trim_end_matches('}'));
+                proptest::prop_assert!(serde_json::from_str::<HostRequest>(&tampered).is_err());
+            }
+        }
+    }
 }

@@ -226,4 +226,54 @@ mod tests {
         assert_eq!(gate.current().epoch, DaemonEpoch::new(4));
         assert_eq!(gate.current().fence, Fence::new(1));
     }
+
+    proptest::proptest! {
+        #[test]
+        fn prop_fencing_gate_enforces_exact_lineage_and_monotone_order(
+            gen_a_val in 1_u128..=1_000,
+            gen_b_val in 1_u128..=1_000,
+            e0 in 0_u64..=100,
+            f0 in 0_u64..=100,
+            e1 in 0_u64..=100,
+            f1 in 0_u64..=100,
+            require_higher_epoch in proptest::prelude::any::<bool>(),
+        ) {
+            let run_uuid = ProcessRunUuid::from_u128(42);
+            let gen_a = AuthorityGeneration::from_u128(gen_a_val);
+            let gen_b = AuthorityGeneration::from_u128(gen_b_val);
+            let hdr = mk_header(run_uuid, gen_b, e1, f1);
+
+            let mut gate_cmd = FencingGate::new(run_uuid, gen_a, DaemonEpoch::new(e0), Fence::new(f0));
+            let res_cmd = gate_cmd.check_and_advance(&hdr);
+            if gen_b != gen_a {
+                proptest::prop_assert!(
+                    matches!(res_cmd, Err(ProcessHostError::StaleAuthorityGeneration { .. })),
+                    "attendu StaleAuthorityGeneration, obtenu {res_cmd:?}"
+                );
+                proptest::prop_assert_eq!(gate_cmd.current().epoch, DaemonEpoch::new(e0));
+            } else if (e1, f1) >= (e0, f0) {
+                proptest::prop_assert!(res_cmd.is_ok());
+                proptest::prop_assert_eq!(gate_cmd.current().epoch, DaemonEpoch::new(e1));
+                proptest::prop_assert_eq!(gate_cmd.current().fence, Fence::new(f1));
+            } else {
+                proptest::prop_assert!(
+                    matches!(res_cmd, Err(ProcessHostError::StaleEpochOrFence { .. })),
+                    "attendu StaleEpochOrFence, obtenu {res_cmd:?}"
+                );
+            }
+
+            let mut gate_hs = FencingGate::new(run_uuid, gen_a, DaemonEpoch::new(e0), Fence::new(f0));
+            let res_hs = gate_hs.check_recovery_handshake(&hdr, require_higher_epoch);
+            if gen_b != gen_a {
+                proptest::prop_assert!(
+                    matches!(res_hs, Err(ProcessHostError::StaleAuthorityGeneration { .. })),
+                    "attendu StaleAuthorityGeneration sur handshake, obtenu {res_hs:?}"
+                );
+            } else if require_higher_epoch {
+                proptest::prop_assert_eq!(res_hs.is_ok(), e1 > e0);
+            } else {
+                proptest::prop_assert_eq!(res_hs.is_ok(), (e1, f1) >= (e0, f0));
+            }
+        }
+    }
 }

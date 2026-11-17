@@ -22,7 +22,8 @@
 //!   durable après ; une coupure entre écriture et reçu classe l'entrée en `OutcomeUnknown` sans
 //!   jamais la répéter automatiquement.
 //! - **Mode `strict` Q-05 (`isolation`)** : génération et application fail-closed d'un profil
-//!   Seatbelt `/usr/bin/sandbox-exec` sur macOS (et support `bubblewrap` + `seccomp` sur Linux) ;
+//!   Seatbelt `/usr/bin/sandbox-exec` sur macOS, et construction de plan `bubblewrap` `--unshare-all` /
+//!   `--clearenv` sur Linux (`linux-bubblewrap`, sans filtre `seccomp` ni proxy monté en M0) ;
 //!   tout défaut de backend ou d'obligation retourne explicitement `IsolationUnavailable` sans
 //!   jamais basculer vers `standard`.
 //! - **Zéro modèle** : aucun client modèle, aucune clé API, aucune autonomie d'orchestration.

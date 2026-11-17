@@ -794,4 +794,32 @@ mod tests {
         assert!(!read2.segments.is_empty());
         assert!(read2.segments.iter().all(|s| !s.is_volatile));
     }
+
+    proptest::proptest! {
+        #[test]
+        fn prop_redactor_masks_arbitrary_chunk_splits_and_newlines(
+            part1 in "[A-Za-z0-9]{6,12}",
+            part2 in "[A-Za-z0-9]{6,12}",
+            prefix in "[a-z0-9 ]{0,16}",
+            suffix in "[a-z0-9 ]{0,16}",
+            use_crlf in proptest::prelude::any::<bool>(),
+            split_step in 1_usize..=7,
+        ) {
+            let canary = format!("{part1}\n{part2}");
+            let line_end = if use_crlf { "\r\n" } else { "\n" };
+            let rendered_secret = format!("{part1}{line_end}{part2}");
+            let stream = format!("{prefix}{rendered_secret}{suffix}");
+            let mut redactor = SecretRedactor::new(&[SecretString::from(canary.clone())]);
+            let mut out = Vec::new();
+            for chunk in stream.as_bytes().chunks(split_step) {
+                out.extend_from_slice(&redactor.push_chunk(chunk));
+            }
+            out.extend_from_slice(&redactor.flush());
+            let text = String::from_utf8_lossy(&out);
+            proptest::prop_assert!(!text.contains(&rendered_secret));
+            proptest::prop_assert!(!text.contains(&canary));
+            proptest::prop_assert!(text.contains("[REDACTED]"));
+            proptest::prop_assert!(redactor.redaction_count() >= 1);
+        }
+    }
 }

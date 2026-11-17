@@ -5,8 +5,9 @@
 //!   lecture de `data_root`, du répertoire du socket, de `~/Library/Keychains` / `/Library/Keychains`
 //!   et des chemins de credentials déclarés, refusant toute écriture hors des racines assignées, et
 //!   limitant la sortie réseau au seul proxy d'egress (ou refus total sans proxy).
-//! - Sur Linux : prépare l'exécution `bubblewrap` (`--unshare-net`, `--ro-bind`, masquage des racines
-//!   interdites, `--clearenv`) avec filtre `seccomp` BPF.
+//! - Sur Linux : prépare l'exécution `bubblewrap` (`--unshare-all`, `--ro-bind`, masquage des racines
+//!   interdites par `--tmpfs`, `--clearenv`) ; le filtre `seccomp` BPF et le montage du socket proxy
+//!   d'egress dans l'espace de noms `bwrap` restent hors périmètre M0 et non qualifiés sur Linux.
 //! - Fail-closed : si le backend requis est absent ou incapable d'imposer les obligations demandées,
 //!   retourne explicitement [`ProcessHostError::IsolationBackendMissing`] ou
 //!   [`ProcessHostError::IsolationObligationUnenforceable`] (`IsolationUnavailable`), sans jamais
@@ -81,7 +82,7 @@ pub struct PreparedLaunchCommand {
     pub args: Vec<String>,
     /// Environnement complet épuré à appliquer après `env_clear()`.
     pub clean_env: BTreeMap<String, String>,
-    /// Identifiant du backend d'isolation appliqué (`none_standard`, `macos-seatbelt`, `linux-bubblewrap-seccomp`).
+    /// Identifiant du backend d'isolation appliqué (`none_standard`, `macos-seatbelt`, `linux-bubblewrap`).
     pub backend_name: String,
     /// Empreinte SHA-256 du profil généré en mode `strict`.
     pub profile_digest: Option<Sha256Digest>,
@@ -118,7 +119,7 @@ pub trait IsolationBackendProbe: Send + Sync {
     /// Retourne le chemin configuré de `bwrap` sur Linux.
     fn linux_bwrap_path(&self) -> &Path;
 
-    /// Vérifie si `bwrap` sait créer un user namespace isolé avec `--unshare-net` et seccomp.
+    /// Vérifie si `bwrap` sait créer un espace de noms isolé complet (`--unshare-all`) sans seccomp en M0.
     fn probe_linux_bwrap(&self, bwrap_path: &Path) -> SandboxProbeOutcome;
 }
 
@@ -230,10 +231,10 @@ impl IsolationBackendProbe for OsIsolationBackendProbe {
 
         let output = Command::new(bwrap_path)
             .args([
+                "--unshare-all",
                 "--ro-bind",
                 "/",
                 "/",
-                "--unshare-net",
                 "--die-with-parent",
                 "/bin/true",
             ])
@@ -245,7 +246,7 @@ impl IsolationBackendProbe for OsIsolationBackendProbe {
             Ok(out) => {
                 let stderr = String::from_utf8_lossy(&out.stderr).trim().to_owned();
                 SandboxProbeOutcome::Unenforceable {
-                    detail: format!("bwrap --unshare-net refusé ({}) : {stderr}", out.status),
+                    detail: format!("bwrap --unshare-all refusé ({}) : {stderr}", out.status),
                 }
             }
             Err(err) => SandboxProbeOutcome::Unenforceable {
@@ -354,7 +355,7 @@ const fn current_strict_backend_name() -> &'static str {
     }
     #[cfg(target_os = "linux")]
     {
-        "linux-bubblewrap-seccomp"
+        "linux-bubblewrap"
     }
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     {
@@ -571,7 +572,8 @@ fn append_sbpl_network_rules(out: &mut String, spec: &StrictIsolationSpec) {
     }
 }
 
-/// Plan de commande Linux `bubblewrap` + `--seccomp` (exécuté sur Linux, validé unitairement sur toute plateforme).
+/// Plan de commande Linux `bubblewrap` (`--unshare-all`, `--clearenv`, `--ro-bind`, `--tmpfs`),
+/// validé en construction de plan en M0 (sans filtre `seccomp` ni montage de socket proxy).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LinuxBwrapPlan {
     /// Arguments passés à `bwrap`.
@@ -580,18 +582,32 @@ pub struct LinuxBwrapPlan {
     pub profile_digest: Sha256Digest,
 }
 
-/// Construit le plan d'isolation Linux `bubblewrap` (`--unshare-net`, `--ro-bind`, masquage des chemins
-/// protégés, `--clearenv`, et marqueur seccomp) pour `Q-05`.
+/// Construit le plan d'isolation Linux `bubblewrap` (`--unshare-all`, `--ro-bind`, masquage des chemins
+/// protégés par `--tmpfs`, `--clearenv`) pour `Q-05` ; refuse fail-closed tout proxy loopback requis
+/// tant que le montage de socket proxy dans l'espace de noms `bwrap` et le filtre `seccomp` ne sont
+/// pas implémentés.
 ///
 /// # Errors
-/// Retourne [`ProcessHostError::IsolationObligationUnenforceable`] si les contraintes sont invalides.
+/// Retourne [`ProcessHostError::IsolationObligationUnenforceable`] si les contraintes sont invalides
+/// ou exigent un proxy réseau / ports loopback non pris en charge par ce plan M0.
 pub fn build_linux_bwrap_plan(
     program: &str,
     args: &[String],
     clean_env: &BTreeMap<String, String>,
     spec: &StrictIsolationSpec,
 ) -> Result<LinuxBwrapPlan, ProcessHostError> {
-    const BACKEND: &str = "linux-bubblewrap-seccomp";
+    const BACKEND: &str = "linux-bubblewrap";
+    if spec.egress_proxy_addr.is_some() || !spec.extra_loopback_control_ports.is_empty() {
+        return Err(ProcessHostError::IsolationObligationUnenforceable {
+            backend: BACKEND.to_owned(),
+            reason: String::from(
+                "montage du socket proxy d'egress dans l'espace de noms bwrap (--unshare-all) non implémenté en M0",
+            ),
+            remediation: String::from(
+                "Désactiver le proxy d'egress ou exécuter sans montage réseau Linux en M0",
+            ),
+        });
+    }
     let validated = resolve_and_validate_isolation_paths(spec, BACKEND)?;
 
     let mut bwrap_args = vec![
@@ -660,7 +676,7 @@ fn prepare_linux_bwrap_launch(
         SandboxProbeOutcome::Supported => {}
         SandboxProbeOutcome::MissingBackend { detail } => {
             return Err(ProcessHostError::IsolationBackendMissing {
-                backend: String::from("linux-bubblewrap-seccomp"),
+                backend: String::from("linux-bubblewrap"),
                 remediation: format!(
                     "{detail} — installer bubblewrap (bwrap) ou repasser explicitement le projet en mode standard"
                 ),
@@ -668,10 +684,10 @@ fn prepare_linux_bwrap_launch(
         }
         SandboxProbeOutcome::Unenforceable { detail } => {
             return Err(ProcessHostError::IsolationObligationUnenforceable {
-                backend: String::from("linux-bubblewrap-seccomp"),
+                backend: String::from("linux-bubblewrap"),
                 reason: detail,
                 remediation: String::from(
-                    "Activer user namespaces/seccomp ou repasser explicitement le projet en mode standard",
+                    "Activer user namespaces ou repasser explicitement le projet en mode standard",
                 ),
             });
         }
@@ -681,7 +697,7 @@ fn prepare_linux_bwrap_launch(
         executable: bwrap_path.to_path_buf(),
         args: plan.bwrap_args,
         clean_env,
-        backend_name: String::from("linux-bubblewrap-seccomp"),
+        backend_name: String::from("linux-bubblewrap"),
         profile_digest: Some(plan.profile_digest),
         profile_path: None,
     })
@@ -1090,7 +1106,13 @@ mod tests {
             &ok_probe,
         )
         .unwrap();
-        assert_eq!(linux_ok.backend_name, "linux-bubblewrap-seccomp");
+        assert_eq!(linux_ok.backend_name, "linux-bubblewrap");
+        let mut with_proxy = spec.clone();
+        with_proxy.egress_proxy_addr = Some("127.0.0.1:18080".parse().unwrap());
+        assert!(matches!(
+            build_linux_bwrap_plan("/bin/echo", &[], &BTreeMap::new(), &with_proxy),
+            Err(ProcessHostError::IsolationObligationUnenforceable { .. })
+        ));
         let mac_ok = prepare_macos_seatbelt_launch(
             "/bin/echo",
             &["hi".into()],
