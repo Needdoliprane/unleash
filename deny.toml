@@ -5,7 +5,9 @@ all-features = true
 [advisories]
 version = 2
 yanked = "deny"
-ignore = []
+ignore = [
+  { id = "RUSTSEC-2026-0543", reason = "chrono 0.4.45 (avis informatif unmaintained sans CVE ni correctif amont) est requis par ts-rs 12.0.1 (chrono-impl) et le formatage RFC 3339 d'unleash-protocol/unleash-store ; réévaluation prévue lors du support jiff/time par ts-rs." },
+]
 
 [licenses]
 version = 2
