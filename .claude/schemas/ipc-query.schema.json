@@ -1,0 +1,46 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:ovpt:unleash:ipc-query:1",
+  "title": "QueryEnvelope proposée",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "protocol_version",
+    "request_id",
+    "query_type",
+    "project_id",
+    "payload"
+  ],
+  "properties": {
+    "protocol_version": {
+      "type": "string",
+      "enum": [
+        "unleash.ipc.v2"
+      ],
+      "description": "Version du protocole IPC (unleash.ipc.v2)."
+    },
+    "request_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "query_type": {
+      "type": "string",
+      "pattern": "^[A-Z][A-Za-z0-9]+$",
+      "maxLength": 96
+    },
+    "project_id": {
+      "anyOf": [
+        {
+          "type": "string",
+          "format": "uuid"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "payload": {
+      "type": "object"
+    }
+  }
+}

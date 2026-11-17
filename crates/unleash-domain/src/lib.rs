@@ -32,7 +32,7 @@ pub use ids::{
     GoalId, HostId, InvocationId, IterationId, LeaseId, ManifestId, MissionId, ModelCallId,
     OperationId, PoolId, ProcessId, ProcessRunUuid, ProjectId, ProviderProbeId, ReceiptId,
     RegistryVersionId, ReplayWorkerId, RepoId, RequestId, ReservationId, RestoreId, RunId,
-    SecretRef, SessionId, Sha256Digest, StepId, TaskId, TerminalId, WorktreeId,
+    SecretRef, SessionId, Sha256Digest, StepId, StreamId, TaskId, TerminalId, WorktreeId,
 };
 pub use ports::{ClockPort, IdGeneratorPort};
 pub use states::*;
