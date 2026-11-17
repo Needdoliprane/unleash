@@ -511,4 +511,100 @@ mod tests {
         assert_eq!(r2.receipt_id, r1.receipt_id);
         assert_eq!(sink, b"echo 1\n");
     }
+
+    #[test]
+    fn t_f011_005_crash_at_c3_before_dispatch_marker_leaves_clean_state_and_allows_retry() {
+        let dir = local_test_dir("ph-c3").unwrap();
+        let runtime_dir = dir.path().join("host");
+        let ctrl = CutpointController::new();
+        ctrl.set_action_on_hit(Cutpoint::C3, 1, CutpointAction::Fail("killed_at_c3"))
+            .unwrap();
+        let adapter: Arc<dyn HostCutpointObserver> = Arc::new(TestkitCutpointAdapter(ctrl));
+
+        let tracker = PtyInputTracker::open(&runtime_dir, Some(adapter)).unwrap();
+        let mut sink = Vec::<u8>::new();
+        let cmd_id = CommandId::from_u128(55);
+        let act_id = ActionId::from_u128(66);
+
+        let err = tracker
+            .dispatch_input(
+                &mut sink,
+                1,
+                cmd_id,
+                act_id,
+                b"safe-before-dispatch\n",
+                TimestampMs::new(100),
+            )
+            .unwrap_err();
+        assert!(matches!(err, ProcessHostError::TerminalUnavailable { .. }));
+        assert!(
+            sink.is_empty(),
+            "aucune écriture PTY ne doit avoir eu lieu à C3"
+        );
+
+        let reopened = PtyInputTracker::open(&runtime_dir, None).unwrap();
+        assert!(reopened.reconcile_in_flight().unwrap().is_empty());
+        assert_eq!(reopened.summary(), (0, Vec::new()));
+
+        let receipt = reopened
+            .dispatch_input(
+                &mut sink,
+                1,
+                cmd_id,
+                act_id,
+                b"safe-before-dispatch\n",
+                TimestampMs::new(200),
+            )
+            .unwrap();
+        assert!(!receipt.deduplicated);
+        assert_eq!(sink, b"safe-before-dispatch\n");
+    }
+
+    #[test]
+    fn t_f011_005_crash_at_c4_after_dispatch_marker_before_pty_write_becomes_outcome_unknown_without_retry()
+     {
+        let dir = local_test_dir("ph-c4").unwrap();
+        let runtime_dir = dir.path().join("host");
+        let ctrl = CutpointController::new();
+        ctrl.set_action_on_hit(Cutpoint::C4, 1, CutpointAction::Fail("killed_at_c4"))
+            .unwrap();
+        let adapter: Arc<dyn HostCutpointObserver> = Arc::new(TestkitCutpointAdapter(ctrl));
+
+        let tracker = PtyInputTracker::open(&runtime_dir, Some(adapter)).unwrap();
+        let mut sink = Vec::<u8>::new();
+        let cmd_id = CommandId::from_u128(77);
+        let act_id = ActionId::from_u128(88);
+
+        let err = tracker
+            .dispatch_input(
+                &mut sink,
+                1,
+                cmd_id,
+                act_id,
+                b"post-dispatch\n",
+                TimestampMs::new(300),
+            )
+            .unwrap_err();
+        assert!(matches!(err, ProcessHostError::TerminalUnavailable { .. }));
+        assert!(sink.is_empty(), "C4 intervient avant écriture PTY");
+
+        let reopened = PtyInputTracker::open(&runtime_dir, None).unwrap();
+        assert_eq!(reopened.reconcile_in_flight().unwrap(), vec![1]);
+
+        let retry_err = reopened
+            .dispatch_input(
+                &mut sink,
+                1,
+                cmd_id,
+                act_id,
+                b"post-dispatch\n",
+                TimestampMs::new(400),
+            )
+            .unwrap_err();
+        assert!(matches!(
+            retry_err,
+            ProcessHostError::TerminalInputOutcomeUnknown { input_seq: 1, .. }
+        ));
+        assert!(sink.is_empty());
+    }
 }

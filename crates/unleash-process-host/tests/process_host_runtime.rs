@@ -25,7 +25,6 @@ use std::process::{Child, Command, Stdio};
 use std::sync::mpsc;
 use std::time::Duration;
 
-use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
 use unleash_domain::{
     ActionId, AuthorityGeneration, CommandId, DaemonEpoch, Fence, HostId, MissionId, ProcessId,
@@ -36,11 +35,11 @@ use unleash_platform::{
     inspect_process_identity, write_private_file_atomic,
 };
 use unleash_process_host::{
-    CONTROL_SECRET_FILENAME, HOST_MANIFEST_FILENAME, HOST_READY_PREFIX, HostBootstrapSpec,
-    HostClient, HostCommandHeader, HostControlSecret, HostLaunchState, HostManifest, HostRequest,
-    HostResponse, IsolationBackendProbe, IsolationMode, IsolationProfileKind, LogSpool,
-    OsIsolationBackendProbe, OsProcessInspector, ProcessHostError, ProcessHostServer,
-    ProcessInspector, ResourceKind, SandboxProbeOutcome, StrictIsolationSpec,
+    CONTROL_SECRET_FILENAME, ChildExitStatus, HOST_MANIFEST_FILENAME, HOST_READY_PREFIX,
+    HostBootstrapSpec, HostClient, HostCommandHeader, HostControlSecret, HostLaunchState,
+    HostManifest, HostRequest, HostResponse, IsolationBackendProbe, IsolationMode,
+    IsolationProfileKind, LogSpool, OsIsolationBackendProbe, OsProcessInspector, ProcessHostError,
+    ProcessHostServer, ProcessInspector, ResourceKind, SandboxProbeOutcome, StrictIsolationSpec,
     reconcile_after_lost_host, store_canary_secrets, store_control_secret,
 };
 use unleash_protocol::{ErrorCode, ReasonCode, RetryClass};
@@ -396,7 +395,10 @@ struct StrictProbeConfig {
     report_path: PathBuf,
 }
 
-#[allow(clippy::struct_excessive_bools)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "rapport de sonde T-SEC-03 à booléens explicites"
+)]
 #[derive(Debug, Serialize, Deserialize)]
 struct StrictProbeReport {
     write_inside_ok: bool,
@@ -429,7 +431,9 @@ fn fixture_strict_sandbox_probe_entrypoint() {
     let allowed_tcp_ok = std::net::TcpStream::connect(("127.0.0.1", cfg.allowed_tcp_port)).is_ok();
     let blocked_tcp_denied =
         std::net::TcpStream::connect(("127.0.0.1", cfg.blocked_tcp_port)).is_err();
-    let inherited_secret_env_absent = std::env::var_os("UNLEASH_FAKE_API_KEY").is_none();
+    let inherited_secret_env_absent = std::env::var_os("UNLEASH_FAKE_API_KEY").is_none()
+        && std::env::var_os("ANTHROPIC_API_KEY").is_none()
+        && std::env::var_os("OPENAI_API_KEY").is_none();
 
     let report = StrictProbeReport {
         write_inside_ok,
@@ -1419,8 +1423,19 @@ fn t_sec_macos_seatbelt_strict_mode_and_isolation_unavailable_negative() {
         max_volatile_bytes: 4096,
     };
 
-    // 1. Positif : lancement réel sous /usr/bin/sandbox-exec dans PTY
-    let guard = ArcHostGuard::start(&spec);
+    // 1. Positif : lancement réel du binaire unleash-process-host sous /usr/bin/sandbox-exec dans PTY,
+    // avec secrets injectés dans l'environnement du parent/host pour prouver leur nettoyage effectif.
+    let bootstrap_path = runtime_dir.join("bootstrap.json");
+    write_bootstrap(&bootstrap_path, &spec);
+    let (mut host_child, _uuid, host_sock, _host_rx) = spawn_real_host_binary(
+        &bootstrap_path,
+        &[
+            ("UNLEASH_FAKE_API_KEY", "sk-leak-check-fake"),
+            ("ANTHROPIC_API_KEY", "sk-ant-leak-check"),
+            ("OPENAI_API_KEY", "sk-oai-leak-check"),
+        ],
+        false,
+    );
 
     let mut byte = [0_u8; 1];
     fifo_rd.read_exact(&mut byte).unwrap();
@@ -1439,11 +1454,27 @@ fn t_sec_macos_seatbelt_strict_mode_and_isolation_unavailable_negative() {
     assert!(report.blocked_tcp_denied);
     assert!(report.inherited_secret_env_absent);
 
+    let mut strict_client = HostClient::connect(
+        &host_sock,
+        run_uuid,
+        gen_a,
+        DaemonEpoch::new(1),
+        Fence::new(1),
+    )
+    .unwrap();
+    let sd = strict_client
+        .call(&HostRequest::Shutdown {
+            header: mk_header(run_uuid, gen_a, 1, 1, 900),
+            secret: secret.to_owned(),
+        })
+        .unwrap();
+    assert!(matches!(sd, HostResponse::ShutdownAck));
+    let _ = host_child.wait().unwrap();
+
     let mf = HostManifest::load_private(&runtime_dir.join(HOST_MANIFEST_FILENAME)).unwrap();
     assert_eq!(mf.isolation_mode, IsolationMode::Strict);
     assert_eq!(mf.isolation_backend.as_deref(), Some("macos-seatbelt"));
     assert!(mf.isolation_profile_digest.is_some());
-    drop(guard);
 
     // 2. Négatifs : backend absent -> IsolationBackendMissing, jamais de repli vers standard
     let dir_neg = local_test_dir("sp-neg").unwrap();
@@ -1559,6 +1590,275 @@ impl ProcessInspector for DifferentBootInspector {
     }
 }
 
+// T-F011-010 / REQ-TERM-002 / REQ-TERM-006
+#[test]
+fn t_f011_010_external_sigkill_on_child_observed_by_reconcile_and_shutdown() {
+    use rustix::process::{Pid, Signal, kill_process};
+    use std::io::Read as _;
+
+    // Cas A : SIGKILL externe sur l'enfant -> Reconcile observe Exited sans récolter prématurément,
+    // puis Stop récolte proprement sous ancrage zombie.
+    let dir = local_test_dir("sp-ck").unwrap();
+    let runtime_dir = dir.path().join("host");
+    let work_dir = dir.path().join("work");
+    fs::create_dir_all(&work_dir).unwrap();
+    ensure_private_rendezvous_dir(&runtime_dir).unwrap();
+
+    let sync_sock_path = dir.path().join("sync.sock");
+    let sync_listener = UnixListener::bind(&sync_sock_path).unwrap();
+
+    let secret = "ctrl-secret-ck";
+    let secret_path = runtime_dir.join(CONTROL_SECRET_FILENAME);
+    store_control_secret(&secret_path, &HostControlSecret::new(secret).unwrap()).unwrap();
+
+    let run_uuid = ProcessRunUuid::from_u128(0x7777);
+    let gen_a = AuthorityGeneration::from_u128(0xAAAA);
+    let mut explicit_env = BTreeMap::new();
+    explicit_env.insert(ENV_ROLE.to_owned(), "pty_worker".to_owned());
+    explicit_env.insert(
+        ENV_SYNC_SOCK.to_owned(),
+        sync_sock_path.display().to_string(),
+    );
+
+    let spec = HostBootstrapSpec {
+        runtime_dir: runtime_dir.clone(),
+        host_id: HostId::from_u128(7),
+        process_id: ProcessId::from_u128(8),
+        terminal_id: Some(TerminalId::from_u128(9)),
+        process_run_uuid: run_uuid,
+        authority_generation: gen_a,
+        daemon_epoch: DaemonEpoch::new(1),
+        resource_fence: Fence::new(1),
+        action_id: ActionId::from_u128(10),
+        mission_id: None,
+        owner_agent_id: None,
+        worktree_id: None,
+        cwd: work_dir.clone(),
+        program: std::env::current_exe().unwrap().display().to_string(),
+        arguments: current_exe_fixture_args("fixture_pty_worker_entrypoint"),
+        explicit_env: explicit_env.clone(),
+        resource_kind: ResourceKind::Pty { rows: 24, cols: 80 },
+        isolation_mode: IsolationMode::Standard,
+        strict_spec: None,
+        isolation_profile_kind: None,
+        control_secret_path: secret_path,
+        canaries_secret_path: None,
+        max_segment_bytes: 256,
+        max_total_log_bytes: 64 * 1024,
+        max_volatile_bytes: 256,
+    };
+    let bootstrap_path = runtime_dir.join("bootstrap.json");
+    write_bootstrap(&bootstrap_path, &spec);
+
+    let (mut host_child, _uuid, host_sock, _rx) =
+        spawn_real_host_binary(&bootstrap_path, &[], false);
+    let (pty_sock, mut pty_reader) = accept_sync_client(&sync_listener);
+    assert_eq!(read_line_timeout(&mut pty_reader), "PTY_READY");
+    drop(pty_sock);
+
+    let mut client = HostClient::connect(
+        &host_sock,
+        run_uuid,
+        gen_a,
+        DaemonEpoch::new(1),
+        Fence::new(1),
+    )
+    .unwrap();
+    let ack = client
+        .call(&HostRequest::Handshake {
+            header: mk_header(run_uuid, gen_a, 1, 1, 1),
+            current_secret: secret.to_owned(),
+            rotate_to_secret: None,
+            require_higher_epoch: false,
+        })
+        .unwrap();
+    let HostResponse::HandshakeAck { os_identity, .. } = ack else {
+        panic!("handshake inattendu : {ack:?}");
+    };
+
+    // Tuer l'enfant directement par SIGKILL hors StopProcess.
+    let child_raw_pid = Pid::from_raw(i32::try_from(os_identity.pid).unwrap()).unwrap();
+    kill_process(child_raw_pid, Signal::KILL).unwrap();
+
+    // Attendre l'EOF noyau du descripteur de l'enfant tué (zéro sleep).
+    let mut eof_buf = Vec::new();
+    let _ = pty_reader.read_to_end(&mut eof_buf);
+
+    let mut fence_seq = 2_u64;
+    let mut reconciled = None;
+    for _ in 0..500 {
+        let resp = client
+            .call(&HostRequest::Reconcile {
+                header: mk_header(run_uuid, gen_a, 1, fence_seq, u128::from(fence_seq)),
+                secret: secret.to_owned(),
+            })
+            .unwrap();
+        fence_seq += 1;
+        if let HostResponse::ReconcileState {
+            launch_state,
+            os_verification,
+            anchor,
+            exit_status,
+            ..
+        } = resp
+            && matches!(launch_state, HostLaunchState::Exited { .. })
+        {
+            reconciled = Some((launch_state, os_verification, anchor, exit_status));
+            break;
+        }
+        std::thread::yield_now();
+    }
+    let (launch_state, os_verification, anchor, exit_status) =
+        reconciled.expect("ReconcileState doit observer Exited après SIGKILL enfant");
+
+    let expected_exit = ChildExitStatus {
+        exit_code: None,
+        exit_signal: Some(libc::SIGKILL),
+        success: false,
+    };
+    assert_eq!(os_verification, "exited_unreaped_zombie");
+    assert!(!anchor.reaped);
+    assert_eq!(exit_status, Some(expected_exit));
+    assert_eq!(
+        launch_state,
+        HostLaunchState::Exited {
+            exit_code: None,
+            exit_signal: Some(libc::SIGKILL),
+        }
+    );
+
+    // Le manifeste durable reflète déjà la transition Exited, et le host reste vivant et pilotable.
+    let mf_mid = HostManifest::load_private(&runtime_dir.join(HOST_MANIFEST_FILENAME)).unwrap();
+    assert_eq!(mf_mid.launch_state, launch_state);
+
+    // L'ancrage zombie n'ayant pas été récolté prématurément, Stop peut encore l'observer et récolter.
+    let stop_resp = client
+        .call(&HostRequest::Stop {
+            header: mk_header(run_uuid, gen_a, 1, fence_seq, u128::from(fence_seq)),
+            secret: secret.to_owned(),
+            escalate_to_sigkill: true,
+            known_descendant_pids: vec![],
+        })
+        .unwrap();
+    fence_seq += 1;
+    let HostResponse::StopObserved { observation } = stop_resp else {
+        panic!("StopObserved attendu : {stop_resp:?}");
+    };
+    assert_eq!(observation.direct_exit, Some(expected_exit));
+
+    let post_stop_reconcile = client
+        .call(&HostRequest::Reconcile {
+            header: mk_header(run_uuid, gen_a, 1, fence_seq, u128::from(fence_seq)),
+            secret: secret.to_owned(),
+        })
+        .unwrap();
+    fence_seq += 1;
+    let HostResponse::ReconcileState {
+        os_verification,
+        anchor,
+        exit_status,
+        launch_state,
+        ..
+    } = post_stop_reconcile
+    else {
+        panic!("ReconcileState attendu : {post_stop_reconcile:?}");
+    };
+    assert_eq!(os_verification, "reaped");
+    assert!(anchor.reaped);
+    assert_eq!(exit_status, Some(expected_exit));
+    assert_eq!(
+        launch_state,
+        HostLaunchState::Exited {
+            exit_code: None,
+            exit_signal: Some(libc::SIGKILL),
+        }
+    );
+
+    let sd = client
+        .call(&HostRequest::Shutdown {
+            header: mk_header(run_uuid, gen_a, 1, fence_seq, u128::from(fence_seq)),
+            secret: secret.to_owned(),
+        })
+        .unwrap();
+    assert!(matches!(sd, HostResponse::ShutdownAck));
+    let _ = host_child.wait().unwrap();
+
+    // Cas B : SIGKILL enfant suivi directement de Shutdown sans Stop -> serve_until_shutdown
+    // appelle poll_exit(true), récolte et persiste HostLaunchState::Exited sur disque.
+    let dir_b = local_test_dir("sp-ckb").unwrap();
+    let rt_b = dir_b.path().join("host");
+    ensure_private_rendezvous_dir(&rt_b).unwrap();
+    let sync_b_path = dir_b.path().join("sync.sock");
+    let sync_b_listener = UnixListener::bind(&sync_b_path).unwrap();
+    let secret_b = "ctrl-secret-ckb";
+    let secret_b_path = rt_b.join(CONTROL_SECRET_FILENAME);
+    store_control_secret(&secret_b_path, &HostControlSecret::new(secret_b).unwrap()).unwrap();
+    let run_b = ProcessRunUuid::from_u128(0x7788);
+    let mut env_b = BTreeMap::new();
+    env_b.insert(ENV_ROLE.to_owned(), "pty_worker".to_owned());
+    env_b.insert(ENV_SYNC_SOCK.to_owned(), sync_b_path.display().to_string());
+    let mut bootstrap_b = spec;
+    bootstrap_b.runtime_dir = rt_b.clone();
+    bootstrap_b.process_run_uuid = run_b;
+    bootstrap_b.explicit_env = env_b;
+    bootstrap_b.control_secret_path = secret_b_path;
+    let bs_b = rt_b.join("bootstrap.json");
+    write_bootstrap(&bs_b, &bootstrap_b);
+
+    let (mut host_b, _uuid_b, sock_b, _rx_b) = spawn_real_host_binary(&bs_b, &[], false);
+    let (pty_b, mut reader_b) = accept_sync_client(&sync_b_listener);
+    assert_eq!(read_line_timeout(&mut reader_b), "PTY_READY");
+    drop(pty_b);
+
+    let mut client_b =
+        HostClient::connect(&sock_b, run_b, gen_a, DaemonEpoch::new(1), Fence::new(1)).unwrap();
+    let ack_b = client_b
+        .call(&HostRequest::Handshake {
+            header: mk_header(run_b, gen_a, 1, 1, 1),
+            current_secret: secret_b.to_owned(),
+            rotate_to_secret: None,
+            require_higher_epoch: false,
+        })
+        .unwrap();
+    let HostResponse::HandshakeAck {
+        os_identity: id_b, ..
+    } = ack_b
+    else {
+        panic!("handshake B inattendu : {ack_b:?}");
+    };
+    kill_process(
+        Pid::from_raw(i32::try_from(id_b.pid).unwrap()).unwrap(),
+        Signal::KILL,
+    )
+    .unwrap();
+    let mut eof_b = Vec::new();
+    let _ = reader_b.read_to_end(&mut eof_b);
+    while matches!(
+        OsProcessInspector.verify_identity(&id_b),
+        Ok(ProcessVerification::Match)
+    ) {
+        std::thread::yield_now();
+    }
+
+    let sd_b = client_b
+        .call(&HostRequest::Shutdown {
+            header: mk_header(run_b, gen_a, 1, 2, 2),
+            secret: secret_b.to_owned(),
+        })
+        .unwrap();
+    assert!(matches!(sd_b, HostResponse::ShutdownAck));
+    let _ = host_b.wait().unwrap();
+
+    let mf_b = HostManifest::load_private(&rt_b.join(HOST_MANIFEST_FILENAME)).unwrap();
+    assert_eq!(
+        mf_b.launch_state,
+        HostLaunchState::Exited {
+            exit_code: None,
+            exit_signal: Some(libc::SIGKILL),
+        }
+    );
+}
+
 struct UnenforceableProbe;
 
 impl IsolationBackendProbe for UnenforceableProbe {
@@ -1582,6 +1882,3 @@ impl IsolationBackendProbe for UnenforceableProbe {
         }
     }
 }
-
-#[allow(dead_code)]
-fn _unused_secret_string_import(_: SecretString) {}

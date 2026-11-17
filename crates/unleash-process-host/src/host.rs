@@ -473,6 +473,7 @@ impl ProcessHostServer {
         }
 
         let durable_seq = self.shared.spool.flush_and_sync_durable()?;
+        let polled_exit = self.shared.anchor.poll_exit(true).ok().flatten();
         {
             let mut mf = self
                 .shared
@@ -480,7 +481,7 @@ impl ProcessHostServer {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             mf.durable_log_seq = durable_seq;
-            if let Some(st) = self.shared.anchor.exit_status() {
+            if let Some(st) = polled_exit.or_else(|| self.shared.anchor.exit_status()) {
                 mf.launch_state = HostLaunchState::Exited {
                     exit_code: st.exit_code,
                     exit_signal: st.exit_signal,
@@ -859,20 +860,24 @@ fn process_request(req: HostRequest, shared: &ServerShared) -> HostResponse {
                 let unknown_input_seqs = shared.inputs.reconcile_in_flight()?;
                 let (last_confirmed_input_seq, _) = shared.inputs.summary();
                 let durable_log_seq = shared.spool.sync_durable_now()?;
+                let exit_status = shared.anchor.poll_exit(false)?;
                 let anchor_report = shared.anchor.verification_report();
-                let exit_status = shared.anchor.exit_status();
-                let launch_state = if let Some(st) = exit_status {
-                    HostLaunchState::Exited {
-                        exit_code: st.exit_code,
-                        exit_signal: st.exit_signal,
-                    }
-                } else {
-                    shared
+                let launch_state = {
+                    let mut mf = shared
                         .manifest
                         .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner)
-                        .launch_state
-                        .clone()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    mf.durable_log_seq = durable_log_seq;
+                    mf.last_confirmed_input_seq = last_confirmed_input_seq;
+                    mf.in_flight_input_seq = unknown_input_seqs.first().copied();
+                    if let Some(st) = exit_status {
+                        mf.launch_state = HostLaunchState::Exited {
+                            exit_code: st.exit_code,
+                            exit_signal: st.exit_signal,
+                        };
+                    }
+                    let _ = mf.save_atomic(&shared.manifest_path);
+                    mf.launch_state.clone()
                 };
                 Ok(HostResponse::ReconcileState {
                     launch_state,

@@ -15,7 +15,9 @@ use std::process::{Child, Command, ExitStatus};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use rustix::process::{Pid, Signal, kill_process, kill_process_group};
+use rustix::process::{
+    Pid, Signal, WaitId, WaitIdOptions, WaitIdStatus, kill_process, kill_process_group, waitid,
+};
 use serde::{Deserialize, Serialize};
 use unleash_platform::{
     BootIdentity, OsProcessIdentity, ProcessVerification, current_boot_identity,
@@ -80,6 +82,8 @@ pub fn ensure_sigchld_qualified() -> Result<SigchldQualification, ProcessHostErr
         return Ok(current);
     }
 
+    // SAFETY: `libc::sigaction` est une structure C POD (`repr(C)`) initialisable à zéro avant
+    // d'assigner `sa_sigaction`, `sa_flags` et `sa_mask`.
     let mut sa: libc::sigaction = unsafe { std::mem::zeroed() };
     sa.sa_sigaction = sigchld_handler as *const () as libc::sighandler_t;
     sa.sa_flags = libc::SA_RESTART | libc::SA_NOCLDSTOP;
@@ -123,6 +127,7 @@ pub fn configure_setsid_pre_exec(cmd: &mut Command) {
             ] {
                 libc::signal(signo, libc::SIG_DFL);
             }
+            // `sigset_t` est un type C POD initialisé immédiatement via `sigemptyset`.
             let mut empty_set: libc::sigset_t = std::mem::zeroed();
             libc::sigemptyset(&raw mut empty_set);
             libc::sigprocmask(
@@ -322,8 +327,10 @@ fn parse_portable_signal_number(name: &str) -> Option<i32> {
         Some(libc::SIGTERM)
     } else if upper.contains("INT") {
         Some(libc::SIGINT)
-    } else if upper.contains("HUP") {
+    } else if upper.contains("HUP") || upper.contains("HANGUP") {
         Some(libc::SIGHUP)
+    } else if upper.contains("QUIT") {
+        Some(libc::SIGQUIT)
     } else if upper.contains("ABRT") || upper.contains("ABORT") {
         Some(libc::SIGABRT)
     } else {
@@ -580,8 +587,8 @@ impl OwnedChildAnchor {
 
     /// Vérifie si l'enfant direct s'est terminé sans bloquer, et conserve son statut.
     ///
-    /// ATTENTION : si `reap_if_exited` vaut `false`, consulte sans libérer l'ancrage tant que
-    /// le contrôle de groupe peut encore être requis ; si `true`, récolte l'enfant terminé.
+    /// ATTENTION : si `reap_if_exited` vaut `false`, consulte sans libérer l'ancrage (`waitid(WNOWAIT)`)
+    /// tant que le contrôle de groupe peut encore être requis ; si `true`, récolte l'enfant terminé.
     ///
     /// # Errors
     /// Retourne [`ProcessHostError::Io`] en cas d'erreur système `waitpid`.
@@ -597,12 +604,7 @@ impl OwnedChildAnchor {
             return Ok(Some(status));
         }
         if !reap_if_exited {
-            let dead = is_direct_child_zombie_without_reaping(guard.expected_identity.pid);
-            if dead {
-                // On connaît qu'il a quitté sans encore relâcher le zombie !
-                return Ok(None);
-            }
-            return Ok(None);
+            return Ok(observe_exit_without_reaping_locked(&guard));
         }
         let Some(handle) = guard.handle.as_mut() else {
             return Ok(guard.exit_status);
@@ -729,8 +731,7 @@ impl OwnedChildAnchor {
         let mut group_signaled = send_group_signal_checked(target_pgid, leader_pid, Signal::TERM)?;
 
         // Envoyer SIGKILL au groupe AVANT la récolte pour préserver l'ancrage PGID non réutilisable.
-        if escalate_to_sigkill
-            && child_or_group_alive(&mut guard, self.inspector.as_ref(), target_pgid)
+        if escalate_to_sigkill && child_or_group_alive(&guard, self.inspector.as_ref(), target_pgid)
         {
             group_signaled |= send_group_signal_checked(target_pgid, leader_pid, Signal::KILL)?;
         }
@@ -919,16 +920,15 @@ fn send_group_signal_checked(
 }
 
 fn child_or_group_alive(
-    guard: &mut AnchorInner,
+    guard: &AnchorInner,
     inspector: &dyn ProcessInspector,
     target_pgid: u32,
 ) -> bool {
-    let direct_still_running = guard
-        .handle
-        .as_mut()
-        .and_then(|h| h.try_wait().ok())
-        .flatten()
-        .is_none();
+    // Inspecter sans jamais appeler `try_wait()` ici afin de ne pas récolter l'enfant direct
+    // avant l'éventuelle escalade `SIGKILL` au groupe.
+    let direct_still_running = !guard.reaped
+        && guard.exit_status.is_none()
+        && !is_direct_child_zombie_without_reaping(guard.expected_identity.pid);
     let group_has_live = !inspector.list_group_members(target_pgid).is_empty();
     direct_still_running || group_has_live
 }
@@ -951,32 +951,50 @@ fn reap_locked(guard: &mut AnchorInner) -> Result<ChildExitStatus, ProcessHostEr
     Ok(status)
 }
 
-#[allow(unsafe_code)]
-fn waitid_unreaped_siginfo(pid: u32) -> Option<(libc::pid_t, libc::siginfo_t)> {
-    let pid_t = libc::pid_t::try_from(pid).ok()?;
-    let id_val = libc::id_t::try_from(pid_t).ok()?;
-    let mut siginfo: libc::siginfo_t = unsafe { std::mem::zeroed() };
-    // SAFETY: `waitid` avec `WEXITED | WNOHANG | WNOWAIT` retourne `0` tant que `pid` est un
-    // enfant direct non encore récolté (vivant, en cours de sortie `exit1()` ou zombie) sans le
-    // récolter ni libérer son PID/PGID, et `-1` (`ECHILD`) s'il a déjà été récolté.
-    let rc = unsafe {
-        libc::waitid(
-            libc::P_PID,
-            id_val,
-            &raw mut siginfo,
-            libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
-        )
+fn inspect_unreaped_waitid(pid: u32) -> Result<Option<WaitIdStatus>, ()> {
+    let raw_pid = i32::try_from(pid).ok().and_then(Pid::from_raw).ok_or(())?;
+    waitid(
+        WaitId::Pid(raw_pid),
+        WaitIdOptions::EXITED | WaitIdOptions::NOHANG | WaitIdOptions::NOWAIT,
+    )
+    .map_err(|_| ())
+}
+
+fn observe_exit_without_reaping_locked(guard: &AnchorInner) -> Option<ChildExitStatus> {
+    if guard.reaped {
+        return guard.exit_status;
+    }
+    let Ok(Some(status)) = inspect_unreaped_waitid(guard.expected_identity.pid) else {
+        return None;
     };
-    (rc == 0).then_some((pid_t, siginfo))
+    child_exit_from_waitid(&status)
+}
+
+fn child_exit_from_waitid(status: &WaitIdStatus) -> Option<ChildExitStatus> {
+    if status.exited() {
+        let code = status.exit_status();
+        Some(ChildExitStatus {
+            exit_code: code,
+            exit_signal: None,
+            success: code == Some(0),
+        })
+    } else if status.killed() || status.dumped() {
+        Some(ChildExitStatus {
+            exit_code: None,
+            exit_signal: status.terminating_signal(),
+            success: false,
+        })
+    } else {
+        None
+    }
 }
 
 fn is_unreaped_direct_child(pid: u32) -> bool {
-    waitid_unreaped_siginfo(pid).is_some()
+    inspect_unreaped_waitid(pid).is_ok()
 }
 
-#[cfg(target_os = "macos")]
 fn is_direct_child_zombie_without_reaping(pid: u32) -> bool {
-    waitid_unreaped_siginfo(pid).is_some_and(|(pid_t, siginfo)| siginfo.si_pid == pid_t)
+    matches!(inspect_unreaped_waitid(pid), Ok(Some(_)))
 }
 
 #[cfg(target_os = "linux")]
@@ -1149,5 +1167,130 @@ mod tests {
 
         drop(child_stdin);
         let _ = anchor.wait_and_reap().unwrap();
+    }
+
+    #[test]
+    fn poll_exit_non_reaping_reports_sigkill_without_releasing_anchor() {
+        let mut cmd = Command::new("/bin/cat");
+        cmd.stdin(Stdio::piped()).stdout(Stdio::piped());
+        configure_setsid_pre_exec(&mut cmd);
+        let child = cmd.spawn().unwrap();
+        let pid = child.id();
+
+        let sigchld = ensure_sigchld_qualified().unwrap();
+        let anchor = OwnedChildAnchor::capture_direct_child(
+            OwnedChildHandle::Service(child),
+            sigchld,
+            Box::new(OsProcessInspector),
+        )
+        .unwrap();
+
+        let raw_pid = Pid::from_raw(i32::try_from(pid).unwrap()).unwrap();
+        kill_process(raw_pid, Signal::KILL).unwrap();
+        while !anchor.has_exited_or_reaped() {
+            std::thread::yield_now();
+        }
+
+        let observed = anchor
+            .poll_exit(false)
+            .unwrap()
+            .expect("poll_exit(false) doit retourner le statut SIGKILL sans récolter");
+        assert!(!anchor.is_reaped());
+        assert_eq!(observed.exit_code, None);
+        assert_eq!(observed.exit_signal, Some(libc::SIGKILL));
+        assert!(!observed.success);
+
+        let reaped = anchor.wait_and_reap().unwrap();
+        assert!(anchor.is_reaped());
+        assert_eq!(reaped, observed);
+    }
+
+    #[test]
+    fn stop_escalates_sigkill_to_group_without_premature_reap_when_leader_exits_on_sigterm() {
+        use std::fs::OpenOptions;
+        use std::io::{BufRead, BufReader};
+        use unleash_testkit::local_test_dir;
+
+        let dir = local_test_dir("anc-pg").unwrap();
+        let hold_fifo = dir.path().join("hold.fifo");
+        let fifo_status = Command::new("mkfifo").arg(&hold_fifo).status().unwrap();
+        assert!(fifo_status.success());
+        let _hold_guard = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&hold_fifo)
+            .unwrap();
+
+        let script = r#"/bin/sh -c 'trap "" TERM; printf "GC:%s\n" "$$"; exec /bin/cat < "$1"' gc "$1" & wait"#;
+        let mut cmd = Command::new("/bin/sh");
+        cmd.arg("-c")
+            .arg(script)
+            .arg("leader")
+            .arg(&hold_fifo)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
+        configure_setsid_pre_exec(&mut cmd);
+        let mut child = cmd.spawn().unwrap();
+        let child_stdout = child.stdout.take().unwrap();
+
+        let sigchld = ensure_sigchld_qualified().unwrap();
+        let anchor = OwnedChildAnchor::capture_direct_child(
+            OwnedChildHandle::Service(child),
+            sigchld,
+            Box::new(OsProcessInspector),
+        )
+        .unwrap();
+
+        let mut reader = BufReader::new(child_stdout);
+        let mut line = String::new();
+        loop {
+            line.clear();
+            let n = reader.read_line(&mut line).unwrap();
+            assert!(n > 0, "EOF avant réception de GC:<pid>");
+            if line.trim_end().starts_with("GC:") {
+                break;
+            }
+        }
+        let gc_pid: u32 = line.trim().strip_prefix("GC:").unwrap().parse().unwrap();
+        let leader_id = anchor.expected_identity();
+        assert_ne!(gc_pid, leader_id.pid);
+        let grandchild_id = OsProcessInspector.inspect_pid(gc_pid).unwrap();
+        assert_eq!(grandchild_id.pgid, leader_id.pgid);
+
+        // Tue le leader seul avec SIGTERM pendant que le petit-enfant ignore SIGTERM.
+        anchor.signal_direct_child(HostSignal::Term).unwrap();
+        while !anchor.has_exited_or_reaped() {
+            std::thread::yield_now();
+        }
+        assert!(!anchor.is_reaped());
+        let pre_stop = anchor.poll_exit(false).unwrap().unwrap();
+        assert_eq!(pre_stop.exit_signal, Some(libc::SIGTERM));
+
+        // stop_and_observe doit escalader à SIGKILL sur le PGID AVANT de récolter le leader zombie.
+        let obs = anchor.stop_and_observe(true, &[gc_pid]).unwrap();
+        assert!(anchor.is_reaped());
+        assert_eq!(obs.direct_exit, Some(pre_stop));
+        assert!(obs.group_signaled);
+
+        // `hold.fifo` est encore ouvert et `gc_pid` ignore `SIGTERM` : l'EOF du tube `stdout`
+        // hérité par `gc_pid` ne peut provenir que de sa terminaison réelle par `SIGKILL` du PGID.
+        let mut eof_drain = Vec::new();
+        reader.read_to_end(&mut eof_drain).unwrap();
+        while matches!(
+            OsProcessInspector.verify_identity(&grandchild_id),
+            Ok(ProcessVerification::Match)
+        ) {
+            std::thread::yield_now();
+        }
+        assert!(
+            OsProcessInspector
+                .list_group_members(leader_id.pgid)
+                .is_empty()
+        );
+        assert!(matches!(
+            OsProcessInspector.verify_identity(&grandchild_id),
+            Ok(ProcessVerification::Exited)
+        ));
     }
 }

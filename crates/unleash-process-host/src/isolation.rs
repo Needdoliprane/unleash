@@ -452,22 +452,12 @@ fn prepare_macos_seatbelt_launch(
 ///
 /// # Errors
 /// Retourne [`ProcessHostError::IsolationObligationUnenforceable`] si les racines assignées sont
-/// vides, contiennent des caractères non représentables de façon sûre en SBPL, ou englobent un
+/// vides, contiennent des caractères non représentables de façon sûre en SBPL, ou chevauchent un
 /// répertoire protégé (`data_root`, `socket_dir`, trousseau ou credential).
 pub fn render_macos_seatbelt_profile(
     spec: &StrictIsolationSpec,
 ) -> Result<String, ProcessHostError> {
     const BACKEND: &str = "macos-seatbelt";
-    if spec.assigned_write_roots.is_empty() {
-        return Err(ProcessHostError::IsolationObligationUnenforceable {
-            backend: BACKEND.to_owned(),
-            reason: String::from("aucune racine d'écriture assignée"),
-            remediation: String::from(
-                "Assigner au moins un worktree ou répertoire temporaire dédié",
-            ),
-        });
-    }
-
     if spec.profile_kind == IsolationProfileKind::WorkspaceCommand
         && !spec.extra_loopback_control_ports.is_empty()
     {
@@ -478,40 +468,7 @@ pub fn render_macos_seatbelt_profile(
         });
     }
 
-    let write_roots = resolve_strict_path_variants(&spec.assigned_write_roots, BACKEND)?;
-    let mut deny_reads = Vec::new();
-    deny_reads.extend(resolve_strict_path_variants(
-        std::slice::from_ref(&spec.data_root),
-        BACKEND,
-    )?);
-    deny_reads.extend(resolve_strict_path_variants(
-        std::slice::from_ref(&spec.socket_dir),
-        BACKEND,
-    )?);
-    deny_reads.extend(resolve_strict_path_variants(&spec.keychain_paths, BACKEND)?);
-    deny_reads.extend(resolve_strict_path_variants(
-        &spec.declared_credential_paths,
-        BACKEND,
-    )?);
-
-    // Interdire qu'une racine autorisée en écriture englobe ou égale data_root / socket_dir / credentials.
-    for wr in &write_roots {
-        for denied in &deny_reads {
-            if denied.starts_with(wr) {
-                return Err(ProcessHostError::IsolationObligationUnenforceable {
-                    backend: BACKEND.to_owned(),
-                    reason: format!(
-                        "racine d'écriture '{}' englobe un chemin protégé '{}'",
-                        wr.display(),
-                        denied.display()
-                    ),
-                    remediation: String::from(
-                        "Séparer la racine d'écriture des répertoires protégés",
-                    ),
-                });
-            }
-        }
-    }
+    let validated = resolve_and_validate_isolation_paths(spec, BACKEND)?;
 
     if let Some(addr) = spec.egress_proxy_addr
         && !addr.ip().is_loopback()
@@ -527,15 +484,27 @@ pub fn render_macos_seatbelt_profile(
     out.push_str("(version 1)\n");
     out.push_str("(allow default)\n");
 
-    if !deny_reads.is_empty() {
-        append_sbpl_subpath_block(&mut out, "(deny file-read*\n", &deny_reads, BACKEND)?;
+    if !validated.deny_reads.is_empty() {
+        append_sbpl_subpath_block(
+            &mut out,
+            "(deny file-read*\n",
+            &validated.deny_reads,
+            BACKEND,
+        )?;
     }
 
-    // Si un worktree réside légitimement sous <data_root>/worktrees/..., réautoriser uniquement ce sous-chemin
-    // après le refus global de data_root, sans ouvrir data_root ni aucun autre sous-répertoire.
-    let nested_read_allows: Vec<PathBuf> = write_roots
+    // Seul un worktree strictement inclus sous data_root (ex. <data_root>/worktrees/...) peut recevoir
+    // une réautorisation de lecture ciblée après le refus de data_root ; aucun recouvrement sous
+    // socket_dir, keychain_paths ou declared_credential_paths n'est admis.
+    let nested_read_allows: Vec<PathBuf> = validated
+        .write_roots
         .iter()
-        .filter(|wr| deny_reads.iter().any(|d| wr.starts_with(d) && *wr != d))
+        .filter(|wr| {
+            validated
+                .data_root_variants
+                .iter()
+                .any(|dr| wr.starts_with(dr) && *wr != dr)
+        })
         .cloned()
         .collect();
     if !nested_read_allows.is_empty() {
@@ -549,7 +518,7 @@ pub fn render_macos_seatbelt_profile(
 
     out.push_str("(deny file-write* (subpath \"/\"))\n");
     out.push_str("(allow file-write*\n");
-    for path in &write_roots {
+    for path in &validated.write_roots {
         let escaped = escape_sbpl_path(path, BACKEND)?;
         out.push_str("  (subpath \"");
         out.push_str(&escaped);
@@ -623,49 +592,7 @@ pub fn build_linux_bwrap_plan(
     spec: &StrictIsolationSpec,
 ) -> Result<LinuxBwrapPlan, ProcessHostError> {
     const BACKEND: &str = "linux-bubblewrap-seccomp";
-    if spec.assigned_write_roots.is_empty() {
-        return Err(ProcessHostError::IsolationObligationUnenforceable {
-            backend: BACKEND.to_owned(),
-            reason: String::from("aucune racine d'écriture assignée"),
-            remediation: String::from(
-                "Assigner au moins un worktree ou répertoire temporaire dédié",
-            ),
-        });
-    }
-
-    let write_roots = resolve_strict_path_variants(&spec.assigned_write_roots, BACKEND)?;
-    let mut deny_reads = Vec::new();
-    deny_reads.extend(resolve_strict_path_variants(
-        std::slice::from_ref(&spec.data_root),
-        BACKEND,
-    )?);
-    deny_reads.extend(resolve_strict_path_variants(
-        std::slice::from_ref(&spec.socket_dir),
-        BACKEND,
-    )?);
-    deny_reads.extend(resolve_strict_path_variants(&spec.keychain_paths, BACKEND)?);
-    deny_reads.extend(resolve_strict_path_variants(
-        &spec.declared_credential_paths,
-        BACKEND,
-    )?);
-
-    for wr in &write_roots {
-        for denied in &deny_reads {
-            if denied.starts_with(wr) {
-                return Err(ProcessHostError::IsolationObligationUnenforceable {
-                    backend: BACKEND.to_owned(),
-                    reason: format!(
-                        "racine d'écriture '{}' englobe un chemin protégé '{}'",
-                        wr.display(),
-                        denied.display()
-                    ),
-                    remediation: String::from(
-                        "Séparer la racine d'écriture des répertoires protégés",
-                    ),
-                });
-            }
-        }
-    }
+    let validated = resolve_and_validate_isolation_paths(spec, BACKEND)?;
 
     let mut bwrap_args = vec![
         String::from("--unshare-all"),
@@ -687,14 +614,14 @@ pub fn build_linux_bwrap_plan(
     }
 
     // Masquer les chemins protégés existants sous tmpfs inaccessible avant de monter les worktrees.
-    for denied in &deny_reads {
+    for denied in &validated.deny_reads {
         if denied.exists() {
             bwrap_args.push(String::from("--tmpfs"));
             bwrap_args.push(denied.display().to_string());
         }
     }
 
-    for wr in &write_roots {
+    for wr in &validated.write_roots {
         let s = wr.display().to_string();
         bwrap_args.push(String::from("--bind"));
         bwrap_args.push(s.clone());
@@ -719,7 +646,6 @@ pub fn build_linux_bwrap_plan(
 }
 
 #[cfg(any(target_os = "linux", test))]
-#[allow(dead_code)]
 fn prepare_linux_bwrap_launch(
     program: &str,
     args: &[String],
@@ -758,6 +684,80 @@ fn prepare_linux_bwrap_launch(
         backend_name: String::from("linux-bubblewrap-seccomp"),
         profile_digest: Some(plan.profile_digest),
         profile_path: None,
+    })
+}
+
+struct ValidatedIsolationPaths {
+    write_roots: Vec<PathBuf>,
+    data_root_variants: Vec<PathBuf>,
+    deny_reads: Vec<PathBuf>,
+}
+
+fn resolve_and_validate_isolation_paths(
+    spec: &StrictIsolationSpec,
+    backend: &'static str,
+) -> Result<ValidatedIsolationPaths, ProcessHostError> {
+    if spec.assigned_write_roots.is_empty() {
+        return Err(ProcessHostError::IsolationObligationUnenforceable {
+            backend: backend.to_owned(),
+            reason: String::from("aucune racine d'écriture assignée"),
+            remediation: String::from(
+                "Assigner au moins un worktree ou répertoire temporaire dédié",
+            ),
+        });
+    }
+
+    let write_roots = resolve_strict_path_variants(&spec.assigned_write_roots, backend)?;
+    let data_root_variants =
+        resolve_strict_path_variants(std::slice::from_ref(&spec.data_root), backend)?;
+    let mut non_overlappable = Vec::new();
+    non_overlappable.extend(resolve_strict_path_variants(
+        std::slice::from_ref(&spec.socket_dir),
+        backend,
+    )?);
+    non_overlappable.extend(resolve_strict_path_variants(&spec.keychain_paths, backend)?);
+    non_overlappable.extend(resolve_strict_path_variants(
+        &spec.declared_credential_paths,
+        backend,
+    )?);
+
+    for wr in &write_roots {
+        for data_path in &data_root_variants {
+            if data_path.starts_with(wr) {
+                return Err(ProcessHostError::IsolationObligationUnenforceable {
+                    backend: backend.to_owned(),
+                    reason: format!(
+                        "racine d'écriture '{}' englobe ou égale data_root '{}'",
+                        wr.display(),
+                        data_path.display()
+                    ),
+                    remediation: String::from("Séparer la racine d'écriture de data_root"),
+                });
+            }
+        }
+        for forbidden in &non_overlappable {
+            if forbidden.starts_with(wr) || wr.starts_with(forbidden) {
+                return Err(ProcessHostError::IsolationObligationUnenforceable {
+                    backend: backend.to_owned(),
+                    reason: format!(
+                        "racine d'écriture '{}' chevauche le répertoire protégé '{}'",
+                        wr.display(),
+                        forbidden.display()
+                    ),
+                    remediation: String::from(
+                        "Séparer strictement les racines d'écriture des répertoires de sockets, trousseaux et credentials",
+                    ),
+                });
+            }
+        }
+    }
+
+    let mut deny_reads = data_root_variants.clone();
+    deny_reads.extend(non_overlappable);
+    Ok(ValidatedIsolationPaths {
+        write_roots,
+        data_root_variants,
+        deny_reads,
     })
 }
 
@@ -976,5 +976,157 @@ mod tests {
         assert!(plan.bwrap_args.contains(&"--unshare-all".to_owned()));
         assert!(plan.bwrap_args.contains(&"--clearenv".to_owned()));
         assert!(plan.bwrap_args.contains(&"--ro-bind".to_owned()));
+    }
+
+    #[test]
+    fn strict_rejects_write_root_nested_inside_socket_keychain_or_credentials() {
+        let dir = local_test_dir("iso-nest-forb").unwrap();
+        let data = dir.path().join("data");
+        let sock = dir.path().join("sock");
+        let keychain = dir.path().join("keychain");
+        let cred = dir.path().join("creds");
+        let prof = dir.path().join("prof");
+        let under_sock = sock.join("child");
+        let under_kc = keychain.join("sub");
+        let under_cred = cred.join("sub");
+        for p in [&data, &under_sock, &under_kc, &under_cred] {
+            fs::create_dir_all(p).unwrap();
+        }
+
+        for forbidden_wr in [under_sock, under_kc, under_cred] {
+            let spec = StrictIsolationSpec {
+                profile_kind: IsolationProfileKind::WorkspaceCommand,
+                assigned_write_roots: vec![forbidden_wr],
+                data_root: data.clone(),
+                socket_dir: sock.clone(),
+                keychain_paths: vec![keychain.clone()],
+                declared_credential_paths: vec![cred.clone()],
+                egress_proxy_addr: None,
+                extra_loopback_control_ports: vec![],
+                profile_output_dir: prof.clone(),
+            };
+            assert!(matches!(
+                render_macos_seatbelt_profile(&spec),
+                Err(ProcessHostError::IsolationObligationUnenforceable { .. })
+            ));
+            assert!(matches!(
+                build_linux_bwrap_plan("/bin/echo", &[], &BTreeMap::new(), &spec),
+                Err(ProcessHostError::IsolationObligationUnenforceable { .. })
+            ));
+        }
+    }
+
+    #[test]
+    fn strict_allows_nested_worktree_under_data_root_only() {
+        let dir = local_test_dir("iso-wt-data").unwrap();
+        let data = dir.path().join("data");
+        let wt = data.join("worktrees").join("wt-1");
+        let sock = dir.path().join("sock");
+        let cred = dir.path().join("creds");
+        let prof = dir.path().join("prof");
+        for p in [&wt, &sock, &cred] {
+            fs::create_dir_all(p).unwrap();
+        }
+
+        let spec = StrictIsolationSpec {
+            profile_kind: IsolationProfileKind::WorkspaceCommand,
+            assigned_write_roots: vec![wt.clone()],
+            data_root: data.clone(),
+            socket_dir: sock.clone(),
+            keychain_paths: vec![],
+            declared_credential_paths: vec![cred.clone()],
+            egress_proxy_addr: None,
+            extra_loopback_control_ports: vec![],
+            profile_output_dir: prof,
+        };
+        let profile = render_macos_seatbelt_profile(&spec).unwrap();
+        let wt_canon = fs::canonicalize(&wt).unwrap();
+        let data_canon = fs::canonicalize(&data).unwrap();
+        let expected_allow = format!("(allow file-read*\n  (subpath \"{}\")\n", wt.display());
+        let expected_allow_canon = format!(
+            "(allow file-read*\n  (subpath \"{}\")\n",
+            wt_canon.display()
+        );
+        assert!(
+            profile.contains(&expected_allow) || profile.contains(&expected_allow_canon),
+            "profile={profile}"
+        );
+        assert!(profile.contains(&data_canon.display().to_string()));
+        assert!(profile.contains(&sock.display().to_string()));
+        assert!(profile.contains(&cred.display().to_string()));
+    }
+
+    #[test]
+    fn prepare_platform_strict_launchers_validate_positive_missing_and_unenforceable() {
+        let dir = local_test_dir("iso-prep").unwrap();
+        let work = dir.path().join("work");
+        let data = dir.path().join("data");
+        let sock = dir.path().join("sock");
+        let prof = dir.path().join("prof");
+        for p in [&work, &data, &sock] {
+            fs::create_dir_all(p).unwrap();
+        }
+
+        let spec = StrictIsolationSpec {
+            profile_kind: IsolationProfileKind::WorkspaceCommand,
+            assigned_write_roots: vec![work],
+            data_root: data,
+            socket_dir: sock,
+            keychain_paths: vec![],
+            declared_credential_paths: vec![],
+            egress_proxy_addr: None,
+            extra_loopback_control_ports: vec![],
+            profile_output_dir: prof,
+        };
+
+        let ok_probe = FakeProbe {
+            outcome: SandboxProbeOutcome::Supported,
+        };
+        let linux_ok = prepare_linux_bwrap_launch(
+            "/bin/echo",
+            &["hi".into()],
+            BTreeMap::new(),
+            &spec,
+            &ok_probe,
+        )
+        .unwrap();
+        assert_eq!(linux_ok.backend_name, "linux-bubblewrap-seccomp");
+        let mac_ok = prepare_macos_seatbelt_launch(
+            "/bin/echo",
+            &["hi".into()],
+            BTreeMap::new(),
+            &spec,
+            &ok_probe,
+        )
+        .unwrap();
+        assert_eq!(mac_ok.backend_name, "macos-seatbelt");
+
+        let miss_probe = FakeProbe {
+            outcome: SandboxProbeOutcome::MissingBackend {
+                detail: "absent".into(),
+            },
+        };
+        assert!(matches!(
+            prepare_linux_bwrap_launch("/bin/echo", &[], BTreeMap::new(), &spec, &miss_probe),
+            Err(ProcessHostError::IsolationBackendMissing { .. })
+        ));
+        assert!(matches!(
+            prepare_macos_seatbelt_launch("/bin/echo", &[], BTreeMap::new(), &spec, &miss_probe),
+            Err(ProcessHostError::IsolationBackendMissing { .. })
+        ));
+
+        let unenf_probe = FakeProbe {
+            outcome: SandboxProbeOutcome::Unenforceable {
+                detail: "refus".into(),
+            },
+        };
+        assert!(matches!(
+            prepare_linux_bwrap_launch("/bin/echo", &[], BTreeMap::new(), &spec, &unenf_probe),
+            Err(ProcessHostError::IsolationObligationUnenforceable { .. })
+        ));
+        assert!(matches!(
+            prepare_macos_seatbelt_launch("/bin/echo", &[], BTreeMap::new(), &spec, &unenf_probe),
+            Err(ProcessHostError::IsolationObligationUnenforceable { .. })
+        ));
     }
 }

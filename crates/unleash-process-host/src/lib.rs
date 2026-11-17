@@ -29,8 +29,10 @@
 //!
 //! ## Politique `unsafe`
 //! Le workspace impose `unsafe_code = "deny"`. Seuls les appels système strictement ciblés
-//! (`sigaction(SIGCHLD)`, `waitid(WNOWAIT)`, `pre_exec(setsid)`) lèvent `#[allow(unsafe_code)]`
-//! localement avec justification `// SAFETY:`.
+//! dans `anchor` (`sigaction(SIGCHLD)` dans [`inspect_sigchld_disposition`]/[`ensure_sigchld_qualified`],
+//! `pre_exec(setsid)` dans [`configure_setsid_pre_exec`] et `proc_listallpids` pour l'énumération
+//! des membres de groupe sous macOS) lèvent `#[allow(unsafe_code)]` localement avec justification
+//! `// SAFETY:` ; l'observation non destructive `waitid(WNOWAIT)` passe par `rustix::process::waitid`.
 
 #![warn(missing_docs)]
 
