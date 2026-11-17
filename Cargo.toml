@@ -3,6 +3,7 @@ resolver = "3"
 members = [
     "crates/unleash-domain",
     "crates/unleash-protocol",
+    "crates/unleash-store",
     "crates/unleash-testkit",
 ]
 exclude = ["spikes"]
@@ -43,7 +44,12 @@ codegen-units = 1
 
 [workspace.dependencies]
 unleash-domain = { version = "0.1.0", path = "crates/unleash-domain" }
+unleash-protocol = { version = "0.1.0", path = "crates/unleash-protocol" }
+unleash-store = { version = "0.1.0", path = "crates/unleash-store" }
 unleash-testkit = { version = "0.1.0", path = "crates/unleash-testkit" }
+rusqlite = { version = "0.43.0", features = ["bundled", "backup"] }
+tokio = { version = "1.54.1", features = ["sync"] }
+tracing = "0.1"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 serde_jcs = "0.2.0"
