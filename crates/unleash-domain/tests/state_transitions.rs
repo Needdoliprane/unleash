@@ -706,8 +706,8 @@ fn test_mission_and_completion_policy_forbidden() {
 
 #[test]
 fn test_action_origin_xor_strict() {
-    let inv_id = InvocationId::new_v4();
-    let att_id = AttemptId::new_v4();
+    let inv_id = InvocationId::from_u128(1);
+    let att_id = AttemptId::from_u128(2);
     let origin_inv = ActionOrigin::Invocation {
         invocation_id: inv_id,
         attempt_id: att_id,
@@ -715,7 +715,7 @@ fn test_action_origin_xor_strict() {
     let json_inv = serde_json::to_string(&origin_inv).unwrap();
     assert!(json_inv.contains("invocation"));
 
-    let rep_id = ReplayWorkerId::new_v4();
+    let rep_id = ReplayWorkerId::from_u128(3);
     let origin_rep = ActionOrigin::Replay {
         replay_worker_id: rep_id,
     };

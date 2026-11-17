@@ -23,16 +23,16 @@ macro_rules! define_uuid_id {
         pub struct $name(Uuid);
 
         impl $name {
-            /// Crée un nouvel identifiant aléatoire (UUID v4).
-            #[must_use]
-            pub fn new_v4() -> Self {
-                Self(Uuid::new_v4())
-            }
-
             /// Construit l'identifiant à partir d'un UUID brut existant.
             #[must_use]
             pub const fn from_uuid(uuid: Uuid) -> Self {
                 Self(uuid)
+            }
+
+            /// Construit l'identifiant de manière déterministe à partir d'un entier `u128`.
+            #[must_use]
+            pub const fn from_u128(v: u128) -> Self {
+                Self(Uuid::from_u128(v))
             }
 
             /// Renvoie l'UUID sous-jacent.
@@ -200,16 +200,16 @@ define_uuid_id!(
 pub struct AuthorityGeneration(Uuid);
 
 impl AuthorityGeneration {
-    /// Crée une nouvelle génération d'autorité aléatoire (UUID v4).
-    #[must_use]
-    pub fn new_v4() -> Self {
-        Self(Uuid::new_v4())
-    }
-
     /// Construit la génération à partir d'un UUID existant.
     #[must_use]
     pub const fn from_uuid(uuid: Uuid) -> Self {
         Self(uuid)
+    }
+
+    /// Construit la génération de manière déterministe à partir d'un entier `u128`.
+    #[must_use]
+    pub const fn from_u128(v: u128) -> Self {
+        Self(Uuid::from_u128(v))
     }
 
     /// Renvoie l'UUID sous-jacent.
