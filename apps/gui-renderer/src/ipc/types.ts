@@ -17,6 +17,17 @@ import type {
   RetryClass,
   Sensitivity,
 } from "../generated";
+import type {
+  GuiCommandInput,
+  GuiErrorPayload,
+  GuiMarkdownInput,
+  GuiQueryInput,
+  GuiStreamNotification,
+  GuiSubscribeInput,
+  MarkdownBlockNode,
+  MarkdownDocumentAst,
+  MarkdownInlineNode,
+} from "../generated-gui";
 
 export type {
   CommandEnvelope,
@@ -25,8 +36,17 @@ export type {
   EventCausation,
   EventCursor,
   EventEnvelope,
+  GuiCommandInput,
+  GuiErrorPayload,
+  GuiMarkdownInput,
+  GuiQueryInput,
+  GuiStreamNotification,
+  GuiSubscribeInput,
   HelloResponse,
   IpcError,
+  MarkdownBlockNode,
+  MarkdownDocumentAst,
+  MarkdownInlineNode,
   OperationKind,
   OperationName,
   ProtocolVersion,
@@ -127,33 +147,6 @@ export type DiffDocument = {
   modifiedText: string;
 };
 
-export type MarkdownInlineNode =
-  | { kind: "text"; text: string }
-  | { kind: "strong"; children: MarkdownInlineNode[] }
-  | { kind: "emphasis"; children: MarkdownInlineNode[] }
-  | { kind: "strikethrough"; children: MarkdownInlineNode[] }
-  | { kind: "code"; text: string }
-  | { kind: "link"; href: string; title: string | null; children: MarkdownInlineNode[] }
-  | { kind: "soft_break" }
-  | { kind: "hard_break" };
-
-export type MarkdownBlockNode =
-  | { kind: "heading"; level: 1 | 2 | 3 | 4 | 5 | 6; children: MarkdownInlineNode[] }
-  | { kind: "paragraph"; children: MarkdownInlineNode[] }
-  | { kind: "list"; ordered: boolean; start: number; items: MarkdownBlockNode[][] }
-  | { kind: "blockquote"; children: MarkdownBlockNode[] }
-  | { kind: "code_block"; language: string | null; code: string }
-  | { kind: "thematic_break" }
-  | { kind: "table"; headers: MarkdownInlineNode[][]; rows: MarkdownInlineNode[][][] };
-
-export type MarkdownDocumentAst = {
-  truncated: boolean;
-  total_nodes: number;
-  blocked_raw_html_count: number;
-  blocked_url_count: number;
-  blocks: MarkdownBlockNode[];
-};
-
 export type TerminalProjection = {
   processRunUuid: string;
   worktree: string;
@@ -165,22 +158,18 @@ export type TerminalProjection = {
 
 export type ConnectionState = "connected" | "disconnected" | "resync_required";
 
-export type GuiQueryRequest = {
-  project_id: string | null;
-  payload: Record<string, unknown>;
-};
-
-export type GuiCommandRequest = {
-  project_id: string | null;
-  aggregate_id: string;
-  expected_revision: number;
-  command_id: string;
-  payload: Record<string, unknown>;
+export type StreamSubscription = {
+  cursor: EventCursor;
+  close: () => void;
 };
 
 export interface TransportAdapter {
-  executeQuery(operation: OperationName, request: GuiQueryRequest): Promise<QueryResponse>;
-  submitCommand(operation: OperationName, request: GuiCommandRequest): Promise<CommandReceipt>;
+  executeQuery(operation: OperationName, request: GuiQueryInput): Promise<QueryResponse>;
+  submitCommand(operation: OperationName, request: GuiCommandInput): Promise<CommandReceipt>;
+  subscribeEvents(
+    request: GuiSubscribeInput,
+    onNotification: (notification: GuiStreamNotification) => void,
+  ): Promise<StreamSubscription>;
   renderMarkdownAst(markdown: string): Promise<MarkdownDocumentAst>;
   listExposedOperations(): Promise<OperationName[]>;
 }

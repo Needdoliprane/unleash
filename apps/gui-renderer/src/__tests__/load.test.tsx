@@ -3,8 +3,16 @@ import { describe, expect, it } from "vitest";
 import { App } from "../App";
 import { buildAgentTree, buildEventPage, buildTenThousandLineDiff } from "../data/m0Fixtures";
 
+function percentile(sorted: readonly number[], ratio: number): number {
+  if (sorted.length === 0) {
+    return 0;
+  }
+  const idx = Math.min(sorted.length - 1, Math.floor(sorted.length * ratio));
+  return sorted[idx] ?? 0;
+}
+
 describe("AC-F014-011 — Charge GUI (1 000 agents, 100 000 événements, diff 10 000 lignes)", () => {
-  it("rend et filtre la charge M0 sans matérialiser toutes les lignes ni dépasser le budget de latence", () => {
+  it("rend et filtre la charge M0 en p95 < 100 ms sans matérialiser toutes les lignes", () => {
     const startRender = performance.now();
     render(<App />);
     const initialRenderMs = performance.now() - startRender;
@@ -18,33 +26,59 @@ describe("AC-F014-011 — Charge GUI (1 000 agents, 100 000 événements, diff 1
     expect(renderedAgentRows.length).toBeGreaterThan(0);
     expect(renderedAgentRows.length).toBeLessThan(80);
 
-    // Filtre agents temps réel
+    // Résoudre les sélecteurs DOM avant les boucles chronométrées d'interaction utilisateur
     const agentFilter = screen.getByTestId("agent-filter-input");
-    const startAgentFilter = performance.now();
-    fireEvent.change(agentFilter, { target: { value: "Leader-01" } });
-    const agentFilterMs = performance.now() - startAgentFilter;
-    expect(screen.getByText(/Leader-01/)).toBeInTheDocument();
-
-    // Pagination et filtre sur 100 000 événements
     const timelineFilter = screen.getByTestId("timeline-filter-input");
-    const startTimelineFilter = performance.now();
-    fireEvent.change(timelineFilter, { target: { value: "IntegrationBlocked" } });
-    const timelineFilterMs = performance.now() - startTimelineFilter;
+    const prevPageBtn = screen.getByRole("button", { name: "Page précédente" });
+    const jumpEndBtn = screen.getByRole("button", { name: "Fin (100 000)" });
+
+    const agentSamples: number[] = [];
+    for (let i = 0; i < 20; i += 1) {
+      const value = i % 2 === 0 ? "Leader-01" : "Worker-00";
+      const t0 = performance.now();
+      fireEvent.change(agentFilter, { target: { value } });
+      agentSamples.push(performance.now() - t0);
+    }
+    expect(screen.getAllByText(/Worker-00/).length).toBeGreaterThan(0);
+    fireEvent.change(agentFilter, { target: { value: "" } });
+
+    const timelineSamples: number[] = [];
+    for (let i = 0; i < 20; i += 1) {
+      const value = i % 2 === 0 ? "IntegrationBlocked" : "";
+      const t0 = performance.now();
+      fireEvent.change(timelineFilter, { target: { value } });
+      timelineSamples.push(performance.now() - t0);
+    }
     expect(screen.getByText(/Cache borné :/)).toBeInTheDocument();
 
-    // Saut en fin de journal (100 000)
-    const startJump = performance.now();
-    fireEvent.click(screen.getByRole("button", { name: "Fin (100 000)" }));
-    const pageJumpMs = performance.now() - startJump;
+    const pageJumpSamples: number[] = [];
+    for (let i = 0; i < 20; i += 1) {
+      const btn = i % 2 === 0 ? jumpEndBtn : prevPageBtn;
+      const t0 = performance.now();
+      fireEvent.click(btn);
+      pageJumpSamples.push(performance.now() - t0);
+    }
+    expect(screen.getByText(/Fenêtre : 99/)).toBeInTheDocument();
+
+    agentSamples.sort((a, b) => a - b);
+    timelineSamples.sort((a, b) => a - b);
+    pageJumpSamples.sort((a, b) => a - b);
+
+    const agentP50 = percentile(agentSamples, 0.5);
+    const agentP95 = percentile(agentSamples, 0.95);
+    const timelineP50 = percentile(timelineSamples, 0.5);
+    const timelineP95 = percentile(timelineSamples, 0.95);
+    const pageJumpP50 = percentile(pageJumpSamples, 0.5);
+    const pageJumpP95 = percentile(pageJumpSamples, 0.95);
 
     // Mesures consignées dans la sortie de test pour qualification M0
     console.info(
-      `[GUI-LOAD] initialRenderMs=${initialRenderMs.toFixed(2)} agentFilterMs=${agentFilterMs.toFixed(2)} timelineFilterMs=${timelineFilterMs.toFixed(2)} pageJumpMs=${pageJumpMs.toFixed(2)} domAgentRows=${String(renderedAgentRows.length)}`,
+      `[GUI-LOAD] initialRenderMs=${initialRenderMs.toFixed(2)} agentFilter(p50=${agentP50.toFixed(2)}ms p95=${agentP95.toFixed(2)}ms) timelineFilter(p50=${timelineP50.toFixed(2)}ms p95=${timelineP95.toFixed(2)}ms) pageJump(p50=${pageJumpP50.toFixed(2)}ms p95=${pageJumpP95.toFixed(2)}ms) domAgentRows=${String(renderedAgentRows.length)}`,
     );
 
-    expect(agentFilterMs).toBeLessThan(150);
-    expect(timelineFilterMs).toBeLessThan(150);
-    expect(pageJumpMs).toBeLessThan(150);
+    expect(agentP95).toBeLessThan(100);
+    expect(timelineP95).toBeLessThan(100);
+    expect(pageJumpP95).toBeLessThan(100);
   });
 
   it("génère des projections bornées pour 1 000 agents, pages de 200/100 000 événements et diff 10 000 lignes", () => {

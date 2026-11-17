@@ -217,11 +217,8 @@ fn draw_standard_body(frame: &mut Frame<'_>, area: Rect, state: &mut TuiState) {
 }
 
 fn draw_compact_body(frame: &mut Frame<'_>, area: Rect, state: &mut TuiState) {
-    if state.inspector_open
-        && state.mode == InputMode::Navigation
-        && state.focus == FocusPane::DiffViewer
-    {
-        draw_diff_viewer(frame, area, state);
+    if state.inspector_open && state.mode == InputMode::Navigation {
+        draw_inspector(frame, area, state);
         return;
     }
     match state.focus {

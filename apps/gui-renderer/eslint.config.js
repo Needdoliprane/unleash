@@ -5,7 +5,14 @@ import jsxA11y from "eslint-plugin-jsx-a11y";
 
 export default tseslint.config(
   {
-    ignores: ["dist/**", "node_modules/**", "src/generated/**", "vite.config.ts", "eslint.config.js"],
+    ignores: [
+      "dist/**",
+      "node_modules/**",
+      "src/generated/**",
+      "src/generated-gui/**",
+      "vite.config.ts",
+      "eslint.config.js",
+    ],
   },
   js.configs.recommended,
   ...tseslint.configs.strictTypeChecked,

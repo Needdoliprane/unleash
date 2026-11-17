@@ -4,6 +4,7 @@
 //! `GuiAppState` ne contient aucune règle métier ni connexion `SQLite` : il adapte uniquement
 //! les commandes `WebView` validées vers `unleash_client::UnleashClient`.
 
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -11,13 +12,16 @@ use serde::Serialize;
 use serde_json::{Map, Value};
 use tauri::ipc::Channel;
 use tokio::sync::{Mutex, RwLock};
+use tokio::task::JoinHandle;
+use ts_rs::TS;
 use unleash_client::{
-    ClientConfig, CommandCorrelationQueue, EventFollowerConfig, EventSynchronizer, UnleashClient,
+    ClientConfig, ClientError, CommandCorrelationQueue, EventFollowerConfig, EventSyncUpdate,
+    EventSynchronizer, IpcConnection, UnleashClient,
 };
 use unleash_domain::{RequestId, Revision};
 use unleash_protocol::{
-    CommandEnvelope, CommandReceipt, EventCursor, EventEnvelope, OperationKind, OperationName,
-    ProtocolVersion, QueryEnvelope, QueryResponse,
+    CommandEnvelope, CommandReceipt, ErrorCode, EventCursor, EventEnvelope, OperationKind,
+    OperationName, ProtocolVersion, QueryEnvelope, QueryResponse,
 };
 
 use crate::commands::{
@@ -27,7 +31,7 @@ use crate::errors::GuiError;
 use crate::registry::{ensure_operation_kind, validate_exposed_operation};
 
 /// Lot borné poussé vers la `WebView` via [`tauri::ipc::Channel`].
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, TS)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum GuiStreamNotification {
     /// Snapshot initial ou consécutif à `ResyncRequired`.
@@ -35,6 +39,7 @@ pub enum GuiStreamNotification {
         /// Watermark transactionnel du snapshot.
         watermark: EventCursor,
         /// Projection JSON retournée par le daemon.
+        #[ts(type = "unknown")]
         snapshot: Value,
         /// Motif optionnel de resynchronisation.
         resync_reason: Option<String>,
@@ -46,6 +51,36 @@ pub enum GuiStreamNotification {
         /// Curseur atteint.
         cursor: EventCursor,
     },
+    /// Fermeture ou perte de flux vers le daemon (sans arrêter l'application ni les brouillons).
+    Disconnected {
+        /// Motif borné de déconnexion du flux.
+        reason: String,
+    },
+}
+
+fn allocate_request_id(seq_counter: &AtomicU64) -> RequestId {
+    let seq = seq_counter.fetch_add(1, Ordering::Relaxed);
+    RequestId::from_u128(0x6100_0000_0000_0000_0000_0000_0000_0000_u128 | u128::from(seq))
+}
+
+fn map_sync_update(update: EventSyncUpdate) -> Result<GuiStreamNotification, GuiError> {
+    match update {
+        EventSyncUpdate::SnapshotLoaded {
+            watermark,
+            snapshot,
+            resync_reason,
+        } => Ok(GuiStreamNotification::SnapshotLoaded {
+            watermark,
+            snapshot,
+            resync_reason,
+        }),
+        EventSyncUpdate::Events { events, cursor } => {
+            Ok(GuiStreamNotification::Events { events, cursor })
+        }
+        _ => Err(GuiError::Tauri(String::from(
+            "Variante EventSyncUpdate inattendue",
+        ))),
+    }
 }
 
 /// État partagé de l'hôte Tauri `unleash-gui` (présentation et adaptateur IPC uniquement).
@@ -54,7 +89,18 @@ pub struct GuiAppState {
     client_config: RwLock<Option<ClientConfig>>,
     client: Mutex<Option<UnleashClient>>,
     correlation_queue: Mutex<CommandCorrelationQueue>,
-    next_seq: AtomicU64,
+    stream_task: std::sync::Mutex<Option<JoinHandle<()>>>,
+    next_seq: Arc<AtomicU64>,
+}
+
+impl Drop for GuiAppState {
+    fn drop(&mut self) {
+        if let Ok(mut guard) = self.stream_task.lock()
+            && let Some(handle) = guard.take()
+        {
+            handle.abort();
+        }
+    }
 }
 
 impl GuiAppState {
@@ -75,12 +121,22 @@ impl GuiAppState {
             client_config: RwLock::new(client_config),
             client: Mutex::new(None),
             correlation_queue: Mutex::new(correlation_queue),
-            next_seq: AtomicU64::new(seed.saturating_mul(1024).saturating_add(1)),
+            stream_task: std::sync::Mutex::new(None),
+            next_seq: Arc::new(AtomicU64::new(seed.saturating_mul(1024).saturating_add(1))),
+        }
+    }
+
+    fn stop_active_stream(&self) {
+        if let Ok(mut guard) = self.stream_task.lock()
+            && let Some(handle) = guard.take()
+        {
+            handle.abort();
         }
     }
 
     /// Configure (ou remplace) la configuration IPC du daemon cible.
     pub async fn set_client_config(&self, config: ClientConfig) {
+        self.stop_active_stream();
         {
             let mut cfg_guard = self.client_config.write().await;
             *cfg_guard = Some(config);
@@ -90,8 +146,7 @@ impl GuiAppState {
     }
 
     fn next_request_id(&self) -> RequestId {
-        let seq = self.next_seq.fetch_add(1, Ordering::Relaxed);
-        RequestId::from_u128(0x6100_0000_0000_0000_0000_0000_0000_0000_u128 | u128::from(seq))
+        allocate_request_id(&self.next_seq)
     }
 
     async fn ensure_connected_client<'a>(
@@ -137,7 +192,13 @@ impl GuiAppState {
         let client = self.ensure_connected_client(&mut client_guard).await?;
         let res = client.query(&envelope).await;
         if matches!(res, Err(unleash_client::ClientError::Disconnected { .. })) {
+            tracing::warn!(
+                operation = verified.as_str(),
+                "Connexion IPC GUI perdue lors de la lecture"
+            );
             *client_guard = None;
+        } else {
+            tracing::debug!(operation = verified.as_str(), "Lecture GUI exécutée");
         }
         res.map_err(GuiError::from)
     }
@@ -189,21 +250,39 @@ impl GuiAppState {
         drop(queue_guard);
 
         if matches!(res, Err(unleash_client::ClientError::Disconnected { .. })) {
+            tracing::warn!(
+                operation = verified.as_str(),
+                command_id = %input.command_id,
+                "Connexion IPC GUI perdue pendant soumission"
+            );
             *client_guard = None;
+        } else {
+            tracing::debug!(
+                operation = verified.as_str(),
+                command_id = %input.command_id,
+                "Commande GUI transmise via file de corrélation"
+            );
         }
         res.map_err(GuiError::from)
     }
 
-    /// Synchronise un snapshot initial + watermark puis transmet un premier lot borné au renderer
-    /// sur un [`tauri::ipc::Channel`].
+    /// Synchronise un snapshot initial + watermark puis lance une tâche continue consommant
+    /// le flux `SubscribeEvents` (y compris resynchronisations `ResyncRequired`) vers le
+    /// [`tauri::ipc::Channel`] jusqu'à fermeture du canal ou déconnexion.
+    ///
+    /// # Sûreté à l'annulation
+    /// Annule tout abonnement précédent avant d'en démarrer un nouveau, et la tâche spawnée est
+    /// annulée automatiquement lors du [`Drop`] de [`GuiAppState`].
     ///
     /// # Errors
-    /// Retourne [`GuiError`] si la connexion IPC ou l'envoi sur le canal Tauri échoue.
+    /// Retourne [`GuiError`] si la connexion IPC ou l'envoi initial sur le canal Tauri échoue.
     pub async fn subscribe_events(
         &self,
         input: GuiSubscribeInput,
         channel: Channel<GuiStreamNotification>,
     ) -> Result<EventCursor, GuiError> {
+        self.stop_active_stream();
+
         let cfg = {
             let guard = self.client_config.read().await;
             guard.clone().ok_or(GuiError::ClientNotConnected)?
@@ -217,36 +296,88 @@ impl GuiAppState {
             snapshot_query_payload: Map::new(),
         };
 
-        let mut sync = EventSynchronizer::new(cfg, follower);
+        let mut sync = EventSynchronizer::new(cfg.clone(), follower);
         let req_id = self.next_request_id();
-        let mut client_guard = self.client.lock().await;
-        let client = self.ensure_connected_client(&mut client_guard).await?;
-        let (initial, _reader) = sync.sync_initial(client.connection_mut(), req_id).await?;
-        let cursor = sync.current_cursor().ok_or(GuiError::ClientNotConnected)?;
-
-        let notification = match initial {
-            unleash_client::EventSyncUpdate::SnapshotLoaded {
-                watermark,
-                snapshot,
-                resync_reason,
-            } => GuiStreamNotification::SnapshotLoaded {
-                watermark,
-                snapshot,
-                resync_reason,
-            },
-            unleash_client::EventSyncUpdate::Events { events, cursor } => {
-                GuiStreamNotification::Events { events, cursor }
-            }
-            _ => {
-                return Err(GuiError::Tauri(String::from(
-                    "Variante EventSyncUpdate inattendue",
-                )));
-            }
+        let (initial, mut reader, cursor) = {
+            let mut client_guard = self.client.lock().await;
+            let client = self.ensure_connected_client(&mut client_guard).await?;
+            let (initial, reader) = sync.sync_initial(client.connection_mut(), req_id).await?;
+            let cursor = sync.current_cursor().ok_or(GuiError::ClientNotConnected)?;
+            (initial, reader, cursor)
         };
 
         channel
-            .send(notification)
+            .send(map_sync_update(initial)?)
             .map_err(|e| GuiError::Tauri(e.to_string()))?;
+
+        tracing::info!(
+            stream_id = %cursor.stream_id,
+            sequence = cursor.sequence.as_u64(),
+            "Abonnement continu SubscribeEvents GUI initialisé"
+        );
+
+        let seq_counter = Arc::clone(&self.next_seq);
+        let handle = tokio::spawn(async move {
+            let mut resync_conn: Option<IpcConnection> = None;
+            loop {
+                if resync_conn.is_none() {
+                    match IpcConnection::connect(&cfg).await {
+                        Ok(conn) => resync_conn = Some(conn),
+                        Err(err) => {
+                            tracing::warn!(error = %err, "Échec reconnexion canal resync GUI");
+                            let _ = channel.send(GuiStreamNotification::Disconnected {
+                                reason: err.to_string(),
+                            });
+                            break;
+                        }
+                    }
+                }
+                let Some(q_conn) = resync_conn.as_mut() else {
+                    break;
+                };
+                let step = sync
+                    .poll_next(&mut reader, q_conn, || allocate_request_id(&seq_counter))
+                    .await;
+                match step {
+                    Ok((update, maybe_new_reader)) => {
+                        if let Some(new_reader) = maybe_new_reader {
+                            reader = new_reader;
+                        }
+                        match map_sync_update(update) {
+                            Ok(notif) => {
+                                if channel.send(notif).is_err() {
+                                    break;
+                                }
+                            }
+                            Err(err) => {
+                                tracing::warn!(error = %err, "Erreur mapping lot SubscribeEvents GUI");
+                                let _ = channel.send(GuiStreamNotification::Disconnected {
+                                    reason: err.to_string(),
+                                });
+                                break;
+                            }
+                        }
+                    }
+                    Err(ClientError::Remote(ipc)) if ipc.code == ErrorCode::ResyncRequired => {
+                        tracing::info!("ResyncRequired reçu sur le flux GUI, réouverture canal");
+                        resync_conn = None;
+                    }
+                    Err(err) => {
+                        tracing::warn!(error = %err, "Flux SubscribeEvents GUI interrompu");
+                        let _ = channel.send(GuiStreamNotification::Disconnected {
+                            reason: err.to_string(),
+                        });
+                        break;
+                    }
+                }
+            }
+        });
+
+        if let Ok(mut guard) = self.stream_task.lock() {
+            *guard = Some(handle);
+        } else {
+            handle.abort();
+        }
 
         Ok(cursor)
     }

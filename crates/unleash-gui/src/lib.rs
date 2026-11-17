@@ -21,6 +21,7 @@ pub mod errors;
 pub mod markdown;
 pub mod registry;
 pub mod state;
+pub mod ts_export;
 
 pub use commands::{
     GuiCommandInput, GuiMarkdownInput, GuiQueryInput, GuiSubscribeInput, MAX_GUI_PAYLOAD_BYTES,

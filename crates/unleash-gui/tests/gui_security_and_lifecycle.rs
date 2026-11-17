@@ -23,10 +23,11 @@ use std::time::Duration;
 use chrono::{DateTime, Utc};
 use serde_json::{Map, Value, json};
 use tauri::Manager;
-use tauri::ipc::{CallbackFn, InvokeBody};
+use tauri::ipc::{CallbackFn, Channel, InvokeBody, InvokeResponseBody};
 use tauri::webview::InvokeRequest;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{UnixListener, UnixStream};
+use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use unleash_client::{ClientConfig, UnleashClient};
 use unleash_domain::{
@@ -34,15 +35,17 @@ use unleash_domain::{
     RequestId, Revision, Sequence, Sha256Digest, StreamId,
 };
 use unleash_gui::{
-    FORBIDDEN_GUI_OPERATIONS, GuiAppState, MAX_GUI_PAYLOAD_BYTES, configure_builder,
-    exposed_gui_operations, parse_markdown_ast, tauri_command_name, validate_exposed_operation,
-    validate_webview_payload,
+    FORBIDDEN_GUI_OPERATIONS, GuiAppState, GuiSubscribeInput, MAX_GUI_PAYLOAD_BYTES,
+    configure_builder, exposed_gui_operations, parse_markdown_ast, tauri_command_name,
+    ts_export::{generate_gui_ts_files, write_gui_ts_bindings},
+    validate_exposed_operation, validate_webview_payload,
 };
 use unleash_platform::{bind_private_unix_listener, verify_same_uid_peer};
 use unleash_protocol::{
     ClientKind, CommandEnvelope, CommandReceipt, EventCausation, EventCursor, EventEnvelope,
     HelloRequest, HelloResponse, MAX_FRAME_BYTES, OperationName, ProtocolVersion, QueryEnvelope,
-    QueryResponse, ReceiptState, Sensitivity, from_json_str_strict,
+    QueryResponse, ReceiptState, Sensitivity, SubscribeEventsFrame, SubscribeEventsRequest,
+    from_json_str_strict,
 };
 use unleash_testkit::local_test_dir;
 use uuid::Uuid;
@@ -208,6 +211,16 @@ async fn handle_fixture_conn(
                         watermark: Some(EventCursor::new(stream_id, Sequence::new(st.job_ticks))),
                         result: serde_json::to_value(inspection).expect("serialize inspection"),
                     }
+                } else if query.query_type == "GetStateSnapshot" {
+                    QueryResponse {
+                        request_id: query.request_id,
+                        watermark: Some(EventCursor::new(stream_id, Sequence::new(1))),
+                        result: json!({
+                            "snapshot_ready": true,
+                            "agents": 1000,
+                            "resolved_actor": peer_actor_ref,
+                        }),
+                    }
                 } else {
                     st.job_ticks += 1;
                     let ticks = st.job_ticks;
@@ -223,6 +236,41 @@ async fn handle_fixture_conn(
                 }
             };
             write_json(&mut stream, &resp).await?;
+        } else if let Ok(sub_req) = from_json_str_strict::<SubscribeEventsRequest>(&raw) {
+            let start_seq = sub_req.after_sequence.as_u64().saturating_add(1);
+            let make_ev = |seq: u64, etype: &str| EventEnvelope {
+                event_id: Uuid::from_u128(0xE000_0000 + u128::from(seq)),
+                stream_id,
+                sequence: Sequence::new(seq),
+                event_type: String::from(etype),
+                schema_version: 1,
+                occurred_at: "2026-11-17T09:30:00Z".parse().expect("ts"),
+                recorded_at: "2026-11-17T09:30:00Z".parse().expect("ts"),
+                project_id: sub_req.project_id,
+                aggregate_id: Uuid::from_u128(1),
+                aggregate_revision: Revision::new(seq),
+                actor_ref: peer_actor_ref.clone(),
+                correlation_id: Uuid::from_u128(0xC000_0000 + u128::from(seq)),
+                causation: EventCausation::from_command_receipt(ReceiptId::from_u128(1)),
+                command_id: None,
+                payload_hash: Sha256Digest::from_bytes(b"stream_event"),
+                payload: Map::new(),
+                sensitivity: Sensitivity::Public,
+            };
+            let frame1 = SubscribeEventsFrame::Events {
+                events: vec![make_ev(start_seq, "ActionDispatched")],
+                cursor: EventCursor::new(stream_id, Sequence::new(start_seq)),
+            };
+            write_json(&mut stream, &frame1).await?;
+            tokio::task::yield_now().await;
+            let frame2 = SubscribeEventsFrame::Events {
+                events: vec![make_ev(start_seq + 1, "ObservationRecorded")],
+                cursor: EventCursor::new(stream_id, Sequence::new(start_seq + 1)),
+            };
+            write_json(&mut stream, &frame2).await?;
+            // Maintenir la connexion de flux ouverte tant que le client est connecté
+            let _ = read_frame(&mut stream).await;
+            break;
         } else if let Ok(cmd) = from_json_str_strict::<CommandEnvelope>(&raw) {
             let receipt = {
                 let mut st = state.lock().expect("lock state");
@@ -256,25 +304,7 @@ async fn handle_fixture_conn(
             };
             write_json(&mut stream, &receipt).await?;
         } else {
-            let _ = EventEnvelope {
-                event_id: Uuid::from_u128(1),
-                stream_id,
-                sequence: Sequence::new(1),
-                event_type: String::from("Noop"),
-                schema_version: 1,
-                occurred_at: "2026-11-17T09:30:00Z".parse().expect("ts"),
-                recorded_at: "2026-11-17T09:30:00Z".parse().expect("ts"),
-                project_id: None,
-                aggregate_id: Uuid::from_u128(1),
-                aggregate_revision: Revision::new(1),
-                actor_ref: peer_actor_ref.clone(),
-                correlation_id: Uuid::from_u128(1),
-                causation: EventCausation::from_command_receipt(ReceiptId::from_u128(1)),
-                command_id: None,
-                payload_hash: Sha256Digest::from_bytes(b"noop"),
-                payload: Map::new(),
-                sensitivity: Sensitivity::Public,
-            };
+            break;
         }
     }
     Ok(())
@@ -462,11 +492,12 @@ async fn t_f014_013_daemon_survives_gui_close_and_actor_ref_is_kernel_derived() 
         let query_resp: QueryResponse = overview_res.deserialize().expect("QueryResponse");
         assert_eq!(query_resp.result["mission_status"], "active");
 
-        // Tentative de soumission avec champ inconnu (`actor_ref`) rejetée par `deny_unknown_fields`
+        // Tentative de soumission sur une VRAIE commande mutante enregistrée (`op_pause_mission`)
+        // avec champ inconnu `actor_ref` au sommet de `GuiCommandInput` (`#[serde(deny_unknown_fields)]`).
         let spoof_res = tauri::test::get_ipc_response(
             &main_win,
             build_invoke_request(
-                "op_create_mission",
+                "op_pause_mission",
                 json!({
                     "input": {
                         "project_id": null,
@@ -479,9 +510,47 @@ async fn t_f014_013_daemon_survives_gui_close_and_actor_ref_is_kernel_derived() 
                 }),
             ),
         );
+        let spoof_err = spoof_res.expect_err(
+            "un actor_ref forgé dans GuiCommandInput doit être rejeté par deny_unknown_fields",
+        );
+        let spoof_err_text = spoof_err.to_string();
         assert!(
-            spoof_res.is_err(),
-            "un champ inconnu ou actor_ref forgé doit être rejeté avant envoi"
+            spoof_err_text.contains("actor_ref") || spoof_err_text.contains("unknown field"),
+            "le rejet doit provenir de deny_unknown_fields sur actor_ref (pas d'une commande inconnue) : {spoof_err_text}"
+        );
+
+        // Tentative de soumission avec `actor_ref` imbriqué dans `payload` sur `op_pause_mission`
+        let spoof_payload_res = tauri::test::get_ipc_response(
+            &main_win,
+            build_invoke_request(
+                "op_pause_mission",
+                json!({
+                    "input": {
+                        "project_id": null,
+                        "aggregate_id": aggregate_id,
+                        "expected_revision": 0,
+                        "command_id": command_id,
+                        "payload": { "actor_ref": "forged:payload" }
+                    }
+                }),
+            ),
+        );
+        let spoof_payload_err =
+            spoof_payload_res.expect_err("un actor_ref dans payload doit être rejeté avant envoi");
+        let spoof_payload_text = spoof_payload_err.to_string();
+        assert!(
+            spoof_payload_text.contains("InvalidArgument")
+                && spoof_payload_text.contains("actor_ref"),
+            "le rejet payload doit être InvalidArgument sur actor_ref : {spoof_payload_text}"
+        );
+        assert!(
+            daemon
+                .state
+                .lock()
+                .expect("lock")
+                .recorded_commands
+                .is_empty(),
+            "aucune commande usurpée ne doit atteindre le daemon"
         );
 
         // Soumission valide `op_pause_mission`
@@ -536,4 +605,106 @@ async fn t_f014_013_daemon_survives_gui_close_and_actor_ref_is_kernel_derived() 
         .expect("reçu retrouvé par command_id");
     assert_eq!(inspection.receipt.command_id, command_id);
     assert_eq!(inspection.receipt.state, ReceiptState::Accepted);
+}
+
+#[test]
+fn t_gui_typescript_bindings_in_sync_with_repository() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let generated_gui_dir = root.join("apps/gui-renderer/src/generated-gui");
+
+    if std::env::var_os("UPDATE_TS_BINDINGS").is_some_and(|v| !v.is_empty() && v != "0") {
+        write_gui_ts_bindings(&generated_gui_dir).expect("écriture bindings TS unleash-gui");
+    }
+
+    assert!(
+        generated_gui_dir.is_dir(),
+        "Le dossier {} doit exister (exécuter avec UPDATE_TS_BINDINGS=1 pour le générer)",
+        generated_gui_dir.display()
+    );
+
+    let expected_files = generate_gui_ts_files();
+    for (filename, expected_content) in &expected_files {
+        assert!(
+            !expected_content.contains("bigint"),
+            "Aucun type 'bigint' autorisé dans {filename}"
+        );
+        assert!(
+            !expected_content.contains(": any") && !expected_content.contains("<any>"),
+            "Aucun type 'any' autorisé dans {filename}"
+        );
+        let repo_file = generated_gui_dir.join(filename);
+        let repo_content = fs::read_to_string(&repo_file)
+            .unwrap_or_else(|e| panic!("Impossible de lire {} : {e}", repo_file.display()));
+        assert_eq!(
+            repo_content, *expected_content,
+            "Le binding GUI {filename} diverge de ts-rs !"
+        );
+    }
+
+    for entry in fs::read_dir(&generated_gui_dir).expect("read_dir generated-gui") {
+        let name = entry
+            .expect("dirent")
+            .file_name()
+            .to_string_lossy()
+            .into_owned();
+        assert!(
+            expected_files.contains_key(&name),
+            "Fichier orphelin inattendu dans generated-gui/ : {name}"
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn t_gui_subscribe_events_streams_continuously() {
+    let daemon = FixtureDaemon::start();
+    let gui_state = GuiAppState::new(Some(daemon.gui_config()));
+
+    let (tx, mut rx) = mpsc::unbounded_channel::<Value>();
+    let channel: Channel<unleash_gui::GuiStreamNotification> = Channel::new(move |body| {
+        if let InvokeResponseBody::Json(raw) = body {
+            let parsed: Value = serde_json::from_str(&raw).expect("JSON Channel valide");
+            let _ = tx.send(parsed);
+        }
+        Ok(())
+    });
+
+    let watermark = gui_state
+        .subscribe_events(
+            GuiSubscribeInput {
+                project_id: None,
+                aggregate_id: None,
+                batch_limit: Some(50),
+            },
+            channel,
+        )
+        .await
+        .expect("subscribe_events initialise le snapshot et démarre le flux continu");
+    assert_eq!(watermark.sequence.as_u64(), 1);
+
+    let first = tokio::time::timeout(Duration::from_secs(2), rx.recv())
+        .await
+        .expect("timeout snapshot")
+        .expect("notification snapshot");
+    assert_eq!(first["kind"], "snapshot_loaded");
+    assert_eq!(first["snapshot"]["snapshot_ready"], true);
+
+    // Deux lots continus reçus après retour de subscribe_events (preuve que _reader n'est pas droppé)
+    let second = tokio::time::timeout(Duration::from_secs(2), rx.recv())
+        .await
+        .expect("timeout lot 1 continu")
+        .expect("notification events lot 1");
+    assert_eq!(second["kind"], "events");
+    assert_eq!(second["events"][0]["event_type"], "ActionDispatched");
+    assert_eq!(second["cursor"]["sequence"], 2);
+
+    let third = tokio::time::timeout(Duration::from_secs(2), rx.recv())
+        .await
+        .expect("timeout lot 2 continu")
+        .expect("notification events lot 2");
+    assert_eq!(third["kind"], "events");
+    assert_eq!(third["events"][0]["event_type"], "ObservationRecorded");
+    assert_eq!(third["cursor"]["sequence"], 3);
+
+    // La destruction de GuiAppState annule proprement la tâche de lecture continue
+    drop(gui_state);
 }

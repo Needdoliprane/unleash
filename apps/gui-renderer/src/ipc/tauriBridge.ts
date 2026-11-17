@@ -1,12 +1,16 @@
 import type {
   CommandReceipt,
-  GuiCommandRequest,
-  GuiQueryRequest,
+  EventCursor,
+  GuiCommandInput,
+  GuiQueryInput,
+  GuiStreamNotification,
+  GuiSubscribeInput,
   MarkdownBlockNode,
   MarkdownDocumentAst,
   MarkdownInlineNode,
   OperationName,
   QueryResponse,
+  StreamSubscription,
   TransportAdapter,
 } from "./types";
 
@@ -41,8 +45,19 @@ export function assertExposedGuiOperation(operation: OperationName): void {
   }
 }
 
+type TauriChannelMessage<T> = {
+  message?: T;
+  index?: number;
+  end?: boolean;
+};
+
 type TauriInternals = {
   invoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T>;
+  transformCallback?(
+    callback: (response: TauriChannelMessage<GuiStreamNotification>) => void,
+    once?: boolean,
+  ): number;
+  unregisterCallback?(id: number): void;
 };
 
 function getTauriInternals(): TauriInternals | null {
@@ -151,8 +166,7 @@ export function buildSafeFallbackMarkdownAst(markdown: string): MarkdownDocument
     }
     const headingMatch = /^(#{1,6})\s+(.*)$/.exec(trimmed);
     if (headingMatch) {
-      const level = Math.min(6, Math.max(1, (headingMatch[1] ?? "#").length)) as
-        1 | 2 | 3 | 4 | 5 | 6;
+      const level = Math.min(6, Math.max(1, (headingMatch[1] ?? "#").length));
       blocks.push({
         kind: "heading",
         level,
@@ -190,7 +204,7 @@ export function buildSafeFallbackMarkdownAst(markdown: string): MarkdownDocument
 
 export function createTauriTransportAdapter(): TransportAdapter {
   return {
-    async executeQuery(operation: OperationName, request: GuiQueryRequest): Promise<QueryResponse> {
+    async executeQuery(operation: OperationName, request: GuiQueryInput): Promise<QueryResponse> {
       assertExposedGuiOperation(operation);
       const tauri = getTauriInternals();
       if (!tauri) {
@@ -205,7 +219,7 @@ export function createTauriTransportAdapter(): TransportAdapter {
 
     async submitCommand(
       operation: OperationName,
-      request: GuiCommandRequest,
+      request: GuiCommandInput,
     ): Promise<CommandReceipt> {
       assertExposedGuiOperation(operation);
       const tauri = getTauriInternals();
@@ -225,6 +239,82 @@ export function createTauriTransportAdapter(): TransportAdapter {
         };
       }
       return tauri.invoke<CommandReceipt>(operationToTauriCommand(operation), { input: request });
+    },
+
+    async subscribeEvents(
+      request: GuiSubscribeInput,
+      onNotification: (notification: GuiStreamNotification) => void,
+    ): Promise<StreamSubscription> {
+      assertExposedGuiOperation("SubscribeEvents");
+      const tauri = getTauriInternals();
+      if (!tauri || typeof tauri.transformCallback !== "function") {
+        const cursor: EventCursor = {
+          stream_id: "00000000-0000-0000-0000-000000000001",
+          sequence: 100000,
+        };
+        onNotification({
+          kind: "snapshot_loaded",
+          watermark: cursor,
+          snapshot: { fixture: true, project_id: request.project_id },
+          resync_reason: null,
+        });
+        return {
+          cursor,
+          close: () => {},
+        };
+      }
+
+      let closed = false;
+      let nextExpectedIndex = 0;
+      const pending = new Map<number, GuiStreamNotification>();
+
+      const callbackId = tauri.transformCallback((envelope) => {
+        if (closed) {
+          return;
+        }
+        if (envelope.end) {
+          closed = true;
+          tauri.unregisterCallback?.(callbackId);
+          return;
+        }
+        if (envelope.message === undefined) {
+          return;
+        }
+        const idx = envelope.index ?? nextExpectedIndex;
+        pending.set(idx, envelope.message);
+        while (pending.has(nextExpectedIndex)) {
+          const msg = pending.get(nextExpectedIndex);
+          pending.delete(nextExpectedIndex);
+          nextExpectedIndex += 1;
+          if (msg) {
+            onNotification(msg);
+          }
+        }
+      }, false);
+
+      const channel = {
+        toJSON: (): string => `__CHANNEL__:${String(callbackId)}`,
+      };
+
+      try {
+        const cursor = await tauri.invoke<EventCursor>("op_subscribe_events", {
+          input: request,
+          channel,
+        });
+        return {
+          cursor,
+          close: () => {
+            if (!closed) {
+              closed = true;
+              tauri.unregisterCallback?.(callbackId);
+            }
+          },
+        };
+      } catch (err) {
+        closed = true;
+        tauri.unregisterCallback?.(callbackId);
+        throw err;
+      }
     },
 
     async renderMarkdownAst(markdown: string): Promise<MarkdownDocumentAst> {

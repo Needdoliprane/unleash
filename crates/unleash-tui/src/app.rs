@@ -4,7 +4,6 @@
 
 use std::future::poll_fn;
 use std::pin::Pin;
-use std::task::Poll;
 
 use crossterm::event::{Event, EventStream, KeyCode, KeyEvent, KeyModifiers};
 use futures_core::Stream;
@@ -347,28 +346,39 @@ pub fn apply_backend_update(state: &mut TuiState, update: BackendUpdate) {
     }
 }
 
-/// Démarre l'application TUI plein écran avec lecteur unique `EventStream` et tâche I/O
-/// `unleash-client` bornée.
+/// Reçoit la prochaine mise à jour du worker I/O ou bascule en attente passive dès que le
+/// canal se ferme, afin d'éviter toute boucle de redraw à 100 % CPU lorsque le daemon est absent.
+async fn recv_update(upd_rx: &mut Option<mpsc::Receiver<BackendUpdate>>) -> BackendUpdate {
+    if let Some(rx) = upd_rx.as_mut() {
+        if let Some(upd) = rx.recv().await {
+            return upd;
+        }
+        *upd_rx = None;
+    }
+    std::future::pending().await
+}
+
+/// Boucle événementielle TUI réutilisable sur tout [`Backend`] Ratatui et flux [`Stream`].
 ///
-/// Quitter la TUI restaure tous les modes terminal et n'envoie aucune commande d'arrêt au daemon.
+/// # Sûreté à l'annulation
+/// Ne conserve aucun verrou synchrone à travers `.await` et termine dès la fermeture du flux
+/// d'événements terminal ou lorsque `state.should_quit` devient vrai.
 ///
 /// # Errors
-/// Retourne [`TerminalLifecycleError`] si stdin/stdout n'est pas un TTY ou si le rendu échoue.
-pub async fn run_tui(
-    client_config: Option<ClientConfig>,
-    capabilities: TerminalCapabilities,
-) -> Result<(), TerminalLifecycleError> {
-    let mut guard = TerminalGuard::enter(&capabilities)?;
-    let mut state = TuiState::with_m0_fixture(capabilities);
-
-    let (cmd_tx, cmd_rx) = mpsc::channel::<BackendCommand>(64);
-    let (upd_tx, mut upd_rx) = mpsc::channel::<BackendUpdate>(MAX_NOTIFICATION_QUEUE);
-
-    let io_task = tokio::spawn(run_backend_io_worker(client_config, cmd_rx, upd_tx));
-    let mut event_stream = EventStream::new();
-
+/// Propage toute erreur émise par [`ratatui::Terminal::draw`].
+pub async fn run_tui_loop<B, S>(
+    terminal: &mut ratatui::Terminal<B>,
+    state: &mut TuiState,
+    mut event_stream: S,
+    cmd_tx: Option<&mpsc::Sender<BackendCommand>>,
+    mut upd_rx: Option<mpsc::Receiver<BackendUpdate>>,
+) -> Result<(), B::Error>
+where
+    B: Backend,
+    S: Stream<Item = std::io::Result<Event>> + Unpin,
+{
     loop {
-        guard.terminal_mut().draw(|frame| draw(frame, &mut state))?;
+        terminal.draw(|frame| draw(frame, state))?;
         if state.should_quit {
             break;
         }
@@ -377,22 +387,52 @@ pub async fn run_tui(
         tokio::select! {
             maybe_event = poll_fn(|cx| pinned_stream.as_mut().poll_next(cx)) => {
                 match maybe_event {
-                    Some(Ok(ev)) => handle_terminal_event(&mut state, ev, Some(&cmd_tx)),
+                    Some(Ok(ev)) => handle_terminal_event(state, ev, cmd_tx),
                     Some(Err(_)) | None => break,
                 }
             }
-            maybe_upd = upd_rx.recv() => {
-                if let Some(upd) = maybe_upd {
-                    apply_backend_update(&mut state, upd);
-                }
+            upd = recv_update(&mut upd_rx) => {
+                apply_backend_update(state, upd);
             }
         }
     }
+    Ok(())
+}
+
+/// Lance la TUI interactive plein écran avec garde RAII terminal, lecteur d'événements unique et
+/// worker asynchrone `unleash-client`.
+///
+/// # Sûreté à l'annulation
+/// À la sortie normale, erreur ou panique, `TerminalGuard` restaure le mode terminal avant retour.
+///
+/// # Errors
+/// Retourne [`TerminalLifecycleError::NotATty`] hors terminal interactif, ou [`TerminalLifecycleError::Io`].
+pub async fn run_tui(
+    client_config: Option<ClientConfig>,
+    capabilities: TerminalCapabilities,
+) -> Result<(), TerminalLifecycleError> {
+    let mut guard = TerminalGuard::enter(&capabilities)?;
+    let mut state = TuiState::with_m0_fixture(capabilities);
+
+    let (cmd_tx, cmd_rx) = mpsc::channel::<BackendCommand>(64);
+    let (upd_tx, upd_rx) = mpsc::channel::<BackendUpdate>(MAX_NOTIFICATION_QUEUE);
+
+    let io_task = tokio::spawn(run_backend_io_worker(client_config, cmd_rx, upd_tx));
+    let event_stream = EventStream::new();
+
+    let loop_res = run_tui_loop(
+        guard.terminal_mut(),
+        &mut state,
+        event_stream,
+        Some(&cmd_tx),
+        Some(upd_rx),
+    )
+    .await;
 
     drop(cmd_tx);
     let _ = io_task.await;
     guard.restore()?;
-    Ok(())
+    loop_res.map_err(TerminalLifecycleError::Io)
 }
 
 /// Effectue un rendu unique déterministe sur n'importe quel backend Ratatui (notamment `TestBackend`).
@@ -407,12 +447,14 @@ pub fn render_once<B: Backend>(
     Ok(())
 }
 
-async fn run_backend_io_worker(
+/// Worker I/O borné reliant la TUI à `UnleashClient` hors thread de rendu.
+pub async fn run_backend_io_worker(
     client_config: Option<ClientConfig>,
     mut cmd_rx: mpsc::Receiver<BackendCommand>,
     upd_tx: mpsc::Sender<BackendUpdate>,
 ) {
     let Some(cfg) = client_config else {
+        tracing::debug!("Worker TUI démarré sans socket daemon configurée");
         let _ = upd_tx
             .send(BackendUpdate::Disconnected {
                 reason: String::from("Socket daemon non configuré"),
@@ -423,6 +465,7 @@ async fn run_backend_io_worker(
 
     let mut client = match UnleashClient::connect(cfg).await {
         Ok(c) => {
+            tracing::info!(stream_id = %c.hello().stream_id, "Connexion IPC TUI établie");
             let _ = upd_tx
                 .send(BackendUpdate::Connected {
                     cursor: Some(EventCursor::new(
@@ -434,6 +477,7 @@ async fn run_backend_io_worker(
             c
         }
         Err(err) => {
+            tracing::warn!(error = %err, "Échec connexion IPC TUI");
             let _ = upd_tx
                 .send(BackendUpdate::Disconnected {
                     reason: err.to_string(),
@@ -457,6 +501,7 @@ async fn run_backend_io_worker(
                 };
                 match client.query(&q).await {
                     Ok(resp) => {
+                        tracing::debug!(operation = operation.as_str(), "Requête TUI exécutée");
                         let _ = upd_tx
                             .send(BackendUpdate::QueryResult {
                                 operation,
@@ -465,6 +510,11 @@ async fn run_backend_io_worker(
                             .await;
                     }
                     Err(err) => {
+                        tracing::warn!(
+                            operation = operation.as_str(),
+                            error = %err,
+                            "Erreur requête IPC TUI"
+                        );
                         let _ = upd_tx
                             .send(BackendUpdate::Disconnected {
                                 reason: err.to_string(),
@@ -475,12 +525,4 @@ async fn run_backend_io_worker(
             }
         }
     }
-}
-
-#[allow(dead_code)]
-fn _poll_stream_check<S: Stream>(
-    s: Pin<&mut S>,
-    cx: &mut std::task::Context<'_>,
-) -> Poll<Option<S::Item>> {
-    s.poll_next(cx)
 }

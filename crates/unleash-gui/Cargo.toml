@@ -21,6 +21,7 @@ unleash-client.workspace = true
 unleash-platform.workspace = true
 tauri.workspace = true
 pulldown-cmark.workspace = true
+ts-rs.workspace = true
 tokio.workspace = true
 serde.workspace = true
 serde_json.workspace = true

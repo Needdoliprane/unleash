@@ -7,6 +7,7 @@
 use serde::Deserialize;
 use serde_json::{Map, Value};
 use tauri::ipc::Channel;
+use ts_rs::TS;
 use unleash_domain::{CommandId, ProjectId};
 use unleash_protocol::{CommandReceipt, EventCursor, OperationKind, OperationName, QueryResponse};
 use uuid::Uuid;
@@ -20,45 +21,54 @@ use crate::state::{GuiAppState, GuiStreamNotification};
 pub const MAX_GUI_PAYLOAD_BYTES: usize = 1024 * 1024;
 
 /// Requête typée envoyée par la `WebView` vers une opération de lecture (`OperationKind::Query`).
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, TS)]
 #[serde(deny_unknown_fields)]
 pub struct GuiQueryInput {
     /// Identifiant optionnel du projet ciblé.
+    #[ts(type = "string | null")]
     pub project_id: Option<ProjectId>,
     /// Paramètres JSON stricts (taille bornée, `actor_ref` interdit).
+    #[ts(type = "Record<string, unknown>")]
     pub payload: Map<String, Value>,
 }
 
 /// Commande typée envoyée par la `WebView` vers une opération mutante (`OperationKind::Command`).
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, TS)]
 #[serde(deny_unknown_fields)]
 pub struct GuiCommandInput {
     /// Identifiant optionnel du projet ciblé.
+    #[ts(type = "string | null")]
     pub project_id: Option<ProjectId>,
     /// Identifiant UUID de l'agrégat ciblé.
+    #[ts(type = "string")]
     pub aggregate_id: Uuid,
     /// Révision attendue par contrôle de concurrence optimiste.
+    #[ts(type = "number")]
     pub expected_revision: u64,
     /// Clé d'idempotence durable conservée sur retry/reconnexion.
+    #[ts(type = "string")]
     pub command_id: CommandId,
     /// Charge utile métier JSON (`actor_ref` interdit).
+    #[ts(type = "Record<string, unknown>")]
     pub payload: Map<String, Value>,
 }
 
 /// Paramètres d'abonnement au flux d'événements via un `tauri::ipc::Channel` borné.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, TS)]
 #[serde(deny_unknown_fields)]
 pub struct GuiSubscribeInput {
     /// Projet optionnel à filtrer.
+    #[ts(type = "string | null")]
     pub project_id: Option<ProjectId>,
     /// Agrégat optionnel à filtrer.
+    #[ts(type = "string | null")]
     pub aggregate_id: Option<Uuid>,
     /// Nombre maximal d'événements par lot (`1..=200`).
     pub batch_limit: Option<u32>,
 }
 
 /// Paramètres de rendu Markdown vers AST sûr côté Rust.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, TS)]
 #[serde(deny_unknown_fields)]
 pub struct GuiMarkdownInput {
     /// Contenu Markdown brut non fiable à convertir en AST borné.

@@ -28,7 +28,7 @@ pub mod ui;
 
 pub use app::{
     BackendCommand, BackendUpdate, apply_backend_update, handle_terminal_event, render_once,
-    run_tui,
+    run_backend_io_worker, run_tui, run_tui_loop,
 };
 pub use editor::TuiEditor;
 pub use pty_view::{PtyAttachState, PtyPanel};

@@ -6,6 +6,7 @@
 
 use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 use serde::{Deserialize, Serialize};
+use ts_rs::TS;
 
 use crate::errors::GuiError;
 
@@ -17,7 +18,7 @@ pub const MAX_AST_NODES: usize = 4_096;
 pub const MAX_AST_DEPTH: usize = 16;
 
 /// Nœud en ligne sûr de l'AST Markdown.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum MarkdownInlineNode {
     /// Texte littéral échappé par React.
@@ -61,7 +62,7 @@ pub enum MarkdownInlineNode {
 }
 
 /// Nœud bloc sûr de l'AST Markdown.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum MarkdownBlockNode {
     /// Titre de niveau `1..=6`.
@@ -81,6 +82,7 @@ pub enum MarkdownBlockNode {
         /// `true` si liste numérotée.
         ordered: bool,
         /// Numéro de départ pour les listes ordonnées.
+        #[ts(type = "number")]
         start: u64,
         /// Éléments de liste.
         items: Vec<Vec<MarkdownBlockNode>>,
@@ -109,16 +111,19 @@ pub enum MarkdownBlockNode {
 }
 
 /// Document AST borné prêt pour le rendu React sans `dangerouslySetInnerHTML`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(deny_unknown_fields)]
 pub struct MarkdownDocumentAst {
     /// Indique si le document a été borné au plafond [`MAX_AST_NODES`].
     pub truncated: bool,
     /// Nombre total de nœuds produits.
+    #[ts(type = "number")]
     pub total_nodes: usize,
     /// Nombre de fragments HTML/SVG bruts neutralisés.
+    #[ts(type = "number")]
     pub blocked_raw_html_count: usize,
     /// Nombre d'URLs à schéma non autorisé neutralisées.
+    #[ts(type = "number")]
     pub blocked_url_count: usize,
     /// Liste ordonnée des blocs de premier niveau.
     pub blocks: Vec<MarkdownBlockNode>,

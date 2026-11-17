@@ -3,6 +3,7 @@
 
 use serde::Serialize;
 use thiserror::Error;
+use ts_rs::TS;
 use unleash_client::ClientError;
 use unleash_protocol::{ErrorCode, ReasonCode, RetryClass};
 
@@ -38,7 +39,7 @@ pub enum GuiError {
 }
 
 /// Projection JSON sûre d'une [`GuiError`] retournée à la `WebView` par les commandes Tauri.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
 #[serde(deny_unknown_fields)]
 pub struct GuiErrorPayload {
     /// Classe d'erreur canonique alignée sur le protocole Unleash.

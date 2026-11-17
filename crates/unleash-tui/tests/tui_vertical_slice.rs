@@ -12,15 +12,22 @@
 )]
 
 use std::path::PathBuf;
+use std::pin::Pin;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+use futures_core::Stream;
 use ratatui::Terminal;
-use ratatui::backend::TestBackend;
+use ratatui::backend::{Backend, ClearType, TestBackend, WindowSize};
+use ratatui::buffer::Cell;
+use ratatui::layout::{Position, Size};
 use serde_json::json;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{UnixListener, UnixStream};
+use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use unleash_client::{ClientConfig, UnleashClient};
 use unleash_domain::{
@@ -34,9 +41,10 @@ use unleash_protocol::{
 use unleash_testkit::local_test_dir;
 use unleash_tui::terminal::install_panic_hook;
 use unleash_tui::{
-    BackendUpdate, FocusPane, InputMode, M0_TOTAL_AGENTS, M0_TOTAL_DIFF_LINES, M0_TOTAL_EVENTS,
-    RestoreState, Space, TerminalCapabilities, TuiState, apply_backend_update,
-    handle_terminal_event, render_once,
+    BackendCommand, BackendUpdate, ConnectionBanner, FocusPane, InputMode, M0_TOTAL_AGENTS,
+    M0_TOTAL_DIFF_LINES, M0_TOTAL_EVENTS, MAX_NOTIFICATION_QUEUE, RestoreState, Space,
+    TerminalCapabilities, TuiState, apply_backend_update, handle_terminal_event, render_once,
+    run_backend_io_worker, run_tui_loop,
 };
 
 fn key(code: KeyCode) -> Event {
@@ -106,6 +114,26 @@ fn t_f015_006_009_013_keyboard_10_spaces_palette_resize_and_accessible_modes() {
     render_once(&mut term, &mut state).expect("render 80x24");
     assert!(state.editor.text().contains("note 日本語 éàç"));
     assert_eq!(state.active_space, Space::Agents);
+
+    // En mode compact 80x24 + Navigation, 'i' bascule entre Inspecteur et panneau focalisé (y compris DiffViewer)
+    handle_terminal_event(&mut state, key(KeyCode::Esc), None);
+    assert_eq!(state.mode, InputMode::Navigation);
+    state.focus = FocusPane::DiffViewer;
+    assert!(state.inspector_open);
+    render_once(&mut term, &mut state).expect("render 80x24 inspecteur ouvert");
+    assert!(buffer_text(&term).contains("Inspecteur (i: masquer)"));
+
+    handle_terminal_event(&mut state, key(KeyCode::Char('i')), None);
+    assert!(!state.inspector_open);
+    render_once(&mut term, &mut state).expect("render 80x24 diff sans inspecteur");
+    let compact_diff = buffer_text(&term);
+    assert!(compact_diff.contains("Diff reducer.rs"));
+    assert!(!compact_diff.contains("Inspecteur (i: masquer)"));
+
+    handle_terminal_event(&mut state, key(KeyCode::Char('i')), None);
+    assert!(state.inspector_open);
+    render_once(&mut term, &mut state).expect("render 80x24 retour inspecteur");
+    assert!(buffer_text(&term).contains("Inspecteur (i: masquer)"));
 
     // Modes NO_COLOR + ASCII + lecture linéaire
     let mut linear_state = TuiState::with_m0_fixture(TerminalCapabilities {
@@ -219,11 +247,14 @@ fn t_f015_015_ac_f014_011_load_benchmark_1000_agents_100k_events_10k_diff_p95() 
         samples_ms_120.push(t0.elapsed().as_secs_f64() * 1000.0);
     }
 
+    state.inspector_open = false;
     for step in 0..60usize {
         let t0 = Instant::now();
         handle_terminal_event(
             &mut state,
-            if step % 2 == 0 {
+            if step % 15 == 0 {
+                key(KeyCode::Char('i'))
+            } else if step % 2 == 0 {
                 key(KeyCode::Tab)
             } else {
                 key(KeyCode::Char('j'))
@@ -407,4 +438,117 @@ async fn t_f015_005_tui_client_connects_and_quits_without_stopping_daemon() {
     let _verify_alive = UnleashClient::connect(daemon.tui_config())
         .await
         .expect("le daemon survit à la fermeture du client TUI");
+}
+
+struct CountingBackend {
+    inner: TestBackend,
+    draws: Arc<AtomicUsize>,
+}
+
+impl Backend for CountingBackend {
+    type Error = <TestBackend as Backend>::Error;
+
+    fn draw<'a, I>(&mut self, content: I) -> Result<(), Self::Error>
+    where
+        I: Iterator<Item = (u16, u16, &'a Cell)>,
+    {
+        self.draws.fetch_add(1, Ordering::Relaxed);
+        self.inner.draw(content)
+    }
+
+    fn hide_cursor(&mut self) -> Result<(), Self::Error> {
+        self.inner.hide_cursor()
+    }
+
+    fn show_cursor(&mut self) -> Result<(), Self::Error> {
+        self.inner.show_cursor()
+    }
+
+    fn get_cursor_position(&mut self) -> Result<Position, Self::Error> {
+        self.inner.get_cursor_position()
+    }
+
+    fn set_cursor_position<P: Into<Position>>(&mut self, position: P) -> Result<(), Self::Error> {
+        self.inner.set_cursor_position(position)
+    }
+
+    fn clear(&mut self) -> Result<(), Self::Error> {
+        self.inner.clear()
+    }
+
+    fn clear_region(&mut self, clear_type: ClearType) -> Result<(), Self::Error> {
+        self.inner.clear_region(clear_type)
+    }
+
+    fn size(&self) -> Result<Size, Self::Error> {
+        self.inner.size()
+    }
+
+    fn window_size(&mut self) -> Result<WindowSize, Self::Error> {
+        self.inner.window_size()
+    }
+
+    fn flush(&mut self) -> Result<(), Self::Error> {
+        self.inner.flush()
+    }
+}
+
+struct ChannelEventStream {
+    rx: mpsc::UnboundedReceiver<std::io::Result<Event>>,
+}
+
+impl Stream for ChannelEventStream {
+    type Item = std::io::Result<Event>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        self.rx.poll_recv(cx)
+    }
+}
+
+#[tokio::test]
+async fn t_f015_015_no_busy_redraw_loop_when_backend_channel_closes() {
+    // Vérifie l'absence de boucle de redraw infinie lorsque run_backend_io_worker se termine
+    // (`client_config == None`) et droppe `upd_tx`.
+    let draws = Arc::new(AtomicUsize::new(0));
+    let backend = CountingBackend {
+        inner: TestBackend::new(120, 40),
+        draws: Arc::clone(&draws),
+    };
+    let mut terminal = Terminal::new(backend).expect("Terminal CountingBackend");
+    let mut state = TuiState::with_m0_fixture(TerminalCapabilities::default());
+
+    let (cmd_tx, cmd_rx) = mpsc::channel::<BackendCommand>(8);
+    let (upd_tx, upd_rx) = mpsc::channel::<BackendUpdate>(MAX_NOTIFICATION_QUEUE);
+    let io_task = tokio::spawn(run_backend_io_worker(None, cmd_rx, upd_tx));
+
+    let (ev_tx, ev_rx) = mpsc::unbounded_channel();
+    let loop_fut = run_tui_loop(
+        &mut terminal,
+        &mut state,
+        ChannelEventStream { rx: ev_rx },
+        Some(&cmd_tx),
+        Some(upd_rx),
+    );
+    let driver_fut = async move {
+        let _ = io_task.await;
+        for _ in 0..64 {
+            tokio::task::yield_now().await;
+        }
+        let _ = ev_tx.send(Ok(key(KeyCode::Char('q'))));
+    };
+
+    let (loop_res, ()) = tokio::join!(loop_fut, driver_fut);
+    loop_res.expect("run_tui_loop termine proprement sur 'q'");
+
+    drop(cmd_tx);
+
+    assert!(matches!(
+        state.connection,
+        ConnectionBanner::Disconnected { .. }
+    ));
+    let total_draws = draws.load(Ordering::Relaxed);
+    assert!(
+        total_draws <= 4,
+        "Aucune boucle de redraw à 100 % CPU autorisée après fermeture de upd_rx (reçu {total_draws} redraws)"
+    );
 }
