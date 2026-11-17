@@ -1,6 +1,9 @@
 // Ce fichier a été généré automatiquement par unleash-protocol (ts-rs).
 // Ne pas modifier manuellement.
 
+import type { EventCursor } from "./EventCursor";
+import type { EventEnvelope } from "./EventEnvelope";
+
 export type SubscribeEventsFrame = { "kind": "events", 
 /**
  * Liste des événements du lot.

@@ -33,6 +33,13 @@ fn map_strict_json_error(e: serde_json::Error) -> ProtocolError {
             key: rest[..end_quote].to_owned(),
         };
     }
+    if let Some((_, after_tag)) = msg.split_once("[protocol_incompatible:")
+        && let Some((version, _)) = after_tag.split_once(']')
+    {
+        return ProtocolError::ProtocolIncompatible {
+            version: version.to_owned(),
+        };
+    }
     ProtocolError::Json(e)
 }
 
@@ -45,7 +52,7 @@ fn map_strict_json_error(e: serde_json::Error) -> ProtocolError {
 /// ou [`ProtocolError::Json`] si le document est syntaxiquement invalide ou ne correspond pas à `T`.
 pub fn from_json_str_strict<'a, T: Deserialize<'a>>(json_str: &'a str) -> Result<T, ProtocolError> {
     let value = parse_json_value_strict(json_str)?;
-    T::deserialize(value).map_err(ProtocolError::Json)
+    T::deserialize(value).map_err(map_strict_json_error)
 }
 
 struct StrictValueSeed;

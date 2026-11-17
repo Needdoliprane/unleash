@@ -1,6 +1,10 @@
 // Ce fichier a été généré automatiquement par unleash-protocol (ts-rs).
 // Ne pas modifier manuellement.
 
+import type { ErrorCode } from "./ErrorCode";
+import type { ReasonCode } from "./ReasonCode";
+import type { RetryClass } from "./RetryClass";
+
 export type IpcError = { 
 /**
  * Classe commune d'erreur parmi les 17 canoniques.

@@ -1,6 +1,9 @@
 // Ce fichier a été généré automatiquement par unleash-protocol (ts-rs).
 // Ne pas modifier manuellement.
 
+import type { EventCursor } from "./EventCursor";
+import type { ReceiptState } from "./ReceiptState";
+
 export type CommandReceipt = { 
 /**
  * Identifiant global unique serveur du reçu.

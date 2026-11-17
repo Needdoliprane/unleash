@@ -3,7 +3,8 @@
 //! Responsabilité exclusive : Générer les définitions TypeScript (`.ts`) de tous les DTOs
 //! exposés au renderer GUI (Tauri/React) à partir des attributs `#[derive(TS)]`.
 
-use std::collections::BTreeMap;
+use std::any::TypeId;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::fs;
 use std::path::Path;
@@ -18,7 +19,11 @@ use crate::envelopes::{
 use crate::errors::{ErrorCode, IpcError, ReasonCode, RetryClass};
 use crate::operations::{OperationKind, OperationName};
 
-fn insert_ts_type<T: TS>(files: &mut BTreeMap<String, String>, config: &Config, name: &str) {
+fn insert_ts_type<T: TS + 'static>(
+    files: &mut BTreeMap<String, String>,
+    config: &Config,
+    name: &str,
+) {
     let decl = T::decl(config);
     let trimmed = decl.trim();
     let export_decl = if trimmed.starts_with("export ") {
@@ -26,8 +31,23 @@ fn insert_ts_type<T: TS>(files: &mut BTreeMap<String, String>, config: &Config, 
     } else {
         format!("export {trimmed}")
     };
+    let deps: BTreeSet<String> = T::dependencies(config)
+        .into_iter()
+        .filter(|dep| dep.type_id != TypeId::of::<T>() && dep.ts_name != name)
+        .map(|dep| dep.ts_name)
+        .collect();
+    let imports = deps
+        .into_iter()
+        .map(|dep| format!("import type {{ {dep} }} from \"./{dep}\";"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let body = if imports.is_empty() {
+        export_decl
+    } else {
+        format!("{imports}\n\n{export_decl}")
+    };
     let content = format!(
-        "// Ce fichier a été généré automatiquement par unleash-protocol (ts-rs).\n// Ne pas modifier manuellement.\n\n{export_decl}\n"
+        "// Ce fichier a été généré automatiquement par unleash-protocol (ts-rs).\n// Ne pas modifier manuellement.\n\n{body}\n"
     );
     files.insert(format!("{name}.ts"), content);
 }

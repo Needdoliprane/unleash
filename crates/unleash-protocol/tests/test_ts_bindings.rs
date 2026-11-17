@@ -11,9 +11,78 @@
     clippy::cast_possible_truncation
 )]
 
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::Path;
 use unleash_protocol::{generate_all_ts_files, write_ts_bindings};
+
+/// Supprime commentaires (`//`, `/* ... */`) et littéraux chaînes (`"..."`, `'...'`)
+/// tout en préservant des séparateurs d'espaces pour extraire les identifiants TS réels.
+fn strip_ts_comments_and_strings(src: &str) -> String {
+    let bytes = src.as_bytes();
+    let mut out = String::with_capacity(src.len());
+    let mut i = 0;
+
+    while i < bytes.len() {
+        if bytes[i] == b'/' && i + 1 < bytes.len() && bytes[i + 1] == b'/' {
+            i += 2;
+            while i < bytes.len() && bytes[i] != b'\n' {
+                i += 1;
+            }
+            out.push(' ');
+        } else if bytes[i] == b'/' && i + 1 < bytes.len() && bytes[i + 1] == b'*' {
+            i += 2;
+            while i + 1 < bytes.len() && !(bytes[i] == b'*' && bytes[i + 1] == b'/') {
+                i += 1;
+            }
+            i = (i + 2).min(bytes.len());
+            out.push(' ');
+        } else if bytes[i] == b'"' || bytes[i] == b'\'' {
+            let quote = bytes[i];
+            i += 1;
+            while i < bytes.len() {
+                if bytes[i] == b'\\' {
+                    i += 2;
+                } else if bytes[i] == quote {
+                    i += 1;
+                    break;
+                } else {
+                    i += 1;
+                }
+            }
+            out.push(' ');
+        } else {
+            let ch = src[i..].chars().next().expect("Index UTF-8 valide");
+            out.push(ch);
+            i += ch.len_utf8();
+        }
+    }
+
+    out
+}
+
+/// Extrait les jetons d'identifiants `[A-Za-z_][A-Za-z0-9_]*` d'un source déjà nettoyé.
+fn extract_ts_identifiers(cleaned: &str) -> BTreeSet<String> {
+    let mut idents = BTreeSet::new();
+    let mut current = String::new();
+
+    for ch in cleaned.chars() {
+        if current.is_empty() {
+            if ch.is_ascii_alphabetic() || ch == '_' {
+                current.push(ch);
+            }
+        } else if ch.is_ascii_alphanumeric() || ch == '_' {
+            current.push(ch);
+        } else {
+            idents.insert(std::mem::take(&mut current));
+        }
+    }
+    if !current.is_empty() {
+        idents.insert(current);
+    }
+
+    idents
+}
 
 #[test]
 fn test_typescript_bindings_in_sync_with_repository() {
@@ -93,6 +162,101 @@ fn test_typescript_bindings_in_sync_with_repository() {
         expected_files["SubscribeEventsFrame.ts"].contains("\"kind\": \"events\""),
         "SubscribeEventsFrame.ts doit respecter #[serde(tag = \"kind\", rename_all = \"snake_case\")]"
     );
+    assert!(
+        expected_files["QueryResponse.ts"].contains("result: unknown,"),
+        "QueryResponse.ts doit typer result en 'unknown' (pas 'any')"
+    );
+
+    let exported_types: BTreeSet<&str> = expected_files
+        .keys()
+        .filter(|name| name.as_str() != "index.ts")
+        .map(|name| name.trim_end_matches(".ts"))
+        .collect();
+
+    for (filename, content) in &expected_files {
+        if filename == "index.ts" {
+            continue;
+        }
+        let type_name = filename.trim_end_matches(".ts");
+        let decl_start = content.find("\nexport ").map_or_else(
+            || panic!("Déclaration export manquante dans {filename}"),
+            |idx| idx + 1,
+        );
+        let header = &content[..decl_start];
+        let decl_body = &content[decl_start..];
+
+        let mut imported = BTreeSet::new();
+        for line in header.lines() {
+            if line.starts_with("import ") {
+                let rest = line.strip_prefix("import type { ").unwrap_or_else(|| {
+                    panic!("Import inattendu (non 'import type') dans {filename}: {line}")
+                });
+                let (dep, path_part) = rest
+                    .split_once(" } from \"./")
+                    .unwrap_or_else(|| panic!("Format d'import invalide dans {filename}: {line}"));
+                let path_dep = path_part.strip_suffix("\";").unwrap_or_else(|| {
+                    panic!("Fin de ligne d'import invalide dans {filename}: {line}")
+                });
+                assert_eq!(
+                    dep, path_dep,
+                    "Cible d'import incohérente dans {filename}: {line}"
+                );
+                assert!(
+                    exported_types.contains(dep),
+                    "Import d'un type inconnu '{dep}' dans {filename}"
+                );
+                assert_ne!(dep, type_name, "Auto-import interdit dans {filename}");
+                imported.insert(dep.to_owned());
+            }
+        }
+
+        let cleaned = strip_ts_comments_and_strings(decl_body);
+        let tokens = extract_ts_identifiers(&cleaned);
+        assert!(
+            !tokens.contains("any"),
+            "Aucun type 'any' autorisé dans {filename}"
+        );
+        for token in &tokens {
+            if exported_types.contains(token.as_str()) && token != type_name {
+                assert!(
+                    imported.contains(token.as_str()),
+                    "Dans {filename}, le type '{token}' est référencé sans `import type {{ {token} }} from \"./{token}\";`"
+                );
+            }
+        }
+        for dep in &imported {
+            assert!(
+                tokens.contains(dep.as_str()),
+                "Import inutilisé '{dep}' dans {filename}"
+            );
+        }
+    }
+
+    let expected_imports: &[(&str, &[&str])] = &[
+        ("CommandEnvelope.ts", &["ProtocolVersion"]),
+        ("CommandReceipt.ts", &["EventCursor", "ReceiptState"]),
+        (
+            "CommandReceiptInspection.ts",
+            &["CommandReceipt", "LineageStatus"],
+        ),
+        ("EventCausation.ts", &["EventCausationKind"]),
+        ("EventEnvelope.ts", &["EventCausation", "Sensitivity"]),
+        ("HelloRequest.ts", &["ClientKind", "ProtocolVersion"]),
+        ("HelloResponse.ts", &["ProtocolVersion"]),
+        ("IpcError.ts", &["ErrorCode", "ReasonCode", "RetryClass"]),
+        ("QueryEnvelope.ts", &["ProtocolVersion"]),
+        ("QueryResponse.ts", &["EventCursor"]),
+        ("SubscribeEventsFrame.ts", &["EventCursor", "EventEnvelope"]),
+    ];
+    for (file, deps) in expected_imports {
+        for dep in *deps {
+            let expected_line = format!("import type {{ {dep} }} from \"./{dep}\";");
+            assert!(
+                expected_files[*file].contains(&expected_line),
+                "{file} doit contenir `{expected_line}`"
+            );
+        }
+    }
 
     // Vérification de chaque fichier généré
     for (filename, expected_content) in &expected_files {

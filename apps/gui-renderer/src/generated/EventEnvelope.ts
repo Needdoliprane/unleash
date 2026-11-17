@@ -1,6 +1,9 @@
 // Ce fichier a été généré automatiquement par unleash-protocol (ts-rs).
 // Ne pas modifier manuellement.
 
+import type { EventCausation } from "./EventCausation";
+import type { Sensitivity } from "./Sensitivity";
+
 export type EventEnvelope = { 
 /**
  * Identifiant unique de l'événement (UUID).

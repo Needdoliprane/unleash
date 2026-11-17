@@ -56,12 +56,12 @@ impl<'de> Deserialize<'de> for ProtocolVersion {
         if s == PROTOCOL_VERSION_V2 {
             Ok(Self)
         } else if s == PROTOCOL_VERSION_V1 {
-            Err(de::Error::custom(
-                "Version de protocole 'unleash.ipc.v1' refusée : mise à niveau vers unleash.ipc.v2 requise (ProtocolIncompatible)",
-            ))
+            Err(de::Error::custom(format!(
+                "Version de protocole 'unleash.ipc.v1' refusée : mise à niveau vers unleash.ipc.v2 requise [protocol_incompatible:{s}]"
+            )))
         } else {
             Err(de::Error::custom(format!(
-                "Version de protocole inconnue ou incompatible : '{s}'"
+                "Version de protocole inconnue ou incompatible : '{s}' [protocol_incompatible:{s}]"
             )))
         }
     }
@@ -102,21 +102,6 @@ pub struct CommandEnvelope {
     /// Charge utile métier de la commande (objet JSON).
     #[ts(type = "Record<string, unknown>")]
     pub payload: serde_json::Map<String, serde_json::Value>,
-}
-
-impl CommandEnvelope {
-    /// Valide la conformité de l'enveloppe et s'assure que la version est compatible v2.
-    ///
-    /// # Errors
-    /// Renvoie [`ProtocolError::ProtocolIncompatible`] si la version n'est pas v2.
-    pub fn validate_version(&self) -> Result<(), ProtocolError> {
-        if self.protocol_version.as_str() != PROTOCOL_VERSION_V2 {
-            return Err(ProtocolError::ProtocolIncompatible {
-                version: self.protocol_version.as_str().to_owned(),
-            });
-        }
-        Ok(())
-    }
 }
 
 /// État d'avancement d'une commande dans son cycle de vie serveur.
@@ -350,7 +335,7 @@ pub struct QueryResponse {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub watermark: Option<EventCursor>,
     /// Résultat de la requête.
-    #[ts(type = "any")]
+    #[ts(type = "unknown")]
     pub result: serde_json::Value,
 }
 

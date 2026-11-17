@@ -85,7 +85,41 @@ fn test_validate_ipc_command_schema() {
     );
     let v1_str = serde_json::to_string(&v1_val).unwrap();
     let des_res: Result<CommandEnvelope, _> = from_json_str_strict(&v1_str);
-    assert!(matches!(des_res, Err(ProtocolError::Json(_))));
+    assert!(
+        matches!(
+            des_res,
+            Err(ProtocolError::ProtocolIncompatible { ref version }) if version == "unleash.ipc.v1"
+        ),
+        "CommandEnvelope v1 doit renvoyer ProtocolIncompatible, obtenu : {des_res:?}"
+    );
+
+    // 2b. Version inconnue v99 refusée avec ProtocolIncompatible
+    let mut v99_val = fixture_val.clone();
+    v99_val["protocol_version"] = json!("unleash.ipc.v99");
+    let v99_res: Result<CommandEnvelope, _> =
+        from_json_str_strict(&serde_json::to_string(&v99_val).unwrap());
+    assert!(
+        matches!(
+            v99_res,
+            Err(ProtocolError::ProtocolIncompatible { ref version }) if version == "unleash.ipc.v99"
+        ),
+        "CommandEnvelope v99 doit renvoyer ProtocolIncompatible, obtenu : {v99_res:?}"
+    );
+
+    // 2c. Enveloppe v1 sans authority_generation refusée avec ProtocolIncompatible
+    let mut v1_no_auth = v1_val.clone();
+    if let Some(obj) = v1_no_auth.as_object_mut() {
+        obj.remove("authority_generation");
+    }
+    let v1_no_auth_res: Result<CommandEnvelope, _> =
+        from_json_str_strict(&serde_json::to_string(&v1_no_auth).unwrap());
+    assert!(
+        matches!(
+            v1_no_auth_res,
+            Err(ProtocolError::ProtocolIncompatible { ref version }) if version == "unleash.ipc.v1"
+        ),
+        "CommandEnvelope v1 sans authority_generation doit renvoyer ProtocolIncompatible, obtenu : {v1_no_auth_res:?}"
+    );
 
     // 3. Cas négatif : expected_revision manquant
     let mut missing_rev = fixture_val.clone();
@@ -381,6 +415,23 @@ fn test_validate_ipc_query_schemas() {
         "QueryEnvelope doit valider ipc-query.schema.json"
     );
 
+    // Cas négatif : unleash.ipc.v1 refusé avec ProtocolIncompatible
+    let mut query_v1 = query_val.clone();
+    query_v1["protocol_version"] = json!("unleash.ipc.v1");
+    assert!(
+        !query_validator.is_valid(&query_v1),
+        "QueryEnvelope v1 doit être refusé par ipc-query.schema.json"
+    );
+    let query_v1_res: Result<QueryEnvelope, _> =
+        from_json_str_strict(&serde_json::to_string(&query_v1).unwrap());
+    assert!(
+        matches!(
+            query_v1_res,
+            Err(ProtocolError::ProtocolIncompatible { ref version }) if version == "unleash.ipc.v1"
+        ),
+        "QueryEnvelope v1 doit renvoyer ProtocolIncompatible, obtenu : {query_v1_res:?}"
+    );
+
     // Cas négatif : payload non-objet rejeté par ipc-query.schema.json ET par from_json_str_strict
     for invalid_payload in [
         json!([]),
@@ -435,6 +486,22 @@ fn test_validate_ipc_hello_schema() {
         "HelloRequest doit valider ipc-hello.schema.json"
     );
 
+    let mut req_v1 = req_val.clone();
+    req_v1["protocol_version"] = json!("unleash.ipc.v1");
+    assert!(
+        !validator.is_valid(&req_v1),
+        "HelloRequest v1 doit être refusé par ipc-hello.schema.json"
+    );
+    let req_v1_res: Result<HelloRequest, _> =
+        from_json_str_strict(&serde_json::to_string(&req_v1).unwrap());
+    assert!(
+        matches!(
+            req_v1_res,
+            Err(ProtocolError::ProtocolIncompatible { ref version }) if version == "unleash.ipc.v1"
+        ),
+        "HelloRequest v1 doit renvoyer ProtocolIncompatible, obtenu : {req_v1_res:?}"
+    );
+
     let resp = HelloResponse {
         protocol_version: ProtocolVersion,
         authority_generation: AuthorityGeneration::from_uuid(uuid::uuid!(
@@ -458,6 +525,22 @@ fn test_validate_ipc_hello_schema() {
     assert!(
         validator.is_valid(&resp_val),
         "HelloResponse doit valider ipc-hello.schema.json"
+    );
+
+    let mut resp_v1 = resp_val.clone();
+    resp_v1["protocol_version"] = json!("unleash.ipc.v1");
+    assert!(
+        !validator.is_valid(&resp_v1),
+        "HelloResponse v1 doit être refusé par ipc-hello.schema.json"
+    );
+    let resp_v1_res: Result<HelloResponse, _> =
+        from_json_str_strict(&serde_json::to_string(&resp_v1).unwrap());
+    assert!(
+        matches!(
+            resp_v1_res,
+            Err(ProtocolError::ProtocolIncompatible { ref version }) if version == "unleash.ipc.v1"
+        ),
+        "HelloResponse v1 doit renvoyer ProtocolIncompatible, obtenu : {resp_v1_res:?}"
     );
 }
 

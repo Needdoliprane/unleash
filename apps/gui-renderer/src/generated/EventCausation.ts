@@ -1,6 +1,8 @@
 // Ce fichier a été généré automatiquement par unleash-protocol (ts-rs).
 // Ne pas modifier manuellement.
 
+import type { EventCausationKind } from "./EventCausationKind";
+
 export type EventCausation = { 
 /**
  * Famille causale.

@@ -1,6 +1,8 @@
 // Ce fichier a été généré automatiquement par unleash-protocol (ts-rs).
 // Ne pas modifier manuellement.
 
+import type { ProtocolVersion } from "./ProtocolVersion";
+
 export type HelloResponse = { 
 /**
  * Version protocolaire active du daemon (`unleash.ipc.v2`).
