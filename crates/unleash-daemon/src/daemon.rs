@@ -362,15 +362,19 @@ impl UnleashDaemon {
             let uid = effective_uid();
             store_cfg.owner_uid = uid;
             store_cfg.boot_identity.clone_from(&boot_id);
-            let opened = UnleashStore::open(store_cfg)?;
+            let opened = UnleashStore::open_classified(store_cfg);
             Ok((opened, boot_id, uid))
         })
         .await
         .map_err(|e| DaemonError::InvalidConfiguration(format!("Join error store open: {e}")))?;
 
-        let (opened, boot_id, uid) = match store_open_res {
-            Ok(value) => value,
-            Err(DaemonError::Store(unleash_store::StoreError::StorageCorrupt(_))) => {
+        let (opened, boot_id, uid) = store_open_res?;
+        let opened = match opened {
+            Ok(opened) => opened,
+            Err(unleash_store::StoreOpenFailure {
+                stage: unleash_store::StoreOpenStage::ReadOnlyPreflight,
+                error: unleash_store::StoreError::StorageCorrupt(_),
+            }) => {
                 let handle = crate::diagnostic::start(
                     lock,
                     rdv_dir,
@@ -380,9 +384,9 @@ impl UnleashDaemon {
                 .await?;
                 return Ok(DaemonStartOutcome::Diagnostic(handle));
             }
-            Err(err) => {
+            Err(failure) => {
                 let _ = tokio::task::spawn_blocking(move || drop(lock)).await;
-                return Err(err);
+                return Err(DaemonError::Store(failure.error));
             }
         };
 

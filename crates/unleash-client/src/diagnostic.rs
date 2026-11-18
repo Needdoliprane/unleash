@@ -2,14 +2,14 @@
 
 use crate::errors::ClientError;
 use crate::transport::{
-    ClientConfig, decode_response_or_ipc_error, read_raw_frame_async, write_json_frame_async,
+    ClientConfig, connect_verified_peer, decode_response_or_ipc_error, load_admin_proof,
+    read_raw_frame_async, write_json_frame_async,
 };
 use tokio::net::UnixStream;
 use unleash_domain::RequestId;
-use unleash_platform::{read_admin_credential, validate_socket_file, verify_same_uid_peer};
 use unleash_protocol::{
-    AdminProof, ClientKind, DiagnosticHelloResponse, HelloRequest, MAX_FRAME_BYTES,
-    ProtocolVersion, QueryEnvelope, QueryResponse, READ_ONLY_RECOVERY_CAPABILITY,
+    DiagnosticHelloResponse, HelloRequest, MAX_FRAME_BYTES, ProtocolVersion, QueryEnvelope,
+    QueryResponse, READ_ONLY_RECOVERY_CAPABILITY,
 };
 
 /// Bounded diagnostic connection. It cannot construct commands or subscriptions.
@@ -26,35 +26,8 @@ impl DiagnosticClient {
     /// # Errors
     /// Returns a transport, peer-validation or protocol error.
     pub async fn connect(config: ClientConfig) -> Result<Self, ClientError> {
-        if config.verify_socket_security {
-            validate_socket_file(&config.socket_path)?;
-        }
-        let mut stream = tokio::time::timeout(
-            config.connect_timeout,
-            UnixStream::connect(&config.socket_path),
-        )
-        .await
-        .map_err(|_| ClientError::Timeout {
-            operation: "UnixStream::connect",
-            timeout_ms: u64::try_from(config.connect_timeout.as_millis()).unwrap_or(u64::MAX),
-        })??;
-        if config.verify_socket_security {
-            verify_same_uid_peer(&stream)?;
-        }
-        let proof = if config.verify_socket_security
-            && config.load_admin_credential
-            && matches!(
-                config.client_kind,
-                ClientKind::Cli | ClientKind::Tui | ClientKind::Gui
-            ) {
-            config
-                .socket_path
-                .parent()
-                .and_then(|dir| read_admin_credential(dir).ok().flatten())
-                .and_then(|value| AdminProof::from_hex(&value))
-        } else {
-            None
-        };
+        let mut stream = connect_verified_peer(&config).await?;
+        let proof = load_admin_proof(&config);
         let mut capabilities = config.requested_capabilities.clone();
         if !capabilities
             .iter()
