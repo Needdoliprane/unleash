@@ -15,6 +15,8 @@ use thiserror::Error;
 pub mod anthropic;
 /// Bounded, explicitly restricted OpenAI Responses SSE dialect.
 pub mod openai;
+/// One-attempt Responses executor for the action-broker port.
+pub mod transport;
 
 #[cfg(test)]
 mod anthropic_tests;
@@ -24,6 +26,8 @@ mod http_fixture_tests;
 mod openai_tests;
 #[cfg(test)]
 mod qualification_http;
+#[cfg(test)]
+mod transport_tests;
 
 const MAX_CHUNK: usize = 1_048_576;
 const MAX_LINE: usize = 65_536;

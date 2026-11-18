@@ -6008,10 +6008,18 @@ version = "0.1.0"
 dependencies = [
  "jsonschema",
  "reqwest",
+ "secrecy",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror 2.0.21",
  "tokio",
+ "tokio-rustls",
+ "unleash-action-broker",
+ "unleash-domain",
+ "unleash-protocol",
+ "unleash-testkit",
+ "zeroize",
 ]
 
 [[package]]
