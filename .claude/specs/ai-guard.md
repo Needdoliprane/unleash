@@ -27,6 +27,10 @@ Le résultat est lié au digest exact de l’action. Changer commande, cible, en
 5. L’exécuteur autorisé lance l’action ; événements et preuves portent les deux identifiants de corrélation.
 6. Une fin ambiguë devient OutcomeUnknown ; la réconciliation utilise les preuves locales et, si disponible, la référence distante.
 
+Chaque évaluation prend un `authorization_evaluation_id` avant son premier engagement. L’intention d’évaluer, la décision, le marqueur de dispatch et son observation reprennent cet identifiant. Un commit incertain conserve l’identifiant et les données exactes de la phase jusqu’à inspection ou confirmation du journal. Lorsque le résultat du garde est déjà connu, la reprise du commit utilise ce résultat. Une nouvelle évaluation exige le résultat réessayable du prédécesseur conservé dans le journal et l’expiration du backoff. L’identité du prédécesseur accompagne la nouvelle demande.
+
+Le marqueur de dispatch donne un droit de lancement une seule fois, à l’engagement initial qui le crée. La présence du même marqueur au rejeu impose l’inspection de l’effet. Une résolution d’approbation ou une observation de réconciliation apporte sa propre cause et conserve la décision ou l’incertitude antérieure.
+
 Issues de l’évaluation et projection wire :
 
 - Allow sans contrainte additionnelle → `authorized`. Sous le profil initial `obligations=none_accepted`, tout autre Allow → `CapabilityDenied/GUARD_OBLIGATION_UNSATISFIED`.
