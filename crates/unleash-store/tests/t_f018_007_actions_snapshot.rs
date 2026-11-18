@@ -11,12 +11,35 @@ use unleash_testkit::{DeterministicIdGenerator, ManualClock, local_test_dir};
 
 #[test]
 fn prepared_action_executed_after_snapshot_is_in_capsule_and_remains_frozen() {
-    run_snapshot_case(false);
+    run_snapshot_case(false, EffectProgress::ObserveSuccess);
 }
 
 #[test]
 fn action_with_post_snapshot_parent_is_visible_after_restore() {
-    run_snapshot_case(true);
+    run_snapshot_case(true, EffectProgress::ObserveSuccess);
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EffectProgress {
+    ObserveSuccess,
+    DispatchOnly,
+    ReceiptOnly,
+    ReceiptTombstone,
+}
+
+#[test]
+fn dispatch_without_action_revision_is_captured_and_scope_stays_frozen() {
+    run_snapshot_case(false, EffectProgress::DispatchOnly);
+}
+
+#[test]
+fn changed_dispatch_receipt_is_captured_without_action_revision() {
+    run_snapshot_case(false, EffectProgress::ReceiptOnly);
+}
+
+#[test]
+fn post_snapshot_tombstone_stays_historical_without_full_response_reconstruction() {
+    run_snapshot_case(true, EffectProgress::ReceiptTombstone);
 }
 
 #[expect(
@@ -24,12 +47,17 @@ fn action_with_post_snapshot_parent_is_visible_after_restore() {
     clippy::too_many_lines,
     reason = "Scénario de panne partagé : fixtures, snapshot, effet externe et inspection après restore"
 )]
-fn run_snapshot_case(missing_parent: bool) {
+fn run_snapshot_case(missing_parent: bool, progress: EffectProgress) {
+    let observes_success = matches!(
+        progress,
+        EffectProgress::ObserveSuccess | EffectProgress::ReceiptTombstone
+    );
     let source = local_test_dir("f018-007-prepared-source").unwrap();
     let target = local_test_dir("f018-007-prepared-target").unwrap();
     let ids = Arc::new(DeterministicIdGenerator::new(0xF018_0701));
     let mut config = StoreConfig::new(source.path());
-    config.clock = Arc::new(ManualClock::default());
+    let clock = Arc::new(ManualClock::default());
+    config.clock = clock.clone();
     config.id_generator = ids.clone();
     let store = UnleashStore::open(config.clone()).unwrap();
     store
@@ -47,7 +75,7 @@ fn run_snapshot_case(missing_parent: bool) {
             .unwrap();
     }
     let action_id = ActionId::from_uuid(ids.new_uuid());
-    store
+    let created_action = store
         .commit_command(CommitCommandRequest {
             actor_id: ActorId::new("user:louis").unwrap(),
             envelope: CommandEnvelope {
@@ -88,6 +116,20 @@ fn run_snapshot_case(missing_parent: bool) {
             budget_reservations: vec![],
         })
         .unwrap();
+    if progress == EffectProgress::ReceiptOnly {
+        store
+            .record_action_dispatch(ActionDispatchInput {
+                dispatch_id: "dispatch-post-snapshot".to_owned(),
+                action_id,
+                ordinal: 1,
+                adapter_id: "counter-fixture".to_owned(),
+                request_hash: Sha256Digest::from_bytes(b"increment"),
+                provider_request_id: Some("counter-1".to_owned()),
+                transport_state: "sent".to_owned(),
+                receipt_hash: None,
+            })
+            .unwrap();
+    }
     if !missing_parent {
         store
             .prepare_backup(PrepareBackupRequest {
@@ -113,23 +155,47 @@ fn run_snapshot_case(missing_parent: bool) {
     // Fixture indépendante de SQLite : un effet a lieu après le snapshot.
     let external_counter = std::sync::atomic::AtomicUsize::new(0);
     external_counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-    store
-        .record_action_dispatch(ActionDispatchInput {
-            dispatch_id: "dispatch-post-snapshot".to_owned(),
-            action_id,
-            ordinal: 1,
-            adapter_id: "counter-fixture".to_owned(),
-            request_hash: Sha256Digest::from_bytes(b"increment"),
-            provider_request_id: Some("counter-1".to_owned()),
-            transport_state: "acked".to_owned(),
-            receipt_hash: Some(Sha256Digest::from_bytes(b"counter=1")),
-        })
-        .unwrap();
-    store.execute_in_writer_tx(WriteCriticality::Normal, move |tx, _| {
+    if progress == EffectProgress::ReceiptOnly {
+        store.execute_in_writer_tx(WriteCriticality::Normal, move |tx, _| {
+            tx.execute("UPDATE action_dispatches SET receipt_hash = ?1, ended_at_ms = 1, transport_state = 'acked' WHERE dispatch_id = 'dispatch-post-snapshot'",
+                [Sha256Digest::from_bytes(b"counter=1").as_prefixed_str()]).map_err(StoreError::from_rusqlite)?;
+            Ok(())
+        }).unwrap();
+    } else {
+        store
+            .record_action_dispatch(ActionDispatchInput {
+                dispatch_id: "dispatch-post-snapshot".to_owned(),
+                action_id,
+                ordinal: 1,
+                adapter_id: "counter-fixture".to_owned(),
+                request_hash: Sha256Digest::from_bytes(b"increment"),
+                provider_request_id: Some("counter-1".to_owned()),
+                transport_state: "acked".to_owned(),
+                receipt_hash: Some(Sha256Digest::from_bytes(b"counter=1")),
+            })
+            .unwrap();
+    }
+    if observes_success {
+        store.execute_in_writer_tx(WriteCriticality::Normal, move |tx, _| {
         tx.execute("UPDATE actions SET state = 'observed_success', revision = revision + 1 WHERE action_id = ?1", [action_id.to_string()])
             .map_err(StoreError::from_rusqlite)?;
         Ok(())
     }).unwrap();
+    }
+    if progress == EffectProgress::ReceiptTombstone {
+        clock.advance(std::time::Duration::from_secs(8 * 86_400));
+        store.purge_expired_command_receipts().unwrap();
+    }
+    let source_cutoff: i64 = store
+        .read_snapshot(|conn, _| {
+            conn.query_row(
+                "SELECT response_retained_until_ms FROM command_receipts WHERE receipt_id = ?1",
+                [created_action.receipt().receipt_id.to_string()],
+                |row| row.get(0),
+            )
+            .map_err(StoreError::from_rusqlite)
+        })
+        .unwrap();
     let restore_request = RestoreBackupRequest {
         backup_dir,
         target_data_root: target.path().to_owned(),
@@ -156,16 +222,42 @@ fn run_snapshot_case(missing_parent: bool) {
             .unwrap(),
     )
     .unwrap();
+    let expected_state = if observes_success {
+        "observed_success"
+    } else {
+        "outcome_unknown"
+    };
     assert!(
         capsule
             .actions
             .iter()
-            .any(|a| a.action_id == action_id && a.state == "observed_success")
+            .any(|a| a.action_id == action_id && a.state == expected_state)
+    );
+    let action_delta = capsule
+        .actions
+        .iter()
+        .find(|action| action.action_id == action_id)
+        .unwrap();
+    assert_eq!(
+        action_delta.source_state.as_deref(),
+        Some(if observes_success {
+            "observed_success"
+        } else {
+            "prepared"
+        })
+    );
+    assert_eq!(
+        action_delta.source_revision,
+        if observes_success { 2 } else { 1 }
     );
     let report = restored.inspect_recovery().unwrap();
-    assert!(report.items.iter().any(
-        |a| a.action_id == action_id && a.state == unleash_domain::ActionState::ObservedSuccess
-    ));
+    assert!(report.items.iter().any(|a| a.action_id == action_id
+        && a.state
+            == if observes_success {
+                unleash_domain::ActionState::ObservedSuccess
+            } else {
+                unleash_domain::ActionState::OutcomeUnknown
+            }));
     let item = report
         .items
         .iter()
@@ -208,7 +300,65 @@ fn run_snapshot_case(missing_parent: bool) {
     );
     assert_eq!(historical_receipt.receipt.state, ReceiptState::Accepted);
 
-    assert!(report.frozen_scopes.iter().any(|s| s.state == "frozen"));
+    let source_receipt = restored
+        .inspect_command_receipt(
+            &ActorId::new("user:louis").unwrap(),
+            created_action.receipt().command_id,
+        )
+        .unwrap();
+    match source_receipt {
+        unleash_store::ReceiptInspectionOutcome::Full(receipt) => {
+            assert_ne!(progress, EffectProgress::ReceiptTombstone);
+            assert_eq!(receipt.authority_generation, authority);
+            assert_eq!(
+                receipt.lineage_status,
+                unleash_protocol::LineageStatus::Historical
+            );
+            assert_eq!(&receipt.receipt, created_action.receipt());
+        }
+        unleash_store::ReceiptInspectionOutcome::Tombstone {
+            authority_generation,
+            lineage_status,
+            receipt_id,
+            ..
+        } => {
+            assert!(progress == EffectProgress::ReceiptTombstone);
+            assert_eq!(receipt_id, created_action.receipt().receipt_id);
+            assert_eq!(authority_generation, authority);
+            assert_eq!(lineage_status, unleash_protocol::LineageStatus::Historical);
+        }
+    }
+    let restored_cutoff: i64 = restored
+        .read_snapshot(|conn, _| {
+            conn.query_row(
+                "SELECT response_retained_until_ms FROM command_receipts WHERE receipt_id = ?1",
+                [created_action.receipt().receipt_id.to_string()],
+                |row| row.get(0),
+            )
+            .map_err(StoreError::from_rusqlite)
+        })
+        .unwrap();
+    assert_eq!(restored_cutoff, source_cutoff);
+    let source_scope = &capsule
+        .actions
+        .iter()
+        .find(|a| a.action_id == action_id)
+        .unwrap()
+        .scope_id;
+    assert!(
+        report
+            .frozen_scopes
+            .iter()
+            .any(|s| s.state == "frozen" && &s.scope_id == source_scope)
+    );
+    assert_eq!(
+        item.last_receipt_hash.as_deref(),
+        Some(
+            Sha256Digest::from_bytes(b"counter=1")
+                .as_prefixed_str()
+                .as_str()
+        )
+    );
     assert_eq!(
         external_counter.load(std::sync::atomic::Ordering::SeqCst),
         1

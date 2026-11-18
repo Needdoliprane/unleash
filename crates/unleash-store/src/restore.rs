@@ -124,6 +124,9 @@ impl ExecutorNeutralizer for EmptyExecutorNeutralizer {
 /// Résumé d'une action ou effet postérieur au watermark du backup inclus dans la capsule.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CapsuleActionDelta {
+    /// État SQL source exact, distinct du classement conservateur transféré.
+    #[serde(default)]
+    pub source_state: Option<String>,
     /// Run source, même lorsqu'il est absent du snapshot.
     #[serde(default)]
     pub run_id: Option<String>,
@@ -143,7 +146,7 @@ pub struct CapsuleActionDelta {
     pub action_id: ActionId,
     /// Scope métier affecté.
     pub scope_id: String,
-    /// État observé post-watermark (`observed_success`, `observed_failure`, `outcome_unknown`, etc.).
+    /// État transféré, conservativement unknown si un dispatch contredit un état pré-effet.
     pub state: String,
     /// Stratégie de réconciliation.
     pub reconcile_strategy: String,
@@ -155,9 +158,55 @@ pub struct CapsuleActionDelta {
     pub account_id: Option<String>,
 }
 
+/// État de conservation d'une réponse historique de commande.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CapsuleReceiptResponseState {
+    /// Réponse source encore intégralement conservée.
+    Full,
+    /// Réponse explicitement purgée ; aucune reconstruction n'est permise.
+    Tombstone,
+}
+impl CapsuleReceiptResponseState {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Full => "full",
+            Self::Tombstone => "tombstone",
+        }
+    }
+}
+
+/// Contenu et garanties source d'un reçu transféré sans réactivation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CapsuleReceiptRetention {
+    /// Lignée historique réelle du reçu.
+    pub authority_generation: AuthorityGeneration,
+    /// Identifiant de requête source, conservé sans reconstruction.
+    pub request_id: String,
+    /// Type de commande source.
+    pub command_type: String,
+    /// Agrégat source.
+    pub aggregate_id: String,
+    /// Réponse complète ou tombstone explicite.
+    pub response_state: CapsuleReceiptResponseState,
+    /// JSON exact de la réponse, absent pour un tombstone.
+    pub response_json: Option<String>,
+    /// Cutoff fixé au commit source, jamais remplacé par celui de la destination.
+    pub response_retained_until_ms: TimestampMs,
+    /// Première séquence causée dans le flux source.
+    pub first_event_seq: Option<Sequence>,
+    /// Dernière séquence causée dans le flux source.
+    pub last_event_seq: Option<Sequence>,
+    /// Date d'engagement source.
+    pub committed_at_ms: TimestampMs,
+}
+
 /// Consommation ou receipt post-watermark inclus dans la capsule.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CapsuleReceiptDelta {
+    /// Contenu réellement conservé à la source ; aucun full n’est reconstruit depuis un tombstone.
+    #[serde(default)]
+    pub retained: Option<CapsuleReceiptRetention>,
     /// Identifiant du reçu source.
     pub receipt_id: ReceiptId,
     /// Acteur source.
@@ -500,7 +549,7 @@ struct SourceActionRow {
     created_at_ms: i64,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct SourceDispatchRow {
     dispatch_id: String,
     action_id: String,
@@ -512,6 +561,21 @@ struct SourceDispatchRow {
     ended_at_ms: Option<i64>,
     transport_state: String,
     receipt_hash: Option<String>,
+}
+
+fn source_dispatch_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SourceDispatchRow> {
+    Ok(SourceDispatchRow {
+        dispatch_id: row.get(0)?,
+        action_id: row.get(1)?,
+        ordinal: row.get(2)?,
+        adapter_id: row.get(3)?,
+        request_hash: row.get(4)?,
+        provider_request_id: row.get(5)?,
+        started_at_ms: row.get(6)?,
+        ended_at_ms: row.get(7)?,
+        transport_state: row.get(8)?,
+        receipt_hash: row.get(9)?,
+    })
 }
 
 #[derive(Debug, Clone)]
@@ -847,10 +911,123 @@ fn mark_source_restore_handed_over(src_db: &Path, restore_id: RestoreId) {
     }
 }
 
+struct SourceReceiptRow {
+    receipt_id: String,
+    actor_id: String,
+    command_id: String,
+    aggregate_id: String,
+    command_digest: String,
+    state: String,
+    authority_generation: String,
+    request_id: String,
+    command_type: String,
+    response_state: String,
+    response_json: Option<String>,
+    retained_until_ms: i64,
+    first_event_seq: Option<i64>,
+    last_event_seq: Option<i64>,
+    committed_at_ms: i64,
+}
+
+fn source_receipt_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SourceReceiptRow> {
+    Ok(SourceReceiptRow {
+        receipt_id: row.get(0)?,
+        actor_id: row.get(1)?,
+        command_id: row.get(2)?,
+        aggregate_id: row.get(3)?,
+        command_digest: row.get(4)?,
+        state: row.get(5)?,
+        authority_generation: row.get(6)?,
+        request_id: row.get(7)?,
+        command_type: row.get(8)?,
+        response_state: row.get(9)?,
+        response_json: row.get(10)?,
+        retained_until_ms: row.get(11)?,
+        first_event_seq: row.get(12)?,
+        last_event_seq: row.get(13)?,
+        committed_at_ms: row.get(14)?,
+    })
+}
+
+fn receipt_sequence(raw: Option<i64>) -> Result<Option<Sequence>, StoreError> {
+    raw.map(|sequence| {
+        u64::try_from(sequence).map(Sequence::new).map_err(|_| {
+            StoreError::RestoreIncomplete("invalid historical receipt sequence".to_owned())
+        })
+    })
+    .transpose()
+}
+
+fn import_capsule_receipts(
+    tx: &rusqlite::Transaction<'_>,
+    receipts: &[CapsuleReceiptDelta],
+) -> Result<(), StoreError> {
+    for receipt in receipts {
+        let Some(retained) = &receipt.retained else {
+            return Err(StoreError::RestoreIncomplete(
+                "historical receipt content is unavailable".to_owned(),
+            ));
+        };
+        let first_event_seq = retained
+            .first_event_seq
+            .map(|sequence| i64::try_from(sequence.as_u64()))
+            .transpose()
+            .map_err(|_| {
+                StoreError::RestoreIncomplete(
+                    "historical receipt sequence exceeds SQLite range".to_owned(),
+                )
+            })?;
+        let last_event_seq = retained
+            .last_event_seq
+            .map(|sequence| i64::try_from(sequence.as_u64()))
+            .transpose()
+            .map_err(|_| {
+                StoreError::RestoreIncomplete(
+                    "historical receipt sequence exceeds SQLite range".to_owned(),
+                )
+            })?;
+        let imported = tx.execute(
+            "INSERT INTO command_receipts
+             (actor_id, command_id, authority_generation, receipt_id, request_id, command_type,
+              command_digest, aggregate_id, state, response_state, response_json, response_retained_until_ms,
+              first_event_seq, last_event_seq, committed_at_ms)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
+             ON CONFLICT(actor_id, command_id) DO UPDATE SET
+                response_state = CASE WHEN command_receipts.response_state = 'tombstone' OR excluded.response_state = 'tombstone'
+                    THEN 'tombstone' ELSE 'full' END,
+                response_json = CASE WHEN command_receipts.response_state = 'tombstone' OR excluded.response_state = 'tombstone'
+                    THEN NULL ELSE command_receipts.response_json END
+             WHERE command_receipts.authority_generation = excluded.authority_generation
+               AND command_receipts.receipt_id = excluded.receipt_id AND command_receipts.command_digest = excluded.command_digest
+               AND command_receipts.request_id = excluded.request_id AND command_receipts.command_type = excluded.command_type
+               AND command_receipts.aggregate_id = excluded.aggregate_id AND command_receipts.state = excluded.state
+               AND command_receipts.response_retained_until_ms = excluded.response_retained_until_ms
+               AND command_receipts.committed_at_ms = excluded.committed_at_ms
+               AND command_receipts.first_event_seq IS excluded.first_event_seq AND command_receipts.last_event_seq IS excluded.last_event_seq
+               AND (command_receipts.response_state = 'tombstone' OR excluded.response_state = 'tombstone'
+                    OR command_receipts.response_json = excluded.response_json)",
+            rusqlite::params![
+                receipt.actor_id, receipt.command_id.to_string(), retained.authority_generation.to_string(),
+                receipt.receipt_id.to_string(), retained.request_id, retained.command_type,
+                receipt.command_digest.as_prefixed_str(), retained.aggregate_id, receipt.state,
+                retained.response_state.as_str(), retained.response_json, retained.response_retained_until_ms.as_i64(),
+                first_event_seq, last_event_seq,
+                retained.committed_at_ms.as_i64(),
+            ],
+        ).map_err(StoreError::from_rusqlite)?;
+        if imported != 1 {
+            return Err(StoreError::RestoreIncomplete(
+                "historical receipt identity or guarantee differs from snapshot".to_owned(),
+            ));
+        }
+    }
+    Ok(())
+}
+
 struct SnapshotBaseline {
     outbox_scopes: BTreeSet<String>,
     actions: HashMap<String, i64>,
-    dispatches: HashSet<String>,
+    dispatches: HashMap<String, SourceDispatchRow>,
     receipts: HashSet<(String, String)>,
     full_receipts: HashSet<(String, String)>,
     inbox: HashSet<(String, String)>,
@@ -898,15 +1075,19 @@ fn collect_snapshot_outbox_scopes(snapshot_db: &Path) -> Result<SnapshotBaseline
         snap_actions.insert(id, revision);
     }
 
-    let mut snap_dispatches = HashSet::new();
+    let mut snap_dispatches = HashMap::new();
     let mut s_disp = conn
-        .prepare("SELECT dispatch_id FROM action_dispatches")
+        .prepare(
+            "SELECT dispatch_id, action_id, ordinal, adapter_id, request_hash, provider_request_id,
+        started_at_ms, ended_at_ms, transport_state, receipt_hash FROM action_dispatches",
+        )
         .map_err(StoreError::from_rusqlite)?;
     let disp_rows = s_disp
-        .query_map([], |r| r.get::<_, String>(0))
+        .query_map([], source_dispatch_row)
         .map_err(StoreError::from_rusqlite)?;
-    for r in disp_rows {
-        snap_dispatches.insert(r.map_err(StoreError::from_rusqlite)?);
+    for row in disp_rows {
+        let dispatch = row.map_err(StoreError::from_rusqlite)?;
+        snap_dispatches.insert(dispatch.dispatch_id.clone(), dispatch);
     }
 
     let mut snap_rcpts = HashSet::new();
@@ -1125,6 +1306,49 @@ fn collect_source_delta(
     let src_schema_ver: i64 = src_conn
         .pragma_query_value(None, "user_version", |r| r.get(0))
         .unwrap_or(2);
+    // Dispatches postérieurs au snapshot (`action_dispatches`)
+    {
+        let mut stmt = src_conn
+            .prepare(
+                "SELECT dispatch_id, action_id, ordinal, adapter_id, request_hash,
+                        provider_request_id, started_at_ms, ended_at_ms, transport_state, receipt_hash
+                 FROM action_dispatches ORDER BY started_at_ms ASC, ordinal ASC",
+            )
+            .map_err(StoreError::from_rusqlite)?;
+        let rows = stmt
+            .query_map([], source_dispatch_row)
+            .map_err(StoreError::from_rusqlite)?;
+        for item in rows {
+            let d = item.map_err(StoreError::from_rusqlite)?;
+            if baseline.dispatches.get(&d.dispatch_id) == Some(&d) {
+                continue;
+            }
+            if let (Ok(aid), Ok(req_h)) = (
+                d.action_id.parse::<ActionId>(),
+                d.request_hash.parse::<Sha256Digest>(),
+            ) {
+                let rcpt_h = d
+                    .receipt_hash
+                    .as_deref()
+                    .map(str::parse::<Sha256Digest>)
+                    .transpose()?;
+                delta.capsule_dispatches.push(CapsuleDispatchDelta {
+                    dispatch_id: d.dispatch_id.clone(),
+                    action_id: aid,
+                    ordinal: d.ordinal,
+                    adapter_id: d.adapter_id.clone(),
+                    request_hash: req_h,
+                    provider_request_id: d.provider_request_id.clone(),
+                    started_at_ms: TimestampMs::new(d.started_at_ms),
+                    ended_at_ms: d.ended_at_ms.map(TimestampMs::new),
+                    transport_state: d.transport_state.clone(),
+                    receipt_hash: rcpt_h,
+                });
+            }
+            delta.dispatches.push(d);
+        }
+    }
+
     {
         let actions_sql = if src_schema_ver >= 3 {
             "SELECT action_id, origin_kind, control_principal_id, project_id, scope_key,
@@ -1179,13 +1403,29 @@ fn collect_source_delta(
             })
             .map_err(StoreError::from_rusqlite)?;
         for r in rows {
-            let act = r.map_err(StoreError::from_rusqlite)?;
+            let mut act = r.map_err(StoreError::from_rusqlite)?;
+            let has_post_snapshot_dispatch = delta
+                .dispatches
+                .iter()
+                .any(|dispatch| dispatch.action_id == act.action_id);
             if baseline
                 .actions
                 .get(&act.action_id)
                 .is_some_and(|revision| *revision >= act.revision)
+                && !has_post_snapshot_dispatch
             {
                 continue;
+            }
+            let source_state = act.state.clone();
+            let source_revision = act.revision;
+            if has_post_snapshot_dispatch
+                && matches!(
+                    act.state.as_str(),
+                    "prepared" | "authorizing" | "approval_required" | "authorized" | "denied"
+                )
+            {
+                "outcome_unknown".clone_into(&mut act.state);
+                act.revision = act.revision.saturating_add(1);
             }
             let matching_res = delta
                 .budget_reservations
@@ -1221,11 +1461,12 @@ fn collect_source_delta(
 
             if let Ok(parsed_action_id) = act.action_id.parse::<ActionId>() {
                 delta.capsule_actions.push(CapsuleActionDelta {
+                    source_state: Some(source_state),
                     run_id: act.run_id.clone(),
                     invocation_id: act.invocation_id.clone(),
                     project_id: act.project_id.clone(),
                     payload_hash: Some(act.payload_hash.parse()?),
-                    source_revision: u64::try_from(act.revision).unwrap_or(0),
+                    source_revision: u64::try_from(source_revision).unwrap_or(0),
                     action_id: parsed_action_id,
                     scope_id,
                     state: act.state.clone(),
@@ -1243,62 +1484,6 @@ fn collect_source_delta(
             }
 
             delta.actions.push(act);
-        }
-    }
-
-    // Dispatches postérieurs au snapshot (`action_dispatches`)
-    {
-        let mut stmt = src_conn
-            .prepare(
-                "SELECT dispatch_id, action_id, ordinal, adapter_id, request_hash,
-                        provider_request_id, started_at_ms, ended_at_ms, transport_state, receipt_hash
-                 FROM action_dispatches ORDER BY started_at_ms ASC, ordinal ASC",
-            )
-            .map_err(StoreError::from_rusqlite)?;
-        let rows = stmt
-            .query_map([], |r| {
-                Ok(SourceDispatchRow {
-                    dispatch_id: r.get(0)?,
-                    action_id: r.get(1)?,
-                    ordinal: r.get(2)?,
-                    adapter_id: r.get(3)?,
-                    request_hash: r.get(4)?,
-                    provider_request_id: r.get(5)?,
-                    started_at_ms: r.get(6)?,
-                    ended_at_ms: r.get(7)?,
-                    transport_state: r.get(8)?,
-                    receipt_hash: r.get(9)?,
-                })
-            })
-            .map_err(StoreError::from_rusqlite)?;
-        for item in rows {
-            let d = item.map_err(StoreError::from_rusqlite)?;
-            if baseline.dispatches.contains(&d.dispatch_id) {
-                continue;
-            }
-            if let (Ok(aid), Ok(req_h)) = (
-                d.action_id.parse::<ActionId>(),
-                d.request_hash.parse::<Sha256Digest>(),
-            ) {
-                let rcpt_h = d
-                    .receipt_hash
-                    .as_deref()
-                    .map(str::parse::<Sha256Digest>)
-                    .transpose()?;
-                delta.capsule_dispatches.push(CapsuleDispatchDelta {
-                    dispatch_id: d.dispatch_id.clone(),
-                    action_id: aid,
-                    ordinal: d.ordinal,
-                    adapter_id: d.adapter_id.clone(),
-                    request_hash: req_h,
-                    provider_request_id: d.provider_request_id.clone(),
-                    started_at_ms: TimestampMs::new(d.started_at_ms),
-                    ended_at_ms: d.ended_at_ms.map(TimestampMs::new),
-                    transport_state: d.transport_state.clone(),
-                    receipt_hash: rcpt_h,
-                });
-            }
-            delta.dispatches.push(d);
         }
     }
 
@@ -1478,49 +1663,89 @@ fn collect_source_delta(
         }
     }
 
-    // Receipts postérieurs au snapshot
+    // Receipts postérieurs au snapshot : contenu, cutoff et lignée historiques exacts.
     {
-        let mut stmt = src_conn
+        let mut statement = src_conn
             .prepare(
-                "SELECT receipt_id, actor_id, command_id, aggregate_id, command_digest, state
-                 FROM command_receipts",
+                "SELECT receipt_id, actor_id, command_id, aggregate_id, command_digest, state,
+                authority_generation, request_id, command_type, response_state, response_json,
+                response_retained_until_ms, first_event_seq, last_event_seq, committed_at_ms
+             FROM command_receipts",
             )
             .map_err(StoreError::from_rusqlite)?;
-        let rows = stmt
-            .query_map([], |r| {
-                Ok((
-                    r.get::<_, String>(0)?,
-                    r.get::<_, String>(1)?,
-                    r.get::<_, String>(2)?,
-                    r.get::<_, String>(3)?,
-                    r.get::<_, String>(4)?,
-                    r.get::<_, String>(5)?,
-                ))
-            })
+        let rows = statement
+            .query_map([], source_receipt_row)
             .map_err(StoreError::from_rusqlite)?;
-        for r in rows {
-            let (rcpt_id_s, actor_id, cmd_id_s, agg_id_s, digest_s, state) =
-                r.map_err(StoreError::from_rusqlite)?;
-            if baseline
-                .receipts
-                .contains(&(actor_id.clone(), cmd_id_s.clone()))
+        for row in rows {
+            let source = row.map_err(StoreError::from_rusqlite)?;
+            let key = (source.actor_id.clone(), source.command_id.clone());
+            if baseline.receipts.contains(&key)
+                && !(baseline.full_receipts.contains(&key) && source.response_state == "tombstone")
             {
                 continue;
             }
-            if let (Ok(receipt_id), Ok(command_id), Ok(command_digest)) = (
-                rcpt_id_s.parse::<ReceiptId>(),
-                cmd_id_s.parse::<CommandId>(),
-                digest_s.parse::<Sha256Digest>(),
-            ) {
-                delta.capsule_receipts.push(CapsuleReceiptDelta {
-                    receipt_id,
-                    actor_id,
-                    command_id,
-                    scope_id: agg_id_s,
-                    command_digest,
-                    state,
-                });
+            let response_state = match source.response_state.as_str() {
+                "full" => CapsuleReceiptResponseState::Full,
+                "tombstone" => CapsuleReceiptResponseState::Tombstone,
+                _ => {
+                    return Err(StoreError::RestoreIncomplete(
+                        "invalid historical receipt retention state".to_owned(),
+                    ));
+                }
+            };
+            let receipt_id = source.receipt_id.parse::<ReceiptId>()?;
+            let command_id = source.command_id.parse::<CommandId>()?;
+            if response_state == CapsuleReceiptResponseState::Full {
+                let response = source.response_json.as_deref().ok_or_else(|| {
+                    StoreError::RestoreIncomplete("historical full response is absent".to_owned())
+                })?;
+                let original: unleash_protocol::CommandReceipt = serde_json::from_str(response)?;
+                if original.receipt_id != receipt_id
+                    || original.command_id != command_id
+                    || original.aggregate_id.to_string() != source.aggregate_id
+                    || serde_json::to_value(original.state)?
+                        != serde_json::Value::String(source.state.clone())
+                {
+                    return Err(StoreError::RestoreIncomplete(
+                        "historical full response provenance mismatch".to_owned(),
+                    ));
+                }
+            } else if source.response_json.is_some() {
+                return Err(StoreError::RestoreIncomplete(
+                    "historical tombstone contains a full response".to_owned(),
+                ));
             }
+            let scope_id: Option<String> = src_conn
+                .query_row(
+                    "SELECT COALESCE(project_id, aggregate_id) FROM events
+                 WHERE command_actor_id = ?1 AND command_id = ?2 ORDER BY sequence LIMIT 1",
+                    rusqlite::params![source.actor_id, source.command_id],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(StoreError::from_rusqlite)?;
+            let scope_id = scope_id.unwrap_or_else(|| source.aggregate_id.clone());
+            delta.affected_scopes.insert(scope_id.clone());
+            delta.capsule_receipts.push(CapsuleReceiptDelta {
+                receipt_id,
+                actor_id: source.actor_id,
+                command_id,
+                scope_id,
+                command_digest: source.command_digest.parse()?,
+                state: source.state,
+                retained: Some(CapsuleReceiptRetention {
+                    authority_generation: source.authority_generation.parse()?,
+                    request_id: source.request_id,
+                    command_type: source.command_type,
+                    aggregate_id: source.aggregate_id,
+                    response_state,
+                    response_json: source.response_json,
+                    response_retained_until_ms: TimestampMs::new(source.retained_until_ms),
+                    first_event_seq: receipt_sequence(source.first_event_seq)?,
+                    last_event_seq: receipt_sequence(source.last_event_seq)?,
+                    committed_at_ms: TimestampMs::new(source.committed_at_ms),
+                }),
+            });
         }
     }
 
@@ -2059,46 +2284,9 @@ pub(crate) fn execute_restore_backup(
     )
     .map_err(StoreError::from_rusqlite)?;
 
-    // Conserver un reçu command_receipts pour RestoreBackup
-    let existing_target_rcpt: Option<String> = tx
-        .query_row(
-            "SELECT receipt_id FROM command_receipts WHERE actor_id = ?1 AND command_id = ?2",
-            rusqlite::params![req.actor_id, req.command_id.to_string()],
-            |r| r.get(0),
-        )
-        .optional()
-        .map_err(StoreError::from_rusqlite)?;
-    let target_rcpt_str = if let Some(receipt) = existing_target_rcpt {
-        receipt
-    } else if use_manifest_fallback {
-        // Aucun curseur source n'est inventé quand seule la maintenance est lisible.
-        // restore_imports et restore_manifest_records portent ce reçu hors base.
-        receipt_id.to_string()
-    } else {
-        let source_path = req.source_db_path.as_ref().ok_or_else(|| {
-            StoreError::RestoreIncomplete("source receipt unavailable".to_owned())
-        })?;
-        let source = Connection::open_with_flags(source_path, OpenFlags::SQLITE_OPEN_READ_ONLY)
-            .map_err(StoreError::from_rusqlite)?;
-        let (response, retained_until, committed_at): (String, i64, i64) = source.query_row(
-            "SELECT response_json, response_retained_until_ms, committed_at_ms FROM command_receipts
-             WHERE actor_id = ?1 AND command_id = ?2 AND authority_generation = ?3",
-            rusqlite::params![req.actor_id, req.command_id.to_string(), src_auth_s],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-        ).map_err(StoreError::from_rusqlite)?;
-        let original: unleash_protocol::CommandReceipt = serde_json::from_str(&response)?;
-        tx.execute(
-            "INSERT INTO command_receipts
-             (actor_id, command_id, authority_generation, receipt_id, request_id, command_type,
-              command_digest, aggregate_id, state, response_state, response_json,
-              response_retained_until_ms, first_event_seq, last_event_seq, committed_at_ms)
-             VALUES (?1, ?2, ?3, ?4, ?5, 'RestoreBackup', ?6, ?7, 'accepted', 'full', ?8, ?9, NULL, NULL, ?10)",
-            rusqlite::params![req.actor_id, req.command_id.to_string(), src_auth_s, original.receipt_id.to_string(),
-                restore_id.to_string(), req.command_digest.as_prefixed_str(), restore_id.to_string(), response,
-                retained_until, committed_at],
-        ).map_err(StoreError::from_rusqlite)?;
-        original.receipt_id.to_string()
-    };
+    // Tous les reçus conservés restent historiques, y compris RestoreBackup lui-même.
+    import_capsule_receipts(&tx, &capsule.receipts)?;
+    let target_rcpt_str = receipt_id.to_string();
 
     // Appliquer non-régression budgétaire et deltas d'actions source
     for (p_id, p_kind, a_id, st, cr_ms) in &src_delta.principals {
@@ -2269,11 +2457,16 @@ pub(crate) fn execute_restore_backup(
             )
             .map_err(StoreError::from_rusqlite)?;
         if act_exists > 0 {
-            tx.execute(
-                "INSERT OR IGNORE INTO action_dispatches
+            let imported = tx.execute(
+                "INSERT INTO action_dispatches
                  (dispatch_id, action_id, ordinal, adapter_id, request_hash, provider_request_id,
                   started_at_ms, ended_at_ms, transport_state, receipt_hash)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+                 ON CONFLICT(dispatch_id) DO UPDATE SET provider_request_id = excluded.provider_request_id,
+                     ended_at_ms = excluded.ended_at_ms, transport_state = excluded.transport_state, receipt_hash = excluded.receipt_hash
+                 WHERE action_dispatches.action_id = excluded.action_id AND action_dispatches.ordinal = excluded.ordinal
+                     AND action_dispatches.adapter_id = excluded.adapter_id AND action_dispatches.request_hash = excluded.request_hash
+                     AND action_dispatches.started_at_ms = excluded.started_at_ms",
                 rusqlite::params![
                     d.dispatch_id,
                     d.action_id,
@@ -2288,6 +2481,11 @@ pub(crate) fn execute_restore_backup(
                 ],
             )
             .map_err(StoreError::from_rusqlite)?;
+            if imported != 1 {
+                return Err(StoreError::RestoreIncomplete(
+                    "dispatch identity changed after snapshot".to_owned(),
+                ));
+            }
         }
     }
 
