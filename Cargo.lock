@@ -5509,6 +5509,29 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ca718471876992059f251e33aafc334346ada08042b7661dd1fe313a9bced557"
 
 [[package]]
+name = "unleash-action-broker"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "hex",
+ "proptest",
+ "secrecy",
+ "serde",
+ "serde_jcs",
+ "serde_json",
+ "sha2 0.10.9",
+ "thiserror 2.0.21",
+ "tokio",
+ "tracing",
+ "unleash-domain",
+ "unleash-platform",
+ "unleash-protocol",
+ "unleash-testkit",
+ "uuid",
+ "zeroize",
+]
+
+[[package]]
 name = "unleash-browser"
 version = "0.1.0"
 dependencies = [
@@ -5724,6 +5747,8 @@ dependencies = [
  "serde_json",
  "tempfile",
  "thiserror 2.0.21",
+ "tokio",
+ "unleash-action-broker",
  "unleash-domain",
  "uuid",
  "zeroize",

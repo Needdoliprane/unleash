@@ -480,6 +480,15 @@ impl ManualClock {
             .wakeups
             .len()
     }
+
+    pub(crate) fn cancel_wakeup(&self, wakeup: &ClockWakeup) {
+        self.inner
+            .state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .wakeups
+            .retain(|entry| !Arc::ptr_eq(&entry.signal, &wakeup.inner));
+    }
 }
 
 struct WaiterDecrementGuard<'a> {
