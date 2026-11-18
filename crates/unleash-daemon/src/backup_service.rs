@@ -17,13 +17,53 @@ use unleash_domain::{
 use unleash_platform::UnavailableOsKeyring;
 use unleash_protocol::canonical_sha256;
 use unleash_store::{
-    BackupRequestRecord, ExecuteReservedBackupRequest, GuardPolicyMode, PolicyIsolationMode,
-    REQUEST_BACKUP_VERB,
+    BackupBlockReason, BackupRequestRecord, ExecuteReservedBackupRequest, GuardPolicyMode,
+    PolicyIsolationMode, REQUEST_BACKUP_VERB,
 };
 
 use crate::broker_activity::BrokerActivityGuard;
 use crate::broker_journal::SqliteBrokerJournal;
-use crate::ipc::DaemonRuntimeState;
+use crate::ipc::{DaemonRuntimeState, publish_committed_events_ordered};
+
+async fn block_before_dispatch(
+    state: &Arc<DaemonRuntimeState>,
+    record: &BackupRequestRecord,
+    activity: &Arc<BrokerActivityGuard>,
+    reason: BackupBlockReason,
+) {
+    let store = Arc::clone(&state.store);
+    let backup_id = record.backup_id;
+    let generation = record.authority_generation;
+    let task_activity = Arc::clone(activity);
+    let outcome = tokio::task::spawn_blocking(move || {
+        let _activity = task_activity;
+        store.block_claimed_backup(backup_id, generation, reason)
+    })
+    .await;
+    let cursor = if let Ok(Ok(record)) = outcome {
+        Some(record.last_event_cursor)
+    } else {
+        let store = Arc::clone(&state.store);
+        let task_activity = Arc::clone(activity);
+        tokio::task::spawn_blocking(move || {
+            let _activity = task_activity;
+            store
+                .inspect_backup_request_snapshot(backup_id)
+                .ok()?
+                .value
+                .map(|r| r.last_event_cursor)
+        })
+        .await
+        .ok()
+        .flatten()
+    };
+    if let Some(cursor) = cursor
+        && cursor.stream_id == state.stream_id
+    {
+        publish_committed_events_ordered(state, cursor.stream_id, cursor.sequence.as_u64(), 1, &[])
+            .await;
+    }
+}
 
 /// Admit a detached orchestration only after the command receipt exists.
 pub(crate) fn start(state: &Arc<DaemonRuntimeState>, backup_id: BackupId) {
@@ -136,16 +176,35 @@ async fn run(
     .map_err(|_| ())?
     .map_err(|_| ())?
     .value;
-    if policy.effective_isolation_mode != PolicyIsolationMode::Standard
-        || policy
-            .guard_config
-            .as_ref()
-            .is_some_and(|guard| guard.guard_mode != GuardPolicyMode::BrokerOnly)
-        || policy
-            .global_policy
-            .as_ref()
-            .map_or(unleash_domain::Revision::INITIAL, |policy| policy.revision)
-            != record.policy_revision
+    if policy.effective_isolation_mode != PolicyIsolationMode::Standard {
+        block_before_dispatch(
+            &state,
+            &record,
+            &activity,
+            BackupBlockReason::IsolationProfileUnavailable,
+        )
+        .await;
+        return Err(());
+    }
+    if policy
+        .guard_config
+        .as_ref()
+        .is_some_and(|guard| guard.guard_mode != GuardPolicyMode::BrokerOnly)
+    {
+        block_before_dispatch(
+            &state,
+            &record,
+            &activity,
+            BackupBlockReason::GuardProfileUnavailable,
+        )
+        .await;
+        return Err(());
+    }
+    if policy
+        .global_policy
+        .as_ref()
+        .map_or(unleash_domain::Revision::INITIAL, |policy| policy.revision)
+        != record.policy_revision
     {
         return Err(());
     }
@@ -219,12 +278,21 @@ async fn run(
         },
         Arc::new(SqliteBrokerJournal::new(&state)),
     );
-    let AuthorizationOutcome::Authorized(decision) = broker
-        .authorize_action(intent, &authority)
-        .await
-        .map_err(|_| ())?
-    else {
-        return Err(());
+    let decision = match broker.authorize_action(intent, &authority).await {
+        Ok(AuthorizationOutcome::Authorized(decision)) => decision,
+        Ok(AuthorizationOutcome::ApprovalRequired { .. }) => return Err(()),
+        Err(_) => {
+            // Le writer refuse ce blocage si aucun refus terminal n'est engagé,
+            // notamment si l'issue de l'append est seulement incertaine.
+            block_before_dispatch(
+                &state,
+                &record,
+                &activity,
+                BackupBlockReason::AuthorizationDenied,
+            )
+            .await;
+            return Err(());
+        }
     };
     let executor = BackupExecutor {
         store: Arc::clone(&state.store),
