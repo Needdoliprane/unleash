@@ -468,6 +468,7 @@ async fn dispatch_query(
         "GetHealth" => query_health(state, query.request_id).await,
         "GetStateSnapshot" => query_state_snapshot(state, session, query).await,
         "GetCommandReceipt" => query_command_receipt(state, session, query).await,
+        "GetBackupManifest" => query_backup_manifest(state, session, query).await,
         "ListProjects" | "GetProject" | "ReadSettings" | "ReadPolicySummary"
         | "ReadGuardHealth" | "InspectRecovery" => query_m1_projection(state, session, query).await,
         other => Err(IpcError::new(
@@ -477,6 +478,54 @@ async fn dispatch_query(
             RetryClass::Never,
         )),
     }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BackupManifestQuery {
+    backup_id: unleash_domain::BackupId,
+}
+
+async fn query_backup_manifest(
+    state: &Arc<DaemonRuntimeState>,
+    session: &AuthenticatedSession,
+    query: QueryEnvelope,
+) -> Result<QueryResponse, IpcError> {
+    if session.allowed_projects.is_some() {
+        return Err(IpcError::from_reason(
+            ReasonCode::AccessDenied,
+            "Projection globale hors du périmètre autorisé",
+        ));
+    }
+    let input: BackupManifestQuery =
+        serde_json::from_value(Value::Object(query.payload)).map_err(|_| invalid_projection())?;
+    if query.project_id.is_some() || input.backup_id.as_uuid().is_nil() {
+        return Err(invalid_projection());
+    }
+    let store = Arc::clone(&state.store);
+    let snapshot =
+        tokio::task::spawn_blocking(move || store.inspect_backup_request_snapshot(input.backup_id))
+            .await
+            .map_err(|_| internal_ipc_error("Lecture de sauvegarde interrompue", None))?
+            .map_err(|error| store_error_to_ipc_error(&error, None))?;
+    let record = snapshot.value.ok_or_else(|| {
+        IpcError::new(
+            ErrorCode::NotFoundOrHidden,
+            None,
+            "Sauvegarde introuvable ou masquée",
+            RetryClass::Never,
+        )
+    })?;
+    Ok(QueryResponse {
+        request_id: query.request_id,
+        watermark: Some(snapshot.cursor),
+        result: json!({
+            "backup_id": record.backup_id,
+            "state": record.state,
+            "manifest": record.manifest,
+            "manifest_digest": record.manifest_digest,
+        }),
+    })
 }
 
 #[derive(Deserialize)]

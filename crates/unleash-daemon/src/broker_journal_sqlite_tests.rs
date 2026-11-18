@@ -74,7 +74,9 @@ async fn daemon_publishes_the_committed_broker_cursor_to_live_ipc() {
     use std::os::unix::fs::PermissionsExt;
     use unleash_client::{ClientConfig, UnleashClient};
     use unleash_domain::{CommandId, Sequence};
-    use unleash_protocol::{ClientKind, SubscribeEventsFrame, SubscribeEventsRequest};
+    use unleash_protocol::{
+        ClientKind, QueryEnvelope, SubscribeEventsFrame, SubscribeEventsRequest,
+    };
 
     let rdv = local_test_dir("m1-broker-events-rdv").unwrap();
     std::fs::set_permissions(rdv.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
@@ -120,13 +122,67 @@ async fn daemon_publishes_the_committed_broker_cursor_to_live_ipc() {
             events: Vec::new(), capacity_reservations: Vec::new(), budget_reservations: Vec::new(),
         }).unwrap().receipt().clone()
     }).await.unwrap();
-    let client = UnleashClient::connect(ClientConfig::new(
+    let mut client = UnleashClient::connect(ClientConfig::new(
         handle.socket_path().to_path_buf(),
         ClientKind::Cli,
         "broker-events-test",
     ))
     .await
     .unwrap();
+    let reserved_backup = unleash_domain::BackupId::from_u128(800);
+    let store = Arc::clone(&runtime.store);
+    tokio::task::spawn_blocking(move || {
+        let actor = ActorId::new("p-sys").unwrap();
+        store
+            .commit_command(CommitCommandRequest {
+                actor_id: actor,
+                envelope: CommandEnvelope {
+                    protocol_version: ProtocolVersion,
+                    request_id: RequestId::from_u128(801),
+                    command_id: CommandId::from_u128(802),
+                    authority_generation: generation,
+                    actor_ref: None,
+                    project_id: None,
+                    aggregate_id: reserved_backup.as_uuid(),
+                    expected_revision: Revision::INITIAL,
+                    command_type: "RequestBackup".into(),
+                    payload: serde_json::Map::new(),
+                },
+                target_aggregate: AggregateKind::BackupJob,
+                operation_id: None,
+                receipt_state: ReceiptState::Accepted,
+                result_ref: None,
+                retention_days_override: None,
+                fence_assertion: None,
+                mutation: CommandMutation::RequestBackup {
+                    backup_id: reserved_backup,
+                },
+                events: Vec::new(),
+                capacity_reservations: Vec::new(),
+                budget_reservations: Vec::new(),
+            })
+            .unwrap();
+    })
+    .await
+    .unwrap();
+    let response = client
+        .query(&QueryEnvelope {
+            protocol_version: ProtocolVersion,
+            request_id: RequestId::from_u128(803),
+            query_type: "GetBackupManifest".into(),
+            project_id: None,
+            payload: serde_json::json!({"backup_id":reserved_backup})
+                .as_object()
+                .unwrap()
+                .clone(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(response.result["backup_id"], reserved_backup.to_string());
+    assert_eq!(response.result["state"], "reserved");
+    assert!(response.result["manifest"].is_null());
+    assert!(response.result["manifest_digest"].is_null());
+    assert!(response.watermark.is_some());
     let mut stream = client
         .subscribe_events(&SubscribeEventsRequest {
             stream_id: cause.event_cursor.stream_id,
