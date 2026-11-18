@@ -81,7 +81,10 @@ pub use isolation::{
     HostIsolationProbe, IsolationBackendStatus, IsolationCapability, IsolationMode,
     IsolationProbePort, IsolationRequirements, verify_isolation_requirements,
 };
-pub use journal::{BrokerJournalEntry, BrokerJournalError, BrokerJournalPort};
+pub use journal::{
+    AuthorizationCause, AuthorizationEvaluation, BrokerJournalEntry, BrokerJournalError,
+    BrokerJournalPort, ObservationCause,
+};
 pub use retention::{
     ManagedBackupRef, PurgeLimitDisclosure, PurgeReport, PurgeTombstone, REDACTED_MARKER,
     RedactionOutcome, RetentionClass, RetentionItem, RetentionItemState, RetentionPolicy,

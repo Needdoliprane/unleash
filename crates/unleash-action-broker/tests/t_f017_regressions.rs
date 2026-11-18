@@ -30,6 +30,756 @@ struct Fixture {
 const JOURNAL_CANARY: &str = "test-sensitive-guard-canary";
 const ESCAPED_CANARY: &str = "guard-\"quoted\\backslash\nsecret";
 
+#[derive(Default)]
+struct SensitiveReferenceExecutor {
+    calls: std::sync::atomic::AtomicU64,
+}
+
+impl ActionExecutorPort for SensitiveReferenceExecutor {
+    fn execute_action<'a>(
+        &'a self,
+        dispatch_id: DispatchId,
+        _intent: &'a ActionIntent,
+        _decision: &'a AuthorizationDecision,
+        _secrets: &'a [ResolvedSecret],
+    ) -> BoxFuture<'a, Result<ActionExecutionResult, ActionExecutionFailure>> {
+        self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Box::pin(async move {
+            Ok(ActionExecutionResult {
+                dispatch_id,
+                provider_request_id: Some(JOURNAL_CANARY.into()),
+                output_digest: unleash_domain::Sha256Digest::from_bytes(b"local test output"),
+                observed_at_ms: TimestampMs::new(1_767_225_600_000),
+            })
+        })
+    }
+}
+
+#[tokio::test]
+async fn t_f017_003_sensitive_remote_reference_is_omitted_without_changing_observed_success() {
+    let journal = Arc::new(StrictEvaluationJournal::default());
+    let f = Fixture::with_journal(Some(journal.clone()));
+    let intent = f.intent();
+    let id = intent.action_id;
+    let decision = f.authorize(intent).await;
+    let executor = SensitiveReferenceExecutor::default();
+    let receipt = f
+        .broker
+        .execute_authorized(
+            id,
+            &decision.decision_ref,
+            fence(),
+            &f.authority,
+            &executor,
+            &f.secrets,
+        )
+        .await
+        .unwrap();
+    assert_eq!(receipt.state, ActionState::ObservedSuccess);
+    assert_eq!(receipt.remote_audit_ref, None);
+    assert!(receipt.remote_audit_unavailable);
+    assert_eq!(executor.calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert!(!format!("{:?}", journal.committed.lock().unwrap()).contains(JOURNAL_CANARY));
+}
+
+#[derive(Default)]
+struct StrictEvaluationJournal {
+    committed: Mutex<Vec<BrokerJournalEntry>>,
+    attempts: Mutex<Vec<BrokerJournalEntry>>,
+    lose_authorization_ack: std::sync::atomic::AtomicBool,
+    hang_authorization_ack: std::sync::atomic::AtomicBool,
+    lose_observation_ack: std::sync::atomic::AtomicBool,
+    lose_approval_ack: std::sync::atomic::AtomicBool,
+    lose_authorizing_ack: std::sync::atomic::AtomicBool,
+    hang_authorizing_ack: std::sync::atomic::AtomicBool,
+    reject_authorization_before_commit: std::sync::atomic::AtomicBool,
+    authorization_gate: tokio::sync::Notify,
+}
+
+fn evaluation_of(entry: &BrokerJournalEntry) -> &AuthorizationEvaluation {
+    match entry {
+        BrokerJournalEntry::Authorizing { evaluation, .. }
+        | BrokerJournalEntry::Authorization { evaluation, .. }
+        | BrokerJournalEntry::Dispatch { evaluation, .. }
+        | BrokerJournalEntry::Observation { evaluation, .. } => evaluation,
+    }
+}
+
+fn same_journal_slot(a: &BrokerJournalEntry, b: &BrokerJournalEntry) -> bool {
+    if evaluation_of(a).evaluation_id != evaluation_of(b).evaluation_id {
+        return false;
+    }
+    match (a, b) {
+        (BrokerJournalEntry::Authorizing { .. }, BrokerJournalEntry::Authorizing { .. })
+        | (BrokerJournalEntry::Dispatch { .. }, BrokerJournalEntry::Dispatch { .. }) => true,
+        (
+            BrokerJournalEntry::Authorization { cause: a, .. },
+            BrokerJournalEntry::Authorization { cause: b, .. },
+        ) => a == b,
+        (
+            BrokerJournalEntry::Observation {
+                observation_revision: a,
+                ..
+            },
+            BrokerJournalEntry::Observation {
+                observation_revision: b,
+                ..
+            },
+        ) => a == b,
+        _ => false,
+    }
+}
+
+impl BrokerJournalPort for StrictEvaluationJournal {
+    fn append<'a>(
+        &'a self,
+        entry: &'a BrokerJournalEntry,
+    ) -> BoxFuture<'a, Result<(), BrokerJournalError>> {
+        self.attempts.lock().unwrap().push(entry.clone());
+        if matches!(
+            entry,
+            BrokerJournalEntry::Authorization {
+                cause: AuthorizationCause::Evaluation,
+                ..
+            }
+        ) && self
+            .reject_authorization_before_commit
+            .swap(false, std::sync::atomic::Ordering::SeqCst)
+        {
+            return Box::pin(async { Err(BrokerJournalError) });
+        }
+        let mut committed = self.committed.lock().unwrap();
+        if let Some(previous) = committed
+            .iter()
+            .find(|previous| same_journal_slot(previous, entry))
+        {
+            if previous != entry || matches!(entry, BrokerJournalEntry::Dispatch { .. }) {
+                return Box::pin(async { Err(BrokerJournalError) });
+            }
+        } else {
+            committed.push(entry.clone());
+        }
+        drop(committed);
+        let is_result = matches!(
+            entry,
+            BrokerJournalEntry::Authorization {
+                cause: AuthorizationCause::Evaluation,
+                ..
+            }
+        );
+        let lost = (is_result
+            && self
+                .lose_authorization_ack
+                .swap(false, std::sync::atomic::Ordering::SeqCst))
+            || (matches!(entry, BrokerJournalEntry::Authorizing { .. })
+                && self
+                    .lose_authorizing_ack
+                    .swap(false, std::sync::atomic::Ordering::SeqCst))
+            || (matches!(
+                entry,
+                BrokerJournalEntry::Authorization {
+                    cause: AuthorizationCause::HumanApproval { .. },
+                    ..
+                }
+            ) && self
+                .lose_approval_ack
+                .swap(false, std::sync::atomic::Ordering::SeqCst))
+            || (matches!(entry, BrokerJournalEntry::Observation { .. })
+                && self
+                    .lose_observation_ack
+                    .swap(false, std::sync::atomic::Ordering::SeqCst));
+        let hang = (is_result
+            && self
+                .hang_authorization_ack
+                .swap(false, std::sync::atomic::Ordering::SeqCst))
+            || (matches!(entry, BrokerJournalEntry::Authorizing { .. })
+                && self
+                    .hang_authorizing_ack
+                    .swap(false, std::sync::atomic::Ordering::SeqCst));
+        Box::pin(async move {
+            if hang {
+                self.authorization_gate.notified().await;
+            }
+            if lost {
+                Err(BrokerJournalError)
+            } else {
+                Ok(())
+            }
+        })
+    }
+}
+
+#[tokio::test]
+async fn t_f017_008_retry_has_a_new_evaluation_only_after_durable_unavailable_and_backoff() {
+    let journal = Arc::new(StrictEvaluationJournal::default());
+    let f = Fixture::with_journal(Some(journal.clone()));
+    let guard = Arc::new(DeterministicGuardDouble::allowing_unconditional(
+        f.clock.clone(),
+    ));
+    guard.push_outcome(ScriptedGuardOutcome::Unavailable {
+        reason: "offline".into(),
+    });
+    f.guard(guard.clone()).await.unwrap();
+    let intent = f.intent();
+    assert!(
+        f.broker
+            .authorize_action(intent.clone(), &f.authority)
+            .await
+            .is_err()
+    );
+    let attempts_before = journal.attempts.lock().unwrap().clone();
+    let ids_before = f.ids.generated_count();
+    assert!(
+        f.broker
+            .authorize_action(intent.clone(), &f.authority)
+            .await
+            .is_err()
+    );
+    assert_eq!(*journal.attempts.lock().unwrap(), attempts_before);
+    assert_eq!(f.ids.generated_count(), ids_before);
+    f.clock.advance(Duration::from_secs(1));
+    let decision = f.authorize(intent).await;
+    let committed = journal.committed.lock().unwrap();
+    let starts: Vec<_> = committed
+        .iter()
+        .filter(|entry| matches!(entry, BrokerJournalEntry::Authorizing { .. }))
+        .map(evaluation_of)
+        .collect();
+    assert_eq!(starts.len(), 2);
+    assert_ne!(
+        starts.first().unwrap().evaluation_id,
+        starts.get(1).unwrap().evaluation_id
+    );
+    assert_eq!(
+        starts.get(1).unwrap().previous_evaluation_id,
+        Some(starts.first().unwrap().evaluation_id)
+    );
+    assert_eq!(decision.evaluation_id, starts.get(1).unwrap().evaluation_id);
+    assert_eq!(guard.evaluate_call_count(), 2);
+    f.spy.assert_zero_dispatches();
+}
+
+#[tokio::test]
+async fn t_f017_007_authorizing_ack_loss_or_cancel_keeps_the_first_identity() {
+    for cancel in [false, true] {
+        let journal = Arc::new(StrictEvaluationJournal::default());
+        journal
+            .lose_authorizing_ack
+            .store(!cancel, std::sync::atomic::Ordering::SeqCst);
+        journal
+            .hang_authorizing_ack
+            .store(cancel, std::sync::atomic::Ordering::SeqCst);
+        let f = Fixture::with_journal(Some(journal.clone()));
+        let guard = Arc::new(DeterministicGuardDouble::allowing_unconditional(
+            f.clock.clone(),
+        ));
+        f.guard(guard.clone()).await.unwrap();
+        let intent = f.intent();
+        if cancel {
+            let future = f.broker.authorize_action(intent.clone(), &f.authority);
+            tokio::pin!(future);
+            tokio::select! { _ = &mut future => panic!("expected pending intent commit"), () = async { while journal.attempts.lock().unwrap().is_empty() { tokio::task::yield_now().await; } } => {} }
+        } else {
+            assert!(
+                f.broker
+                    .authorize_action(intent.clone(), &f.authority)
+                    .await
+                    .is_err()
+            );
+        }
+        assert_eq!(guard.evaluate_call_count(), 0);
+        let decision = f.authorize(intent).await;
+        assert_eq!(guard.evaluate_call_count(), 1);
+        let attempts = journal.attempts.lock().unwrap();
+        assert_eq!(attempts.first(), attempts.get(1));
+        assert_eq!(
+            evaluation_of(attempts.first().unwrap()).evaluation_id,
+            decision.evaluation_id
+        );
+    }
+}
+
+#[tokio::test]
+async fn t_f017_007_result_rejected_before_commit_keeps_the_known_result() {
+    let journal = Arc::new(StrictEvaluationJournal::default());
+    journal
+        .reject_authorization_before_commit
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let f = Fixture::with_journal(Some(journal.clone()));
+    let guard = Arc::new(DeterministicGuardDouble::allowing_unconditional(
+        f.clock.clone(),
+    ));
+    f.guard(guard.clone()).await.unwrap();
+    let intent = f.intent();
+    assert!(
+        f.broker
+            .authorize_action(intent.clone(), &f.authority)
+            .await
+            .is_err()
+    );
+    f.authorize(intent).await;
+    assert_eq!(guard.evaluate_call_count(), 1);
+    let attempts = journal.attempts.lock().unwrap();
+    assert_eq!(attempts.get(1), attempts.get(2));
+}
+
+#[tokio::test]
+async fn t_f017_008_unavailable_ack_loss_must_be_resolved_before_a_new_evaluation() {
+    let journal = Arc::new(StrictEvaluationJournal::default());
+    journal
+        .lose_authorization_ack
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let f = Fixture::with_journal(Some(journal.clone()));
+    let guard = Arc::new(DeterministicGuardDouble::allowing_unconditional(
+        f.clock.clone(),
+    ));
+    guard.push_outcome(ScriptedGuardOutcome::Unavailable {
+        reason: "offline".into(),
+    });
+    f.guard(guard.clone()).await.unwrap();
+    let intent = f.intent();
+    assert!(
+        f.broker
+            .authorize_action(intent.clone(), &f.authority)
+            .await
+            .is_err()
+    );
+    f.clock.advance(Duration::from_secs(20));
+    assert!(matches!(
+        f.broker
+            .authorize_action(intent.clone(), &f.authority)
+            .await,
+        Err(ActionBrokerError::GuardUnavailable { .. })
+    ));
+    assert_eq!(guard.evaluate_call_count(), 1);
+    let ids_before = f.ids.generated_count();
+    assert!(
+        f.broker
+            .authorize_action(intent.clone(), &f.authority)
+            .await
+            .is_err()
+    );
+    assert_eq!(f.ids.generated_count(), ids_before);
+    f.clock.advance(Duration::from_secs(1));
+    f.authorize(intent).await;
+    assert_eq!(guard.evaluate_call_count(), 2);
+    let attempts = journal.attempts.lock().unwrap();
+    assert_eq!(attempts.get(1), attempts.get(2));
+}
+
+#[tokio::test]
+async fn t_f017_007_two_retry_callers_share_one_pending_evaluation() {
+    let journal = Arc::new(StrictEvaluationJournal::default());
+    let f = Fixture::with_journal(Some(journal.clone()));
+    let guard = Arc::new(DeterministicGuardDouble::allowing_unconditional(
+        f.clock.clone(),
+    ));
+    guard.push_outcome(ScriptedGuardOutcome::Unavailable {
+        reason: "offline".into(),
+    });
+    f.guard(guard.clone()).await.unwrap();
+    let intent = f.intent();
+    assert!(
+        f.broker
+            .authorize_action(intent.clone(), &f.authority)
+            .await
+            .is_err()
+    );
+    f.clock.advance(Duration::from_secs(1));
+    journal
+        .hang_authorization_ack
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    {
+        let future = f.broker.authorize_action(intent.clone(), &f.authority);
+        tokio::pin!(future);
+        tokio::select! { _ = &mut future => panic!("expected pending retry result"), () = async { while guard.evaluate_call_count() < 2 { tokio::task::yield_now().await; } } => {} }
+        let generated = f.ids.generated_count();
+        assert!(
+            f.broker
+                .authorize_action(intent.clone(), &f.authority)
+                .await
+                .is_err()
+        );
+        assert_eq!(f.ids.generated_count(), generated);
+    }
+    f.authorize(intent).await;
+    assert_eq!(guard.evaluate_call_count(), 2);
+    assert_eq!(
+        journal
+            .committed
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|entry| matches!(entry, BrokerJournalEntry::Authorizing { .. }))
+            .count(),
+        2
+    );
+}
+
+#[tokio::test]
+async fn t_f017_007_lost_authorization_ack_replays_the_exact_result_without_guard_recontact() {
+    let journal = Arc::new(StrictEvaluationJournal::default());
+    journal
+        .lose_authorization_ack
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let f = Fixture::with_journal(Some(journal.clone()));
+    let guard = Arc::new(DeterministicGuardDouble::allowing_unconditional(
+        f.clock.clone(),
+    ));
+    f.guard(guard.clone()).await.unwrap();
+    let intent = f.intent();
+    assert!(
+        f.broker
+            .authorize_action(intent.clone(), &f.authority)
+            .await
+            .is_err()
+    );
+    f.clock.advance(Duration::from_secs(10));
+    let decision = f.authorize(intent).await;
+    assert_eq!(guard.evaluate_call_count(), 1);
+    let attempts = journal.attempts.lock().unwrap();
+    let results: Vec<_> = attempts
+        .iter()
+        .filter(|entry| matches!(entry, BrokerJournalEntry::Authorization { .. }))
+        .collect();
+    assert_eq!(results.len(), 2);
+    assert_eq!(results.first().unwrap(), results.get(1).unwrap());
+    assert_eq!(
+        decision.evaluation_id,
+        evaluation_of(results.first().unwrap()).evaluation_id
+    );
+}
+
+#[tokio::test]
+async fn t_f017_007_cached_decisions_keep_the_source_evaluation_and_pending_result() {
+    let journal = Arc::new(StrictEvaluationJournal::default());
+    let f = Fixture::with_journal(Some(journal.clone()));
+    let guard = Arc::new(DeterministicGuardDouble::allowing_unconditional(
+        f.clock.clone(),
+    ));
+    f.guard(guard.clone()).await.unwrap();
+    let source = f.authorize(f.intent()).await;
+    journal
+        .lose_authorization_ack
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let cached_intent = f.intent();
+    assert!(
+        f.broker
+            .authorize_action(cached_intent.clone(), &f.authority)
+            .await
+            .is_err()
+    );
+    let cached = f.authorize(cached_intent).await;
+    assert!(cached.from_cache);
+    assert_ne!(cached.evaluation_id, source.evaluation_id);
+    assert_eq!(cached.source_evaluation_id, Some(source.evaluation_id));
+    let next = f.authorize(f.intent()).await;
+    assert_eq!(next.source_evaluation_id, Some(source.evaluation_id));
+    assert_eq!(guard.evaluate_call_count(), 1);
+}
+
+#[tokio::test]
+async fn t_f017_007_uncertain_authorization_is_not_published_as_a_cache_source() {
+    let journal = Arc::new(StrictEvaluationJournal::default());
+    journal
+        .lose_authorization_ack
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let f = Fixture::with_journal(Some(journal));
+    let guard = Arc::new(DeterministicGuardDouble::allowing_unconditional(
+        f.clock.clone(),
+    ));
+    f.guard(guard.clone()).await.unwrap();
+    assert!(
+        f.broker
+            .authorize_action(f.intent(), &f.authority)
+            .await
+            .is_err()
+    );
+    let other = f.authorize(f.intent()).await;
+    assert!(!other.from_cache);
+    assert_eq!(guard.evaluate_call_count(), 2);
+}
+
+#[tokio::test]
+async fn t_f017_007_late_authorization_ack_cannot_resurrect_invalidated_cache() {
+    for reconfigure in [true, false] {
+        let journal = Arc::new(StrictEvaluationJournal::default());
+        let f = Fixture::with_journal(Some(journal.clone()));
+        let guard = Arc::new(DeterministicGuardDouble::allowing_unconditional(
+            f.clock.clone(),
+        ));
+        f.guard(guard.clone()).await.unwrap();
+        journal
+            .hang_authorization_ack
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let intent = f.intent();
+        let future = f.broker.authorize_action(intent, &f.authority);
+        tokio::pin!(future);
+        tokio::select! { _ = &mut future => panic!("expected pending authorization ack"), () = async { while !journal.committed.lock().unwrap().iter().any(|entry| matches!(entry, BrokerJournalEntry::Authorization { .. })) { tokio::task::yield_now().await; } } => {} }
+        let current_guard = if reconfigure {
+            let replacement = Arc::new(DeterministicGuardDouble::allowing_unconditional(
+                f.clock.clone(),
+            ));
+            replacement.set_default_outcome(ScriptedGuardOutcome::Deny {
+                reason_code: "NEW_POLICY".into(),
+                detail: "denied".into(),
+            });
+            f.guard(replacement.clone()).await.unwrap();
+            replacement
+        } else {
+            let caller = CallerIdentity::admin(ActorId::new("admin").unwrap());
+            let subject = TypedSubjectRef::Principal(ActorId::new("test-admin").unwrap());
+            f.broker
+                .suspend_subject(
+                    &caller,
+                    SuspendSubjectCommand {
+                        subject: subject.clone(),
+                        project_id: None,
+                        expected_revision: Revision::INITIAL,
+                        reason: "review".into(),
+                    },
+                )
+                .await
+                .unwrap();
+            f.broker
+                .resume_subject(
+                    &caller,
+                    ResumeSubjectCommand {
+                        subject,
+                        project_id: None,
+                        expected_revision: Revision::new(1),
+                        reason: "review complete".into(),
+                    },
+                )
+                .await
+                .unwrap();
+            guard.set_default_outcome(ScriptedGuardOutcome::Deny {
+                reason_code: "AFTER_RESUME".into(),
+                detail: "denied".into(),
+            });
+            guard.clone()
+        };
+        let calls_before = current_guard.evaluate_call_count();
+        journal.authorization_gate.notify_one();
+        future.await.unwrap();
+        assert!(matches!(
+            f.broker.authorize_action(f.intent(), &f.authority).await,
+            Err(ActionBrokerError::GuardDenied { .. })
+        ));
+        assert_eq!(current_guard.evaluate_call_count(), calls_before + 1);
+        f.spy.assert_zero_dispatches();
+        f.secrets.assert_zero_secret_resolutions();
+    }
+}
+
+#[tokio::test]
+async fn t_f017_010_unknown_then_reconciliation_keep_distinct_observation_records() {
+    let journal = Arc::new(StrictEvaluationJournal::default());
+    let f = Fixture::with_journal(Some(journal.clone()));
+    let intent = f.intent();
+    let id = intent.action_id;
+    let decision = f.authorize(intent).await;
+    f.spy
+        .set_next_execution_failure(SimulatedExecutionFailure::OutcomeUnknown {
+            reason: "lost receipt".into(),
+        });
+    assert!(
+        f.broker
+            .execute_authorized(
+                id,
+                &decision.decision_ref,
+                fence(),
+                &f.authority,
+                f.spy.as_ref(),
+                &f.secrets
+            )
+            .await
+            .is_err()
+    );
+    f.broker
+        .reconcile_action(id, ReconcileOutcome::Unknown, None)
+        .await
+        .unwrap();
+    let committed = journal.committed.lock().unwrap();
+    let observations: Vec<_> = committed
+        .iter()
+        .filter(|entry| matches!(entry, BrokerJournalEntry::Observation { .. }))
+        .collect();
+    assert_eq!(observations.len(), 2);
+    assert!(
+        matches!(observations.first().unwrap(), BrokerJournalEntry::Observation { cause: ObservationCause::Execution, observation_revision, .. } if *observation_revision == Revision::new(1))
+    );
+    assert!(
+        matches!(observations.get(1).unwrap(), BrokerJournalEntry::Observation { cause: ObservationCause::Reconciliation { evidence_ref: None }, observation_revision, .. } if *observation_revision == Revision::new(2))
+    );
+    assert_eq!(f.spy.dispatch_count(), 1);
+}
+
+#[tokio::test]
+async fn t_f017_008_human_resolution_is_distinct_and_its_uncertain_commit_replays_exactly() {
+    let journal = Arc::new(StrictEvaluationJournal::default());
+    let f = Fixture::with_journal(Some(journal.clone()));
+    let profile = GuardMappingProfile::Qualified {
+        profile_id: "test.approval.v1".into(),
+        version: 1,
+        supported_obligations: BTreeSet::new(),
+        supports_remote_approval: true,
+    };
+    let guard = Arc::new(DeterministicGuardDouble::with_profile(
+        f.clock.clone(),
+        profile.clone(),
+    ));
+    guard.push_outcome(ScriptedGuardOutcome::RequireApproval {
+        approval_scope: unleash_domain::ApprovalScopeId::from_u128(17),
+        reason: "test approval".into(),
+    });
+    let caller = CallerIdentity::admin(ActorId::new("admin").unwrap());
+    f.broker
+        .configure_guard(
+            &caller,
+            ConfigureGuardCommand {
+                endpoint: Some("unix:///test.guard".into()),
+                mapping_profile: Some(profile),
+                ..ConfigureGuardCommand::default()
+            },
+            Some(guard.clone()),
+        )
+        .await
+        .unwrap();
+    let intent = f.intent();
+    let id = intent.action_id;
+    let payload_digest = intent.payload_digest;
+    let AuthorizationOutcome::ApprovalRequired {
+        evaluation_id,
+        approval_scope,
+        revision,
+        ..
+    } = f
+        .broker
+        .authorize_action(intent, &f.authority)
+        .await
+        .unwrap()
+    else {
+        panic!("expected approval")
+    };
+    // Synthetic receipt provenance qualifies this local contract test only.
+    let command = ResolveActionApprovalCommand {
+        decision_receipt_id: unleash_domain::ReceiptId::from_u128(18),
+        decision_command_digest: unleash_domain::Sha256Digest::from_bytes(
+            b"synthetic committed approval command",
+        ),
+        action_id: id,
+        approval_scope,
+        payload_digest,
+        decision: ApprovalDecision::Approve,
+        expected_revision: revision,
+        reason: JOURNAL_CANARY.into(),
+    };
+    journal
+        .lose_approval_ack
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    assert!(
+        f.broker
+            .resolve_action_approval(&caller, command.clone())
+            .await
+            .is_err()
+    );
+    let decision = f
+        .broker
+        .resolve_action_approval(&caller, command)
+        .await
+        .unwrap();
+    assert_eq!(decision.evaluation_id, evaluation_id);
+    let attempts = journal.attempts.lock().unwrap();
+    let approvals: Vec<_> = attempts
+        .iter()
+        .filter(|entry| {
+            matches!(
+                entry,
+                BrokerJournalEntry::Authorization {
+                    cause: AuthorizationCause::HumanApproval { .. },
+                    ..
+                }
+            )
+        })
+        .collect();
+    assert_eq!(approvals.len(), 2);
+    assert_eq!(approvals.first().unwrap(), approvals.get(1).unwrap());
+    assert_eq!(guard.evaluate_call_count(), 1);
+}
+
+#[tokio::test]
+async fn t_f017_007_cancelled_result_commit_retains_the_known_guard_result_and_identity() {
+    let journal = Arc::new(StrictEvaluationJournal::default());
+    journal
+        .hang_authorization_ack
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let f = Fixture::with_journal(Some(journal.clone()));
+    let guard = Arc::new(DeterministicGuardDouble::allowing_unconditional(
+        f.clock.clone(),
+    ));
+    f.guard(guard.clone()).await.unwrap();
+    let intent = f.intent();
+    {
+        let future = f.broker.authorize_action(intent.clone(), &f.authority);
+        tokio::pin!(future);
+        tokio::select! {
+            _ = &mut future => panic!("expected pending result commit"),
+            () = async { while !journal.committed.lock().unwrap().iter().any(|entry| matches!(entry, BrokerJournalEntry::Authorization { .. })) { tokio::task::yield_now().await; } } => {},
+        }
+    }
+    f.clock.advance(Duration::from_secs(10));
+    f.authorize(intent).await;
+    assert_eq!(guard.evaluate_call_count(), 1);
+    let attempts = journal.attempts.lock().unwrap();
+    let results: Vec<_> = attempts
+        .iter()
+        .filter(|entry| matches!(entry, BrokerJournalEntry::Authorization { .. }))
+        .collect();
+    assert_eq!(results.len(), 2);
+    assert_eq!(results.first().unwrap(), results.get(1).unwrap());
+}
+
+#[tokio::test]
+async fn t_f017_010_lost_observation_ack_replays_original_entry_without_dispatch() {
+    let journal = Arc::new(StrictEvaluationJournal::default());
+    journal
+        .lose_observation_ack
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let f = Fixture::with_journal(Some(journal.clone()));
+    let intent = f.intent();
+    let id = intent.action_id;
+    let decision = f.authorize(intent).await;
+    assert!(
+        f.broker
+            .execute_authorized(
+                id,
+                &decision.decision_ref,
+                fence(),
+                &f.authority,
+                f.spy.as_ref(),
+                &f.secrets
+            )
+            .await
+            .is_err()
+    );
+    f.clock.advance(Duration::from_secs(10));
+    let receipt = f
+        .broker
+        .reconcile_action(id, ReconcileOutcome::ConfirmedSuccess, None)
+        .await
+        .unwrap();
+    assert_eq!(receipt.evaluation_id, decision.evaluation_id);
+    assert_eq!(f.spy.dispatch_count(), 1);
+    let attempts = journal.attempts.lock().unwrap();
+    let observations: Vec<_> = attempts
+        .iter()
+        .filter(|entry| matches!(entry, BrokerJournalEntry::Observation { .. }))
+        .collect();
+    assert_eq!(observations.len(), 2);
+    assert_eq!(observations.first().unwrap(), observations.get(1).unwrap());
+}
+
 fn fence() -> LineageFence {
     LineageFence::new(
         AuthorityGeneration::from_u128(101),

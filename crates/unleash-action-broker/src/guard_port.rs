@@ -438,6 +438,8 @@ pub struct GuardSubjectSnapshot {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GuardEvaluateRequest {
+    /// Internal durable evaluation identity; no external idempotency contract is implied.
+    pub evaluation_id: unleash_domain::AuthorizationEvaluationId,
     /// Identifiant unique de l'action.
     pub action_id: ActionId,
     /// Sujet typé et authentifié.
@@ -465,8 +467,12 @@ pub struct GuardEvaluateRequest {
 impl GuardEvaluateRequest {
     /// Construit la requête expurgée depuis une [`ActionIntent`] validée.
     #[must_use]
-    pub fn from_intent(intent: &ActionIntent) -> Self {
+    pub fn from_intent(
+        intent: &ActionIntent,
+        evaluation_id: unleash_domain::AuthorizationEvaluationId,
+    ) -> Self {
         Self {
+            evaluation_id,
             action_id: intent.action_id,
             subject: GuardSubjectSnapshot {
                 kind: intent.subject.kind(),
