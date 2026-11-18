@@ -57,6 +57,18 @@ async fn revise_project_is_atomic_idempotent_and_rejects_unknown_fields() {
         command_type: "CreateProject".into(),
         payload: object(json!({"name":"avant", "weight":1})),
     };
+    let mut invalid_create = cmd.clone();
+    invalid_create.command_id = CommandId::from_u128(10);
+    invalid_create
+        .payload
+        .insert("unexpected".into(), json!("DO_NOT_ECHO"));
+    assert!(
+        matches!(client.send_command(&invalid_create).await, Err(ClientError::Remote(e)) if e.code == ErrorCode::InvalidArgument && !e.message.contains("DO_NOT_ECHO"))
+    );
+    invalid_create.payload = object(json!({"name":"avant", "weight":"not-a-number"}));
+    assert!(
+        matches!(client.send_command(&invalid_create).await, Err(ClientError::Remote(e)) if e.code == ErrorCode::InvalidArgument)
+    );
     let created = client.send_command(&cmd).await.unwrap();
     let mut stream = client
         .subscribe_events(&SubscribeEventsRequest {
