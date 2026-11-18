@@ -28,7 +28,7 @@ pub fn draw(frame: &mut Frame<'_>, state: &mut TuiState) {
     let vertical = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(2),
+            Constraint::Length(1),
             Constraint::Length(3),
             Constraint::Min(8),
             Constraint::Length(2),
@@ -91,8 +91,9 @@ fn focus_style(focused: bool, no_color: bool) -> Style {
     }
 }
 
-fn draw_context_bar(frame: &mut Frame<'_>, area: Rect, state: &TuiState) {
-    let conn_label = match &state.connection {
+fn connection_label(state: &TuiState) -> String {
+    match &state.connection {
+        ConnectionBanner::Connecting => String::from("Connexion au daemon en cours"),
         ConnectionBanner::Connected { cursor } => cursor.map_or_else(
             || String::from("IPC v2: connecté"),
             |c| format!("IPC v2: seq {}", c.sequence.as_u64()),
@@ -103,7 +104,10 @@ fn draw_context_bar(frame: &mut Frame<'_>, area: Rect, state: &TuiState) {
         ConnectionBanner::ResyncRequired { reason } => {
             format!("RESYNC: {}", sanitize_single_line(reason))
         }
-    };
+    }
+}
+
+fn draw_context_bar(frame: &mut Frame<'_>, area: Rect, state: &TuiState) {
     let header_line = Line::from(vec![
         Span::styled(
             " OVPT Unleash ",
@@ -116,17 +120,9 @@ fn draw_context_bar(frame: &mut Frame<'_>, area: Rect, state: &TuiState) {
                     .add_modifier(Modifier::BOLD)
             },
         ),
-        Span::raw(format!(
-            " · Mission M0 [mode:supervised] · Pool 3/5 (max 50) · {conn_label} · Rev {}",
-            state.draft_base_revision
-        )),
+        Span::raw(format!(" · {}", connection_label(state))),
     ]);
-    let p = Paragraph::new(vec![
-        header_line,
-        Line::from(
-            " Alerte : blocked_target_checkout sur dev · Doc périmé : ADR-09 · Coût est. 1.40 USD (+ inconnu)",
-        ),
-    ]);
+    let p = Paragraph::new(header_line);
     frame.render_widget(p, area);
 }
 
@@ -245,16 +241,15 @@ fn draw_linear_accessible(frame: &mut Frame<'_>, area: Rect, state: &TuiState) {
         |e| e.summary.clone(),
     );
     let text = format!(
-        "OVPT Unleash (Mode lecture linéaire)\nEspace: {}\nAgents: {} visibles sur {}\nSélection agent: {}\nTimeline: page {} ({} total)\nSélection événement: {}\nDiff: ligne {}/{}\nStatut: {}",
+        "OVPT Unleash (Mode lecture linéaire)\n{}\nEspace: {}\nAgents chargés: {} ({} visibles)\nSélection agent: {}\nÉvénements chargés: {}\nSélection événement: {}\nLignes du diff chargées: {}\nStatut: {}",
+        connection_label(state),
         state.active_space.label(),
-        state.visible_agent_indices.len(),
         state.agents.len(),
+        state.visible_agent_indices.len(),
         agent_line,
-        state.event_page_offset + 1,
-        state.total_events,
+        state.event_page.len(),
         event_line,
-        state.diff_scroll_line + 1,
-        state.total_diff_lines,
+        state.diff_window_cache.len(),
         state.status_line
     );
     let p = Paragraph::new(text).wrap(Wrap { trim: false });
@@ -268,7 +263,7 @@ fn draw_agent_tree(frame: &mut Frame<'_>, area: Rect, state: &mut TuiState) {
         .border_set(border_set(state.capabilities.ascii_only))
         .border_style(focus_style(focused, state.capabilities.no_color))
         .title(format!(
-            " Agents ({}/{} visibles, 3/5 slots) ",
+            " Agents ({}/{} visibles) ",
             state.visible_agent_indices.len(),
             state.agents.len()
         ));
@@ -330,16 +325,20 @@ fn draw_agent_tree(frame: &mut Frame<'_>, area: Rect, state: &mut TuiState) {
 
 fn draw_timeline(frame: &mut Frame<'_>, area: Rect, state: &TuiState) {
     let focused = state.focus == FocusPane::Timeline;
+    let title = if state.event_page.is_empty() {
+        String::from(" Activité · aucun événement chargé ")
+    } else {
+        format!(
+            " Activité (page {}–{}) ",
+            state.event_page_offset + 1,
+            state.event_page_offset + state.event_page.len()
+        )
+    };
     let block = Block::default()
         .borders(Borders::ALL)
         .border_set(border_set(state.capabilities.ascii_only))
         .border_style(focus_style(focused, state.capabilities.no_color))
-        .title(format!(
-            " Timeline ({} total · page {}..{}) ",
-            state.total_events,
-            state.event_page_offset + 1,
-            state.event_page_offset + state.event_page.len()
-        ));
+        .title(title);
     let inner = block.inner(area);
     let height = usize::from(inner.height).max(1);
     let start = state.selected_event_pos.saturating_sub(height / 2);
@@ -376,11 +375,15 @@ fn draw_diff_viewer(frame: &mut Frame<'_>, area: Rect, state: &TuiState) {
         .borders(Borders::ALL)
         .border_set(border_set(state.capabilities.ascii_only))
         .border_style(focus_style(focused, state.capabilities.no_color))
-        .title(format!(
-            " Diff reducer.rs ({} lignes · ligne {}) ",
-            state.total_diff_lines,
-            state.diff_scroll_line + 1
-        ));
+        .title(if state.diff_window_cache.is_empty() {
+            String::from(" Diff · aucun fichier chargé ")
+        } else {
+            format!(
+                " Diff ({} lignes · ligne {}) ",
+                state.total_diff_lines,
+                state.diff_scroll_line + 1
+            )
+        });
     let lines: Vec<Line<'_>> = state
         .diff_window_cache
         .iter()

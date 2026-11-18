@@ -228,8 +228,12 @@ fn handle_navigation_key(
         }
         KeyCode::Char('a') => {
             state.focus = FocusPane::Pty;
-            state.pty.attach("lease-001", 7);
-            state.mode = InputMode::PtyAttached;
+            if state.fixture {
+                state.pty.attach("lease-001", 7);
+                state.mode = InputMode::PtyAttached;
+            } else {
+                state.status_line = String::from("Aucune session PTY disponible");
+            }
         }
         KeyCode::Char(']') => {
             state.active_space = state.active_space.next();
@@ -412,7 +416,7 @@ pub async fn run_tui(
     capabilities: TerminalCapabilities,
 ) -> Result<(), TerminalLifecycleError> {
     let mut guard = TerminalGuard::enter(&capabilities)?;
-    let mut state = TuiState::with_m0_fixture(capabilities);
+    let mut state = TuiState::new(capabilities);
 
     let (cmd_tx, cmd_rx) = mpsc::channel::<BackendCommand>(64);
     let (upd_tx, upd_rx) = mpsc::channel::<BackendUpdate>(MAX_NOTIFICATION_QUEUE);
@@ -466,14 +470,7 @@ pub async fn run_backend_io_worker(
     let mut client = match UnleashClient::connect(cfg).await {
         Ok(c) => {
             tracing::info!(stream_id = %c.hello().stream_id, "Connexion IPC TUI établie");
-            let _ = upd_tx
-                .send(BackendUpdate::Connected {
-                    cursor: Some(EventCursor::new(
-                        c.hello().stream_id,
-                        unleash_domain::Sequence::new(0),
-                    )),
-                })
-                .await;
+            let _ = upd_tx.send(BackendUpdate::Connected { cursor: None }).await;
             c
         }
         Err(err) => {

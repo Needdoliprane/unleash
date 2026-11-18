@@ -45,19 +45,15 @@ impl std::fmt::Debug for PtyPanel {
 }
 
 impl PtyPanel {
-    /// Crée un panneau PTY initialisé avec les dimensions et l'identité de processus.
+    /// Crée un panneau PTY vide. Un identifiant vide signale l'absence de processus.
     #[must_use]
     pub fn new(process_run_uuid: impl Into<String>, rows: u16, cols: u16) -> Self {
-        let mut panel = Self {
+        Self {
             parser: Parser::new(rows.max(4), cols.max(20), 2000),
             process_run_uuid: process_run_uuid.into(),
             attach_state: PtyAttachState::Detached,
             pending_tx_bytes: Vec::new(),
-        };
-        panel.process_output(
-            b"[unleash-pty] inspecteur isole actif (Ctrl+] pour detacher en mode attache)\r\n$ cargo test -p unleash-protocol --quiet\r\ntest result: ok. 31 passed\r\n",
-        );
-        panel
+        }
     }
 
     /// Retourne l'état courant d'attachement.
@@ -113,6 +109,9 @@ impl PtyPanel {
     /// Rend l'écran `vt100` via [`tui_term::widget::PseudoTerminal`].
     pub fn render_into(&self, area: Rect, buf: &mut Buffer, ascii_only: bool, no_color: bool) {
         let title = match &self.attach_state {
+            PtyAttachState::Detached if self.process_run_uuid.is_empty() => {
+                String::from(" PTY · aucun processus chargé ")
+            }
             PtyAttachState::Detached => {
                 format!(" PTY {} [DETACHE — 'a' attacher] ", self.process_run_uuid)
             }
