@@ -15,7 +15,8 @@ Jalon : M1 — Features : F001, F002, F017 (broker interne), F018 (squelette rep
 - [x] `crates/unleash-action-broker` implémente `GuardPort`, profil `none_accepted`, modes `broker_only`/`guard_optional`/`guard_required`, révocation/suspension et secrets opaques sans fuite
 - [x] Client disparu après acceptation ne crée pas 2 commandes ; daemon tué redémarre avec état engagé ; restore invalide ancienne lignée (`STALE_AUTHORITY_GENERATION`) ; acteur non autorisé refusé et historisé sans secret
 - [x] Preuves `qualification/evidence/EV-F017-*.json` (limites `EXT-GUARD` explicites) & `EV-F018-*.json` et `qualification/m1/exit.md` validés par `qa-expert`, `reliability-expert`, `security-expert`
-- [ ] Toutes gates vertes sur `dev` et `git push origin dev` réussi
+- [x] Gates Rust et dossier vertes sur `dev@8598866`, push réussi et SHA distant vérifié
+- [ ] CI GitHub Actions observée sur le SHA publié. Dernière lecture HTTP 404.
 
 ## Hors périmètre
 - Contrat/serveur réel AI-Guard (`EXT-GUARD`, prévu en M6)
@@ -32,4 +33,4 @@ Jalon : M1 — Features : F001, F002, F017 (broker interne), F018 (squelette rep
 | t03 | Preuves `EV-F017/F018-*`, `qualification/m1/exit.md`, revues experts, fusion `dev` & push | `qualification/**`, `.claude/state/goals/**` | t02 | root + experts | strong / pro | Toutes gates sur `dev` | in_progress |
 
 ## Résultat
-Candidat local accepté. Code testé en `c03273c`, contrainte dev CLI en `2357de8`, 369 tests réussis et dossier valide. [Rapport M1](../../../../qualification/m1/exit.md). Gates, publication et observation de la CI sur `dev` restent en cours.
+M1 accepté localement et publié à `85988665786b1b14d1ca5d74a4fbaba9e5cee2b0`. Le rejeu `dev` donne 369 tests réussis et un dossier valide. [Rapport M1](../../../../qualification/m1/exit.md). La clôture reste ouverte pour la CI GitHub et le résidu physique du worktree t02 après le refus SMB. La livraison t01b est intégrée et son checkout est absent physiquement et dans Git.
