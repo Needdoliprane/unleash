@@ -1549,6 +1549,13 @@ fn prepare_revise_project(
     })
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CreateProjectPayload {
+    name: Option<String>,
+    weight: Option<i64>,
+}
+
 fn prepare_create_project(
     session: &AuthenticatedSession,
     cmd: CommandEnvelope,
@@ -1570,11 +1577,19 @@ fn prepare_create_project(
         }
         None => ProjectId::from_uuid(cmd.aggregate_id),
     };
-    let name = cmd
-        .payload
-        .get("name")
-        .and_then(Value::as_str)
-        .map_or_else(|| format!("project-{project_id}"), ToOwned::to_owned);
+    let payload: CreateProjectPayload = serde_json::from_value(Value::Object(cmd.payload.clone()))
+        .map_err(|_| {
+            IpcError::new(
+                ErrorCode::InvalidArgument,
+                None,
+                "Payload CreateProject invalide",
+                RetryClass::Never,
+            )
+            .with_command_id(cid)
+        })?;
+    let name = payload
+        .name
+        .unwrap_or_else(|| format!("project-{project_id}"));
     if name.trim().is_empty() {
         return Err(IpcError::new(
             ErrorCode::InvalidArgument,
@@ -1584,11 +1599,7 @@ fn prepare_create_project(
         )
         .with_command_id(cid));
     }
-    let weight = cmd
-        .payload
-        .get("weight")
-        .and_then(Value::as_i64)
-        .unwrap_or(1);
+    let weight = payload.weight.unwrap_or(1);
     if !(1..=10).contains(&weight) {
         return Err(IpcError::new(
             ErrorCode::InvalidArgument,
