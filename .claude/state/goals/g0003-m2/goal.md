@@ -24,7 +24,7 @@ Raccorder l’admission durable, les adaptateurs de modèles et le process-host 
 | f003-policy | Décision Q-15 pure dans `crates/unleash-scheduler` | — | T-F003-005 sur fixtures, 11 cas | done |
 | f012-stream | Décodeurs SSE et banc HTTP local de `crates/unleash-model-router` | — | 26 cas, notamment EOF et 429 | done |
 | t01-admission | Port transactionnel d’admission dans `crates/unleash-store`, projection des trois types d’unités et décompte durable | Scheduler et Store M1 | SQLite, mélange 5/6, concurrence sur dernière place, checkpoint avant libération | in_progress, `/root/m1_store` |
-| t02-model-http | Transport borné de `crates/unleash-model-router`, premier dialecte testé avec TLS loopback | Décodeurs F012 et frontière `ActionExecutorPort` | Certificat valide, refus avant réseau, 429/EOF sans second POST | in_progress, `/root/m2_stream` |
+| t02-model-http | Transport OpenAI Responses de `crates/unleash-model-router` derrière le broker, TLS loopback | Décodeurs F012 et frontière `ActionExecutorPort` | 11 essais TLS, 417 tests workspace à `7730f59` | intégré en `b8c4314`, clôture du worktree en cours |
 | t03a-host-ack | Test F011 de reprise sur le même host après perte de l’acquittement de rotation | Host et PTY réels, daemon simulé | T-F011-003 ciblé et 35 tests de la crate à `c16e230` | done |
 | t03-terminal | Service de terminal et raccord IPC pour le vrai daemon, réutilisation de `unleash-process-host` | Port Store des terminaux et journal broker | T-F011-003 (crash daemon, rotation, même PTY) et états d’issue inconnue | pending |
 | t04-probe | Raccord `TestProviderProfile` authentifié avec propriétaire réel du probe, admission, budget, auteur du dispatch et résultat corrélé | t01 et t02 | Deux dialectes en essai local de bout en bout, refus sans connexion, coupure après dispatch | pending |
@@ -35,3 +35,5 @@ Le Store a un seul écrivain par phase. Les connexions F011 et F012 au daemon se
 ## Résultat acquis
 
 `5a16c4a` intègre la politique F003 et les flux F012. Leur campagne combinée a passé 249 tests Rust. La fusion `cdb16bd` réunit ces lots et le socle M1 publié. Cargo accepte le verrou hors ligne et le dossier validé compte 0 erreur et 0 avertissement. Le rejeu de la fusion passe avec 406 tests Rust (doctest compris). Les raccords à SQLite, à l’IPC et au vrai daemon restent ouverts.
+
+`b8c4314` intègre le transport TLS OpenAI Responses et reproduit exactement l’arbre vérifié `7730f59`. Les 417 tests Rust comprennent les onze cas de transport sur de vrais sockets TLS avec journal de fixture. L’admission, le budget et la persistance de l’usage sont prévus dans le raccord t04.
