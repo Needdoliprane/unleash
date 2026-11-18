@@ -12,7 +12,7 @@
     "worktrees/"
   ],
   "hash_algorithm": "sha256",
-  "source_tree_digest": "bd304cb00adba311f34ef3c5ef9edd49f58ad18b80760f2c07a92f29c95b3ad0",
+  "source_tree_digest": "9c18101a7f196bafa51492de54421be7d297fad650aa5c6600941d19bfb8094c",
   "files": [
     {
       "path": "INDEX.md",
@@ -2242,8 +2242,8 @@
     },
     {
       "path": "specs/scheduling.md",
-      "sha256": "18c607a85e77a7d9f200f4f579a67f331195fafaa6dc4b610d6011d1ed64d1ad",
-      "bytes": 15506,
+      "sha256": "8f7750673dbee61127a4fb7d7ef3443fa3af70487eb4433b3dab691e18e77ec1",
+      "bytes": 15924,
       "media_type": "text/markdown"
     },
     {
