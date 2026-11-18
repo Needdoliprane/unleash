@@ -37,7 +37,7 @@ Jalons : M0 → M7 — Features : F001–F019 — Exigences : 239 REQ — Invari
 | --- | --- | --- | --- | --- |
 | g0001-m0 | M0 | Workspace Cargo, contrats partagés (domain, protocol, testkit) & 5 spikes (SQLite, UI, Runtime, Contrats/Connaissance, Navigateur) | `qualification/m0/exit.md` | done |
 | g0002-m1 | M1 | Cœur durable & autorité locale : F001, F002 complet, F017 broker interne, squelette F018 | `qualification/m1/exit.md` | in_progress |
-| g0003-m2 | M2 | Exécutions, router modèles API/locaux & processus : F003, F011, F012 | `qualification/m2/exit.md` | pending |
+| g0003-m2 | M2 | Exécutions, router modèles API/locaux & processus : F003, F011, F012 | `qualification/m2/exit.md` | in_progress |
 | g0004-m3 | M3 | Workflows, contrats, compétences, hiérarchie & automatisations : F005, F008, F006, F007, F004, F019 | `qualification/m3/exit.md` | pending |
 | g0005-m4 | M4 | Travail réel dans les repositories : F010, F009, enrichissement F016 | `qualification/m4/exit.md` | pending |
 | g0006-m5 | M5 | Expérience complète & connecteurs : F013, F014 (10 espaces), F015 (10 espaces), F016, parcours guidé Q-20 | `qualification/m5/exit.md` | pending |
@@ -45,4 +45,4 @@ Jalons : M0 → M7 — Features : F001–F019 — Exigences : 239 REQ — Invari
 | g0008-m7 | M7 | Recette A–Z, F018 pannes/restauration, `unleash-update`, packaging macOS/Ubuntu, SBOM, OSS | `qualification/m7/exit.md` | pending |
 
 ## Résultat
-En cours : baseline R7 alignée et poussée sur `dev`, programme `g0000-v1` et sous-goal `g0001-m0` ouverts.
+M0 est clos. M1 est publié sur `origin/dev@8598866` avec les contrôles Rust et le validateur de conception verts. La CI distante reste non vérifiée (HTTP 404). M2 avance sur `goal/g0003-m2` avec le socle M1 et les premiers lots F003/F012.
