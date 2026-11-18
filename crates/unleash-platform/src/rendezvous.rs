@@ -9,7 +9,7 @@ use std::os::unix::net::UnixListener;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use rustix::fs::{FileType, Mode, OFlags, RawMode, fstat, open};
+use rustix::fs::{FileType, Mode, OFlags, RawMode, fstat, open, openat};
 use rustix::io::Errno;
 
 use crate::errors::PlatformError;
@@ -22,6 +22,95 @@ pub const MACOS_SUN_LEN: usize = 104;
 
 /// Longueur maximale admissible en octets pour un chemin de socket Unix (`SUN_LEN - 1`).
 pub const MAX_UNIX_SOCKET_PATH_BYTES: usize = MACOS_SUN_LEN - 1;
+
+/// Nom fixe de la preuve administrative dans le rendez-vous privé.
+pub const ADMIN_PROOF_FILENAME: &str = "admin-proof";
+
+/// Lit le credential sur un fichier régulier appartenant à cet UID et de mode strict `0600`.
+/// Le fichier est ouvert relativement au descripteur vérifié du rendez-vous et la lecture
+/// est bornée à 65 octets. Une absence retourne `None` ; aucune valeur invalide ne figure
+/// dans les erreurs.
+///
+/// # Errors
+/// Retourne une erreur de validation ou de lecture si le répertoire ou le fichier est invalide.
+pub fn read_admin_credential(
+    dir: &Path,
+) -> Result<Option<zeroize::Zeroizing<String>>, PlatformError> {
+    validate_rendezvous_dir(dir)?;
+    let dir_fd = open(
+        dir,
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .map_err(|e| PlatformError::OsCall {
+        op: "open(admin rendezvous)",
+        source: std::io::Error::from(e),
+    })?;
+    let dir_stat = fstat(&dir_fd).map_err(|e| PlatformError::OsCall {
+        op: "fstat(admin rendezvous)",
+        source: std::io::Error::from(e),
+    })?;
+    if FileType::from_raw_mode(dir_stat.st_mode) != FileType::Directory
+        || dir_stat.st_uid != effective_uid()
+        || raw_mode_to_u32(dir_stat.st_mode) & 0o7777 != 0o700
+    {
+        return Err(PlatformError::InvalidPath {
+            path: dir.display().to_string(),
+            reason: String::from("Répertoire de credential invalide"),
+        });
+    }
+    let fd = match openat(
+        &dir_fd,
+        ADMIN_PROOF_FILENAME,
+        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::NONBLOCK,
+        Mode::empty(),
+    ) {
+        Ok(fd) => fd,
+        Err(Errno::NOENT) => return Ok(None),
+        Err(e) => {
+            return Err(PlatformError::OsCall {
+                op: "openat(admin credential)",
+                source: std::io::Error::from(e),
+            });
+        }
+    };
+    let st = fstat(&fd).map_err(|e| PlatformError::OsCall {
+        op: "fstat(admin credential)",
+        source: std::io::Error::from(e),
+    })?;
+    let path = dir.join(ADMIN_PROOF_FILENAME).display().to_string();
+    if FileType::from_raw_mode(st.st_mode) != FileType::RegularFile {
+        return Err(PlatformError::NotARegularFile { path });
+    }
+    if st.st_uid != effective_uid() {
+        return Err(PlatformError::OwnershipMismatch {
+            path,
+            expected_uid: effective_uid(),
+            actual_uid: st.st_uid,
+        });
+    }
+    let mode = raw_mode_to_u32(st.st_mode) & 0o7777;
+    if mode != 0o600 {
+        return Err(PlatformError::InsecurePermissions {
+            path,
+            expected_mode: 0o600,
+            actual_mode: mode,
+        });
+    }
+    let mut bytes = zeroize::Zeroizing::new(Vec::new());
+    File::from(fd).take(65).read_to_end(&mut bytes)?;
+    if bytes.len() != 64 || !bytes.iter().all(u8::is_ascii) {
+        return Err(PlatformError::InvalidPath {
+            path,
+            reason: String::from("Credential de longueur ou encodage invalide"),
+        });
+    }
+    let value = std::str::from_utf8(&bytes).map_err(|_| PlatformError::InvalidPath {
+        path,
+        reason: String::from("Credential invalide"),
+    })?;
+    Ok(Some(zeroize::Zeroizing::new(value.to_owned())))
+}
 
 #[cfg(target_os = "macos")]
 const fn raw_mode_to_u32(raw: RawMode) -> u32 {

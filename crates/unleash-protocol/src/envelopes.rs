@@ -436,6 +436,10 @@ pub struct HelloRequest {
     pub client_version: String,
     /// Capacités optionnelles requises ou supportées par le client.
     pub capabilities: Vec<String>,
+    /// Preuve réservée au transport Rust ; absente ou nulle pour un accès diagnostic.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(skip)]
+    pub admin_proof: Option<AdminProof>,
 }
 
 /// Réponse du daemon à la poignée de main initiale (`ipc-hello.schema.json`).

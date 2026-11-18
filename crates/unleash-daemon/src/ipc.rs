@@ -216,7 +216,7 @@ async fn perform_hello_handshake(
         }
     };
 
-    let hello_raw =
+    let hello_raw = zeroize::Zeroizing::new(
         match read_raw_frame_timeout(stream, MAX_FRAME_BYTES, HANDSHAKE_IO_TIMEOUT).await {
             Ok(Some(bytes)) => bytes,
             Ok(None) => return None,
@@ -224,11 +224,13 @@ async fn perform_hello_handshake(
                 let _ = write_json_frame_timeout(stream, &ipc_err, RESPONSE_WRITE_TIMEOUT).await;
                 return None;
             }
-        };
+        },
+    );
 
     let hello_req = match decode_strict_with_v1_check::<HelloRequest>(&hello_raw) {
         Ok(req) => req,
-        Err(ipc_err) => {
+        Err(mut ipc_err) => {
+            ipc_err.message = String::from("Handshake Hello invalide");
             let _ = write_json_frame_timeout(stream, &ipc_err, RESPONSE_WRITE_TIMEOUT).await;
             return None;
         }
@@ -397,6 +399,7 @@ fn session_capability_labels(session: &AuthenticatedSession) -> Vec<String> {
     let mut labels = Vec::new();
     for cap in &session.capabilities {
         let name = match cap {
+            Capability::Administer => "administer",
             Capability::QueryDaemonDiagnostic => "query_daemon_diagnostic",
             Capability::QueryState => "query_state",
             Capability::ManageProjects => "manage_projects",
@@ -446,7 +449,7 @@ async fn dispatch_query(
     query: QueryEnvelope,
 ) -> Result<QueryResponse, IpcError> {
     match query.query_type.as_str() {
-        "GetDaemonStatus" => query_daemon_status(state, query.request_id).await,
+        "GetDaemonStatus" => query_daemon_status(state, session, query.request_id).await,
         "GetHealth" => query_health(state, query.request_id).await,
         "GetStateSnapshot" => query_state_snapshot(state, session, query).await,
         "GetCommandReceipt" => query_command_receipt(state, session, query).await,
@@ -586,8 +589,16 @@ async fn query_m1_projection(
 
 async fn query_daemon_status(
     state: &Arc<DaemonRuntimeState>,
+    session: &AuthenticatedSession,
     request_id: unleash_domain::RequestId,
 ) -> Result<QueryResponse, IpcError> {
+    if !session.capabilities.contains(&Capability::Administer) {
+        return Ok(QueryResponse {
+            request_id,
+            watermark: None,
+            result: json!({"mode": state.current_mode().to_string()}),
+        });
+    }
     let store = Arc::clone(&state.store);
     let mode_mem = state.current_mode();
     let (daemon_row, watermark, dead_letters) = tokio::task::spawn_blocking(move || {

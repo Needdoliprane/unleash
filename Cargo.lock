@@ -5565,6 +5565,7 @@ dependencies = [
  "unleash-protocol",
  "unleash-testkit",
  "uuid",
+ "zeroize",
 ]
 
 [[package]]
@@ -5575,6 +5576,7 @@ dependencies = [
  "clap",
  "crossterm",
  "futures-core",
+ "getrandom 0.3.4",
  "ratatui",
  "rusqlite",
  "serde",
@@ -5594,6 +5596,7 @@ dependencies = [
  "unleash-testkit",
  "unleash-tui",
  "uuid",
+ "zeroize",
 ]
 
 [[package]]

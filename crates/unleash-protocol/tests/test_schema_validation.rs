@@ -479,6 +479,7 @@ fn test_validate_ipc_hello_schema() {
         client_kind: ClientKind::Cli,
         client_version: "0.1.0".to_string(),
         capabilities: vec!["terminal".to_string(), "events".to_string()],
+        admin_proof: None,
     };
     let req_val = serde_json::to_value(&req).unwrap();
     assert!(

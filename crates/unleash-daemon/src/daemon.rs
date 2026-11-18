@@ -15,16 +15,18 @@ use unleash_domain::{
     transition_daemon_mode,
 };
 use unleash_platform::{
-    AuthorityLock, PlatformError, PlatformPaths, assert_not_under_claude,
+    ADMIN_PROOF_FILENAME, AuthorityLock, PlatformError, PlatformPaths, assert_not_under_claude,
     bind_private_unix_listener, canonical_rendezvous_dir, current_boot_identity, effective_uid,
-    validate_socket_file, verify_same_uid_peer,
+    read_admin_credential, validate_rendezvous_dir, validate_socket_file, verify_same_uid_peer,
+    write_private_file_atomic,
 };
 use unleash_protocol::{
-    ClientKind, EventCausationKind, EventEnvelope, HelloRequest, HelloResponse, MAX_FRAME_BYTES,
-    ProtocolVersion, Sensitivity, from_json_str_strict,
+    AdminProof, ClientKind, EventCausationKind, EventEnvelope, HelloRequest, HelloResponse,
+    MAX_FRAME_BYTES, ProtocolVersion, Sensitivity, from_json_str_strict,
 };
 use unleash_store::{StoreConfig, UnleashStore, WriteCriticality};
 
+use crate::auth::AdministrativeAuthVerifier;
 use crate::config::DaemonConfig;
 use crate::error::DaemonError;
 use crate::executors::{DrainReport, ExecutorDrainPort};
@@ -39,6 +41,23 @@ use crate::recovery::{
 use crate::subscriptions::SubscriptionHub;
 
 const PROBE_CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
+
+fn install_admin_proof(dir: &Path) -> Result<AdminProof, DaemonError> {
+    validate_rendezvous_dir(dir)?;
+    let mut bytes = zeroize::Zeroizing::new([0_u8; 32]);
+    getrandom::fill(&mut *bytes).map_err(|_| {
+        DaemonError::InvalidConfiguration(String::from("Génération du credential impossible"))
+    })?;
+    let proof = AdminProof::from_bytes(*bytes);
+    write_private_file_atomic(&dir.join(ADMIN_PROOF_FILENAME), proof.to_hex().as_bytes())?;
+    let verified = read_admin_credential(dir)?.and_then(|value| AdminProof::from_hex(&value));
+    if !verified.is_some_and(|candidate| candidate.matches(&proof)) {
+        return Err(DaemonError::InvalidConfiguration(String::from(
+            "Credential local invalide après création",
+        )));
+    }
+    Ok(proof)
+}
 
 /// Résultat d'une tentative de démarrage du daemon.
 #[derive(Debug)]
@@ -341,6 +360,33 @@ impl UnleashDaemon {
             }
         };
 
+        // La preuve est renouvelée sous verrou et avant toute ouverture du socket.
+        let proof_dir = rdv_dir.clone();
+        let proof_result = tokio::task::spawn_blocking(move || install_admin_proof(&proof_dir))
+            .await
+            .map_err(|_| {
+                DaemonError::InvalidConfiguration(String::from(
+                    "Génération du credential interrompue",
+                ))
+            })
+            .and_then(std::convert::identity);
+        let admin_proof = match proof_result {
+            Ok(proof) => proof,
+            Err(err) => {
+                let _ = tokio::task::spawn_blocking(move || {
+                    drop(store);
+                    drop(lock);
+                })
+                .await;
+                return Err(err);
+            }
+        };
+        let auth_verifier: Arc<dyn crate::auth::AuthVerifierPort> =
+            Arc::new(AdministrativeAuthVerifier {
+                inner: Arc::clone(&config.auth_verifier),
+                expected: admin_proof,
+            });
+
         // 5. Nettoyage éventuel de socket orphelin et ouverture socket Unix privé (`0600`)
         let store_for_cleanup = Arc::clone(&store);
         let socket_prep = tokio::task::spawn_blocking(move || {
@@ -397,7 +443,7 @@ impl UnleashDaemon {
             stream_id: recovery_row.stream_id,
             mode: Arc::clone(&shared_mode),
             browser_search_paths,
-            auth_verifier: Arc::clone(&config.auth_verifier),
+            auth_verifier,
             post_commit_hook: config.post_commit_hook.clone(),
             subscriptions: Arc::clone(&subscriptions),
             last_published_seq: AsyncMutex::new(Some((
@@ -817,6 +863,7 @@ async fn probe_live_daemon_hello(socket_path: &Path) -> Result<HelloResponse, Da
         client_kind: ClientKind::Probe,
         client_version: env!("CARGO_PKG_VERSION").to_owned(),
         capabilities: Vec::new(),
+        admin_proof: None,
     };
     write_json_frame_timeout(&mut stream, &req, PROBE_CONNECT_TIMEOUT).await?;
 
