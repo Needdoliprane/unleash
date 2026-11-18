@@ -35,6 +35,265 @@ use unleash_testkit::{
     SecretResolutionSpy, TestIsolationProbe, local_test_dir,
 };
 
+#[derive(Default)]
+struct PauseAfterIntent {
+    armed: AtomicBool,
+    fail_after_commit: AtomicBool,
+    entered: tokio::sync::Notify,
+    released: std::sync::Mutex<bool>,
+    condvar: std::sync::Condvar,
+}
+
+impl unleash_store::CutpointObserver for PauseAfterIntent {
+    fn hit(&self, point: unleash_store::StoreCutpoint) -> Result<(), StoreError> {
+        if point == unleash_store::StoreCutpoint::C3AfterBrokerIntentCommit
+            && self.fail_after_commit.swap(false, Ordering::SeqCst)
+        {
+            return Err(StoreError::CutpointInjected {
+                cutpoint: "C3".into(),
+                message: "test".into(),
+            });
+        }
+        if point == unleash_store::StoreCutpoint::C3AfterBrokerIntentCommit
+            && self.armed.swap(false, Ordering::SeqCst)
+        {
+            self.entered.notify_one();
+            let mut released = self.released.lock().unwrap();
+            while !*released {
+                released = self.condvar.wait(released).unwrap();
+            }
+        }
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn daemon_publishes_the_committed_broker_cursor_to_live_ipc() {
+    use crate::{DaemonConfig, DaemonStartOutcome, UnleashDaemon};
+    use std::os::unix::fs::PermissionsExt;
+    use unleash_client::{ClientConfig, UnleashClient};
+    use unleash_domain::{CommandId, Sequence};
+    use unleash_protocol::{ClientKind, SubscribeEventsFrame, SubscribeEventsRequest};
+
+    let rdv = local_test_dir("m1-broker-events-rdv").unwrap();
+    std::fs::set_permissions(rdv.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let data = local_test_dir("m1-broker-events-data").unwrap();
+    let pause = Arc::new(PauseAfterIntent::default());
+    let cfg = DaemonConfig {
+        data_root: Some(data.path().to_path_buf()),
+        rendezvous_dir: Some(rdv.path().to_path_buf()),
+        store_overrides: crate::StoreOverrides {
+            cutpoints: Some(pause.clone()),
+            ..Default::default()
+        },
+        ..DaemonConfig::default()
+    };
+    let DaemonStartOutcome::Started(handle) = UnleashDaemon::start(cfg).await.unwrap() else {
+        panic!("daemon attendu");
+    };
+    let runtime = handle.test_runtime_state();
+    let store = Arc::clone(&runtime.store);
+    let generation = runtime.authority_generation;
+    let cause = tokio::task::spawn_blocking(move || {
+        store.register_principal("p-sys", "system", "p-sys").unwrap();
+        let actor = ActorId::new("p-sys").unwrap();
+        let payload = serde_json::json!({"scope_kind":"user", "scope_id":"default", "patch":{"confirm_retention_shortening":false}});
+        store.commit_command(CommitCommandRequest {
+            actor_id: actor.clone(),
+            envelope: CommandEnvelope {
+                protocol_version: ProtocolVersion, request_id: RequestId::from_u128(71),
+                command_id: CommandId::from_u128(72), authority_generation: generation,
+                actor_ref: None, project_id: None, aggregate_id: generation.as_uuid(),
+                expected_revision: Revision::INITIAL, command_type: "SetSettings".into(),
+                payload: payload.as_object().unwrap().clone(),
+            },
+            target_aggregate: AggregateKind::Settings, operation_id: None, receipt_state: ReceiptState::Accepted,
+            result_ref: None, retention_days_override: None, fence_assertion: None,
+            mutation: CommandMutation::SetSettings {
+                scope_kind: SettingsScopeKind::User, scope_id: "default".into(),
+                caller: CallerAuthority { actor_id: actor, role: CallerRole::PolicyAdmin },
+                patch: SettingsPatch::default(),
+            },
+            events: Vec::new(), capacity_reservations: Vec::new(), budget_reservations: Vec::new(),
+        }).unwrap().receipt().clone()
+    }).await.unwrap();
+    let client = UnleashClient::connect(ClientConfig::new(
+        handle.socket_path().to_path_buf(),
+        ClientKind::Cli,
+        "broker-events-test",
+    ))
+    .await
+    .unwrap();
+    let mut stream = client
+        .subscribe_events(&SubscribeEventsRequest {
+            stream_id: cause.event_cursor.stream_id,
+            after_sequence: Sequence::new(cause.event_cursor.sequence.as_u64() - 1),
+            project_id: None,
+            aggregate_id: None,
+            batch_limit: 16,
+        })
+        .await
+        .unwrap();
+    let initial = tokio::time::timeout(std::time::Duration::from_secs(5), stream.next_frame())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert!(
+        matches!(initial, SubscribeEventsFrame::Events { events, .. } if events.iter().any(|e| e.sequence == cause.event_cursor.sequence))
+    );
+    let (evaluation, mut intent) = super::tests::fixture();
+    intent.subject = ActionSubject::new_control_plane(
+        ActorId::new("p-sys").unwrap(),
+        format!("receipt:{}", cause.receipt_id),
+    )
+    .unwrap();
+    intent.lineage_fence = LineageFence::new(generation, runtime.daemon_epoch, Fence::ZERO);
+    intent.action_deadline = TimestampMs::new(
+        i64::try_from(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis(),
+        )
+        .unwrap()
+            + 60_000,
+    );
+    let action_id = intent.action_id;
+    let journal = SqliteBrokerJournal::new(Arc::clone(&runtime));
+    journal
+        .append(&BrokerJournalEntry::Authorizing { evaluation, intent })
+        .await
+        .unwrap();
+    let expected_sequence = {
+        let store = Arc::clone(&runtime.store);
+        tokio::task::spawn_blocking(move || store.read_snapshot(|conn, _| {
+            conn.query_row("SELECT sequence FROM events WHERE aggregate_id=?1 AND event_type='ActionAuthorizationRequested'",
+                [action_id.to_string()], |r| r.get::<_, i64>(0))
+                .map_err(StoreError::from_rusqlite)
+        })).await.unwrap().unwrap()
+    };
+    let frame = tokio::time::timeout(std::time::Duration::from_secs(5), stream.next_frame())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert!(
+        matches!(frame, SubscribeEventsFrame::Events { events, .. } if events.iter().any(|e|
+        e.event_type == "ActionAuthorizationRequested" && e.sequence.as_u64() == u64::try_from(expected_sequence).unwrap()))
+    );
+    // Annulation après commit C3 et avant accusé : le worker détaché doit
+    // encore publier le curseur réellement engagé à l'abonné actif.
+    let (mut evaluation, mut cancelled_intent) = super::tests::fixture();
+    evaluation.evaluation_id = unleash_domain::AuthorizationEvaluationId::from_u128(501);
+    cancelled_intent.action_id = unleash_domain::ActionId::from_u128(500);
+    cancelled_intent.subject = ActionSubject::new_control_plane(
+        ActorId::new("p-sys").unwrap(),
+        format!("receipt:{}", cause.receipt_id),
+    )
+    .unwrap();
+    cancelled_intent.lineage_fence =
+        LineageFence::new(generation, runtime.daemon_epoch, Fence::ZERO);
+    cancelled_intent.action_deadline = TimestampMs::new(
+        i64::try_from(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis(),
+        )
+        .unwrap()
+            + 60_000,
+    );
+    let cancelled_id = cancelled_intent.action_id;
+    pause.armed.store(true, Ordering::SeqCst);
+    let journal = Arc::new(journal);
+    let publisher = Arc::clone(&journal);
+    let caller = tokio::spawn(async move {
+        publisher
+            .append(&BrokerJournalEntry::Authorizing {
+                evaluation,
+                intent: cancelled_intent,
+            })
+            .await
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(5), pause.entered.notified())
+        .await
+        .unwrap();
+    caller.abort();
+    *pause.released.lock().unwrap() = true;
+    pause.condvar.notify_one();
+    let frame = tokio::time::timeout(std::time::Duration::from_secs(5), stream.next_frame())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    let cancelled_sequence = {
+        let store = Arc::clone(&runtime.store);
+        tokio::task::spawn_blocking(move || store.read_snapshot(|conn, _| {
+            conn.query_row("SELECT sequence FROM events WHERE aggregate_id=?1 AND event_type='ActionAuthorizationRequested'",
+                [cancelled_id.to_string()], |r| r.get::<_, i64>(0))
+                .map_err(StoreError::from_rusqlite)
+        })).await.unwrap().unwrap()
+    };
+    assert!(
+        matches!(frame, SubscribeEventsFrame::Events { events, .. } if events.iter().any(|e|
+        e.event_type == "ActionAuthorizationRequested" && e.sequence.as_u64() == u64::try_from(cancelled_sequence).unwrap()))
+    );
+    // C3 renvoie une erreur APRÈS commit : aucune confirmation de succès,
+    // mais l'abonné doit recevoir le curseur relu dans la base.
+    let (mut evaluation, mut uncertain) = super::tests::fixture();
+    evaluation.evaluation_id = unleash_domain::AuthorizationEvaluationId::from_u128(601);
+    uncertain.action_id = unleash_domain::ActionId::from_u128(600);
+    uncertain.subject = ActionSubject::new_control_plane(
+        ActorId::new("p-sys").unwrap(),
+        format!("receipt:{}", cause.receipt_id),
+    )
+    .unwrap();
+    uncertain.lineage_fence = LineageFence::new(generation, runtime.daemon_epoch, Fence::ZERO);
+    uncertain.action_deadline = TimestampMs::new(
+        i64::try_from(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis(),
+        )
+        .unwrap()
+            + 60_000,
+    );
+    let uncertain_id = uncertain.action_id;
+    pause.fail_after_commit.store(true, Ordering::SeqCst);
+    assert!(
+        journal
+            .append(&BrokerJournalEntry::Authorizing {
+                evaluation,
+                intent: uncertain
+            })
+            .await
+            .is_err()
+    );
+    let frame = tokio::time::timeout(std::time::Duration::from_secs(5), stream.next_frame())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    let uncertain_sequence = {
+        let store = Arc::clone(&runtime.store);
+        tokio::task::spawn_blocking(move || store.read_snapshot(|conn, _| {
+            conn.query_row("SELECT sequence FROM events WHERE aggregate_id=?1 AND event_type='ActionAuthorizationRequested'",
+                [uncertain_id.to_string()], |r| r.get::<_, i64>(0)).map_err(StoreError::from_rusqlite)
+        })).await.unwrap().unwrap()
+    };
+    assert!(
+        matches!(frame, SubscribeEventsFrame::Events { events, .. } if events.iter().any(|e|
+        e.event_type == "ActionAuthorizationRequested" && e.sequence.as_u64() == u64::try_from(uncertain_sequence).unwrap()))
+    );
+    drop(journal);
+    drop(stream);
+    drop(client);
+    drop(runtime);
+    handle.shutdown_graceful("test").await.unwrap();
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Loss {
     None,
@@ -207,7 +466,7 @@ async fn run_case(loss: Loss) {
             allow_cross_repository: false,
         }],
     );
-    let journal = Arc::new(SqliteBrokerJournal::new(Arc::clone(&store)));
+    let journal = Arc::new(SqliteBrokerJournal::for_store_test(Arc::clone(&store)));
     let fault = Arc::new(FaultJournal {
         inner: Arc::clone(&journal),
         loss,
@@ -443,7 +702,7 @@ async fn run_case(loss: Loss) {
     if matches!(loss, Loss::None | Loss::AfterObservation) {
         assert_eq!(after_restart, "observed_success");
     }
-    let journal2 = Arc::new(SqliteBrokerJournal::new(Arc::clone(&reopened)));
+    let journal2 = Arc::new(SqliteBrokerJournal::for_store_test(Arc::clone(&reopened)));
     if loss != Loss::BeforeDispatch {
         assert!(journal2.append(&dispatch).await.is_err());
     }

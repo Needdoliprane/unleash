@@ -89,6 +89,8 @@ pub enum DaemonStartOutcome {
 /// Handle de contrôle sur une instance [`UnleashDaemon`] active.
 #[derive(Debug)]
 pub struct DaemonHandle {
+    #[cfg(test)]
+    test_state: std::sync::Weak<DaemonRuntimeState>,
     socket_path: PathBuf,
     data_root: PathBuf,
     rendezvous_dir: PathBuf,
@@ -103,6 +105,10 @@ pub struct DaemonHandle {
 }
 
 impl DaemonHandle {
+    #[cfg(test)]
+    pub(crate) fn test_runtime_state(&self) -> Arc<DaemonRuntimeState> {
+        self.test_state.upgrade().expect("daemon test runtime")
+    }
     /// Chemin du socket Unix servi par le daemon.
     #[must_use]
     pub fn socket_path(&self) -> &Path {
@@ -521,6 +527,8 @@ impl UnleashDaemon {
         });
 
         let handle = DaemonHandle {
+            #[cfg(test)]
+            test_state: Arc::downgrade(&state),
             socket_path,
             data_root,
             rendezvous_dir: rdv_dir,

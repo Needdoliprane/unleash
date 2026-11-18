@@ -3,6 +3,7 @@
 //! This adapter does not start an executor. Human decisions and observations
 //! requiring evidence remain closed until their verifiers exist.
 
+use crate::ipc::{DaemonRuntimeState, publish_committed_events_ordered};
 use std::sync::Arc;
 use unleash_action_broker::{
     ActionBrokerError, ActionIntent, ActionProvenance, AuthorizationCause, AuthorizationDecision,
@@ -21,13 +22,25 @@ use unleash_store::{
 /// Broker journal backed by a durable Store port.
 pub(crate) struct SqliteBrokerJournal {
     store: Arc<UnleashStore>,
+    runtime: Option<Arc<DaemonRuntimeState>>,
 }
 
 impl SqliteBrokerJournal {
     /// Connect the journal to its Store port. This does not activate effects.
     #[must_use]
-    pub(crate) fn new(store: Arc<UnleashStore>) -> Self {
-        Self { store }
+    pub(crate) fn new(runtime: Arc<DaemonRuntimeState>) -> Self {
+        Self {
+            store: Arc::clone(&runtime.store),
+            runtime: Some(runtime),
+        }
+    }
+
+    #[cfg(test)]
+    fn for_store_test(store: Arc<UnleashStore>) -> Self {
+        Self {
+            store,
+            runtime: None,
+        }
     }
 }
 
@@ -268,22 +281,71 @@ impl BrokerJournalPort for SqliteBrokerJournal {
         Box::pin(async move {
             let (evaluation, intent, phase) = project(entry)?;
             let store = Arc::clone(&self.store);
-            tokio::task::spawn_blocking(move || {
-                let dispatch = matches!(phase, BrokerPhase::Dispatch { .. });
-                let expected_revision = store
-                    .inspect_broker_action(intent.action_id)
-                    .map_err(|_| BrokerJournalError)?
-                    .map_or(Revision::INITIAL, |snapshot| snapshot.revision);
-                let request = BrokerPhaseRequest {
-                    authority_generation: intent.lineage_fence.authority_generation,
-                    expected_revision,
-                    evaluation,
-                    phase,
+            let runtime = self.runtime.clone();
+            // L'opération détachée poursuit aussi la publication si son appelant
+            // est annulé après mise en file du writer.
+            tokio::spawn(async move {
+                let action_id = intent.action_id;
+                let recovery_store = Arc::clone(&store);
+                let result = tokio::task::spawn_blocking(move || {
+                    let dispatch = matches!(phase, BrokerPhase::Dispatch { .. });
+                    let expected_revision = store
+                        .inspect_broker_action(intent.action_id)
+                        .map_err(|_| BrokerJournalError)?
+                        .map_or(Revision::INITIAL, |snapshot| snapshot.revision);
+                    let request = BrokerPhaseRequest {
+                        authority_generation: intent.lineage_fence.authority_generation,
+                        expected_revision,
+                        evaluation,
+                        phase,
+                    };
+                    let commit = store
+                        .commit_broker_phase(request)
+                        .map_err(|_| BrokerJournalError)?;
+                    Ok::<_, BrokerJournalError>((commit, dispatch, intent.action_id))
+                })
+                .await;
+                let Ok(Ok((commit, dispatch, action_id))) = result else {
+                    // Une erreur peut suivre un commit. La lecture ne confirme
+                    // pas la phase demandée : elle permet seulement de publier
+                    // un curseur effectivement engagé, puis l'erreur demeure.
+                    if let Some(runtime) = runtime {
+                        let snapshot = tokio::task::spawn_blocking(move || {
+                            recovery_store.inspect_broker_action(action_id)
+                        })
+                        .await;
+                        if let Ok(Ok(Some(snapshot))) = snapshot
+                            && snapshot.last_event_cursor.stream_id == runtime.stream_id
+                        {
+                            publish_committed_events_ordered(
+                                &runtime,
+                                snapshot.last_event_cursor.stream_id,
+                                snapshot.last_event_cursor.sequence.as_u64(),
+                                1,
+                                &[],
+                            )
+                            .await;
+                        }
+                    }
+                    return Err(BrokerJournalError);
                 };
-                let commit = store
-                    .commit_broker_phase(request)
-                    .map_err(|_| BrokerJournalError)?;
-                if commit.action_id != intent.action_id || (dispatch && commit.replayed) {
+                if commit.action_id != action_id {
+                    return Err(BrokerJournalError);
+                }
+                if let Some(runtime) = runtime {
+                    if commit.event_cursor.stream_id != runtime.stream_id {
+                        return Err(BrokerJournalError);
+                    }
+                    publish_committed_events_ordered(
+                        &runtime,
+                        commit.event_cursor.stream_id,
+                        commit.event_cursor.sequence.as_u64(),
+                        1,
+                        &[],
+                    )
+                    .await;
+                }
+                if dispatch && commit.replayed {
                     return Err(BrokerJournalError);
                 }
                 Ok(())
@@ -307,7 +369,7 @@ mod tests {
         DaemonEpoch, Fence, LineageFence, ReconcileStrategy, SecretRef, TimestampMs,
     };
 
-    fn fixture() -> (AuthorizationEvaluation, ActionIntent) {
+    pub(super) fn fixture() -> (AuthorizationEvaluation, ActionIntent) {
         let principal = ActorId::new("p-sys").unwrap();
         let receipt = ReceiptId::from_u128(10);
         let intent = ActionIntent {
