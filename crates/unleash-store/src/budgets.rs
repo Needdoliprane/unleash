@@ -531,6 +531,29 @@ pub(crate) fn tx_release_capacity_reservation(
     now_ms: TimestampMs,
     reservation_id: ReservationId,
 ) -> Result<(), StoreError> {
+    let execution: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM capacity_reservations c JOIN capacity_pools p ON p.pool_id=c.pool_id WHERE c.reservation_id=?1 AND p.pool_kind='execution')", [reservation_id.to_string()], |row| row.get(0))?;
+    if execution {
+        // Historical queued reservations with no physical attempt/effect can be
+        // released. An absent or uncertain owner is never evidence of a stop.
+        let never_started: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM execution_reservation_owners o JOIN invocations i ON i.invocation_id=o.invocation_id JOIN capacity_reservations c ON c.reservation_id=o.reservation_id WHERE o.reservation_id=?1 AND o.attempt_id IS NULL AND i.state='queued' AND c.owner_type='agent_invocation' AND c.owner_id=i.invocation_id AND NOT EXISTS(SELECT 1 FROM invocation_attempts t WHERE t.invocation_id=i.invocation_id) AND NOT EXISTS(SELECT 1 FROM actions a WHERE a.invocation_id=i.invocation_id))", [reservation_id.to_string()], |row| row.get(0))?;
+        if !never_started {
+            return Err(StoreError::InvalidArgument {
+                reason: None,
+                message:
+                    "une exécution active exige une observation de checkpoint et neutralisation"
+                        .to_owned(),
+            });
+        }
+    }
+    tx_release_capacity_reservation_verified(tx, now_ms, reservation_id)
+}
+
+// Only the checkpoint transaction or the no-start path above may call this.
+pub(crate) fn tx_release_capacity_reservation_verified(
+    tx: &Transaction<'_>,
+    now_ms: TimestampMs,
+    reservation_id: ReservationId,
+) -> Result<(), StoreError> {
     let pool_id: Option<String> = tx
         .query_row(
             "SELECT pool_id FROM capacity_reservations
