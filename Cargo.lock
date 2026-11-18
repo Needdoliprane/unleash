@@ -5611,6 +5611,7 @@ dependencies = [
  "tracing",
  "unleash-action-broker",
  "unleash-browser",
+ "unleash-cli",
  "unleash-client",
  "unleash-domain",
  "unleash-gui",

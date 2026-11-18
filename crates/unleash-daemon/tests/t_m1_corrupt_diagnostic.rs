@@ -3,11 +3,15 @@
     clippy::unwrap_used,
     clippy::expect_used,
     clippy::panic,
-    clippy::indexing_slicing
+    clippy::indexing_slicing,
+    clippy::too_many_lines
 )]
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use unleash_client::{ClientConfig, ClientError, DiagnosticClient, UnleashClient};
 use unleash_daemon::{DaemonConfig, DaemonError, DaemonStartOutcome, UnleashDaemon};
+use unleash_domain::RequestId;
+use unleash_protocol::{ClientKind, ErrorCode, ReasonCode};
 use unleash_store::StoreConfig;
 use unleash_testkit::local_test_dir;
 
@@ -91,6 +95,55 @@ async fn corrupt_store_starts_locked_diagnostic_without_touching_database() {
             .get("watermark")
             .is_none_or(serde_json::Value::is_null)
     );
+    let denied_mutation = exchange(&mut stream, serde_json::json!({
+        "protocol_version":"unleash.ipc.v2", "request_id":"00000000-0000-0000-0000-000000000005",
+        "command_type":"CreateProject", "payload":{}
+    })).await;
+    assert_eq!(denied_mutation["reason_code"], "STORAGE_CORRUPT");
+    let denied_subscription = exchange(
+        &mut stream,
+        serde_json::json!({
+            "stream_id":"00000000-0000-0000-0000-000000000000", "after_sequence":0, "batch_limit":1
+        }),
+    )
+    .await;
+    assert_eq!(denied_subscription["reason_code"], "STORAGE_CORRUPT");
+    let legacy_config =
+        ClientConfig::new(handle.socket_path().to_path_buf(), ClientKind::Cli, "test");
+    assert!(
+        matches!(UnleashClient::connect(legacy_config.clone()).await,
+        Err(ClientError::Remote(error)) if error.reason_code == Some(ReasonCode::StorageCorrupt))
+    );
+    let mut diagnostic = DiagnosticClient::connect(legacy_config.without_admin_credential())
+        .await
+        .unwrap();
+    let status = diagnostic.status(RequestId::from_u128(2)).await.unwrap();
+    assert_eq!(status.result["mode"], "read_only_recovery");
+    assert!(status.watermark.is_none());
+    assert!(
+        matches!(diagnostic.inspect_recovery(RequestId::from_u128(3)).await,
+        Err(ClientError::Remote(error)) if error.code == ErrorCode::CapabilityDenied)
+    );
+    let mut wrong = tokio::net::UnixStream::connect(handle.socket_path())
+        .await
+        .unwrap();
+    let mut wrong_hello = hello(vec!["read_only_recovery_v1"]);
+    wrong_hello["admin_proof"] = serde_json::json!("0".repeat(64));
+    let _ = exchange(&mut wrong, wrong_hello).await;
+    let refusal = exchange(&mut wrong, serde_json::json!({
+        "protocol_version":"unleash.ipc.v2", "request_id":"00000000-0000-0000-0000-000000000004",
+        "query_type":"InspectRecovery", "project_id":null, "payload":{}
+    })).await;
+    assert_eq!(refusal["code"], "CapabilityDenied");
+    let cli = unleash_cli::Cli {
+        socket: Some(handle.socket_path().to_path_buf()),
+        json: true,
+        timeout_ms: 5000,
+        command: unleash_cli::Commands::Status,
+    };
+    let output = unleash_cli::run_cli(&cli).await.unwrap();
+    assert_eq!(output["mode"], "read_only_recovery");
+    assert_eq!(output["storage_corrupt"], true);
     let socket_path = handle.socket_path().to_path_buf();
     tokio::time::timeout(Duration::from_secs(5), handle.shutdown_graceful())
         .await

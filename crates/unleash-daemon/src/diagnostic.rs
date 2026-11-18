@@ -249,6 +249,21 @@ async fn serve(mut stream: UnixStream, verifier: Arc<dyn AuthVerifierPort>, _con
             {
                 return;
             }
+        } else if query.query_type == "InspectRecovery"
+            && (!session.capabilities.contains(&Capability::Administer)
+                || !session.capabilities.contains(&Capability::QueryState)
+                || session.allowed_projects.is_some())
+        {
+            let error = IpcError::from_reason(
+                ReasonCode::OperationNotAuthorized,
+                "Preuve administrative globale requise",
+            );
+            if write_json_frame_timeout(&mut stream, &error, TIMEOUT)
+                .await
+                .is_err()
+            {
+                return;
+            }
         } else {
             // InspectRecovery remains closed until the offline manifest reader is qualified.
             if write_json_frame_timeout(&mut stream, &corrupt(), TIMEOUT)
