@@ -449,6 +449,19 @@ async fn dispatch_query(
     session: &AuthenticatedSession,
     query: QueryEnvelope,
 ) -> Result<QueryResponse, IpcError> {
+    if !query.payload.is_empty()
+        && matches!(
+            query.query_type.as_str(),
+            "GetDaemonStatus" | "GetHealth" | "GetStateSnapshot"
+        )
+    {
+        return Err(IpcError::new(
+            ErrorCode::InvalidArgument,
+            None,
+            "Payload de requête invalide",
+            RetryClass::Never,
+        ));
+    }
     match query.query_type.as_str() {
         "GetDaemonStatus" => query_daemon_status(state, session, query.request_id).await,
         "GetHealth" => query_health(state, query.request_id).await,
