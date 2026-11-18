@@ -5,11 +5,11 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
-use rusqlite::{Connection, OpenFlags, Transaction, TransactionBehavior};
+use rusqlite::{Connection, OpenFlags, OptionalExtension, Transaction, TransactionBehavior};
 use unleash_domain::{
     AccountId, ActionId, ActorId, AuthorityGeneration, BackupId, CommandId, DaemonEpoch,
-    DaemonInstanceId, LeaseId, MicrosAmount, PoolId, ProjectId, ReceiptId, Sequence, Sha256Digest,
-    StreamId, TimestampMs,
+    DaemonInstanceId, LeaseId, MicrosAmount, PoolId, ProjectId, Sequence, Sha256Digest, StreamId,
+    TimestampMs,
 };
 use unleash_protocol::{CommandEnvelope, EventEnvelope};
 use uuid::Uuid;
@@ -97,6 +97,15 @@ impl Drop for SnapshotReaderGuard<'_> {
         }
         self.readers.unregister(self.reader_id);
     }
+}
+
+/// Projection et curseur de la même vue SQLite, sans SQL dans les clients.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SnapshotProjection<T> {
+    /// Projection typée.
+    pub value: T,
+    /// Watermark du journal dans la transaction de lecture.
+    pub cursor: unleash_protocol::EventCursor,
 }
 
 /// Façade propriétaire de la persistance locale `SQLite` d'Unleash.
@@ -1389,34 +1398,165 @@ impl UnleashStore {
             })
     }
 
-    /// Lève explicitement le gel d'un scope après disposition autorisée (F018).
+    /// Enregistre une disposition interne habilitée et lève le seul gel de la restauration visée.
+    ///
+    /// Aucun état d'action ni montant budgétaire n'est converti par cette décision.
     ///
     /// # Errors
-    /// Retourne [`StoreError`] en cas d'erreur SQL.
+    /// Refuse une autorité insuffisante, un reçu étranger, une politique ou restauration obsolète.
     pub fn dispose_frozen_scope(
         &self,
-        scope_id: &str,
-        disposition_receipt_id: ReceiptId,
+        disposition: crate::recovery_ops::ScopeFreezeDisposition,
     ) -> Result<usize, StoreError> {
-        let sid = scope_id.to_owned();
-        let rcpt = disposition_receipt_id.to_string();
-        self.writer.submit_immediate_blocking(
-            WriteCriticality::Critical,
-            false,
-            move |tx, now_ms| {
-                let updated = tx
-                    .execute(
-                        "UPDATE recovery_scope_freezes
-                         SET state = 'disposed', disposed_at_ms = ?1, disposition_receipt_id = ?2
-                         WHERE scope_id = ?3 AND state = 'frozen'",
-                        rusqlite::params![now_ms.as_i64(), rcpt, sid],
-                    )
-                    .map_err(StoreError::from_rusqlite)?;
-                Ok(updated)
-            },
-        )
+        crate::policies_secrets::require_human_decider(
+            &disposition.caller,
+            "recovery scope disposition",
+        )?;
+        if disposition.reason.trim().is_empty()
+            || disposition.dependency_budget_impact.trim().is_empty()
+            || disposition.policy_revision < 0
+        {
+            return Err(StoreError::InvalidArgument {
+                reason: None,
+                message: "disposition requires reason, policy and dependency/budget impact"
+                    .to_owned(),
+            });
+        }
+        let decision_json = serde_json::to_string(&disposition)?;
+        self.writer.submit_immediate_blocking(WriteCriticality::Critical, false, move |tx, now_ms| {
+            let current: Option<(String, String)> = tx.query_row(
+                "SELECT f.state, i.target_authority_generation FROM recovery_scope_freezes f
+                 JOIN restore_imports i ON i.restore_id = f.restore_id
+                 WHERE f.scope_id = ?1 AND f.restore_id = ?2",
+                rusqlite::params![disposition.scope_id, disposition.restore_id.to_string()],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            ).optional().map_err(StoreError::from_rusqlite)?;
+            let Some((state, target_authority)) = current else {
+                return Err(StoreError::RecoveryInProgress("scope/restore mismatch".to_owned()));
+            };
+            let active = read_daemon_state_conn(tx)?.authority_generation.to_string();
+            if target_authority != active {
+                return Err(StoreError::RecoveryInProgress("restore is not the active lineage".to_owned()));
+            }
+            let receipt_valid: i64 = tx.query_row(
+                "SELECT COUNT(*) FROM command_receipts WHERE receipt_id = ?1 AND actor_id = ?2
+                 AND authority_generation = ?3 AND state IN ('accepted', 'completed')",
+                rusqlite::params![disposition.decision_receipt_id.to_string(), disposition.caller.actor_id.to_string(), active],
+                |r| r.get(0),
+            ).map_err(StoreError::from_rusqlite)?;
+            if receipt_valid != 1 {
+                return Err(StoreError::Unauthorized("scope disposition receipt/actor/lineage mismatch".to_owned()));
+            }
+            let policy_applies = (disposition.policy_scope_kind == "global" && disposition.policy_scope_id == "global")
+                || (disposition.policy_scope_kind == "project" && disposition.policy_scope_id == disposition.scope_id);
+            let revision: i64 = tx.query_row(
+                "SELECT COALESCE(MAX(revision), 0) FROM security_policies WHERE scope_kind = ?1 AND scope_id = ?2",
+                rusqlite::params![disposition.policy_scope_kind, disposition.policy_scope_id], |r| r.get(0),
+            ).map_err(StoreError::from_rusqlite)?;
+            if !policy_applies || revision != disposition.policy_revision {
+                return Err(StoreError::Unauthorized("scope disposition policy mismatch".to_owned()));
+            }
+            if state != "frozen" {
+                let previous: Option<String> = tx.query_row(
+                    "SELECT decision_json FROM recovery_scope_dispositions WHERE scope_id = ?1 AND restore_id = ?2",
+                    rusqlite::params![disposition.scope_id, disposition.restore_id.to_string()], |r| r.get(0),
+                ).optional().map_err(StoreError::from_rusqlite)?;
+                return if previous.as_deref() == Some(&decision_json) { Ok(0) } else {
+                    Err(StoreError::ContractViolation { reason: None, message: "scope already disposed by another decision".to_owned() })
+                };
+            }
+            tx.execute(
+                "INSERT INTO recovery_scope_dispositions (scope_id, restore_id, decision_receipt_id, decided_by_actor, decision_json, created_at_ms)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                rusqlite::params![disposition.scope_id, disposition.restore_id.to_string(), disposition.decision_receipt_id.to_string(),
+                    disposition.caller.actor_id.to_string(), decision_json, now_ms.as_i64()],
+            ).map_err(StoreError::from_rusqlite)?;
+            tx.execute(
+                "UPDATE recovery_scope_freezes SET state = 'disposed', disposed_at_ms = ?1, disposition_receipt_id = ?2
+                 WHERE scope_id = ?3 AND restore_id = ?4 AND state = 'frozen'",
+                rusqlite::params![now_ms.as_i64(), disposition.decision_receipt_id.to_string(), disposition.scope_id, disposition.restore_id.to_string()],
+            ).map_err(StoreError::from_rusqlite)
+        })
     }
 
+    fn project_snapshot<T>(
+        &self,
+        read: impl FnOnce(&Connection) -> Result<T, StoreError>,
+    ) -> Result<SnapshotProjection<T>, StoreError> {
+        self.read_snapshot(|conn, _ctx| {
+            let daemon = read_daemon_state_conn(conn)?;
+            let high: i64 = conn
+                .query_row(
+                    "SELECT COALESCE(MAX(sequence), 0) FROM events WHERE stream_id = ?1",
+                    [daemon.stream_id.to_string()],
+                    |r| r.get(0),
+                )
+                .map_err(StoreError::from_rusqlite)?;
+            let value = read(conn)?;
+            Ok(SnapshotProjection {
+                value,
+                cursor: unleash_protocol::EventCursor::new(
+                    daemon.stream_id,
+                    Sequence::new(u64::try_from(high).unwrap_or(0)),
+                ),
+            })
+        })
+    }
+
+    /// Liste projets et watermark dans une seule transaction lectrice.
+    ///
+    /// # Errors
+    /// Retourne les erreurs de lecture du store.
+    pub fn list_projects_snapshot(
+        &self,
+    ) -> Result<SnapshotProjection<Vec<ProjectRecord>>, StoreError> {
+        self.project_snapshot(list_projects_conn)
+    }
+
+    /// Lit projet et watermark dans une seule transaction lectrice.
+    ///
+    /// # Errors
+    /// Retourne les erreurs de lecture du store.
+    pub fn get_project_snapshot(
+        &self,
+        project_id: ProjectId,
+    ) -> Result<SnapshotProjection<ProjectRecord>, StoreError> {
+        self.project_snapshot(|conn| get_project_conn(conn, project_id))
+    }
+
+    /// Lit réglages et watermark dans une seule transaction lectrice.
+    ///
+    /// # Errors
+    /// Retourne les erreurs de lecture du store.
+    pub fn read_settings_snapshot(
+        &self,
+        scope_kind: SettingsScopeKind,
+        scope_id: &str,
+    ) -> Result<SnapshotProjection<SettingsRecord>, StoreError> {
+        let now_ms = self.config.clock.now_ms();
+        self.project_snapshot(|conn| read_settings_conn(conn, now_ms, scope_kind, scope_id))
+    }
+
+    /// Lit résumé de politique et watermark dans une seule transaction lectrice.
+    ///
+    /// # Errors
+    /// Retourne les erreurs de lecture du store.
+    pub fn read_policy_summary_snapshot(
+        &self,
+        project_id: Option<ProjectId>,
+    ) -> Result<SnapshotProjection<PolicySummary>, StoreError> {
+        self.project_snapshot(|conn| read_policy_summary_conn(conn, project_id))
+    }
+
+    /// Lit récupération et watermark dans une seule transaction lectrice.
+    ///
+    /// # Errors
+    /// Retourne les erreurs de lecture du store.
+    pub fn inspect_recovery_snapshot(
+        &self,
+    ) -> Result<SnapshotProjection<RecoveryReport>, StoreError> {
+        self.project_snapshot(|conn| inspect_recovery_conn(conn, &self.config))
+    }
     /// Liste tous les projets persistés (`ListProjects`).
     ///
     /// # Errors
@@ -1553,8 +1693,7 @@ impl UnleashStore {
     /// # Errors
     /// Retourne [`StoreError`] en cas d'erreur de lecture.
     pub fn inspect_recovery(&self) -> Result<RecoveryReport, StoreError> {
-        let maint = self.config.maintenance_dir.clone();
-        self.read_snapshot(|conn, _ctx| inspect_recovery_conn(conn, &maint))
+        self.read_snapshot(|conn, _ctx| inspect_recovery_conn(conn, &self.config))
     }
 
     /// Inspecte l'état de récupération hors-ligne, y compris quand la base source est corrompue (`0600` manifest).

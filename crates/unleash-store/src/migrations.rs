@@ -9,7 +9,7 @@ use crate::config::{CutpointObserver, StoreCutpoint};
 use crate::error::StoreError;
 
 /// Version courante maximale du schéma gérée par cette version de `unleash-store`.
-pub const CURRENT_SCHEMA_VERSION: i64 = 3;
+pub const CURRENT_SCHEMA_VERSION: i64 = 4;
 
 /// État persisté d'une migration dans `schema_migrations`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -83,6 +83,11 @@ const MIGRATIONS: &[MigrationDef] = &[
         version: 3,
         name: "v003_m1_projects_policies_secrets_recovery_retention",
         sql: V003_SQL,
+    },
+    MigrationDef {
+        version: 4,
+        name: "v004_recovery_scope_dispositions",
+        sql: V004_SQL,
     },
 ];
 
@@ -1566,5 +1571,17 @@ CREATE TABLE IF NOT EXISTS restore_manifest_records (
     blocked_reason TEXT,
     updated_at_ms INTEGER NOT NULL,
     imported_at_ms INTEGER NOT NULL
+) STRICT;
+";
+
+const V004_SQL: &str = "
+CREATE TABLE recovery_scope_dispositions (
+    scope_id TEXT NOT NULL REFERENCES recovery_scope_freezes(scope_id),
+    restore_id TEXT NOT NULL REFERENCES restore_imports(restore_id),
+    decision_receipt_id TEXT NOT NULL REFERENCES command_receipts(receipt_id),
+    decided_by_actor TEXT NOT NULL,
+    decision_json TEXT NOT NULL,
+    created_at_ms INTEGER NOT NULL,
+    PRIMARY KEY (scope_id, restore_id)
 ) STRICT;
 ";

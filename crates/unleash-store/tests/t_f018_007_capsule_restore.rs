@@ -709,10 +709,10 @@ fn test_t_f018_007_full_capsule_dispatches_tombstones_neutralization_and_freeze(
         Some(ReasonCode::RecoveryInProgress)
     );
 
-    // Une fois `post_act` réconciliée, le gel du scope est levé !
-    restored
+    // Classifier une action ne dispose pas le scope du delta post-snapshot.
+    let disposition_receipt = restored
         .commit_command(CommitCommandRequest {
-            actor_id: admin,
+            actor_id: admin.clone(),
             envelope: make_env(
                 &ids,
                 auth_2,
@@ -730,7 +730,7 @@ fn test_t_f018_007_full_capsule_dispatches_tombstones_neutralization_and_freeze(
             fence_assertion: None,
             mutation: CommandMutation::ReconcileAction {
                 action_id: post_act,
-                caller: human,
+                caller: human.clone(),
                 outcome: ReconcileOutcome::ConfirmedFailureNoEffect,
                 evidence_digest: None,
                 receipt_hash: None,
@@ -749,6 +749,41 @@ fn test_t_f018_007_full_capsule_dispatches_tombstones_neutralization_and_freeze(
             .list_frozen_scopes()
             .unwrap()
             .into_iter()
-            .all(|(_, _, st)| st == "disposed")
+            .any(|(_, _, st)| st == "frozen")
     );
+    let mut decision = unleash_store::ScopeFreezeDisposition {
+        scope_id: project_id.to_string(),
+        restore_id: act_res.restore_id,
+        decision_receipt_id: disposition_receipt.receipt().receipt_id,
+        caller: human,
+        reason: "suite distincte autorisée après examen de la capsule".to_owned(),
+        policy_scope_kind: "global".to_owned(),
+        policy_scope_id: "global".to_owned(),
+        policy_revision: 0,
+        evidence_digests: vec![act_res.capsule_object_hash],
+        dependency_budget_impact: "coûts conservés, nouvelle intention distincte seulement"
+            .to_owned(),
+    };
+    let mut wrong_actor = decision.clone();
+    wrong_actor.caller.actor_id = ActorId::new("user:other").unwrap();
+    assert!(matches!(
+        restored.dispose_frozen_scope(wrong_actor),
+        Err(StoreError::Unauthorized(_))
+    ));
+    decision.policy_revision = 9;
+    assert!(matches!(
+        restored.dispose_frozen_scope(decision.clone()),
+        Err(StoreError::Unauthorized(_))
+    ));
+    decision.policy_revision = 0;
+    assert_eq!(restored.dispose_frozen_scope(decision.clone()).unwrap(), 1);
+    assert_eq!(restored.dispose_frozen_scope(decision.clone()).unwrap(), 0);
+    let report = restored.inspect_recovery().unwrap();
+    let scope = report
+        .frozen_scopes
+        .iter()
+        .find(|s| s.scope_id == project_id.to_string())
+        .unwrap();
+    assert_eq!(scope.state, "disposed");
+    assert_eq!(scope.disposition.as_ref(), Some(&decision));
 }

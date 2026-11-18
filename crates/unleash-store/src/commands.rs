@@ -1038,19 +1038,6 @@ pub(crate) fn tx_commit_command(
     )
     .map_err(StoreError::from_rusqlite)?;
 
-    if matches!(
-        req.mutation,
-        CommandMutation::ReconcileAction { .. } | CommandMutation::ResolveActionOutcome { .. }
-    ) {
-        tx.execute(
-            "UPDATE recovery_scope_freezes
-             SET disposition_receipt_id = ?1
-             WHERE state = 'disposed' AND disposed_at_ms = ?2 AND disposition_receipt_id IS NULL",
-            rusqlite::params![receipt_id_str, now_ms.as_i64()],
-        )
-        .map_err(StoreError::from_rusqlite)?;
-    }
-
     cutpoints.hit(StoreCutpoint::C1BeforeCommandCommit)?;
 
     Ok(CommitOutcome::Committed(receipt))

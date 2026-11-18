@@ -124,6 +124,21 @@ impl ExecutorNeutralizer for EmptyExecutorNeutralizer {
 /// Résumé d'une action ou effet postérieur au watermark du backup inclus dans la capsule.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CapsuleActionDelta {
+    /// Run source, même lorsqu'il est absent du snapshot.
+    #[serde(default)]
+    pub run_id: Option<String>,
+    /// Invocation source, même lorsqu'elle est absente du snapshot.
+    #[serde(default)]
+    pub invocation_id: Option<String>,
+    /// Projet source.
+    #[serde(default)]
+    pub project_id: Option<String>,
+    /// Empreinte du payload source.
+    #[serde(default)]
+    pub payload_hash: Option<Sha256Digest>,
+    /// Révision source à la collecte.
+    #[serde(default)]
+    pub source_revision: u64,
     /// Identifiant de l'action source.
     pub action_id: ActionId,
     /// Scope métier affecté.
@@ -1169,6 +1184,11 @@ fn collect_source_delta(
 
             if let Ok(parsed_action_id) = act.action_id.parse::<ActionId>() {
                 delta.capsule_actions.push(CapsuleActionDelta {
+                    run_id: act.run_id.clone(),
+                    invocation_id: act.invocation_id.clone(),
+                    project_id: act.project_id.clone(),
+                    payload_hash: Some(act.payload_hash.parse()?),
+                    source_revision: u64::try_from(act.revision).unwrap_or(0),
                     action_id: parsed_action_id,
                     scope_id,
                     state: act.state.clone(),
