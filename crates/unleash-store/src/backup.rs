@@ -116,7 +116,7 @@ pub struct BackupManifest {
 /// Demande de création d'une sauvegarde complète (`PrepareBackup`).
 #[derive(Debug, Clone)]
 pub struct PrepareBackupRequest {
-    /// Répertoire cible autorisé pour ce jeu complet (par défaut sous `backups_dir/<backup_id>`).
+    /// Nouvelle feuille cible autorisée, jamais précréée (par défaut sous `backups_dir/<backup_id>`).
     pub destination_dir: PathBuf,
     /// Palier de rétention (Q-12).
     pub retention_tier: BackupRetentionTier,
@@ -442,6 +442,43 @@ pub(crate) fn tx_abandon_backup_job(
     Ok(())
 }
 
+fn prevalidate_backup_destination(destination: &Path) -> Result<(), StoreError> {
+    if destination.file_name().is_none() {
+        return Err(StoreError::InvalidArgument {
+            reason: None,
+            message: "la destination de sauvegarde doit désigner une nouvelle feuille".into(),
+        });
+    }
+    match fs::symlink_metadata(destination) {
+        Ok(_) => Err(StoreError::InvalidArgument {
+            reason: None,
+            message: "la destination de sauvegarde existe déjà".into(),
+        }),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn reserve_backup_destination(destination: &Path) -> Result<(), StoreError> {
+    let parent = destination
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    fs::create_dir_all(parent)?;
+    let mut builder = fs::DirBuilder::new();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
+    }
+    // Prevalidation is only an early refusal. This non-recursive mkdir reserves the leaf
+    // exclusively and refuses a directory, file or symlink that appeared after C11a.
+    builder.create(destination)?;
+    set_dir_permissions_0700(destination)?;
+    sync_dir(parent)?;
+    Ok(())
+}
+
 /// Exécute le protocole complet `PrepareBackup` (barrière durable, `sqlite3_backup_step(-1)`, pins, copies, vérifications, Q-12).
 #[expect(
     clippy::too_many_lines,
@@ -462,6 +499,7 @@ pub(crate) fn prepare_backup_workflow(
             message: "destination de sauvegarde identique à la racine live interdite".to_owned(),
         });
     }
+    prevalidate_backup_destination(&req.destination_dir)?;
 
     let backup_id = BackupId::from_uuid(config.id_generator.new_uuid());
     let _span = tracing::info_span!(
@@ -527,12 +565,8 @@ pub(crate) fn prepare_backup_workflow(
 
     cutpoints.hit(StoreCutpoint::C11aAfterBackupBarrier)?;
 
-    fs::create_dir_all(&req.destination_dir)?;
-    set_dir_permissions_0700(&req.destination_dir)?;
+    reserve_backup_destination(&req.destination_dir)?;
     let snapshot_db_path = req.destination_dir.join("db.sqlite");
-    if snapshot_db_path.exists() {
-        fs::remove_file(&snapshot_db_path)?;
-    }
 
     {
         let src_conn = open_reader_connection(config)?;
