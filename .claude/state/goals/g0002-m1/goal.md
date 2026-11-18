@@ -24,8 +24,8 @@ Jalon : M1 — Features : F001, F002, F017 (broker interne), F018 (squelette rep
 ## Plan
 | Tâche | Objectif | Écriture exclusive | Dépend de | Rôle | Niveau / modèle | Vérification | Statut |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| t01a | `crates/unleash-action-broker` + double `GuardPort` dans `unleash-testkit` (parallèle) | `Cargo.*`, `crates/unleash-action-broker/**`, `crates/unleash-testkit/**` | — | systems-implementer | strong / pro | fmt/clippy/test/doc/deny | pending |
-| t01b | `crates/unleash-store` M1 + backup/restore/capsule F018 + Q-12 (parallèle) | `crates/unleash-store/**` | — | systems-implementer | strong / pro | fmt/clippy/test/doc/deny | pending |
+| t01a | `crates/unleash-action-broker` + double `GuardPort` dans `unleash-testkit` (parallèle) | `Cargo.*`, `crates/unleash-action-broker/**`, `crates/unleash-testkit/**` | — | systems-implementer | strong / pro | fmt/clippy/test/doc/deny | in_progress |
+| t01b | `crates/unleash-store` M1 + backup/restore/capsule F018 + Q-12 (parallèle) | `crates/unleash-store/**` | — | systems-implementer | strong / pro | fmt/clippy/test/doc/deny | in_progress |
 | t02 | Câblage `ActionBroker` et opérations M1 dans `daemon`/`client`/`cli` | `crates/unleash-{daemon,client,cli}/**` | t01a, t01b | systems-implementer | strong / pro | fmt/clippy/test/doc/deny | pending |
 | t03 | Preuves `EV-F017/F018-*`, `qualification/m1/exit.md`, revues experts, fusion `dev` & push | `qualification/**`, `.claude/state/goals/**` | t02 | root + experts | strong / pro | Toutes gates sur `dev` | pending |
 
