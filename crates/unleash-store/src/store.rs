@@ -83,6 +83,36 @@ use crate::writer::{
     open_reader_connection, run_guarded_immediate_tx, spawn_held_reader_session,
 };
 
+// Le contrôle RO existant est exécuté une fois, avant toute initialisation de fichiers.
+// La validation propre aux migrations après ouverture RW reste distincte et inchangée.
+fn readonly_open_preflight(
+    config: &StoreConfig,
+    pre_migration_backup_id: Option<BackupId>,
+) -> Result<(), StoreError> {
+    // Pré-contrôle strictement en lecture seule sur base existante (zéro écriture si refus)
+    if config.db_path.try_exists()? {
+        let ro_conn = Connection::open_with_flags(
+            &config.db_path,
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )
+        .map_err(StoreError::from_rusqlite)?;
+        ro_conn
+            .busy_timeout(std::time::Duration::from_millis(u64::from(
+                config.busy_timeout_ms,
+            )))
+            .map_err(StoreError::from_rusqlite)?;
+        let _ = inspect_and_verify_build(&ro_conn, &config.build_policy)?;
+        let _ = preflight_check_existing_db(
+            &ro_conn,
+            config.max_supported_schema_version,
+            pre_migration_backup_id,
+        )?;
+        drop(ro_conn);
+    }
+
+    Ok(())
+}
+
 struct SnapshotReaderGuard<'a> {
     conn: Option<Connection>,
     readers: &'a ReaderRegistry,
@@ -106,6 +136,26 @@ pub struct SnapshotProjection<T> {
     pub value: T,
     /// Watermark du journal dans la transaction de lecture.
     pub cursor: unleash_protocol::EventCursor,
+}
+
+/// Frontière atteinte lorsqu'une ouverture échoue.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StoreOpenStage {
+    /// Contrôles existants RO, avant initialisation FS ou connexion `SQLite` RW.
+    ReadOnlyPreflight,
+    /// Initialisation, connexion RW, migrations ou démarrage du writer.
+    AfterPreflight,
+}
+
+/// Échec d'ouverture attribué à une phase précise, sans relancer le préflight.
+#[derive(Debug, thiserror::Error)]
+#[error("Store open failed at {stage:?}: {error}")]
+pub struct StoreOpenFailure {
+    /// Phase attestée par le chemin réellement exécuté.
+    pub stage: StoreOpenStage,
+    /// Erreur d'origine conservée.
+    #[source]
+    pub error: StoreError,
 }
 
 /// Façade propriétaire de la persistance locale `SQLite` d'Unleash.
@@ -380,6 +430,40 @@ impl UnleashStore {
         config: StoreConfig,
         pre_migration_backup_id: Option<BackupId>,
     ) -> Result<Self, StoreError> {
+        Self::open_classified_with_backup(config, pre_migration_backup_id)
+            .map_err(|failure| failure.error)
+    }
+
+    /// Ouvre en attribuant chaque échec à la frontière réellement franchie.
+    ///
+    /// # Errors
+    /// Seul `ReadOnlyPreflight` atteste un refus avant toute initialisation FS/connexion RW.
+    pub fn open_classified(config: StoreConfig) -> Result<Self, StoreOpenFailure> {
+        Self::open_classified_with_backup(config, None)
+    }
+
+    fn open_classified_with_backup(
+        config: StoreConfig,
+        pre_migration_backup_id: Option<BackupId>,
+    ) -> Result<Self, StoreOpenFailure> {
+        readonly_open_preflight(&config, pre_migration_backup_id).map_err(|error| {
+            StoreOpenFailure {
+                stage: StoreOpenStage::ReadOnlyPreflight,
+                error,
+            }
+        })?;
+        Self::open_after_preflight(config, pre_migration_backup_id).map_err(|error| {
+            StoreOpenFailure {
+                stage: StoreOpenStage::AfterPreflight,
+                error,
+            }
+        })
+    }
+
+    fn open_after_preflight(
+        config: StoreConfig,
+        pre_migration_backup_id: Option<BackupId>,
+    ) -> Result<Self, StoreError> {
         fs::create_dir_all(&config.data_root)?;
         set_dir_permissions_0700(&config.data_root)?;
         if let Some(db_parent) = config.db_path.parent() {
@@ -388,27 +472,6 @@ impl UnleashStore {
         }
         fs::create_dir_all(&config.artifacts_dir)?;
         set_dir_permissions_0700(&config.artifacts_dir)?;
-
-        // Pré-contrôle strictement en lecture seule sur base existante (zéro écriture si refus)
-        if config.db_path.exists() {
-            let ro_conn = Connection::open_with_flags(
-                &config.db_path,
-                OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-            )
-            .map_err(StoreError::from_rusqlite)?;
-            ro_conn
-                .busy_timeout(std::time::Duration::from_millis(u64::from(
-                    config.busy_timeout_ms,
-                )))
-                .map_err(StoreError::from_rusqlite)?;
-            let _ = inspect_and_verify_build(&ro_conn, &config.build_policy)?;
-            let _ = preflight_check_existing_db(
-                &ro_conn,
-                config.max_supported_schema_version,
-                pre_migration_backup_id,
-            )?;
-            drop(ro_conn);
-        }
 
         let mut rw_conn = Connection::open_with_flags(
             &config.db_path,

@@ -97,7 +97,7 @@ pub use restore::{
     ExecutorNeutralizer, MaintenanceManifestEntry, MaintenanceRestoreManifest,
     RestoreActivationResult, RestoreBackupRequest, RestoreCapsule, RestoreRequestState,
 };
-pub use store::{SnapshotProjection, UnleashStore};
+pub use store::{SnapshotProjection, StoreOpenFailure, StoreOpenStage, UnleashStore};
 pub use unleash_domain::ReconcileOutcome;
 pub use writer::{HeldReaderSession, ReaderContext, ReaderControl, WalTelemetry};
 
