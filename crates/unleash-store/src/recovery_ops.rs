@@ -244,7 +244,7 @@ pub struct ScopeFreezeDisposition {
     pub scope_id: String,
     /// Restauration courante ayant posé le gel.
     pub restore_id: RestoreId,
-    /// Reçu engagé sous la lignée active par le décideur.
+    /// Identifiant serveur dédié au reçu interne engagé atomiquement avec cette décision.
     pub decision_receipt_id: ReceiptId,
     /// Décideur résolu par le service appelant.
     pub caller: CallerAuthority,
@@ -287,6 +287,8 @@ pub struct RecoveryScopeFreezeRecord {
 /// Rapport global retourné par `InspectRecovery`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RecoveryReport {
+    /// Purges engagées, état physique et checkpoint, y compris issues bloquées.
+    pub retention_purges: Vec<crate::events::RetentionPurgeStatusRecord>,
     /// Mode courant du daemon si base lisible.
     pub daemon_mode: Option<DaemonMode>,
     /// Lignée active si base lisible.
@@ -421,10 +423,6 @@ pub(crate) fn reconcile_recovered_actions_after_restart_tx(
     Ok(out)
 }
 
-#[expect(
-    clippy::too_many_arguments,
-    reason = "Émission atomique d'EffectOutcomeResolved et déblocage éventuel du WorkflowRun dans la même transaction"
-)]
 fn resolve_blocked_run_tx(
     tx: &Transaction<'_>,
     run_id: RunId,
@@ -707,17 +705,15 @@ pub(crate) fn tx_reconcile_action(
         outbox_destinations: vec![],
     });
 
-    if is_terminal_resolved {
-        if let Some(rid) = run_id {
-            resolve_blocked_run_tx(
-                tx,
-                rid,
-                action_id,
-                project_id,
-                "reconcile_action",
-                generated_events,
-            )?;
-        }
+    if is_terminal_resolved && let Some(rid) = run_id {
+        resolve_blocked_run_tx(
+            tx,
+            rid,
+            action_id,
+            project_id,
+            "reconcile_action",
+            generated_events,
+        )?;
     }
 
     Ok(Revision::new(u64::try_from(next_rev).unwrap_or(1)))
@@ -1473,6 +1469,7 @@ pub(crate) fn inspect_recovery_conn(
     }
 
     Ok(RecoveryReport {
+        retention_purges: crate::events::read_retention_purge_statuses_conn(conn)?,
         daemon_mode: Some(daemon.mode),
         active_authority_generation: Some(daemon.authority_generation),
         active_stream_id: Some(daemon.stream_id),
@@ -1510,6 +1507,7 @@ pub(crate) fn inspect_recovery_offline_cfg(
 
     let maintenance_manifest = read_maintenance_manifest(&config.maintenance_dir)?;
     Ok(RecoveryReport {
+        retention_purges: vec![],
         daemon_mode: Some(DaemonMode::ReadOnlyRecovery),
         active_authority_generation: None,
         active_stream_id: None,

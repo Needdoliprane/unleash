@@ -114,9 +114,6 @@ pub struct PurgeStats {
     pub completed_at_ms: TimestampMs,
 }
 
-use std::fs;
-use std::io::ErrorKind;
-
 use chrono::{DateTime, Utc};
 use rusqlite::{Connection, OptionalExtension, Transaction};
 use unleash_domain::{BackupId, ReceiptId, Revision};
@@ -126,8 +123,7 @@ use crate::backup::BackupRetentionTier;
 use crate::commands::read_daemon_state_conn;
 use crate::config::{EVENT_AND_INBOX_MIN_RETENTION_MS, StoreConfig};
 use crate::error::StoreError;
-use crate::fs_sync::sync_parent_dir;
-use crate::objects::safe_artifact_path;
+use crate::objects::{PrepareObjectDeletionRequest, tx_prepare_object_deletion};
 use crate::projects_settings::{RetentionClass, resolve_effective_retention_tx};
 
 pub(crate) fn read_events_with_window(
@@ -750,6 +746,83 @@ pub struct RetentionPurgeRequest {
     pub is_automatic_sweep: bool,
 }
 
+/// État durable d'une purge logique et de ses suppressions physiques/checkpoint.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RetentionPurgeStatusRecord {
+    /// Identifiant durable, également porté par `result_ref`.
+    pub purge_id: String,
+    /// Reçu causal lorsqu'il s'agit d'une commande.
+    pub command_receipt_id: Option<ReceiptId>,
+    /// Nombre d'intentions de suppression préparées au commit.
+    pub objects_deletion_prepared_count: usize,
+    /// Intentions dont l'unlink/finalisation reste en attente.
+    pub pending_deletions: usize,
+    /// Intentions arrêtées sur un objet étranger ou corrompu préservé.
+    pub quarantined_deletions: usize,
+    /// Checkpoint de fin de purge effectivement réussi.
+    pub wal_checkpoint_truncated: bool,
+    /// `pending`, `quarantined`, `checkpoint_pending` ou `completed`.
+    pub state: String,
+}
+
+pub(crate) fn read_retention_purge_statuses_conn(
+    conn: &Connection,
+) -> Result<Vec<RetentionPurgeStatusRecord>, StoreError> {
+    let table_exists: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'retention_purges'",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(StoreError::from_rusqlite)?;
+    if table_exists == 0 {
+        return Ok(Vec::new());
+    }
+    let mut statement = conn.prepare(
+        "SELECT p.purge_id, p.command_receipt_id, p.objects_purged_count, p.wal_checkpoint_truncated,
+            (SELECT COUNT(*) FROM object_deletions d WHERE d.reason = 'retention_q12:' || p.purge_id AND d.state != 'completed'),
+            (SELECT COUNT(*) FROM object_deletions d JOIN object_records o ON o.object_hash = d.object_hash
+                AND o.object_generation = d.object_generation
+                WHERE d.reason = 'retention_q12:' || p.purge_id AND d.state = 'completed' AND o.state != 'tombstone')
+         FROM retention_purges p ORDER BY p.executed_at_ms, p.purge_id"
+    ).map_err(StoreError::from_rusqlite)?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, Option<String>>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, bool>(3)?,
+                row.get::<_, i64>(4)?,
+                row.get::<_, i64>(5)?,
+            ))
+        })
+        .map_err(StoreError::from_rusqlite)?;
+    let mut records = Vec::new();
+    for row in rows {
+        let (purge_id, receipt, count, checkpoint, pending, quarantined) =
+            row.map_err(StoreError::from_rusqlite)?;
+        records.push(RetentionPurgeStatusRecord {
+            purge_id,
+            command_receipt_id: receipt.as_deref().map(str::parse).transpose()?,
+            objects_deletion_prepared_count: usize::try_from(count).unwrap_or(0),
+            pending_deletions: usize::try_from(pending).unwrap_or(0),
+            quarantined_deletions: usize::try_from(quarantined).unwrap_or(0),
+            wal_checkpoint_truncated: checkpoint,
+            state: if quarantined > 0 {
+                "quarantined"
+            } else if pending > 0 {
+                "pending"
+            } else if !checkpoint {
+                "checkpoint_pending"
+            } else {
+                "completed"
+            }
+            .to_owned(),
+        });
+    }
+    Ok(records)
+}
 /// Sauvegarde gérée impactée contenant encore des octets antérieurs à la purge (rotation <= 35 j).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AffectedBackupEntry {
@@ -778,7 +851,7 @@ pub struct RetentionPurgeReport {
     pub events_tombstoned_count: usize,
     /// Reçus de commande passés à `response_state = 'tombstone'`.
     pub receipts_tombstoned_count: usize,
-    /// Objets expirés purgés du stockage local et marqués `tombstone`.
+    /// Objets expirés dont la suppression durable est engagée (finalisés avant retour réussi de la façade).
     pub objects_purged_count: usize,
     /// Objets/événements âgés épargnés car requis par un run/action/preuve/version/pin actif.
     pub protected_skipped_count: usize,
@@ -1042,7 +1115,7 @@ pub(crate) fn tx_execute_retention_purge(
     {
         let mut obj_stmt = tx
             .prepare(
-                "SELECT object_hash, relative_path, retention_class, keep_by_policy, created_at_ms
+                "SELECT object_hash, object_generation, retention_class, keep_by_policy, created_at_ms
                  FROM object_records
                  WHERE state = 'live'",
             )
@@ -1051,7 +1124,7 @@ pub(crate) fn tx_execute_retention_purge(
             .query_map([], |r| {
                 Ok((
                     r.get::<_, String>(0)?,
-                    r.get::<_, String>(1)?,
+                    r.get::<_, i64>(1)?,
                     r.get::<_, String>(2)?,
                     r.get::<_, i64>(3)?,
                     r.get::<_, i64>(4)?,
@@ -1064,7 +1137,7 @@ pub(crate) fn tx_execute_retention_purge(
         }
         drop(obj_stmt);
 
-        for (obj_hash, rel_path, ret_class_s, keep_i64, created_at_ms) in obj_candidates {
+        for (obj_hash, generation, ret_class_s, keep_i64, created_at_ms) in obj_candidates {
             let class = RetentionClass::parse(&ret_class_s);
             let days = i64::from(policy.days_for_class(class));
             let class_cutoff = now_ms
@@ -1084,21 +1157,17 @@ pub(crate) fn tx_execute_retention_purge(
                 [&obj_hash],
             )
             .map_err(StoreError::from_rusqlite)?;
-            tx.execute(
-                "UPDATE object_records SET state = 'tombstone' WHERE object_hash = ?1",
-                [&obj_hash],
-            )
-            .map_err(StoreError::from_rusqlite)?;
-
-            if let Ok(full_path) = safe_artifact_path(&config.artifacts_dir, &rel_path) {
-                match fs::remove_file(&full_path) {
-                    Ok(()) => {
-                        let _ = sync_parent_dir(&full_path);
-                    }
-                    Err(e) if e.kind() == ErrorKind::NotFound => {}
-                    Err(e) => return Err(StoreError::Io(e)),
-                }
-            }
+            tx_prepare_object_deletion(
+                tx,
+                config.id_generator.as_ref(),
+                now_ms,
+                &PrepareObjectDeletionRequest {
+                    object_hash: obj_hash.parse()?,
+                    expected_generation: generation,
+                    reason: format!("retention_q12:{purge_id}"),
+                    decision_receipt_id: None,
+                },
+            )?;
             objects_purged_count += 1;
         }
     }

@@ -983,6 +983,22 @@ pub(crate) fn tx_commit_command(
 
     let accepted_at =
         DateTime::<Utc>::from_timestamp_millis(now_ms.as_i64()).unwrap_or(DateTime::UNIX_EPOCH);
+    let purge_id: Option<String> = if matches!(req.mutation, CommandMutation::PurgeHistory { .. }) {
+        tx.query_row(
+            "SELECT purge_id FROM retention_purges WHERE command_receipt_id = ?1",
+            [receipt_id.to_string()],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(StoreError::from_rusqlite)?
+    } else {
+        None
+    };
+    let effective_receipt_state = if purge_id.is_some() {
+        ReceiptState::Accepted
+    } else {
+        req.receipt_state
+    };
     let receipt = CommandReceipt {
         receipt_id,
         command_id: req.envelope.command_id,
@@ -990,15 +1006,17 @@ pub(crate) fn tx_commit_command(
         aggregate_id: req.envelope.aggregate_id,
         new_revision: new_rev,
         operation_id: req.operation_id,
-        state: req.receipt_state,
+        state: effective_receipt_state,
         event_cursor: EventCursor::new(
             daemon.stream_id,
             unleash_domain::Sequence::new(cursor_seq_u64),
         ),
-        result_ref: req.result_ref.clone(),
+        result_ref: purge_id
+            .map(|id| format!("retention-purge:{id}"))
+            .or_else(|| req.result_ref.clone()),
     };
     let receipt_json = serde_json::to_string(&receipt)?;
-    let state_str = match req.receipt_state {
+    let state_str = match effective_receipt_state {
         ReceiptState::Accepted => "accepted",
         ReceiptState::Completed => "completed",
         ReceiptState::Blocked => "blocked",
@@ -1037,6 +1055,16 @@ pub(crate) fn tx_commit_command(
         ],
     )
     .map_err(StoreError::from_rusqlite)?;
+
+    if matches!(req.mutation, CommandMutation::PurgeHistory { .. }) {
+        tx.execute(
+            "UPDATE object_deletions SET decision_receipt_id = ?1
+             WHERE decision_receipt_id IS NULL AND reason IN (
+                 SELECT 'retention_q12:' || purge_id FROM retention_purges WHERE command_receipt_id = ?1
+             )",
+            [&receipt_id_str],
+        ).map_err(StoreError::from_rusqlite)?;
+    }
 
     cutpoints.hit(StoreCutpoint::C1BeforeCommandCommit)?;
 
@@ -2016,6 +2044,11 @@ fn apply_command_mutation(
         } => tx_transition_alert(tx, now_ms, expected_rev, cmd_id, alert_id, *target_state),
         CommandMutation::PurgeHistory { request } => {
             let rep = tx_execute_retention_purge(tx, config, now_ms, Some(receipt_id), request)?;
+            if rep.suspended_clock_uncertain {
+                return Err(StoreError::RecoveryInProgress(
+                    "automatic retention suspended: clock uncertainty".to_owned(),
+                ));
+            }
             if !rep.suspended_clock_uncertain {
                 let mut payload = Map::new();
                 payload.insert("purge_id".to_owned(), Value::String(rep.purge_id));
@@ -2024,9 +2057,19 @@ fn apply_command_mutation(
                     Value::Number((rep.events_tombstoned_count as u64).into()),
                 );
                 payload.insert(
-                    "objects_purged_count".to_owned(),
+                    "phase".to_owned(),
+                    Value::String("logical_purge_committed".to_owned()),
+                );
+                payload.insert("objects_purged_count".to_owned(), Value::Number(0.into()));
+                payload.insert(
+                    "objects_deletion_prepared_count".to_owned(),
                     Value::Number((rep.objects_purged_count as u64).into()),
                 );
+                payload.insert(
+                    "physical_deletion_state".to_owned(),
+                    Value::String("pending".to_owned()),
+                );
+                payload.insert("wal_checkpoint_truncated".to_owned(), Value::Bool(false));
                 generated_events.push(EventAppendSpec {
                     event_type: "HistoryPurged".to_owned(),
                     aggregate_type: AggregateKind::RetentionPurge,

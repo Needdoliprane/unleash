@@ -541,7 +541,20 @@ impl StoreWriterHandle {
         guard.telemetry.clone()
     }
 
+    /// Handle de soumission sans propriété du thread, pour un post-traitement bloquant borné.
+    pub(crate) fn submission_client(&self) -> Self {
+        Self {
+            config: self.config.clone(),
+            readers: Arc::clone(&self.readers),
+            queue: Arc::clone(&self.queue),
+            join_handle: None,
+        }
+    }
+
     pub(crate) fn shutdown(&mut self) {
+        if self.join_handle.is_none() {
+            return;
+        }
         let (tx, rx) = oneshot::channel();
         let (lock, cv) = &*self.queue;
         {
@@ -723,19 +736,25 @@ fn writer_thread_loop(
     }
 }
 
-fn run_wal_checkpoint(conn: &Connection, truncate: bool) -> Option<(i32, i32)> {
+fn run_wal_checkpoint(conn: &Connection, truncate: bool) -> Option<(i32, i32, i32)> {
     let sql = if truncate {
         "PRAGMA wal_checkpoint(TRUNCATE)"
     } else {
         "PRAGMA wal_checkpoint(PASSIVE)"
     };
-    conn.query_row(sql, [], |r| Ok((r.get::<_, i32>(1)?, r.get::<_, i32>(2)?)))
-        .ok()
+    conn.query_row(sql, [], |r| {
+        Ok((
+            r.get::<_, i32>(0)?,
+            r.get::<_, i32>(1)?,
+            r.get::<_, i32>(2)?,
+        ))
+    })
+    .ok()
 }
 
-fn wal_bytes_from_checkpoint(physical: u64, ckpt_res: Option<(i32, i32)>) -> u64 {
+fn wal_bytes_from_checkpoint(physical: u64, ckpt_res: Option<(i32, i32, i32)>) -> u64 {
     match ckpt_res {
-        Some((n_log, n_ckpt)) if n_ckpt >= n_log => 0,
+        Some((0, n_log, n_ckpt)) if n_ckpt >= n_log => 0,
         _ => physical,
     }
 }
@@ -785,12 +804,14 @@ fn run_checkpoint_and_reap(
     if wal_after > guard.telemetry.max_wal_bytes_observed {
         guard.telemetry.max_wal_bytes_observed = wal_after;
     }
-    if truncate {
-        guard.telemetry.truncate_checkpoints += 1;
-    } else {
-        guard.telemetry.passive_checkpoints += 1;
+    if let Some((0, _, _)) = ckpt_res {
+        if truncate && physical == 0 {
+            guard.telemetry.truncate_checkpoints += 1;
+        } else if !truncate {
+            guard.telemetry.passive_checkpoints += 1;
+        }
     }
-    if let Some((n_log, n_ckpt)) = ckpt_res {
+    if let Some((_, n_log, n_ckpt)) = ckpt_res {
         guard.telemetry.last_checkpoint_frames = Some((n_log, n_ckpt));
     }
 }
