@@ -25,7 +25,7 @@ use thiserror::Error;
 use unleash_client::{
     ClientConfig, ClientError, DiagnosticClient, EventStreamReader, UnleashClient,
 };
-use unleash_domain::{CommandId, ProjectId, RequestId, Revision, Sequence};
+use unleash_domain::{AuthorityGeneration, CommandId, ProjectId, RequestId, Revision, Sequence};
 use unleash_platform::{PlatformError, SOCKET_FILENAME, canonical_rendezvous_dir};
 use unleash_protocol::{
     ClientKind, CommandEnvelope, ProtocolVersion, QueryEnvelope, ReasonCode, SubscribeEventsFrame,
@@ -46,6 +46,21 @@ pub enum CliError {
     /// Erreur du client IPC `unleash-client`.
     #[error("Erreur client IPC : {0}")]
     Client(#[from] ClientError),
+
+    /// Demande de sauvegarde sans reçu obtenu par le client.
+    #[error(
+        "Reçu indisponible pour la sauvegarde {backup_id}, commande {command_id}, lignée {authority_generation}. {source}"
+    )]
+    BackupReceiptMissing {
+        /// Agrégat ciblé par la demande.
+        backup_id: Uuid,
+        /// Identité immuable de la commande pour l'inspection.
+        command_id: CommandId,
+        /// Lignée épinglée avant l'envoi.
+        authority_generation: AuthorityGeneration,
+        /// Erreur retournée lors de l'envoi ou de la lecture du reçu.
+        source: Box<ClientError>,
+    },
 
     /// Argument utilisateur invalide.
     #[error("Argument CLI invalide : {0}")]
@@ -111,6 +126,12 @@ pub enum Commands {
     },
     /// Rapport de récupération durable.
     Recovery,
+    /// Demande ou consulte une sauvegarde manuelle.
+    Backup {
+        /// Action sur les sauvegardes.
+        #[command(subcommand)]
+        action: BackupCommand,
+    },
     /// Pilotage des missions.
     Mission {
         /// Action sur les missions.
@@ -137,6 +158,28 @@ pub enum Commands {
         /// Active le mode lecture linéaire accessible (`VoiceOver`/Orca).
         #[arg(long)]
         linear: bool,
+    },
+}
+
+/// Sous-commandes `unleash backup`.
+#[derive(Debug, Subcommand)]
+pub enum BackupCommand {
+    /// Demande une sauvegarde manuelle et affiche le reçu d'acceptation.
+    Request {
+        /// Identifiant de la sauvegarde, généré si omis.
+        #[arg(long)]
+        backup_id: Option<Uuid>,
+        /// Identifiant d'une commande à rejouer avec sa lignée d'origine.
+        #[arg(long, requires_all = ["backup_id", "authority_generation"])]
+        command_id: Option<Uuid>,
+        /// Lignée d'origine de la commande lors d'un rejeu explicite.
+        #[arg(long, requires = "command_id")]
+        authority_generation: Option<Uuid>,
+    },
+    /// Consulte l'état d'une sauvegarde et son manifeste lorsqu'il est disponible.
+    Show {
+        /// Identifiant de la sauvegarde.
+        backup_id: Uuid,
     },
 }
 
@@ -339,10 +382,56 @@ pub async fn run_cli(cli: &Cli) -> Result<Value, CliError> {
             let resp = query_simple(&mut client, "InspectRecovery", None, Map::new()).await?;
             Ok(json!({"watermark": resp.watermark, "result": resp.result}))
         }
+        Commands::Backup { action } => run_backup_command(&mut client, action).await,
         Commands::Project { action } => run_project_command(&mut client, action).await,
         Commands::Mission { action } => run_mission_command(&mut client, action).await,
         Commands::Daemon { action } => run_daemon_command(&mut client, action).await,
         Commands::Tui { .. } => Ok(json!({ "status": "exited" })),
+    }
+}
+
+async fn run_backup_command(
+    client: &mut UnleashClient,
+    action: &BackupCommand,
+) -> Result<Value, CliError> {
+    match action {
+        BackupCommand::Request {
+            backup_id,
+            command_id,
+            authority_generation,
+        } => {
+            let envelope = CommandEnvelope {
+                protocol_version: ProtocolVersion,
+                request_id: RequestId::from_uuid(next_uuid()),
+                command_id: CommandId::from_uuid(command_id.unwrap_or_else(next_uuid)),
+                authority_generation: authority_generation
+                    .map(AuthorityGeneration::from_uuid)
+                    .unwrap_or(client.hello().authority_generation),
+                actor_ref: None,
+                project_id: None,
+                aggregate_id: backup_id.unwrap_or_else(next_uuid),
+                expected_revision: Revision::INITIAL,
+                command_type: String::from("RequestBackup"),
+                payload: Map::new(),
+            };
+            let receipt = client.send_command(&envelope).await.map_err(|source| {
+                CliError::BackupReceiptMissing {
+                    backup_id: envelope.aggregate_id,
+                    command_id: envelope.command_id,
+                    authority_generation: envelope.authority_generation,
+                    source: Box::new(source),
+                }
+            })?;
+            Ok(json!({
+                "authority_generation": envelope.authority_generation,
+                "receipt": receipt,
+            }))
+        }
+        BackupCommand::Show { backup_id } => {
+            let payload = Map::from_iter([(String::from("backup_id"), json!(backup_id))]);
+            let resp = query_simple(client, "GetBackupManifest", None, payload).await?;
+            Ok(json!({"watermark": resp.watermark, "result": resp.result}))
+        }
     }
 }
 
@@ -757,6 +846,26 @@ fn next_uuid() -> Uuid {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn backup_request_accepts_only_a_complete_retry_identity() {
+        let request = ["unleash", "backup", "request"];
+        assert!(Cli::try_parse_from(request).is_ok());
+
+        let backup_id = "00000000-0000-4000-8000-000000000001";
+        let command_id = "00000000-0000-4000-8000-000000000002";
+        let authority_generation = "00000000-0000-4000-8000-000000000003";
+        let with_ids =
+            request
+                .into_iter()
+                .chain(["--backup-id", backup_id, "--command-id", command_id]);
+        assert!(Cli::try_parse_from(with_ids.clone()).is_err());
+        assert!(
+            Cli::try_parse_from(with_ids.chain(["--authority-generation", authority_generation]))
+                .is_ok()
+        );
+        assert!(Cli::try_parse_from(["unleash", "backup", "show", backup_id]).is_ok());
+    }
 
     #[test]
     fn cli_parses_all_core_m0_commands_and_json_flag() {

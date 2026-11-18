@@ -25,9 +25,10 @@ Jalon : M1 — Features : F001, F002, F017 (broker interne), F018 (squelette rep
 | Tâche | Objectif | Écriture exclusive | Dépend de | Rôle | Niveau / modèle | Vérification | Statut |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | t01a | `crates/unleash-action-broker` + double `GuardPort` dans `unleash-testkit` (parallèle) | `Cargo.*`, `crates/unleash-action-broker/**`, `crates/unleash-testkit/**` | — | systems-implementer | strong / pro | fmt/clippy/test/doc/deny | done |
+| t01a-journal | Stabiliser la reprise de l’évaluation d’autorisation du broker | `crates/unleash-action-broker/**`, doubles ciblés | 08e62c0 intégré, 109b937 pour l’ID partagé | systems-implementer | strong / Sol ultra | reprise exacte, backoff, concurrence, refus de redispatch | done |
 | t01b | `crates/unleash-store` M1 + backup/restore/capsule F018 + Q-12 (parallèle) | `crates/unleash-store/**` | — | systems-implementer | strong / pro | fmt/clippy/test/doc/deny | in_progress |
 | t02 | Câblage `ActionBroker` et opérations M1 dans `daemon`/`client`/`cli` | `crates/unleash-{daemon,client,cli}/** et transport Hello ciblé dans unleash-platform/protocol` | APIs t01b stables pour démarrer, candidats t01a/t01b vérifiés avant intégration | systems-implementer | strong / pro | fmt/clippy/test/doc/deny | in_progress |
-| t03a | E2E restauration et lignée sur daemon/CLI réels | `crates/unleash-daemon/tests/e2e_m1_restore_lineage.rs` | APIs t01b et t02 du candidat privé | test-engineer | strong / Sol ultra | Redirection stale refusée et réception historique persistée | in_progress |
+| t03a | E2E restauration et lignée sur daemon/CLI réels | `crates/unleash-daemon/tests/e2e_m1_restore_lineage.rs` | APIs t01b et t02 du candidat privé | test-engineer | strong / Sol ultra | Rejet de l’ancienne lignée et consultation du reçu historique | done |
 | t03 | Preuves `EV-F017/F018-*`, `qualification/m1/exit.md`, revues experts, fusion `dev` & push | `qualification/**`, `.claude/state/goals/**` | t02 | root + experts | strong / pro | Toutes gates sur `dev` | pending |
 
 ## Résultat

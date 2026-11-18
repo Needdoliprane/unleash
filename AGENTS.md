@@ -6,7 +6,7 @@ Ce fichier fait foi pour tous les agents (Codex, Claude Code via `CLAUDE.md`, An
 
 OVPT Unleash est un orchestrateur local d'agents et de procédures réutilisables : daemon Rust par utilisateur, SQLite, sessions durables, workers éphémères, workflows bornés, skills et contrats versionnés, Git et worktrees, GUI et TUI à parité, automatisation navigateur, modèles cloud et locaux, AI-Guard. Produit open source sous licence Apache-2.0, visé comme V1 distribuable.
 
-État : **révision R7 du dossier de conception** (`.claude/`) ; arbitrages tous rendus ; **réalisation ouverte à partir du jalon M0**. Aucun code produit n'existe encore. Tous les tests du produit sont `not_run` tant qu'ils n'ont pas été réellement exécutés.
+La **révision R7** de `.claude/` fixe les contrats. Dans le dépôt de réalisation, le socle M0 est intégré à `dev` et décrit dans `qualification/m0/exit.md`. Le programme `.claude/state/goals/g0000-v1/goal.md` indique le jalon actif et ses preuves. Les tests non exécutés restent `not_run`.
 
 ## 2. Ordre de lecture
 
