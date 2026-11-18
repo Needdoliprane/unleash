@@ -1,0 +1,21 @@
+{
+  "evidence_id": "EV-F018-010",
+  "test_id": "T-F018-010",
+  "requirement_id": "REQ-REC-010",
+  "commit": "c03273c3c61ceadab277e02e3e791ec4b755472a",
+  "command": "cargo test --locked --offline --workspace --all-features --no-fail-fast --quiet",
+  "environment": {
+    "os": "macOS 27.2.1 arm64",
+    "rustc": "rustc 1.94.1",
+    "sqlite": "3.54.1"
+  },
+  "result": "passed",
+  "observed_at": "2026-11-18T18:12:09Z",
+  "artifacts": [
+    "crates/unleash-daemon/tests/e2e_m1_corrupt_start.rs",
+    "crates/unleash-daemon/tests/t_m1_corrupt_diagnostic.rs",
+    "crates/unleash-platform/src/rendezvous.rs",
+    "crates/unleash-daemon/src/daemon.rs"
+  ],
+  "limits": "Périmètre M1. Vrai processus de diagnostic sur DB/WAL corrompus de fixture, refus d’écriture et d’identités actives fictives, nettoyage et préservation des octets. Issue tardive et build non qualifié refusés. Les limites physiques de stockage et la matrice OS complète restent à qualifier en M7."
+}

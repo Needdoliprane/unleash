@@ -12,9 +12,9 @@ Jalon M1 — Cœur durable & autorité locale : F001, F002 complet, ActionBroker
 Jalon : M1 — Features : F001, F002, F017 (broker interne), F018 (squelette reprise/backup/restore) — Exigences : REQ-CORE-001..010, REQ-PERSIST-001..010, REQ-SEC-001..011, REQ-REC-002/004/005/007/009/010 — Tests : T-F001-*, T-F002-*, T-F017-001..011, T-F018-002/004/005/007/009/010 — Gates : Gate M1 + revues qa-expert, reliability-expert, security-expert
 
 ## Critères de terminé
-- [ ] `crates/unleash-action-broker` implémente `GuardPort`, profil `none_accepted`, modes `broker_only`/`guard_optional`/`guard_required`, révocation/suspension et secrets opaques sans fuite
-- [ ] Client disparu après acceptation ne crée pas 2 commandes ; daemon tué redémarre avec état engagé ; restore invalide ancienne lignée (`STALE_AUTHORITY_GENERATION`) ; acteur non autorisé refusé et historisé sans secret
-- [ ] Preuves `qualification/evidence/EV-F017-*.json` (limites `EXT-GUARD` explicites) & `EV-F018-*.json` et `qualification/m1/exit.md` validés par `qa-expert`, `reliability-expert`, `security-expert`
+- [x] `crates/unleash-action-broker` implémente `GuardPort`, profil `none_accepted`, modes `broker_only`/`guard_optional`/`guard_required`, révocation/suspension et secrets opaques sans fuite
+- [x] Client disparu après acceptation ne crée pas 2 commandes ; daemon tué redémarre avec état engagé ; restore invalide ancienne lignée (`STALE_AUTHORITY_GENERATION`) ; acteur non autorisé refusé et historisé sans secret
+- [x] Preuves `qualification/evidence/EV-F017-*.json` (limites `EXT-GUARD` explicites) & `EV-F018-*.json` et `qualification/m1/exit.md` validés par `qa-expert`, `reliability-expert`, `security-expert`
 - [ ] Toutes gates vertes sur `dev` et `git push origin dev` réussi
 
 ## Hors périmètre
@@ -29,7 +29,7 @@ Jalon : M1 — Features : F001, F002, F017 (broker interne), F018 (squelette rep
 | t01b | `crates/unleash-store` M1 + backup/restore/capsule F018 + Q-12 (parallèle) | `crates/unleash-store/**` | — | systems-implementer | strong / pro | fmt/clippy/test/doc/deny | in_progress |
 | t02 | Câblage `ActionBroker` et opérations M1 dans `daemon`/`client`/`cli` | `crates/unleash-{daemon,client,cli}/** et transport Hello ciblé dans unleash-platform/protocol` | APIs t01b stables pour démarrer, candidats t01a/t01b vérifiés avant intégration | systems-implementer | strong / pro | fmt/clippy/test/doc/deny | in_progress |
 | t03a | E2E restauration et lignée sur daemon/CLI réels | `crates/unleash-daemon/tests/e2e_m1_restore_lineage.rs` | APIs t01b et t02 du candidat privé | test-engineer | strong / Sol ultra | Rejet de l’ancienne lignée et consultation du reçu historique | done |
-| t03 | Preuves `EV-F017/F018-*`, `qualification/m1/exit.md`, revues experts, fusion `dev` & push | `qualification/**`, `.claude/state/goals/**` | t02 | root + experts | strong / pro | Toutes gates sur `dev` | pending |
+| t03 | Preuves `EV-F017/F018-*`, `qualification/m1/exit.md`, revues experts, fusion `dev` & push | `qualification/**`, `.claude/state/goals/**` | t02 | root + experts | strong / pro | Toutes gates sur `dev` | in_progress |
 
 ## Résultat
-En cours d'exécution.
+Candidat local accepté. Code testé en `c03273c`, contrainte dev CLI en `2357de8`, 369 tests réussis et dossier valide. [Rapport M1](../../../../qualification/m1/exit.md). Gates, publication et observation de la CI sur `dev` restent en cours.
