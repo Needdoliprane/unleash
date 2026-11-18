@@ -69,3 +69,5 @@
 - 2026-11-18T19:05:19Z | clôture t01b | Ref task/g0002-m1/t01b absente, worktree exact absent Git et physique. Le résidu t02 et sa ref restent au ROOT.
 
 - 2026-11-18T19:05:20Z | preuves locales retirées après acceptation | Synthèse et limites dans 93bc477. Aucun consommateur attribué aux deux packs exacts final-m1 et t01b. ROOT a retiré 26 logs, 1 365 900 octets logiques et 1 377 280 octets alloués avant retrait, absences vérifiées. Avertissement lsof sur le montage Time Machine pendant le contrôle, aucun match sur projet. Les résultats compacts, commandes et EV restent versionnés.
+
+- 2026-11-18T19:29:09Z | renderer local sur l’arbre publié | Node v22.23.5, pnpm 10.34.9. Arbre renderer identique à dev@8598866 (3b498d3). Typecheck et lint exit0. Premier Vitest interrompu par ROOT après six minutes sans résultat en phase test (15 processus, lectures SMB). Rejeu pnpm run test --maxWorkers=2 --minWorkers=1 exit0 : 4 suites, 7 tests, zéro échec, diff ts-rs vide. Build isolé en cours et CI GitHub HTTP404 à ce stade.
