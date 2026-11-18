@@ -12,13 +12,32 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 use unleash_client::{ClientConfig, ClientError, UnleashClient};
-use unleash_daemon::{DaemonConfig, DaemonStartOutcome, UnleashDaemon};
+use unleash_daemon::{DaemonConfig, DaemonError, DaemonHandle, DaemonStartOutcome, UnleashDaemon};
 use unleash_domain::{CommandId, RequestId, Revision};
 use unleash_protocol::{
     ClientKind, CommandEnvelope, ErrorCode, ProtocolVersion, QueryEnvelope, ReceiptState,
 };
 use unleash_store::{StoreConfig, UnleashStore};
 use unleash_testkit::local_test_dir;
+
+const BROKER_DRAIN_ACTIVE: &str = "Travaux broker encore actifs ; verrou d'autorité conservé";
+
+async fn wait_for_backup_drain(handle: &DaemonHandle) {
+    // Chaque demande d'arrêt garde son propre délai. Le test borne
+    // l'observation de la fin du travail admis après avoir libéré le marqueur.
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            match handle.shutdown_graceful("drain terminé").await {
+                Ok(_) => break,
+                Err(DaemonError::InvalidConfiguration(message))
+                    if message == BROKER_DRAIN_ACTIVE => {}
+                Err(error) => panic!("erreur inattendue après reprise du drain : {error}"),
+            }
+        }
+    })
+    .await
+    .expect("le drain de la sauvegarde admise doit se terminer");
+}
 
 #[derive(Default)]
 struct PauseBackup {
@@ -495,7 +514,10 @@ async fn stopping_during_real_backup_retains_authority_until_writer_finishes() {
         .unwrap();
     assert_eq!(in_progress.result["state"], "executing");
     assert!(in_progress.result["manifest"].is_null());
-    assert!(handle.shutdown_graceful("backup actif").await.is_err());
+    assert!(matches!(
+        handle.shutdown_graceful("backup actif").await,
+        Err(DaemonError::InvalidConfiguration(message)) if message == BROKER_DRAIN_ACTIVE
+    ));
     assert!(matches!(
         UnleashDaemon::start(cfg.clone()).await,
         Err(unleash_daemon::DaemonError::DaemonAlreadyRunning { .. }
@@ -504,7 +526,7 @@ async fn stopping_during_real_backup_retains_authority_until_writer_finishes() {
     *pause.release.lock().unwrap() = true;
     pause.condvar.notify_one();
     drop(client);
-    handle.shutdown_graceful("backup libéré").await.unwrap();
+    wait_for_backup_drain(&handle).await;
     let DaemonStartOutcome::Started(restarted) = UnleashDaemon::start(cfg).await.unwrap() else {
         panic!("redémarrage attendu")
     };
@@ -686,9 +708,6 @@ async fn lost_dispatch_ack_never_launches_or_reissues_backup() {
 #[tokio::test]
 async fn stop_after_dispatch_keeps_lock_until_the_admitted_backup_finishes() {
     use std::os::unix::fs::PermissionsExt;
-    use unleash_daemon::DaemonError;
-
-    const BROKER_DRAIN_ACTIVE: &str = "Travaux broker encore actifs ; verrou d'autorité conservé";
 
     let rdv = local_test_dir("m1-stop-c4-rdv").unwrap();
     std::fs::set_permissions(rdv.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
@@ -757,20 +776,7 @@ async fn stop_after_dispatch_keeps_lock_until_the_admitted_backup_finishes() {
     *pause.release.lock().unwrap() = true;
     pause.condvar.notify_one();
     drop(client);
-    // Le marqueur libère le travail admis. Chaque requête d'arrêt garde son
-    // propre délai, tandis que ce test borne l'observation de la fin du drain.
-    tokio::time::timeout(Duration::from_secs(10), async {
-        loop {
-            match handle.shutdown_graceful("drain terminé").await {
-                Ok(_) => break,
-                Err(DaemonError::InvalidConfiguration(message))
-                    if message == BROKER_DRAIN_ACTIVE => {}
-                Err(error) => panic!("erreur inattendue après reprise du drain : {error}"),
-            }
-        }
-    })
-    .await
-    .expect("le drain de la sauvegarde admise doit se terminer");
+    wait_for_backup_drain(&handle).await;
     assert!(backup_dir.join("manifest.json").is_file());
     let DaemonStartOutcome::Started(restarted) = UnleashDaemon::start(cfg).await.unwrap() else {
         panic!("redémarrage attendu")
