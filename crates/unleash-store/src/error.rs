@@ -1,7 +1,9 @@
 //! Erreurs typées de persistance et projection vers le catalogue d'erreurs IPC.
 
 use thiserror::Error;
-use unleash_domain::{AuthorityGeneration, CommandId, ReceiptId, Revision, Sha256Digest, StreamId};
+use unleash_domain::{
+    ActionId, AuthorityGeneration, CommandId, ReceiptId, Revision, Sha256Digest, StreamId,
+};
 use unleash_protocol::{ErrorCode, EventCursor, IpcError, ReasonCode, RetryClass};
 
 /// Erreur produite par les opérations de stockage `unleash-store`.
@@ -304,6 +306,58 @@ pub enum StoreError {
     #[error("Erreur de domaine : {0}")]
     Domain(#[from] unleash_domain::DomainTransitionError),
 
+    /// Opération non autorisée pour l'appelant (`CapabilityDenied/OPERATION_NOT_AUTHORIZED`).
+    #[error("Opération non autorisée : {0}")]
+    Unauthorized(String),
+
+    /// Identité du pair ou du décideur non vérifiée (`CapabilityDenied/IDENTITY_UNVERIFIED`).
+    #[error("Identité non vérifiée : {0}")]
+    IdentityUnverified(String),
+
+    /// Capacité refusée avec code de raison explicite (`SubjectSuspended`, `SubjectRevoked`, etc.).
+    #[error("Capacité refusée : {message}")]
+    CapabilityDenied {
+        /// Code de raison associé.
+        reason: ReasonCode,
+        /// Détail du refus.
+        message: String,
+    },
+
+    /// Accès refusé au scope demandé (`ScopeDenied`).
+    #[error("Scope refusé : {message}")]
+    ScopeDenied {
+        /// Raison éventuelle (`ACCESS_DENIED`, `ACCESS_REVOKED`, etc.).
+        reason: Option<ReasonCode>,
+        /// Description du refus.
+        message: String,
+    },
+
+    /// Violation contractuelle explicite (`ContractViolation`).
+    #[error("Violation de contrat : {message}")]
+    ContractViolation {
+        /// Raison éventuelle.
+        reason: Option<ReasonCode>,
+        /// Description de l'erreur contractuelle.
+        message: String,
+    },
+
+    /// Procédure de récupération en cours ou scope gelé (`ResourceBusy/RECOVERY_IN_PROGRESS`).
+    #[error("Récupération en cours ou scope gelé : {0}")]
+    RecoveryInProgress(String),
+
+    /// Issue d'effet externe inconnue (`OutcomeUnknown/UNRESOLVED_EFFECT`).
+    #[error("Issue d'action {action_id} inconnue : {detail}")]
+    ActionOutcomeUnknown {
+        /// Identifiant de l'action incertaine.
+        action_id: ActionId,
+        /// Détail de l'incertitude.
+        detail: String,
+    },
+
+    /// Incohérence d'inventaire ou de comptabilité budgétaire (`ResourceBusy/ACCOUNTING_MISMATCH`).
+    #[error("Incohérence comptable ou d'inventaire : {0}")]
+    AccountingMismatch(String),
+
     /// Erreur de validation d'identifiant ou de digest.
     #[error("Identifiant ou digest invalide : {0}")]
     IdValidation(#[from] unleash_domain::IdValidationError),
@@ -335,6 +389,8 @@ impl StoreError {
             | Self::CapacityBlocked(_)
             | Self::PredecessorNotTerminal { .. }
             | Self::RestorationBlocked(_)
+            | Self::RecoveryInProgress(_)
+            | Self::AccountingMismatch(_)
             | Self::WalPressureStop { .. }
             | Self::ReadTimeout { .. } => ErrorCode::ResourceBusy,
 
@@ -349,14 +405,28 @@ impl StoreError {
             | Self::RestoreIncomplete(_)
             | Self::EvidenceUnavailable(_)
             | Self::MigrationBackupRequired
+            | Self::ContractViolation { reason: None, .. }
             | Self::Domain(_) => ErrorCode::ContractViolation,
+
+            Self::ContractViolation {
+                reason: Some(r), ..
+            }
+            | Self::ScopeDenied {
+                reason: Some(r), ..
+            }
+            | Self::InvalidArgument {
+                reason: Some(r), ..
+            } => r.error_code(),
+
+            Self::ActionOutcomeUnknown { .. } => ErrorCode::OutcomeUnknown,
+
+            Self::Unauthorized(_) | Self::IdentityUnverified(_) => ErrorCode::CapabilityDenied,
+            Self::CapabilityDenied { reason, .. } => reason.error_code(),
+            Self::ScopeDenied { reason: None, .. } => ErrorCode::ScopeDenied,
 
             Self::RevisionConflict { .. } => ErrorCode::RevisionConflict,
             Self::ProtocolIncompatible { .. } => ErrorCode::ProtocolIncompatible,
 
-            Self::InvalidArgument {
-                reason: Some(r), ..
-            } => r.error_code(),
             Self::InvalidArgument { reason: None, .. }
             | Self::ControlReserveIncoherent(_)
             | Self::SuccessorExists
@@ -406,11 +476,19 @@ impl StoreError {
                 Some(ReasonCode::RestoreIncomplete)
             }
             Self::EvidenceUnavailable(_) => Some(ReasonCode::EvidenceUnavailable),
+            Self::Unauthorized(_) => Some(ReasonCode::OperationNotAuthorized),
+            Self::IdentityUnverified(_) => Some(ReasonCode::IdentityUnverified),
+            Self::CapabilityDenied { reason, .. } => Some(*reason),
+            Self::RecoveryInProgress(_) => Some(ReasonCode::RecoveryInProgress),
+            Self::ActionOutcomeUnknown { .. } => Some(ReasonCode::UnresolvedEffect),
+            Self::AccountingMismatch(_) => Some(ReasonCode::AccountingMismatch),
+            Self::ContractViolation { reason, .. }
+            | Self::ScopeDenied { reason, .. }
+            | Self::InvalidArgument { reason, .. } => *reason,
             Self::ResyncRequired { .. } => Some(ReasonCode::CursorExpired),
             Self::TxWalGrowthExceeded { .. } | Self::ExportQuotaExceeded { .. } => {
                 Some(ReasonCode::SchemaLimitExceeded)
             }
-            Self::InvalidArgument { reason, .. } => *reason,
             _ => None,
         }
     }
@@ -514,6 +592,10 @@ mod tests {
     use super::*;
     use unleash_domain::CommandId;
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "Catalogue complet des variantes StoreError vérifiées en projection IPC"
+    )]
     fn build_error_samples() -> Vec<StoreError> {
         let auth = AuthorityGeneration::from_u128(1);
         let cmd = CommandId::from_u128(2);
@@ -610,6 +692,26 @@ mod tests {
                 reason: Some(ReasonCode::OperationNotAuthorized),
                 message: "denied".to_owned(),
             },
+            StoreError::Unauthorized("denied".to_owned()),
+            StoreError::IdentityUnverified("unverified".to_owned()),
+            StoreError::CapabilityDenied {
+                reason: ReasonCode::SubjectSuspended,
+                message: "suspended".to_owned(),
+            },
+            StoreError::ScopeDenied {
+                reason: Some(ReasonCode::AccessRevoked),
+                message: "revoked".to_owned(),
+            },
+            StoreError::ContractViolation {
+                reason: Some(ReasonCode::TerminalImmutable),
+                message: "immutable".to_owned(),
+            },
+            StoreError::RecoveryInProgress("recovery".to_owned()),
+            StoreError::ActionOutcomeUnknown {
+                action_id: ActionId::from_u128(5),
+                detail: "unknown".to_owned(),
+            },
+            StoreError::AccountingMismatch("mismatch".to_owned()),
         ]
     }
 

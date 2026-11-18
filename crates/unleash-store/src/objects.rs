@@ -796,16 +796,21 @@ pub(crate) fn execute_unlink_and_finalize_deletion(
         }
         check_injected_fault(config.fault_injector.as_ref(), FaultTarget::ObjectUnlink)?;
         fs::remove_file(&abs_path)?;
-        if let Some(parent) = abs_path.parent() {
-            sync_dir(parent)?;
-        }
-        tracing::info!(
-            object_hash = %intent.object_hash,
-            object_generation = exp_gen,
-            delete_operation_id = %intent.delete_operation_id,
-            "unlink physique et synchronisation répertoire effectués"
-        );
     }
+    // Un unlink peut précéder un crash/IOERR de sync_dir. L'absence du chemin ne
+    // prouve donc pas la durabilité de sa suppression : resynchroniser à la reprise.
+    check_injected_fault(
+        config.fault_injector.as_ref(),
+        FaultTarget::ObjectDeletionSync,
+    )?;
+    if let Some(parent) = abs_path.parent() {
+        sync_dir(parent)?;
+    }
+    tracing::info!(
+        object_hash = %intent.object_hash, object_generation = exp_gen,
+        delete_operation_id = %intent.delete_operation_id,
+        "suppression et synchronisation répertoire vérifiées"
+    );
 
     let op_id_u = intent.delete_operation_id.clone();
     writer.submit_immediate_blocking(WriteCriticality::Critical, false, move |tx, _now| {

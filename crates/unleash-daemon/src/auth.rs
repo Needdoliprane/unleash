@@ -3,17 +3,20 @@
 //! d'`actor_ref`, rejet d'usurpation et matrice de capacités (`REQ-CORE-004`).
 
 use std::collections::HashSet;
+use std::sync::Arc;
 
 use unleash_domain::{ActorId, ProjectId};
 use unleash_platform::{PeerCredentials, effective_uid, verify_peer_uid};
 use unleash_protocol::{
-    ClientKind, CommandEnvelope, ErrorCode, HelloRequest, IpcError, QueryEnvelope, ReasonCode,
-    RetryClass, SubscribeEventsRequest,
+    AdminProof, ClientKind, CommandEnvelope, ErrorCode, HelloRequest, IpcError, QueryEnvelope,
+    ReasonCode, RetryClass, SubscribeEventsRequest,
 };
 
 /// Capacité atomique vérifiée côté daemon pour chaque opération IPC.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Capability {
+    /// Capacité octroyée après vérification de la preuve de cette incarnation.
+    Administer,
     /// Lecture de diagnostic (`GetDaemonStatus`, `GetHealth`).
     QueryDaemonDiagnostic,
     /// Lecture de projections et reçus (`GetStateSnapshot`, `GetCommandReceipt`, `SubscribeEvents`).
@@ -61,6 +64,41 @@ pub trait AuthVerifierPort: Send + Sync {
 /// Vérificateur par défaut vérifiant l'UID effectif local et les capacités selon `ClientKind`.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct PeerUidAuthVerifier;
+
+/// Enveloppe serveur : retire les droits privés sans preuve du daemon courant.
+pub(crate) struct AdministrativeAuthVerifier {
+    pub(crate) inner: Arc<dyn AuthVerifierPort>,
+    pub(crate) expected: AdminProof,
+}
+
+impl AuthVerifierPort for AdministrativeAuthVerifier {
+    fn authenticate_peer(
+        &self,
+        peer: PeerCredentials,
+        hello: &HelloRequest,
+    ) -> Result<AuthenticatedSession, IpcError> {
+        let mut session = self.inner.authenticate_peer(peer, hello)?;
+        let permitted_kind = matches!(
+            hello.client_kind,
+            ClientKind::Cli | ClientKind::Tui | ClientKind::Gui
+        );
+        let valid = permitted_kind
+            && hello
+                .admin_proof
+                .as_ref()
+                .is_some_and(|p| p.matches(&self.expected));
+        // Une capacité ajoutée par un port injecté ne remplace jamais la preuve de transport.
+        session.capabilities.remove(&Capability::Administer);
+        if valid {
+            session.capabilities.insert(Capability::Administer);
+        } else {
+            session
+                .capabilities
+                .retain(|cap| *cap == Capability::QueryDaemonDiagnostic);
+        }
+        Ok(session)
+    }
+}
 
 impl AuthVerifierPort for PeerUidAuthVerifier {
     fn authenticate_peer(
@@ -156,6 +194,13 @@ pub fn authorize_command(
     session: &AuthenticatedSession,
     cmd: &CommandEnvelope,
 ) -> Result<(), IpcError> {
+    if !session.capabilities.contains(&Capability::Administer) {
+        return Err(IpcError::from_reason(
+            ReasonCode::OperationNotAuthorized,
+            "Preuve administrative requise",
+        )
+        .with_command_id(cmd.command_id));
+    }
     if let Some(ref claimed) = cmd.actor_ref
         && claimed != &session.actor_ref
     {
@@ -172,17 +217,18 @@ pub fn authorize_command(
     }
 
     let required = match cmd.command_type.as_str() {
-        "CreateProject" => Capability::ManageProjects,
+        "CreateProject" | "ReviseProject" => Capability::ManageProjects,
+        "SetSettings" | "SetPolicy" | "ConfigureGuard" | "PurgeHistory" => Capability::Administer,
         "AssignMission" | "PauseMission" | "ResumeMission" | "CancelMission" => {
             Capability::ManageMissions
         }
         "StopDaemon" => Capability::StopDaemon,
         "RecordClaim" | "RecordObservation" | "RecordJudgment" => Capability::WorkerReport,
-        other => {
+        _ => {
             return Err(IpcError::new(
                 ErrorCode::InvalidArgument,
                 None,
-                format!("Type de commande inconnu ou non supporté : '{other}'"),
+                "Type de commande inconnu ou non supporté",
                 RetryClass::Never,
             )
             .with_command_id(cmd.command_id));
@@ -224,14 +270,25 @@ pub fn authorize_query(
     session: &AuthenticatedSession,
     query: &QueryEnvelope,
 ) -> Result<(), IpcError> {
+    if query.query_type != "GetDaemonStatus"
+        && !session.capabilities.contains(&Capability::Administer)
+    {
+        return Err(IpcError::from_reason(
+            ReasonCode::OperationNotAuthorized,
+            "Preuve administrative requise",
+        ));
+    }
     let required = match query.query_type.as_str() {
-        "GetDaemonStatus" | "GetHealth" => Capability::QueryDaemonDiagnostic,
-        "GetStateSnapshot" | "GetCommandReceipt" => Capability::QueryState,
-        other => {
+        "GetDaemonStatus" => Capability::QueryDaemonDiagnostic,
+        "GetHealth" | "GetStateSnapshot" | "GetCommandReceipt" | "ListProjects" | "GetProject"
+        | "ReadSettings" | "ReadPolicySummary" | "ReadGuardHealth" | "InspectRecovery" => {
+            Capability::QueryState
+        }
+        _ => {
             return Err(IpcError::new(
                 ErrorCode::InvalidArgument,
                 None,
-                format!("Type de requête inconnu ou non supporté : '{other}'"),
+                "Type de requête inconnu ou non supporté",
                 RetryClass::Never,
             ));
         }
@@ -268,6 +325,12 @@ pub fn authorize_subscription(
     session: &AuthenticatedSession,
     req: &SubscribeEventsRequest,
 ) -> Result<(), IpcError> {
+    if !session.capabilities.contains(&Capability::Administer) {
+        return Err(IpcError::from_reason(
+            ReasonCode::OperationNotAuthorized,
+            "Preuve administrative requise",
+        ));
+    }
     if !session.capabilities.contains(&Capability::QueryState) {
         return Err(IpcError::from_reason(
             ReasonCode::OperationNotAuthorized,
@@ -321,6 +384,7 @@ mod tests {
                     client_kind: ClientKind::Cli,
                     client_version: String::from("0.1.0"),
                     capabilities: Vec::new(),
+                    admin_proof: None,
                 },
             )
             .unwrap();
@@ -336,6 +400,7 @@ mod tests {
                     client_kind: ClientKind::Worker,
                     client_version: String::from("0.1.0"),
                     capabilities: Vec::new(),
+                    admin_proof: None,
                 },
             )
             .unwrap();
@@ -355,6 +420,7 @@ mod tests {
                     client_kind: ClientKind::Cli,
                     client_version: String::from("0.1.0"),
                     capabilities: Vec::new(),
+                    admin_proof: None,
                 },
             )
             .unwrap_err();
@@ -368,6 +434,7 @@ mod tests {
                     client_kind: ClientKind::Cli,
                     client_version: String::from("0.1.0"),
                     capabilities: vec![String::from("cap:revoked")],
+                    admin_proof: None,
                 },
             )
             .unwrap_err();
@@ -383,6 +450,7 @@ mod tests {
         let p_ok = ProjectId::from_u128(0x10);
         let p_bad = ProjectId::from_u128(0x20);
         let mut caps = HashSet::new();
+        caps.insert(Capability::Administer);
         caps.insert(Capability::QueryState);
         caps.insert(Capability::ManageMissions);
         let mut allowed = HashSet::new();
@@ -423,6 +491,14 @@ mod tests {
         );
         scoped_cmd.project_id = Some(p_ok);
         assert!(authorize_command(&session, &scoped_cmd).is_ok());
+        let mut unknown_command = scoped_cmd.clone();
+        unknown_command.command_type = String::from("DO_NOT_ECHO");
+        assert!(
+            !authorize_command(&session, &unknown_command)
+                .unwrap_err()
+                .message
+                .contains("DO_NOT_ECHO")
+        );
 
         let q_bad = QueryEnvelope {
             protocol_version: ProtocolVersion,
@@ -434,6 +510,14 @@ mod tests {
         assert_eq!(
             authorize_query(&session, &q_bad).unwrap_err().code,
             ErrorCode::ScopeDenied
+        );
+        let mut unknown_query = q_bad.clone();
+        unknown_query.query_type = String::from("DO_NOT_ECHO");
+        assert!(
+            !authorize_query(&session, &unknown_query)
+                .unwrap_err()
+                .message
+                .contains("DO_NOT_ECHO")
         );
 
         let sub_bad = SubscribeEventsRequest {

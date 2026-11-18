@@ -356,6 +356,74 @@ pub enum ClientKind {
     Probe,
 }
 
+/// Preuve administrative éphémère de 32 octets, transmise uniquement au daemon local.
+#[derive(Clone)]
+pub struct AdminProof([u8; 32]);
+
+impl AdminProof {
+    /// Construit la preuve à partir de 32 octets cryptographiquement aléatoires.
+    #[must_use]
+    pub const fn from_bytes(bytes: [u8; 32]) -> Self {
+        Self(bytes)
+    }
+
+    /// Parse la forme hexadécimale minuscule exacte sans exposer les entrées invalides.
+    #[must_use]
+    pub fn from_hex(value: &str) -> Option<Self> {
+        if value.len() != 64
+            || !value
+                .bytes()
+                .all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c))
+        {
+            return None;
+        }
+        let mut bytes = [0_u8; 32];
+        hex::decode_to_slice(value, &mut bytes).ok()?;
+        Some(Self(bytes))
+    }
+
+    /// Encode la preuve sous une chaîne effacée à sa destruction.
+    #[must_use]
+    pub fn to_hex(&self) -> zeroize::Zeroizing<String> {
+        zeroize::Zeroizing::new(hex::encode(self.0))
+    }
+
+    /// Compare les preuves en temps constant.
+    #[must_use]
+    pub fn matches(&self, other: &Self) -> bool {
+        use subtle::ConstantTimeEq;
+        bool::from(self.0.ct_eq(&other.0))
+    }
+}
+impl std::fmt::Debug for AdminProof {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("AdminProof([REDACTED])")
+    }
+}
+impl Drop for AdminProof {
+    fn drop(&mut self) {
+        use zeroize::Zeroize;
+        self.0.zeroize();
+    }
+}
+impl PartialEq for AdminProof {
+    fn eq(&self, other: &Self) -> bool {
+        self.matches(other)
+    }
+}
+impl Eq for AdminProof {}
+impl Serialize for AdminProof {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&self.to_hex())
+    }
+}
+impl<'de> Deserialize<'de> for AdminProof {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let raw = zeroize::Zeroizing::new(String::deserialize(deserializer)?);
+        Self::from_hex(&raw).ok_or_else(|| de::Error::custom("preuve administrative invalide"))
+    }
+}
+
 /// Poignée de main initiale transmise par le client (`ipc-hello.schema.json`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(deny_unknown_fields)]
@@ -368,6 +436,10 @@ pub struct HelloRequest {
     pub client_version: String,
     /// Capacités optionnelles requises ou supportées par le client.
     pub capabilities: Vec<String>,
+    /// Preuve réservée au transport Rust ; absente ou nulle pour un accès diagnostic.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(skip)]
+    pub admin_proof: Option<AdminProof>,
 }
 
 /// Réponse du daemon à la poignée de main initiale (`ipc-hello.schema.json`).

@@ -28,11 +28,12 @@ pub use fences::{
 };
 pub use ids::{
     AccountId, ActionId, ActorId, AgentId, ApprovalScopeId, AttemptId, AuthorityGeneration,
-    BackupId, CommandId, DaemonInstanceId, DiscoveryReceiptId, DispatchId, DraftId, EvidenceId,
-    GoalId, HostId, InvocationId, IterationId, LeaseId, ManifestId, MissionId, ModelCallId,
-    OperationId, PoolId, ProcessId, ProcessRunUuid, ProjectId, ProviderProbeId, ReceiptId,
-    RegistryVersionId, ReplayWorkerId, RepoId, RequestId, ReservationId, RestoreId, RunId,
-    SecretRef, SessionId, Sha256Digest, StepId, StreamId, TaskId, TerminalId, WorktreeId,
+    AuthorizationEvaluationId, BackupId, CommandId, DaemonInstanceId, DiscoveryReceiptId,
+    DispatchId, DraftId, EvidenceId, GoalId, HostId, InvocationId, IterationId, LeaseId,
+    ManifestId, MissionId, ModelCallId, OperationId, PoolId, ProcessId, ProcessRunUuid, ProjectId,
+    ProviderProbeId, ReceiptId, RegistryVersionId, ReplayWorkerId, RepoId, RequestId,
+    ReservationId, RestoreId, RunId, SecretRef, SessionId, Sha256Digest, StepId, StreamId, TaskId,
+    TerminalId, WorktreeId,
 };
 pub use ports::{ClockPort, IdGeneratorPort};
 pub use states::*;

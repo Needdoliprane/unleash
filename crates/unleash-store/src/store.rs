@@ -5,10 +5,10 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
-use rusqlite::{Connection, OpenFlags, Transaction, TransactionBehavior};
+use rusqlite::{Connection, OpenFlags, OptionalExtension, Transaction, TransactionBehavior};
 use unleash_domain::{
     AccountId, ActionId, ActorId, AuthorityGeneration, BackupId, CommandId, DaemonEpoch,
-    DaemonInstanceId, LeaseId, MicrosAmount, PoolId, ReceiptId, Sequence, Sha256Digest, StreamId,
+    DaemonInstanceId, LeaseId, MicrosAmount, PoolId, ProjectId, Sequence, Sha256Digest, StreamId,
     TimestampMs,
 };
 use unleash_protocol::{CommandEnvelope, EventEnvelope};
@@ -37,9 +37,10 @@ use crate::config::{
 use crate::error::StoreError;
 use crate::events::{
     DeadLetterItem, InboxApplyOutcome, OutboxDispatchItem, PurgeStats, ReadEventsOutcome,
-    read_dead_letters_conn, read_events_with_window, tx_ack_outbox, tx_apply_inbox_event,
-    tx_lease_outbox_batch, tx_purge_expired_inbox, tx_purge_history,
-    tx_record_non_transient_failure, tx_record_transient_failure,
+    RetentionPurgeReport, RetentionPurgeRequest, read_dead_letters_conn, read_events_with_window,
+    tx_ack_outbox, tx_apply_inbox_event, tx_execute_retention_purge, tx_lease_outbox_batch,
+    tx_purge_expired_inbox, tx_purge_history, tx_record_non_transient_failure,
+    tx_record_transient_failure,
 };
 use crate::fs_sync::{set_dir_permissions_0700, set_path_permissions};
 use crate::leases::{
@@ -55,8 +56,23 @@ use crate::objects::{
     tx_publish_object_reference, tx_release_pin, tx_tombstone_object_references,
     verify_object_file_before_publish, write_prepared_object_bytes_to_disk,
 };
+use crate::policies_secrets::{
+    AlertRecord, GuardConfigRecord, ListAlertsFilter, NewAlertSpec, PolicySummary,
+    SecretReferenceStatus, SubjectKind, SubjectSuspensionRecord, get_secret_reference_status_conn,
+    list_alerts_conn, list_secret_references_conn, read_guard_config_conn,
+    read_policy_summary_conn, read_subject_suspension_conn, record_alert_tx,
+};
+use crate::projects_settings::{
+    ProjectRecord, RetentionClass, SettingsRecord, SettingsScopeKind, get_project_conn,
+    list_projects_conn, read_settings_conn,
+};
 use crate::qualification::{
     SqliteRuntimeManifest, apply_and_verify_writer_pragmas, inspect_and_verify_build,
+};
+use crate::recovery_ops::{
+    ActionDispatchInput, RecoveryReport, inspect_recovery_conn, inspect_recovery_offline_cfg,
+    lookup_restore_receipt_cfg, reconcile_recovered_actions_after_restart_tx,
+    record_action_dispatch_tx,
 };
 use crate::restore::{
     MaintenanceRestoreManifest, RestoreActivationResult, RestoreBackupRequest,
@@ -81,6 +97,15 @@ impl Drop for SnapshotReaderGuard<'_> {
         }
         self.readers.unregister(self.reader_id);
     }
+}
+
+/// Projection et curseur de la même vue `SQLite`, sans SQL dans les clients.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SnapshotProjection<T> {
+    /// Projection typée.
+    pub value: T,
+    /// Watermark du journal dans la transaction de lecture.
+    pub cursor: unleash_protocol::EventCursor,
 }
 
 /// Façade propriétaire de la persistance locale `SQLite` d'Unleash.
@@ -463,6 +488,10 @@ impl UnleashStore {
             aggregate_id = %req.envelope.aggregate_id
         )
         .entered();
+        let is_purge = matches!(
+            req.mutation,
+            crate::commands::CommandMutation::PurgeHistory { .. }
+        );
         let (digest, retention_days) = self.run_command_prechecks(&req)?;
         let cfg = self.config.clone();
         let cutpoints = Arc::clone(&self.config.cutpoints);
@@ -484,6 +513,13 @@ impl UnleashStore {
         self.config
             .cutpoints
             .hit(StoreCutpoint::C2AfterCommandCommit)?;
+        if is_purge {
+            finish_receipt_retention_purges(
+                &self.config,
+                &self.writer,
+                outcome.receipt().receipt_id,
+            )?;
+        }
         Ok(outcome)
     }
 
@@ -503,6 +539,10 @@ impl UnleashStore {
             aggregate_id = %req.envelope.aggregate_id
         )
         .entered();
+        let is_purge = matches!(
+            req.mutation,
+            crate::commands::CommandMutation::PurgeHistory { .. }
+        );
         let (digest, retention_days) = self.run_command_prechecks(&req)?;
         let cfg = self.config.clone();
         let cutpoints = Arc::clone(&self.config.cutpoints);
@@ -523,6 +563,16 @@ impl UnleashStore {
         self.config
             .cutpoints
             .hit(StoreCutpoint::C2AfterCommandCommit)?;
+        if is_purge {
+            let config = self.config.clone();
+            let writer = self.writer.submission_client();
+            let receipt = outcome.receipt().receipt_id;
+            tokio::task::spawn_blocking(move || {
+                finish_receipt_retention_purges(&config, &writer, receipt)
+            })
+            .await
+            .map_err(|error| StoreError::StorageUnavailable(error.to_string()))??;
+        }
         Ok(outcome)
     }
 
@@ -1116,7 +1166,18 @@ impl UnleashStore {
     pub fn reconcile_objects_and_deletions(
         &self,
     ) -> Result<ObjectReconciliationReport, StoreError> {
-        reconcile_objects_workflow(&self.config, &self.writer, self.config.cutpoints.as_ref())
+        let report =
+            reconcile_objects_workflow(&self.config, &self.writer, self.config.cutpoints.as_ref())?;
+        let purges =
+            self.read_snapshot(|conn, _| crate::events::read_retention_purge_statuses_conn(conn))?;
+        for purge in purges {
+            // Le flag prouve un checkpoint post-suppression ; il ne permet pas de sauter
+            // celui de reprise après un crash entre l'audit et le dernier TRUNCATE.
+            if purge.state != "quarantined" {
+                finish_retention_purge(&self.config, &self.writer, &purge.purge_id)?;
+            }
+        }
+        Ok(report)
     }
 
     /// Lit l'enregistrement `object_records` d'un hash.
@@ -1373,31 +1434,535 @@ impl UnleashStore {
             })
     }
 
-    /// Lève explicitement le gel d'un scope après disposition autorisée (F018).
+    /// Engage atomiquement une décision interne dédiée et lève son seul gel de restauration.
+    ///
+    /// Aucun reçu d'une autre opération n'autorise cette décision. Les effets et coûts restent historiques.
+    ///
+    /// # Errors
+    /// Refuse les autorités, politiques, restaurations ou reçus sans lien exact avec la décision.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "Décision de scope, reçu canonique et levée du gel atomiques sous le writer"
+    )]
+    pub fn dispose_frozen_scope(
+        &self,
+        disposition: crate::recovery_ops::ScopeFreezeDisposition,
+    ) -> Result<usize, StoreError> {
+        crate::policies_secrets::require_human_decider(
+            &disposition.caller,
+            "recovery scope disposition",
+        )?;
+        if disposition.reason.trim().is_empty()
+            || disposition.dependency_budget_impact.trim().is_empty()
+            || disposition.policy_revision < 0
+        {
+            return Err(StoreError::InvalidArgument {
+                reason: None,
+                message: "disposition requires reason, policy and dependency/budget impact"
+                    .to_owned(),
+            });
+        }
+        let decision_json = serde_json::to_string(&disposition)?;
+        let retention_ms =
+            i64::from(self.config.default_receipt_retention_days).saturating_mul(86_400_000);
+        self.writer.submit_immediate_blocking(WriteCriticality::Critical, false, move |tx, now_ms| {
+            let current: Option<(String, String)> = tx.query_row(
+                "SELECT f.state, i.target_authority_generation FROM recovery_scope_freezes f
+                 JOIN restore_imports i ON i.restore_id = f.restore_id WHERE f.scope_id = ?1 AND f.restore_id = ?2",
+                rusqlite::params![disposition.scope_id, disposition.restore_id.to_string()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            ).optional().map_err(StoreError::from_rusqlite)?;
+            let Some((state, target_authority)) = current else {
+                return Err(StoreError::RecoveryInProgress("scope/restore mismatch".to_owned()));
+            };
+            let daemon = read_daemon_state_conn(tx)?;
+            if target_authority != daemon.authority_generation.to_string() {
+                return Err(StoreError::RecoveryInProgress("restore is not the active lineage".to_owned()));
+            }
+            let command_id = CommandId::from_uuid(disposition.decision_receipt_id.as_uuid());
+            let payload = serde_json::to_value(&disposition)?.as_object().cloned()
+                .ok_or_else(|| StoreError::InvariantViolation("scope decision must be an object".to_owned()))?;
+            let envelope = CommandEnvelope {
+                protocol_version: unleash_protocol::ProtocolVersion,
+                request_id: unleash_domain::RequestId::from_uuid(disposition.decision_receipt_id.as_uuid()),
+                command_id, authority_generation: daemon.authority_generation,
+                actor_ref: Some(disposition.caller.actor_id.to_string()), project_id: None,
+                aggregate_id: disposition.restore_id.as_uuid(), expected_revision: unleash_domain::Revision::INITIAL,
+                command_type: "DisposeRecoveryScope".to_owned(), payload,
+            };
+            let digest = unleash_protocol::compute_command_digest_v2(&envelope)?;
+            let existing: Option<(String, String, String, String, String)> = tx.query_row(
+                "SELECT actor_id, authority_generation, command_type, command_digest, aggregate_id FROM command_receipts
+                 WHERE receipt_id = ?1 OR (actor_id = ?2 AND command_id = ?3)",
+                rusqlite::params![disposition.decision_receipt_id.to_string(), disposition.caller.actor_id.to_string(), command_id.to_string()],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
+            ).optional().map_err(StoreError::from_rusqlite)?;
+            if let Some((actor, authority, command_type, existing_digest, aggregate)) = &existing
+                && (actor != disposition.caller.actor_id.as_str()
+                    || authority != &daemon.authority_generation.to_string()
+                    || command_type != "DisposeRecoveryScope" || existing_digest != &digest.as_prefixed_str()
+                    || aggregate != &disposition.restore_id.to_string())
+            {
+                return Err(StoreError::Unauthorized("receipt is not bound to this explicit scope decision".to_owned()));
+            }
+            if state != "frozen" {
+                let previous: Option<String> = tx.query_row(
+                    "SELECT decision_json FROM recovery_scope_dispositions WHERE scope_id = ?1 AND restore_id = ?2",
+                    rusqlite::params![disposition.scope_id, disposition.restore_id.to_string()], |row| row.get(0),
+                ).optional().map_err(StoreError::from_rusqlite)?;
+                return if existing.is_some() && previous.as_deref() == Some(&decision_json) { Ok(0) }
+                    else { Err(StoreError::ContractViolation { reason: None, message: "scope already disposed by another decision".to_owned() }) };
+            }
+            let policy_applies = (disposition.policy_scope_kind == "global" && disposition.policy_scope_id == "global")
+                || (disposition.policy_scope_kind == "project" && disposition.policy_scope_id == disposition.scope_id);
+            let revision: i64 = tx.query_row(
+                "SELECT COALESCE(MAX(revision), 0) FROM security_policies WHERE scope_kind = ?1 AND scope_id = ?2",
+                rusqlite::params![disposition.policy_scope_kind, disposition.policy_scope_id], |row| row.get(0),
+            ).map_err(StoreError::from_rusqlite)?;
+            if !policy_applies || revision != disposition.policy_revision {
+                return Err(StoreError::Unauthorized("scope disposition policy mismatch".to_owned()));
+            }
+            if existing.is_some() {
+                return Err(StoreError::ContractViolation { reason: None, message: "decision receipt without atomic disposition".to_owned() });
+            }
+            let sequence: i64 = tx.query_row("SELECT COALESCE(MAX(sequence), 0) FROM events WHERE stream_id = ?1",
+                [daemon.stream_id.to_string()], |row| row.get(0)).map_err(StoreError::from_rusqlite)?;
+            let receipt = unleash_protocol::CommandReceipt {
+                receipt_id: disposition.decision_receipt_id, command_id,
+                accepted_at: chrono::DateTime::<chrono::Utc>::from_timestamp_millis(now_ms.as_i64()).unwrap_or(chrono::DateTime::UNIX_EPOCH),
+                aggregate_id: disposition.restore_id.as_uuid(), new_revision: unleash_domain::Revision::new(1),
+                operation_id: None, state: unleash_protocol::ReceiptState::Completed,
+                event_cursor: unleash_protocol::EventCursor::new(daemon.stream_id, Sequence::new(u64::try_from(sequence).unwrap_or(0))),
+                result_ref: Some(format!("recovery-scope:{}", disposition.scope_id)),
+            };
+            tx.execute(
+                "INSERT INTO command_receipts
+                 (actor_id, command_id, authority_generation, receipt_id, request_id, command_type, command_digest,
+                  aggregate_id, state, response_state, response_json, response_retained_until_ms, first_event_seq, last_event_seq, committed_at_ms)
+                 VALUES (?1, ?2, ?3, ?4, ?5, 'DisposeRecoveryScope', ?6, ?7, 'completed', 'full', ?8, ?9, NULL, NULL, ?10)",
+                rusqlite::params![disposition.caller.actor_id.to_string(), command_id.to_string(), daemon.authority_generation.to_string(),
+                    disposition.decision_receipt_id.to_string(), envelope.request_id.to_string(), digest.as_prefixed_str(),
+                    disposition.restore_id.to_string(), serde_json::to_string(&receipt)?, now_ms.as_i64().saturating_add(retention_ms), now_ms.as_i64()],
+            ).map_err(StoreError::from_rusqlite)?;
+            tx.execute(
+                "INSERT INTO recovery_scope_dispositions (scope_id, restore_id, decision_receipt_id, decided_by_actor, decision_json, created_at_ms)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                rusqlite::params![disposition.scope_id, disposition.restore_id.to_string(), disposition.decision_receipt_id.to_string(),
+                    disposition.caller.actor_id.to_string(), decision_json, now_ms.as_i64()],
+            ).map_err(StoreError::from_rusqlite)?;
+            tx.execute(
+                "UPDATE recovery_scope_freezes SET state = 'disposed', disposed_at_ms = ?1, disposition_receipt_id = ?2
+                 WHERE scope_id = ?3 AND restore_id = ?4 AND state = 'frozen'",
+                rusqlite::params![now_ms.as_i64(), disposition.decision_receipt_id.to_string(), disposition.scope_id, disposition.restore_id.to_string()],
+            ).map_err(StoreError::from_rusqlite)
+        })
+    }
+
+    fn project_snapshot<T>(
+        &self,
+        read: impl FnOnce(&Connection) -> Result<T, StoreError>,
+    ) -> Result<SnapshotProjection<T>, StoreError> {
+        self.read_snapshot(|conn, _ctx| {
+            let daemon = read_daemon_state_conn(conn)?;
+            let high: i64 = conn
+                .query_row(
+                    "SELECT COALESCE(MAX(sequence), 0) FROM events WHERE stream_id = ?1",
+                    [daemon.stream_id.to_string()],
+                    |r| r.get(0),
+                )
+                .map_err(StoreError::from_rusqlite)?;
+            let value = read(conn)?;
+            Ok(SnapshotProjection {
+                value,
+                cursor: unleash_protocol::EventCursor::new(
+                    daemon.stream_id,
+                    Sequence::new(u64::try_from(high).unwrap_or(0)),
+                ),
+            })
+        })
+    }
+
+    /// Liste projets et watermark dans une seule transaction lectrice.
+    ///
+    /// # Errors
+    /// Retourne les erreurs de lecture du store.
+    pub fn list_projects_snapshot(
+        &self,
+    ) -> Result<SnapshotProjection<Vec<ProjectRecord>>, StoreError> {
+        self.project_snapshot(list_projects_conn)
+    }
+
+    /// Lit projet et watermark dans une seule transaction lectrice.
+    ///
+    /// # Errors
+    /// Retourne les erreurs de lecture du store.
+    pub fn get_project_snapshot(
+        &self,
+        project_id: ProjectId,
+    ) -> Result<SnapshotProjection<ProjectRecord>, StoreError> {
+        self.project_snapshot(|conn| get_project_conn(conn, project_id))
+    }
+
+    /// Lit réglages et watermark dans une seule transaction lectrice.
+    ///
+    /// # Errors
+    /// Retourne les erreurs de lecture du store.
+    pub fn read_settings_snapshot(
+        &self,
+        scope_kind: SettingsScopeKind,
+        scope_id: &str,
+    ) -> Result<SnapshotProjection<SettingsRecord>, StoreError> {
+        let now_ms = self.config.clock.now_ms();
+        self.project_snapshot(|conn| read_settings_conn(conn, now_ms, scope_kind, scope_id))
+    }
+
+    /// Lit résumé de politique et watermark dans une seule transaction lectrice.
+    ///
+    /// # Errors
+    /// Retourne les erreurs de lecture du store.
+    pub fn read_policy_summary_snapshot(
+        &self,
+        project_id: Option<ProjectId>,
+    ) -> Result<SnapshotProjection<PolicySummary>, StoreError> {
+        self.project_snapshot(|conn| read_policy_summary_conn(conn, project_id))
+    }
+
+    /// Lit récupération et watermark dans une seule transaction lectrice.
+    ///
+    /// # Errors
+    /// Retourne les erreurs de lecture du store.
+    pub fn inspect_recovery_snapshot(
+        &self,
+    ) -> Result<SnapshotProjection<RecoveryReport>, StoreError> {
+        self.project_snapshot(|conn| inspect_recovery_conn(conn, &self.config))
+    }
+    /// Liste tous les projets persistés (`ListProjects`).
+    ///
+    /// # Errors
+    /// Retourne [`StoreError`] en cas d'erreur de lecture.
+    pub fn list_projects(&self) -> Result<Vec<ProjectRecord>, StoreError> {
+        self.read_snapshot(|conn, _ctx| list_projects_conn(conn))
+    }
+
+    /// Lit un projet par identifiant (`GetProject`).
+    ///
+    /// # Errors
+    /// Retourne [`StoreError::NotFound`] si absent ou une erreur de lecture.
+    pub fn get_project(&self, project_id: ProjectId) -> Result<ProjectRecord, StoreError> {
+        self.read_snapshot(|conn, _ctx| get_project_conn(conn, project_id))
+    }
+
+    /// Lit les paramètres typés d'une portée (`ReadSettings`), synthétisant les défauts Q-15/Q-12 si vierge.
+    ///
+    /// # Errors
+    /// Retourne [`StoreError`] en cas d'erreur de lecture.
+    pub fn read_settings(
+        &self,
+        scope_kind: SettingsScopeKind,
+        scope_id: &str,
+    ) -> Result<SettingsRecord, StoreError> {
+        let now_ms = self.config.clock.now_ms();
+        self.read_snapshot(|conn, _ctx| read_settings_conn(conn, now_ms, scope_kind, scope_id))
+    }
+
+    /// Lit le résumé agrégé de politique d'isolation et de configuration AI-Guard (`ReadPolicySummary`).
+    ///
+    /// # Errors
+    /// Retourne [`StoreError`] en cas d'erreur de lecture.
+    pub fn read_policy_summary(
+        &self,
+        project_id: Option<ProjectId>,
+    ) -> Result<PolicySummary, StoreError> {
+        self.read_snapshot(|conn, _ctx| read_policy_summary_conn(conn, project_id))
+    }
+
+    /// Lit une configuration AI-Guard par identifiant (`"default"`, etc.).
+    ///
+    /// # Errors
+    /// Retourne [`StoreError`] en cas d'erreur de lecture.
+    pub fn read_guard_config(
+        &self,
+        config_id: &str,
+    ) -> Result<Option<GuardConfigRecord>, StoreError> {
+        self.read_snapshot(|conn, _ctx| read_guard_config_conn(conn, config_id))
+    }
+
+    /// Lit l'état courant de suspension/révocation d'un sujet typé.
+    ///
+    /// # Errors
+    /// Retourne [`StoreError`] en cas d'erreur de lecture.
+    pub fn get_subject_suspension(
+        &self,
+        kind: SubjectKind,
+        subject_id: &str,
+        scope_kind: &str,
+        scope_id: &str,
+    ) -> Result<Option<SubjectSuspensionRecord>, StoreError> {
+        self.read_snapshot(|conn, _ctx| {
+            read_subject_suspension_conn(conn, kind, subject_id, scope_kind, scope_id)
+        })
+    }
+
+    /// Retourne les métadonnées d'une référence secrète opaque (`GetSecretReferenceStatus`, zéro octet secret).
+    ///
+    /// # Errors
+    /// Retourne [`StoreError::NotFound`] si absente ou une erreur de lecture.
+    pub fn get_secret_reference_status(
+        &self,
+        secret_ref_id: &str,
+    ) -> Result<SecretReferenceStatus, StoreError> {
+        self.read_snapshot(|conn, _ctx| get_secret_reference_status_conn(conn, secret_ref_id))
+    }
+
+    /// Liste les références secrètes enregistrées (métadonnées uniquement, zéro octet secret).
+    ///
+    /// # Errors
+    /// Retourne [`StoreError`] en cas d'erreur de lecture.
+    pub fn list_secret_references(
+        &self,
+        namespace: Option<&str>,
+    ) -> Result<Vec<SecretReferenceStatus>, StoreError> {
+        self.read_snapshot(|conn, _ctx| list_secret_references_conn(conn, namespace))
+    }
+
+    /// Enregistre ou met à jour une alerte durable dans `alerts`.
+    ///
+    /// # Errors
+    /// Retourne [`StoreError`] en cas d'erreur SQL ou de contrainte.
+    pub fn record_alert(&self, spec: NewAlertSpec) -> Result<AlertRecord, StoreError> {
+        self.writer
+            .submit_immediate_blocking(WriteCriticality::Normal, false, move |tx, now_ms| {
+                record_alert_tx(tx, now_ms, &spec)
+            })
+    }
+
+    /// Liste les alertes selon filtre, en remontant les alertes bloquantes actives si demandé (`ListAlerts`).
+    ///
+    /// # Errors
+    /// Retourne [`StoreError`] en cas d'erreur de lecture.
+    pub fn list_alerts(&self, filter: &ListAlertsFilter) -> Result<Vec<AlertRecord>, StoreError> {
+        self.read_snapshot(|conn, _ctx| list_alerts_conn(conn, filter))
+    }
+
+    /// Enregistre une tentative de dispatch d'action dans `action_dispatches`.
+    ///
+    /// # Errors
+    /// Retourne [`StoreError::NotFound`] si l'action n'existe pas ou une erreur SQL.
+    pub fn record_action_dispatch(&self, input: ActionDispatchInput) -> Result<(), StoreError> {
+        self.writer
+            .submit_immediate_blocking(WriteCriticality::Normal, false, move |tx, now_ms| {
+                record_action_dispatch_tx(tx, now_ms, &input)
+            })
+    }
+
+    /// Classe en `outcome_unknown` (sans retry automatique) les actions laissées `dispatching`/`in_flight`
+    /// sous une époque antérieure après redémarrage dans la même lignée.
     ///
     /// # Errors
     /// Retourne [`StoreError`] en cas d'erreur SQL.
-    pub fn dispose_frozen_scope(
+    pub fn reconcile_recovered_actions_after_restart(&self) -> Result<Vec<ActionId>, StoreError> {
+        self.writer
+            .submit_immediate_blocking(WriteCriticality::Critical, false, |tx, now_ms| {
+                reconcile_recovered_actions_after_restart_tx(tx, now_ms)
+            })
+    }
+
+    /// Inspecte l'inventaire et l'état de récupération complet (`InspectRecovery`).
+    ///
+    /// # Errors
+    /// Retourne [`StoreError`] en cas d'erreur de lecture.
+    pub fn inspect_recovery(&self) -> Result<RecoveryReport, StoreError> {
+        self.read_snapshot(|conn, _ctx| inspect_recovery_conn(conn, &self.config))
+    }
+
+    /// Inspecte l'état de récupération hors-ligne, y compris quand la base source est corrompue (`0600` manifest).
+    ///
+    /// # Errors
+    /// Retourne [`StoreError`] si la lecture du manifeste privé échoue.
+    pub fn inspect_recovery_offline(config: &StoreConfig) -> Result<RecoveryReport, StoreError> {
+        inspect_recovery_offline_cfg(config)
+    }
+
+    /// Recherche un reçu `RestoreBackup` par `(actor_id, command_id)` via manifeste privé `0600`
+    /// avant bascule ou `restore_manifest_records` après bascule.
+    ///
+    /// # Errors
+    /// Retourne [`StoreError`] si le manifeste ou la base est illisible de manière inattendue.
+    pub fn lookup_restore_receipt(
+        config: &StoreConfig,
+        actor_id: &str,
+        command_id: CommandId,
+    ) -> Result<Option<MaintenanceRestoreManifest>, StoreError> {
+        lookup_restore_receipt_cfg(config, actor_id, command_id)
+    }
+
+    /// Attribue une classe de rétention Q-12 et un éventuel verrou `keep_by_policy` à un objet live.
+    ///
+    /// # Errors
+    /// Retourne [`StoreError::NotFound`] si l'objet est absent ou une erreur SQL.
+    pub fn tag_object_retention(
         &self,
-        scope_id: &str,
-        disposition_receipt_id: ReceiptId,
-    ) -> Result<usize, StoreError> {
-        let sid = scope_id.to_owned();
-        let rcpt = disposition_receipt_id.to_string();
-        self.writer.submit_immediate_blocking(
-            WriteCriticality::Critical,
-            false,
-            move |tx, now_ms| {
+        object_hash: Sha256Digest,
+        retention_class: RetentionClass,
+        keep_by_policy: bool,
+        project_id: Option<ProjectId>,
+    ) -> Result<(), StoreError> {
+        let hash_s = object_hash.as_prefixed_str();
+        let cls_s = retention_class.as_str().to_owned();
+        let keep_i = i64::from(keep_by_policy);
+        let proj_s = project_id.map(|p| p.to_string());
+        self.writer
+            .submit_immediate_blocking(WriteCriticality::Normal, false, move |tx, _now| {
                 let updated = tx
                     .execute(
-                        "UPDATE recovery_scope_freezes
-                         SET state = 'disposed', disposed_at_ms = ?1, disposition_receipt_id = ?2
-                         WHERE scope_id = ?3 AND state = 'frozen'",
-                        rusqlite::params![now_ms.as_i64(), rcpt, sid],
+                        "UPDATE object_records
+                         SET retention_class = ?1, keep_by_policy = ?2, project_id = COALESCE(?3, project_id)
+                         WHERE object_hash = ?4",
+                        rusqlite::params![cls_s, keep_i, proj_s, hash_s],
                     )
                     .map_err(StoreError::from_rusqlite)?;
-                Ok(updated)
-            },
-        )
+                if updated == 0 {
+                    return Err(StoreError::NotFound(format!("object {hash_s}")));
+                }
+                Ok(())
+            })
     }
+
+    /// Exécute une purge complète sous politique de rétention Q-12 (`unleash.retention.default.v1`),
+    /// respecte les préavis >= 24 h et les protections actives, journalise dans `retention_purges`
+    /// puis exécute `PRAGMA wal_checkpoint(TRUNCATE)`.
+    ///
+    /// # Errors
+    /// Retourne [`StoreError`] en cas d'erreur SQL ou I/O.
+    pub fn execute_retention_purge(
+        &self,
+        req: RetentionPurgeRequest,
+    ) -> Result<RetentionPurgeReport, StoreError> {
+        check_injected_fault(
+            self.config.fault_injector.as_ref(),
+            FaultTarget::Maintenance,
+        )?;
+        let cfg = self.config.clone();
+        let mut report = self.writer.submit_immediate_blocking(
+            WriteCriticality::Critical,
+            false,
+            move |tx, now_ms| tx_execute_retention_purge(tx, &cfg, now_ms, None, None, &req),
+        )?;
+        if !report.suspended_clock_uncertain {
+            let (truncated, bytes) =
+                finish_retention_purge(&self.config, &self.writer, &report.purge_id)?;
+            report.wal_checkpoint_truncated = truncated;
+            report.wal_bytes_after = bytes;
+        }
+        Ok(report)
+    }
+}
+
+fn finish_retention_purge(
+    config: &StoreConfig,
+    writer: &StoreWriterHandle,
+    purge_id: &str,
+) -> Result<(bool, u64), StoreError> {
+    let reason = format!("retention_q12:{purge_id}");
+    let intents = writer.submit_immediate_blocking(WriteCriticality::Critical, false, move |tx, _| {
+        let mut statement = tx.prepare("SELECT delete_operation_id, object_hash, object_generation, relative_path, state
+            FROM object_deletions WHERE reason = ?1 AND state IN ('prepared', 'unlinked') ORDER BY delete_operation_id")
+            .map_err(StoreError::from_rusqlite)?;
+        let rows = statement.query_map([reason], |row| Ok((
+            row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, i64>(2)?,
+            row.get::<_, String>(3)?, row.get::<_, String>(4)?,
+        ))).map_err(StoreError::from_rusqlite)?;
+        let mut intents = Vec::new();
+        for row in rows {
+            let (operation, hash, generation, path, state) = row.map_err(StoreError::from_rusqlite)?;
+            intents.push(DeletionIntent { delete_operation_id: operation, object_hash: hash.parse()?,
+                object_generation: generation, relative_path: path, state });
+        }
+        Ok(intents)
+    })?;
+    for intent in intents {
+        execute_unlink_and_finalize_deletion(
+            config,
+            writer,
+            &intent,
+            config.cutpoints.as_ref(),
+            true,
+        )?;
+    }
+    let id = purge_id.to_owned();
+    let incomplete: i64 = writer.submit_immediate_blocking(WriteCriticality::Critical, false, move |tx, _| {
+        tx.query_row("SELECT COUNT(*) FROM object_deletions d JOIN object_records o ON o.object_hash = d.object_hash
+             WHERE d.reason = ?1 AND (d.state != 'completed' OR (o.object_generation = d.object_generation AND o.state != 'tombstone'))",
+             [format!("retention_q12:{id}")], |row| row.get(0)).map_err(StoreError::from_rusqlite)
+    })?;
+    if incomplete != 0 {
+        return Err(StoreError::StorageCorrupt(
+            "retention deletion remains incomplete or quarantined".to_owned(),
+        ));
+    }
+    check_injected_fault(config.fault_injector.as_ref(), FaultTarget::Maintenance)?;
+    let before = writer.telemetry().truncate_checkpoints;
+    let initial = writer.maintenance_tick(true)?;
+    if initial.truncate_checkpoints <= before || initial.wal_bytes != 0 {
+        return Err(StoreError::StorageUnavailable(
+            "retention checkpoint remains blocked".to_owned(),
+        ));
+    }
+    let id = purge_id.to_owned();
+    writer.submit_immediate_blocking(WriteCriticality::Critical, false, move |tx, _| {
+        tx.execute(
+            "UPDATE retention_purges SET wal_checkpoint_truncated = 1 WHERE purge_id = ?1",
+            [id],
+        )
+        .map_err(StoreError::from_rusqlite)?;
+        Ok(())
+    })?;
+    let final_checkpoint = writer.maintenance_tick(true);
+    match final_checkpoint {
+        Ok(result)
+            if result.truncate_checkpoints > initial.truncate_checkpoints
+                && result.wal_bytes == 0 =>
+        {
+            Ok((true, 0))
+        }
+        result => {
+            let id = purge_id.to_owned();
+            writer.submit_immediate_blocking(WriteCriticality::Critical, false, move |tx, _| {
+                tx.execute(
+                    "UPDATE retention_purges SET wal_checkpoint_truncated = 0 WHERE purge_id = ?1",
+                    [id],
+                )
+                .map_err(StoreError::from_rusqlite)?;
+                Ok(())
+            })?;
+            match result {
+                Err(error) => Err(error),
+                Ok(_) => Err(StoreError::StorageUnavailable(
+                    "retention final checkpoint remains blocked".to_owned(),
+                )),
+            }
+        }
+    }
+}
+
+fn finish_receipt_retention_purges(
+    config: &StoreConfig,
+    writer: &StoreWriterHandle,
+    receipt_id: unleash_domain::ReceiptId,
+) -> Result<(), StoreError> {
+    let ids =
+        writer.submit_immediate_blocking(WriteCriticality::Critical, false, move |tx, _| {
+            let mut statement = tx
+                .prepare("SELECT purge_id FROM retention_purges WHERE command_receipt_id = ?1")
+                .map_err(StoreError::from_rusqlite)?;
+            let rows = statement
+                .query_map([receipt_id.to_string()], |row| row.get::<_, String>(0))
+                .map_err(StoreError::from_rusqlite)?;
+            rows.map(|row| row.map_err(StoreError::from_rusqlite))
+                .collect::<Result<Vec<_>, _>>()
+        })?;
+    for id in ids {
+        finish_retention_purge(config, writer, &id)?;
+    }
+    Ok(())
 }
