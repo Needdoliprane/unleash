@@ -3,7 +3,7 @@
 use serde::{Deserialize, Serialize};
 use unleash_domain::{
     ActorId, ApprovalScopeId, AuthorizationEvaluationId, DispatchId, LineageFence, ReceiptId,
-    Revision, Sha256Digest,
+    Revision, Sha256Digest, TimestampMs,
 };
 
 use crate::{
@@ -78,6 +78,9 @@ pub enum BrokerJournalEntry {
         intent: ActionIntent,
         /// Actual authorization result, including its retry semantics.
         outcome: Result<AuthorizationOutcome, ActionBrokerError>,
+        /// Stable UTC lower bound for a retryable unavailable result, allocated before append.
+        /// `None` for every other result; monotonic backoff is also enforced after acknowledgement.
+        retry_not_before_ms: Option<TimestampMs>,
     },
     /// Commit the dispatch marker before secrets or external I/O.
     Dispatch {

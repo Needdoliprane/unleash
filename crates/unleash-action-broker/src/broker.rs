@@ -43,6 +43,8 @@ use crate::journal::{
 use crate::retention::redact_canaries;
 use crate::secrets::{AuthorizedSecretAccess, ResolvedSecret, SecretStore};
 
+const AUTHORIZATION_RETRY_BACKOFF: Duration = Duration::from_secs(1);
+
 /// Capacité administrative vérifiée pour les opérations de gouvernance F017 (`REQ-SEC-004`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -792,6 +794,9 @@ impl Drop for PendingJournal<'_> {
                             cause: AuthorizationCause::Evaluation,
                             intent: attempt.intent.clone(),
                             outcome: result.clone(),
+                            retry_not_before_ms: self
+                                .broker
+                                .authorization_retry_not_before_ms(&result),
                         });
                         attempt.result = Some(result);
                         attempt.evaluating = false;
@@ -914,6 +919,17 @@ impl ActionBroker {
         self.state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn authorization_retry_not_before_ms(
+        &self,
+        outcome: &Result<AuthorizationOutcome, ActionBrokerError>,
+    ) -> Option<TimestampMs> {
+        matches!(outcome, Err(ActionBrokerError::GuardUnavailable { .. })).then(|| {
+            let backoff_ms =
+                i64::try_from(AUTHORIZATION_RETRY_BACKOFF.as_millis()).unwrap_or(i64::MAX);
+            TimestampMs::new(self.clock.now_ms().as_i64().saturating_add(backoff_ms))
+        })
     }
 
     fn evaluation_for_action(
@@ -1629,6 +1645,7 @@ impl ActionBroker {
                 cause,
                 intent: rec.intent.clone(),
                 outcome,
+                retry_not_before_ms: None,
             };
             rec.pending_approval = Some(PendingApproval {
                 entry: entry.clone(),
@@ -1985,6 +2002,7 @@ impl ActionBroker {
                 cause: AuthorizationCause::Evaluation,
                 intent: intent.clone(),
                 outcome: outcome.clone(),
+                retry_not_before_ms: self.authorization_retry_not_before_ms(&outcome),
             };
             if let Some(attempt) = self.lock_state().evaluations.get_mut(&action_id) {
                 attempt.evaluating = false;
@@ -2016,7 +2034,7 @@ impl ActionBroker {
                 attempt.retry_after = Some(
                     self.monotonic_clock
                         .monotonic_now()
-                        .saturating_add(Duration::from_secs(1)),
+                        .saturating_add(AUTHORIZATION_RETRY_BACKOFF),
                 );
             }
         }
