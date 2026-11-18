@@ -29,7 +29,7 @@ Raccorder l’admission durable, les adaptateurs de modèles et le process-host 
 | t03a-host-ack | Test F011 de reprise sur le même host après perte de l’acquittement de rotation | Host et PTY réels, daemon simulé | T-F011-003 ciblé et 35 tests de la crate à `c16e230` | done |
 | t03-terminal | Service de terminal et raccord IPC pour le vrai daemon, réutilisation de `unleash-process-host` | Port Store des terminaux et journal broker | T-F011-003 (crash daemon, rotation, même PTY) et états d’issue inconnue | pending |
 | t04a-probe-store | Préparation d’un probe sans session, reçu, contexte et lien model call/action dans `crates/unleash-store` | Port V008 et contrat F012 | Migration et rollback SQLite, rejeu du reçu, propriétaire et contexte exacts | in_progress, `/root/m1_store` |
-| t04b-probe-wire | Payload fermé de `TestProviderProfile` et décodage dans `crates/unleash-protocol` | Interfaces F012 R6 | Cas phase/limites et refus d’extras, origine et acteur établis par le service | intégré et vérifié en `17a3f2c`, clôture du checkout en cours |
+| t04b-probe-wire | Payload fermé de `TestProviderProfile` et décodage dans `crates/unleash-protocol` | Interfaces F012 R6 | Cas phase/limites et refus d’extras, origine et acteur établis par le service | intégré et vérifié en `17a3f2c`, résidu SMB à réconcilier |
 | t04-probe | Raccord `TestProviderProfile` authentifié avec propriétaire réel du probe, admission, budget, auteur du dispatch et résultat corrélé | t01, t02, t02b, t04a et t04b | Deux dialectes en essai local de bout en bout, refus sans connexion, coupure après dispatch | pending |
 | t05-qualification | Gates M2, preuves F003/F011/F012 et matrice Q-19 applicables | t01 à t04 | Résultats réels, limites et publication | pending |
 
