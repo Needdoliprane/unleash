@@ -17,7 +17,8 @@ use crate::backup::validate_backup_dir;
 use crate::config::{StoreConfig, StoreCutpoint};
 use crate::error::StoreError;
 use crate::fs_sync::{
-    set_dir_permissions_0700, set_path_permissions, sync_parent_dir, write_atomic_durable,
+    read_private_file_bounded, set_dir_permissions_0700, set_path_permissions, sync_parent_dir,
+    write_atomic_durable,
 };
 use crate::migrations::{CURRENT_SCHEMA_VERSION, apply_pending_migrations_for_restore};
 use crate::objects::{object_relative_path, safe_artifact_path};
@@ -317,6 +318,7 @@ pub struct CapsuleTombstoneDelta {
 
 /// Entrée historique append-only consignée dans le manifeste privé de maintenance `0600`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct MaintenanceManifestEntry {
     /// Identifiant de restauration.
     pub restore_id: RestoreId,
@@ -380,8 +382,12 @@ pub struct RestoreCapsule {
     pub sealed_at_ms: TimestampMs,
 }
 
+/// Limite réservant trois quarts de la trame IPC au reste du rapport de récupération.
+pub const MAX_MAINTENANCE_MANIFEST_BYTES: usize = unleash_protocol::MAX_FRAME_BYTES / 4;
+
 /// Manifeste privé de maintenance hors base (`0600`) utilisé quand la base source est illisible/corrompue.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct MaintenanceRestoreManifest {
     /// Identifiant de restauration.
     pub restore_id: RestoreId,
@@ -499,11 +505,19 @@ pub(crate) fn read_maintenance_manifest(
     maintenance_dir: &Path,
 ) -> Result<Option<MaintenanceRestoreManifest>, StoreError> {
     let path = maintenance_dir.join("restore-manifest.json");
-    if !path.exists() {
+    #[cfg(unix)]
+    let owner_uid = rustix::process::geteuid().as_raw();
+    #[cfg(not(unix))]
+    let owner_uid = 0;
+    let Some(bytes) = read_private_file_bounded(&path, owner_uid, MAX_MAINTENANCE_MANIFEST_BYTES)?
+    else {
         return Ok(None);
-    }
-    let bytes = fs::read(&path)?;
-    let parsed = serde_json::from_slice(&bytes)?;
+    };
+    let parsed = serde_json::from_slice(&bytes).map_err(|_| {
+        StoreError::EvidenceUnavailable(
+            "manifeste maintenance non conforme au contrat fermé".to_owned(),
+        )
+    })?;
     Ok(Some(parsed))
 }
 
