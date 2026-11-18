@@ -1,6 +1,6 @@
 //! Restauration offline conservatrice, neutralisation, manifeste privé `0600` et capsule delta (`REQ-PERSIST-010`).
 
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -797,7 +797,7 @@ fn mark_source_restore_handed_over(src_db: &Path, restore_id: RestoreId) {
 
 struct SnapshotBaseline {
     outbox_scopes: BTreeSet<String>,
-    actions: HashSet<String>,
+    actions: HashMap<String, i64>,
     dispatches: HashSet<String>,
     receipts: HashSet<(String, String)>,
     full_receipts: HashSet<(String, String)>,
@@ -834,15 +834,16 @@ fn collect_snapshot_outbox_scopes(snapshot_db: &Path) -> Result<SnapshotBaseline
         }
     }
 
-    let mut snap_actions = HashSet::new();
+    let mut snap_actions = HashMap::new();
     let mut s_act = conn
-        .prepare("SELECT action_id FROM actions")
+        .prepare("SELECT action_id, revision FROM actions")
         .map_err(StoreError::from_rusqlite)?;
     let act_rows = s_act
-        .query_map([], |r| r.get::<_, String>(0))
+        .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))
         .map_err(StoreError::from_rusqlite)?;
     for r in act_rows {
-        snap_actions.insert(r.map_err(StoreError::from_rusqlite)?);
+        let (id, revision) = r.map_err(StoreError::from_rusqlite)?;
+        snap_actions.insert(id, revision);
     }
 
     let mut snap_dispatches = HashSet::new();
@@ -1047,7 +1048,7 @@ fn collect_source_delta(
             .map_err(StoreError::from_rusqlite)?;
         for r in rows {
             let br = r.map_err(StoreError::from_rusqlite)?;
-            if !baseline.actions.contains(&br.action_id)
+            if !baseline.actions.contains_key(&br.action_id)
                 || matches!(br.state.as_str(), "held" | "unknown" | "settled")
             {
                 delta.capsule_budget_reservations.push(CapsuleBudgetDelta {
@@ -1127,7 +1128,11 @@ fn collect_source_delta(
             .map_err(StoreError::from_rusqlite)?;
         for r in rows {
             let act = r.map_err(StoreError::from_rusqlite)?;
-            if baseline.actions.contains(&act.action_id) {
+            if baseline
+                .actions
+                .get(&act.action_id)
+                .is_some_and(|revision| *revision >= act.revision)
+            {
                 continue;
             }
             let matching_res = delta
