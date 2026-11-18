@@ -9,7 +9,7 @@ use crate::config::{CutpointObserver, StoreCutpoint};
 use crate::error::StoreError;
 
 /// Version courante maximale du schéma gérée par cette version de `unleash-store`.
-pub const CURRENT_SCHEMA_VERSION: i64 = 6;
+pub const CURRENT_SCHEMA_VERSION: i64 = 7;
 
 /// État persisté d'une migration dans `schema_migrations`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -99,7 +99,19 @@ const MIGRATIONS: &[MigrationDef] = &[
         name: "v006_reserved_backup_requests",
         sql: V006_SQL,
     },
+    MigrationDef {
+        version: 7,
+        name: "v007_pre_dispatch_backup_block_reason",
+        sql: V007_SQL,
+    },
 ];
+
+const V007_SQL:&str="
+ALTER TABLE backup_requests ADD COLUMN block_reason TEXT CHECK (block_reason IS NULL OR block_reason IN ('guard_profile_unavailable','isolation_profile_unavailable','authorization_denied'));
+CREATE TRIGGER backup_block_reason_immutable BEFORE UPDATE ON backup_requests
+WHEN OLD.block_reason IS NOT NULL AND OLD.block_reason IS NOT NEW.block_reason
+BEGIN SELECT RAISE(ABORT,'backup block reason immutable'); END;
+";
 
 const V006_SQL: &str = "
 CREATE TABLE backup_requests (

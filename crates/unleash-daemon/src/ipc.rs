@@ -521,7 +521,11 @@ async fn query_backup_manifest(
         watermark: Some(snapshot.cursor),
         result: json!({
             "backup_id": record.backup_id,
+            "authority_generation": record.authority_generation,
+            "lineage_status": if record.authority_generation == state.authority_generation { "current" } else { "historical" },
             "state": record.state,
+            "action_state": record.action_state,
+            "blocked_reason": record.block_reason,
             "manifest": record.manifest,
             "manifest_digest": record.manifest_digest,
         }),
@@ -948,6 +952,10 @@ fn validate_command_mode(mode: DaemonMode, cmd: &CommandEnvelope) -> Result<(), 
 }
 
 /// Retourne `true` si le hook `PostCommitAction::DropConnection` demande de couper la connexion sans réponse.
+#[expect(
+    clippy::too_many_lines,
+    reason = "Admission, commit, réconciliation et réponse IPC ordonnés"
+)]
 async fn handle_command_frame(
     stream: &mut UnixStream,
     state: &Arc<DaemonRuntimeState>,
@@ -1018,6 +1026,9 @@ async fn handle_command_frame(
                     // Le Store peut avoir committé avant une erreur de finalisation physique.
                     // La recherche ci-dessous ne change pas la réponse en succès.
                     publish_existing_receipt_cursor(state, session, cmd.command_id).await;
+                    if cmd.command_type == "RequestBackup" {
+                        reconcile_accepted_backup(state, session, &cmd).await;
+                    }
                     ipc.retry_class = RetryClass::AfterReconciliation;
                     ipc.message = String::from(
                         "Issue de commande indéterminée ; inspecter le reçu et la récupération",
@@ -1066,6 +1077,44 @@ async fn handle_command_frame(
 
     let _ = write_json_frame_timeout(stream, &receipt, RESPONSE_WRITE_TIMEOUT).await;
     false
+}
+
+async fn reconcile_accepted_backup(
+    state: &Arc<DaemonRuntimeState>,
+    session: &AuthenticatedSession,
+    cmd: &CommandEnvelope,
+) {
+    let store = Arc::clone(&state.store);
+    let actor = session.actor_id.clone();
+    let command_id = cmd.command_id;
+    let backup_id = unleash_domain::BackupId::from_uuid(cmd.aggregate_id);
+    let generation = state.authority_generation;
+    let attested = tokio::task::spawn_blocking(move || {
+        let ReceiptInspectionOutcome::Full(receipt) =
+            store.inspect_command_receipt(&actor, command_id).ok()?
+        else {
+            return None;
+        };
+        let record = store
+            .inspect_backup_request_snapshot(backup_id)
+            .ok()?
+            .value?;
+        Some(
+            receipt.lineage_status == unleash_protocol::LineageStatus::Current
+                && receipt.authority_generation == generation
+                && receipt.receipt.command_id == command_id
+                && receipt.receipt.aggregate_id == backup_id.as_uuid()
+                && receipt.receipt.state == ReceiptState::Accepted
+                && record.receipt_id == receipt.receipt.receipt_id
+                && record.actor_id == actor
+                && record.authority_generation == generation
+                && record.state == unleash_store::BackupRequestState::Reserved,
+        )
+    })
+    .await;
+    if matches!(attested, Ok(Some(true))) {
+        crate::backup_service::start(state, backup_id);
+    }
 }
 
 async fn publish_existing_receipt_cursor(

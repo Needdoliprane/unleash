@@ -422,6 +422,27 @@ pub(crate) fn tx_abandon_backup_job(
             message: format!("sauvegarde {bkp_id} déjà terminée"),
         });
     }
+    let has_requests: i64 = tx
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='backup_requests'",
+            [],
+            |r| r.get(0),
+        )
+        .map_err(StoreError::from_rusqlite)?;
+    if has_requests != 0 {
+        let executing: i64 = tx
+            .query_row(
+                "SELECT COUNT(*) FROM backup_requests WHERE backup_id=?1 AND state='executing'",
+                [bkp_id.as_str()],
+                |r| r.get(0),
+            )
+            .map_err(StoreError::from_rusqlite)?;
+        if executing != 0 {
+            return Err(StoreError::RecoveryInProgress(
+                "exécuteur réservé non neutralisé : pins conservés".to_owned(),
+            ));
+        }
+    }
     tx.execute(
         "UPDATE backup_jobs SET state = 'aborted', revision = revision + 1 WHERE backup_id = ?1",
         [bkp_id.as_str()],
@@ -650,29 +671,44 @@ fn ensure_managed_backup_root(config: &StoreConfig) -> Result<(), StoreError> {
         });
     }
     match fs::symlink_metadata(&config.backups_dir) {
-        Ok(metadata) => {
-            if metadata.file_type().is_symlink() || !metadata.is_dir() {
-                return Err(StoreError::InvalidArgument {
-                    reason: None,
-                    message: "racine sauvegarde gérée non réelle".to_owned(),
-                });
-            }
-            #[cfg(unix)]
-            if metadata.permissions().mode() & 0o077 != 0 {
-                return Err(StoreError::InvalidArgument {
-                    reason: None,
-                    message: "racine sauvegarde gérée non privée".to_owned(),
-                });
-            }
-        }
+        Ok(metadata) => validate_managed_root_metadata(&metadata)?,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            config
+                .cutpoints
+                .hit(StoreCutpoint::C11gBeforeManagedBackupRootCreate)?;
             let mut builder = fs::DirBuilder::new();
             #[cfg(unix)]
             builder.mode(0o700);
-            builder.create(&config.backups_dir)?;
+            match builder.create(&config.backups_dir) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                    validate_managed_root_metadata(&fs::symlink_metadata(&config.backups_dir)?)?;
+                }
+                Err(error) => return Err(error.into()),
+            }
             sync_dir(parent)?;
         }
         Err(error) => return Err(error.into()),
+    }
+    Ok(())
+}
+
+fn validate_managed_root_metadata(metadata: &fs::Metadata) -> Result<(), StoreError> {
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(StoreError::InvalidArgument {
+            reason: None,
+            message: "racine sauvegarde gérée non réelle".to_owned(),
+        });
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if metadata.permissions().mode() & 0o077 != 0 {
+            return Err(StoreError::InvalidArgument {
+                reason: None,
+                message: "racine sauvegarde gérée non privée".to_owned(),
+            });
+        }
     }
     Ok(())
 }

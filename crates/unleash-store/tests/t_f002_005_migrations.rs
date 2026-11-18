@@ -238,3 +238,65 @@ fn migration_v004_to_v005_requires_backup_and_preserves_v004_checksum() {
     assert_eq!(retained, checksum);
     assert_eq!(tables, 4);
 }
+
+#[test]
+fn migrations_v005_to_v007_preserve_legacy_jobs_without_fabricated_requests() {
+    let dir = local_test_dir("f018-v005-v007").unwrap();
+    let mut v5 = StoreConfig::new(dir.path());
+    v5.max_supported_schema_version = 5;
+    let store = UnleashStore::open(v5).unwrap();
+    let checksum: String = store
+        .read_snapshot(|conn, _| {
+            conn.query_row(
+                "SELECT checksum_sha256 FROM schema_migrations WHERE version=5",
+                [],
+                |r| r.get(0),
+            )
+            .map_err(StoreError::from_rusqlite)
+        })
+        .unwrap();
+    let backup = store
+        .prepare_backup(PrepareBackupRequest {
+            destination_dir: dir.path().join("v005-backup"),
+            retention_tier: BackupRetentionTier::Manual,
+            coverage: "db_and_objects".to_owned(),
+        })
+        .unwrap();
+    store.shutdown().unwrap();
+    let v7 = StoreConfig::new(dir.path());
+    assert!(matches!(
+        UnleashStore::open(v7.clone()),
+        Err(StoreError::MigrationBackupRequired)
+    ));
+    let store = UnleashStore::open_with_migration_backup(v7, Some(backup.backup_id)).unwrap();
+    assert_eq!(store.daemon_state().unwrap().schema_version, 7);
+    let (retained, requests, jobs): (String, i64, i64) = store
+        .read_snapshot(|conn, _| {
+            Ok((
+                conn.query_row(
+                    "SELECT checksum_sha256 FROM schema_migrations WHERE version=5",
+                    [],
+                    |r| r.get(0),
+                )
+                .map_err(StoreError::from_rusqlite)?,
+                conn.query_row("SELECT COUNT(*) FROM backup_requests", [], |r| r.get(0))
+                    .map_err(StoreError::from_rusqlite)?,
+                conn.query_row(
+                    "SELECT COUNT(*) FROM backup_jobs WHERE state='complete'",
+                    [],
+                    |r| r.get(0),
+                )
+                .map_err(StoreError::from_rusqlite)?,
+            ))
+        })
+        .unwrap();
+    assert_eq!(retained, checksum);
+    assert_eq!(requests, 0);
+    assert_eq!(jobs, 1);
+    assert!(
+        store
+            .inspect_backup_request(backup.backup_id)
+            .unwrap()
+            .is_none()
+    );
+}

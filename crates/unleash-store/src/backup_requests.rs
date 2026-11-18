@@ -36,6 +36,30 @@ pub enum BackupRequestState {
     Blocked,
 }
 
+/// Motif fermé d'un blocage prouvé avant tout marqueur d'effet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BackupBlockReason {
+    /// Profil Guard demandé et non qualifié pour le producteur M1.
+    GuardProfileUnavailable,
+    /// Confinement strict demandé et non qualifié pour le producteur M1.
+    IsolationProfileUnavailable,
+    /// Refus terminal déjà engagé dans le journal broker.
+    AuthorizationDenied,
+}
+
+impl BackupBlockReason {
+    /// Valeur SQL/wire fermée, sans texte externe.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::GuardProfileUnavailable => "guard_profile_unavailable",
+            Self::IsolationProfileUnavailable => "isolation_profile_unavailable",
+            Self::AuthorizationDenied => "authorization_denied",
+        }
+    }
+}
+
 /// Projection interne authentique ; aucun payload client ne fournit ces paramètres.
 #[derive(Clone, PartialEq, Eq)]
 pub struct BackupRequestRecord {
@@ -67,6 +91,8 @@ pub struct BackupRequestRecord {
     pub lineage_fence: LineageFence,
     /// État réel du job, None si son historique a été retiré.
     pub job_state: Option<BackupJobState>,
+    /// État broker réel, distinct de la complétion locale du job.
+    pub action_state: Option<unleash_domain::ActionState>,
     /// Date de la réservation initiale.
     pub created_at_ms: TimestampMs,
     /// Dernier événement réellement associé au reçu de réservation.
@@ -81,6 +107,8 @@ pub struct BackupRequestRecord {
     pub barrier_pin_held: bool,
     /// Nombre réel de pins d'objets held appartenant au job.
     pub held_object_pins: u64,
+    /// Motif attesté avant dispatch, sans classifier un effet inconnu.
+    pub block_reason: Option<BackupBlockReason>,
 }
 
 impl core::fmt::Debug for BackupRequestRecord {
@@ -404,7 +432,7 @@ pub(crate) fn read_backup_request_conn(
     let row:Option<RequestRow>=conn.query_row(
         "SELECT r.action_id,r.actor_id,r.principal_id,r.receipt_id,r.authority_generation,r.daemon_epoch,r.scope_revision,r.policy_revision,r.destination_path,r.payload_digest,r.state,r.revision,r.dispatch_id,r.manifest_digest,r.created_at_ms,e.stream_id,e.sequence,j.state
          FROM backup_requests r JOIN command_receipts c ON c.receipt_id=r.receipt_id
-         JOIN events e ON e.sequence=c.last_event_seq LEFT JOIN backup_jobs j USING(backup_id) WHERE r.backup_id=?1",
+         JOIN events e ON e.sequence=(SELECT MAX(sequence) FROM events WHERE aggregate_type='backup_job' AND aggregate_id=r.backup_id) LEFT JOIN backup_jobs j USING(backup_id) WHERE r.backup_id=?1",
         [backup.to_string()],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?,r.get(6)?,r.get(7)?,r.get(8)?,r.get(9)?,r.get(10)?,r.get(11)?,r.get(12)?,r.get(13)?,r.get(14)?,r.get(15)?,r.get(16)?,r.get(17)?))
     ).optional().map_err(StoreError::from_rusqlite)?;
     row.map(
@@ -456,6 +484,11 @@ pub(crate) fn read_backup_request_conn(
         if let Some(manifest)=&manifest
             && (manifest.backup_id!=backup || manifest.state!=BackupJobState::Complete || manifest.source_authority_generation!=authority || Some(canonical_sha256(&serde_json::to_value(manifest)?)?)!=manifest_digest) {return Err(invalid("manifeste sauvegarde SQL divergent"));}
         let (barrier,objects):(i64,i64)=conn.query_row("SELECT COALESCE(SUM(CASE WHEN pin_kind='backup_barrier' THEN 1 ELSE 0 END),0),COALESCE(SUM(CASE WHEN pin_kind='backup' THEN 1 ELSE 0 END),0) FROM object_pins WHERE owner_kind='backup_job' AND owner_id=?1 AND state='held'",[backup.to_string()],|r|Ok((r.get(0)?,r.get(1)?))).map_err(StoreError::from_rusqlite)?;
+        let has_reason:i64=conn.query_row("SELECT COUNT(*) FROM pragma_table_info('backup_requests') WHERE name='block_reason'",[],|r|r.get(0)).map_err(StoreError::from_rusqlite)?;
+        let reason:Option<String>=if has_reason==0 {None} else {conn.query_row("SELECT block_reason FROM backup_requests WHERE backup_id=?1",[backup.to_string()],|r|r.get(0)).map_err(StoreError::from_rusqlite)?};
+        let block_reason=reason.map(|v|match v.as_str() {"guard_profile_unavailable"=>Ok(BackupBlockReason::GuardProfileUnavailable),"isolation_profile_unavailable"=>Ok(BackupBlockReason::IsolationProfileUnavailable),"authorization_denied"=>Ok(BackupBlockReason::AuthorizationDenied),_=>Err(invalid("motif sauvegarde SQL inconnu"))}).transpose()?;
+        let action_state:Option<String>=conn.query_row("SELECT state FROM actions WHERE action_id=?1",[action.as_str()],|r|r.get(0)).optional().map_err(StoreError::from_rusqlite)?;
+        let action_state=action_state.map(|v|crate::recovery_ops::parse_action_state(&v)).transpose()?;
         Ok(BackupRequestRecord {
                 backup_id: backup,
                 action_id: action.parse()?,
@@ -475,6 +508,7 @@ pub(crate) fn read_backup_request_conn(
                     Fence::new(0),
                 ),
                 job_state: job,
+                action_state,
                 created_at_ms: TimestampMs::new(created),
                 last_event_cursor: EventCursor::new(
                     stream.parse()?,
@@ -485,6 +519,7 @@ pub(crate) fn read_backup_request_conn(
             manifest,
             barrier_pin_held:barrier>0,
             held_object_pins:unsigned(objects)?,
+            block_reason,
             })
         },
     )
@@ -619,4 +654,97 @@ pub(crate) fn ensure_consumed_backup_tx(
         ));
     }
     Ok(())
+}
+
+pub(crate) fn block_claimed_backup_tx(
+    tx: &Transaction<'_>,
+    config: &StoreConfig,
+    now: TimestampMs,
+    backup: BackupId,
+    authority: AuthorityGeneration,
+    reason: BackupBlockReason,
+) -> Result<BackupRequestRecord, StoreError> {
+    let daemon = read_daemon_state_tx(tx)?;
+    if authority != daemon.authority_generation {
+        return Err(StoreError::StaleAuthorityGeneration {
+            expected: daemon.authority_generation,
+            actual: authority,
+            command_id: None,
+        });
+    }
+    let record = read_backup_request_conn(tx, backup)?
+        .ok_or_else(|| StoreError::NotFound("demande de sauvegarde".to_owned()))?;
+    if record.authority_generation != authority {
+        return Err(StoreError::StaleAuthorityGeneration {
+            expected: authority,
+            actual: record.authority_generation,
+            command_id: None,
+        });
+    }
+    if record.state == BackupRequestState::Blocked && record.block_reason == Some(reason) {
+        return Ok(record);
+    }
+    let markers: i64 = tx
+        .query_row(
+            "SELECT COUNT(*) FROM action_dispatches WHERE action_id=?1",
+            [record.action_id.to_string()],
+            |r| r.get(0),
+        )
+        .map_err(StoreError::from_rusqlite)?;
+    let unsafe_state:i64=tx.query_row("SELECT COUNT(*) FROM actions WHERE action_id=?1 AND state NOT IN ('prepared','authorizing','approval_required','authorized','denied')",[record.action_id.to_string()],|r|r.get(0)).map_err(StoreError::from_rusqlite)?;
+    if record.state != BackupRequestState::Claimed
+        || record.job_state != Some(BackupJobState::Preparing)
+        || record.dispatch_id.is_some()
+        || markers != 0
+        || unsafe_state != 0
+    {
+        return Err(StoreError::RecoveryInProgress(
+            "blocage pré-dispatch impossible : inspection de l'issue requise".to_owned(),
+        ));
+    }
+    let policy = read_policy_summary_conn(tx, None)?;
+    let verified = match reason {
+        BackupBlockReason::GuardProfileUnavailable => policy
+            .guard_config
+            .as_ref()
+            .is_some_and(|g| g.guard_mode != crate::GuardPolicyMode::BrokerOnly),
+        BackupBlockReason::IsolationProfileUnavailable => {
+            policy.effective_isolation_mode == crate::PolicyIsolationMode::Strict
+        }
+        BackupBlockReason::AuthorizationDenied => {
+            tx.query_row(
+                "SELECT COUNT(*) FROM actions WHERE action_id=?1 AND state='denied'",
+                [record.action_id.to_string()],
+                |r| r.get::<_, i64>(0),
+            )
+            .map_err(StoreError::from_rusqlite)?
+                == 1
+        }
+    };
+    if !verified {
+        return Err(invalid("motif de blocage sauvegarde non attesté"));
+    }
+    let changed=tx.execute("UPDATE backup_requests SET state='blocked',revision=revision+1,block_reason=?2 WHERE backup_id=?1 AND state='claimed' AND revision=?3 AND dispatch_id IS NULL",params![backup.to_string(),reason.as_str(),as_i64(record.revision.as_u64())?]).map_err(StoreError::from_rusqlite)?;
+    if changed != 1 {
+        return Err(StoreError::RecoveryInProgress(
+            "blocage sauvegarde concurrent".to_owned(),
+        ));
+    }
+    let changed=tx.execute("UPDATE backup_jobs SET state='aborted',revision=revision+1 WHERE backup_id=?1 AND state='preparing' AND source_authority_generation=?2",params![backup.to_string(),authority.to_string()]).map_err(StoreError::from_rusqlite)?;
+    if changed != 1 {
+        return Err(invalid("job sauvegarde divergent au blocage"));
+    }
+    let revision: i64 = tx
+        .query_row(
+            "SELECT revision FROM backup_jobs WHERE backup_id=?1",
+            [backup.to_string()],
+            |r| r.get(0),
+        )
+        .map_err(StoreError::from_rusqlite)?;
+    let event = config.id_generator.new_uuid().to_string();
+    let policy_digest = canonical_sha256(&serde_json::to_value(&policy)?)?;
+    let payload = json!({"backup_id":backup,"action_id":record.action_id,"receipt_id":record.receipt_id,"state":"blocked","reason":reason,"execution_state":"not_dispatched","policy_snapshot_digest":policy_digest});
+    tx.execute("INSERT INTO events (event_id,stream_id,aggregate_type,aggregate_id,aggregate_revision,event_ordinal,event_type,schema_version,project_id,actor_ref,actor_id,occurred_at_ms,recorded_at_ms,payload_json,payload_state,payload_hash,sensitivity,command_actor_id,command_id,causation_kind,causation_id,causation_receipt_id,correlation_id) VALUES (?1,?2,'backup_job',?3,?4,(SELECT COALESCE(MAX(event_ordinal)+1,0) FROM events WHERE aggregate_type='backup_job' AND aggregate_id=?3 AND aggregate_revision=?4),'BackupRequestBlocked',1,NULL,?5,?5,?6,?6,?7,'full',?8,'restricted',NULL,NULL,'command',?9,?9,?9)",params![event,daemon.stream_id.to_string(),backup.to_string(),revision,record.actor_id.as_str(),now.as_i64(),serde_json::to_string(&payload)?,canonical_sha256(&payload)?.as_prefixed_str(),record.receipt_id.to_string()]).map_err(StoreError::from_rusqlite)?;
+    tx.execute("INSERT INTO outbox (event_id,destination,state,delivery_attempt,next_attempt_at_ms,authority_generation,consumer_version,delivery_key,rearm_count) VALUES (?1,'clients','pending',0,?2,?3,?4,?5,0)",params![event,now.as_i64(),authority.to_string(),config.consumer_version,format!("{event}:clients")]).map_err(StoreError::from_rusqlite)?;
+    read_backup_request_conn(tx, backup)?.ok_or_else(|| invalid("demande perdue après blocage"))
 }
