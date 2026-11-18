@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex, PoisonError, RwLock};
 use std::time::Duration;
 
 use rusqlite::Connection;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{UnixListener, UnixStream};
@@ -26,8 +26,9 @@ use unleash_protocol::{
     SubscribeEventsRequest, from_json_str_strict, parse_json_value_strict,
 };
 use unleash_store::{
-    AggregateKind, CommandMutation, CommitCommandRequest, CommitOutcome, EventAppendSpec,
-    ReadEventsOutcome, ReceiptInspectionOutcome, StoreError, UnleashStore,
+    AggregateKind, AlertSeverity, CommandMutation, CommitCommandRequest, CommitOutcome,
+    EventAppendSpec, NewAlertSpec, ReadEventsOutcome, ReceiptInspectionOutcome, StoreError,
+    UnleashStore,
 };
 use uuid::Uuid;
 
@@ -216,7 +217,7 @@ async fn perform_hello_handshake(
         }
     };
 
-    let hello_raw =
+    let hello_raw = zeroize::Zeroizing::new(
         match read_raw_frame_timeout(stream, MAX_FRAME_BYTES, HANDSHAKE_IO_TIMEOUT).await {
             Ok(Some(bytes)) => bytes,
             Ok(None) => return None,
@@ -224,11 +225,13 @@ async fn perform_hello_handshake(
                 let _ = write_json_frame_timeout(stream, &ipc_err, RESPONSE_WRITE_TIMEOUT).await;
                 return None;
             }
-        };
+        },
+    );
 
     let hello_req = match decode_strict_with_v1_check::<HelloRequest>(&hello_raw) {
         Ok(req) => req,
-        Err(ipc_err) => {
+        Err(mut ipc_err) => {
+            ipc_err.message = String::from("Handshake Hello invalide");
             let _ = write_json_frame_timeout(stream, &ipc_err, RESPONSE_WRITE_TIMEOUT).await;
             return None;
         }
@@ -397,6 +400,7 @@ fn session_capability_labels(session: &AuthenticatedSession) -> Vec<String> {
     let mut labels = Vec::new();
     for cap in &session.capabilities {
         let name = match cap {
+            Capability::Administer => "administer",
             Capability::QueryDaemonDiagnostic => "query_daemon_diagnostic",
             Capability::QueryState => "query_state",
             Capability::ManageProjects => "manage_projects",
@@ -446,10 +450,12 @@ async fn dispatch_query(
     query: QueryEnvelope,
 ) -> Result<QueryResponse, IpcError> {
     match query.query_type.as_str() {
-        "GetDaemonStatus" => query_daemon_status(state, query.request_id).await,
+        "GetDaemonStatus" => query_daemon_status(state, session, query.request_id).await,
         "GetHealth" => query_health(state, query.request_id).await,
         "GetStateSnapshot" => query_state_snapshot(state, session, query).await,
         "GetCommandReceipt" => query_command_receipt(state, session, query).await,
+        "ListProjects" | "GetProject" | "ReadSettings" | "ReadPolicySummary"
+        | "InspectRecovery" => query_m1_projection(state, session, query).await,
         other => Err(IpcError::new(
             ErrorCode::InvalidArgument,
             None,
@@ -459,10 +465,141 @@ async fn dispatch_query(
     }
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SettingsQueryPayload {
+    scope_kind: unleash_store::SettingsScopeKind,
+    scope_id: String,
+}
+
+fn projection_response<T: Serialize>(
+    projection: unleash_store::SnapshotProjection<T>,
+) -> Result<(Value, EventCursor), IpcError> {
+    let value = serde_json::to_value(projection.value)
+        .map_err(|_| internal_ipc_error("Sérialisation de projection impossible", None))?;
+    Ok((value, projection.cursor))
+}
+
+async fn query_m1_projection(
+    state: &Arc<DaemonRuntimeState>,
+    session: &AuthenticatedSession,
+    query: QueryEnvelope,
+) -> Result<QueryResponse, IpcError> {
+    let invalid = || {
+        IpcError::new(
+            ErrorCode::InvalidArgument,
+            None,
+            "Paramètres de projection invalides",
+            RetryClass::Never,
+        )
+    };
+    let denied = || {
+        IpcError::from_reason(
+            ReasonCode::AccessDenied,
+            "Projection hors du périmètre autorisé",
+        )
+    };
+    let name = query.query_type.clone();
+    let project_id = query.project_id;
+    let allowed = session.allowed_projects.clone();
+    let settings = if name == "ReadSettings" {
+        let parsed: SettingsQueryPayload =
+            serde_json::from_value(Value::Object(query.payload.clone())).map_err(|_| invalid())?;
+        if parsed.scope_id.trim().is_empty() {
+            return Err(invalid());
+        }
+        match parsed.scope_kind {
+            unleash_store::SettingsScopeKind::Project => {
+                if project_id.is_none_or(|p| p.to_string() != parsed.scope_id) {
+                    return Err(invalid());
+                }
+            }
+            _ => {
+                if project_id.is_some() {
+                    return Err(invalid());
+                }
+                if allowed.is_some() {
+                    return Err(denied());
+                }
+            }
+        }
+        Some(parsed)
+    } else {
+        if !query.payload.is_empty() {
+            return Err(invalid());
+        }
+        if name == "GetProject" && project_id.is_none() {
+            return Err(invalid());
+        }
+        if name == "InspectRecovery" && project_id.is_some() {
+            return Err(invalid());
+        }
+        // Ces rapports contiennent des données globales non filtrables par projet.
+        if allowed.is_some() && matches!(name.as_str(), "ReadPolicySummary" | "InspectRecovery") {
+            return Err(denied());
+        }
+        None
+    };
+    let store = Arc::clone(&state.store);
+    let (value, cursor) =
+        tokio::task::spawn_blocking(move || -> Result<(Value, EventCursor), IpcError> {
+            let map_error = |e: StoreError| store_error_to_ipc_error(&e, None);
+            match name.as_str() {
+                "ListProjects" => {
+                    let mut snapshot = store.list_projects_snapshot().map_err(map_error)?;
+                    snapshot.value.retain(|p| {
+                        project_id.is_none_or(|id| id == p.project_id)
+                            && allowed
+                                .as_ref()
+                                .is_none_or(|ids| ids.contains(&p.project_id))
+                    });
+                    projection_response(snapshot)
+                }
+                "GetProject" => projection_response(
+                    store
+                        .get_project_snapshot(project_id.ok_or_else(invalid)?)
+                        .map_err(map_error)?,
+                ),
+                "ReadSettings" => {
+                    let settings = settings.ok_or_else(invalid)?;
+                    projection_response(
+                        store
+                            .read_settings_snapshot(settings.scope_kind, &settings.scope_id)
+                            .map_err(map_error)?,
+                    )
+                }
+                "ReadPolicySummary" => projection_response(
+                    store
+                        .read_policy_summary_snapshot(project_id)
+                        .map_err(map_error)?,
+                ),
+                "InspectRecovery" => {
+                    projection_response(store.inspect_recovery_snapshot().map_err(map_error)?)
+                }
+                _ => Err(invalid()),
+            }
+        })
+        .await
+        .map_err(|_| internal_ipc_error("Lecture de projection interrompue", None))??;
+    Ok(QueryResponse {
+        request_id: query.request_id,
+        watermark: Some(cursor),
+        result: value,
+    })
+}
+
 async fn query_daemon_status(
     state: &Arc<DaemonRuntimeState>,
+    session: &AuthenticatedSession,
     request_id: unleash_domain::RequestId,
 ) -> Result<QueryResponse, IpcError> {
+    if !session.capabilities.contains(&Capability::Administer) {
+        return Ok(QueryResponse {
+            request_id,
+            watermark: None,
+            result: json!({"mode": state.current_mode().to_string()}),
+        });
+    }
     let store = Arc::clone(&state.store);
     let mode_mem = state.current_mode();
     let (daemon_row, watermark, dead_letters) = tokio::task::spawn_blocking(move || {
@@ -705,7 +842,11 @@ async fn handle_command_frame(
     session: &AuthenticatedSession,
     cmd: CommandEnvelope,
 ) -> bool {
-    if let Err(ipc) = authorize_command(session, &cmd) {
+    if let Err(mut ipc) = authorize_command(session, &cmd) {
+        if !audit_security_denial(state, session, &cmd, &ipc).await {
+            ipc.message = String::from("Commande refusée ; audit indisponible ou indéterminé");
+            tracing::warn!("Échec ou délai dépassé lors de l'audit du refus de commande");
+        }
         let _ = write_json_frame_timeout(stream, &ipc, RESPONSE_WRITE_TIMEOUT).await;
         return false;
     }
@@ -767,7 +908,7 @@ async fn handle_command_frame(
         CommitOutcome::IdempotentReplay(r) => (r, false),
     };
 
-    if newly_committed && num_events > 0 {
+    if newly_committed {
         publish_committed_events_for_command(state, &receipt, num_events).await;
     }
 
@@ -788,6 +929,56 @@ async fn handle_command_frame(
 
     let _ = write_json_frame_timeout(stream, &receipt, RESPONSE_WRITE_TIMEOUT).await;
     false
+}
+
+async fn audit_security_denial(
+    state: &Arc<DaemonRuntimeState>,
+    session: &AuthenticatedSession,
+    cmd: &CommandEnvelope,
+    error: &IpcError,
+) -> bool {
+    let reason = match error.code {
+        ErrorCode::AuthenticationFailed => "AUTHENTICATION_FAILED",
+        ErrorCode::CapabilityDenied => "OPERATION_NOT_AUTHORIZED",
+        ErrorCode::ScopeDenied => "ACCESS_DENIED",
+        _ => return true,
+    };
+    let Ok(operation) = cmd.command_type.parse::<unleash_protocol::OperationName>() else {
+        return true;
+    };
+    if operation.kind() != unleash_protocol::OperationKind::Command {
+        return true;
+    }
+    let Ok(digest) = unleash_protocol::canonical_sha256(&json!({
+        "actor": session.actor_id.as_str(), "operation": operation.as_str(),
+        "command_id": cmd.command_id, "reason": reason,
+    })) else {
+        return false;
+    };
+    let digest = digest.to_string();
+    let spec = NewAlertSpec {
+        alert_id: format!("security-denial:{digest}"),
+        kind: String::from("security_denial"),
+        severity: AlertSeverity::Warning,
+        blocking: false,
+        project_id: None,
+        subject_kind: operation.as_str().to_owned(),
+        subject_id: digest,
+        title: String::from("Commande refusée"),
+        summary: String::from("Une commande a été refusée par le contrôle d'autorité local."),
+        reason_code: Some(reason.to_owned()),
+        evidence_ref: None,
+        allowed_operations: Vec::new(),
+    };
+    let store = Arc::clone(&state.store);
+    matches!(
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            tokio::task::spawn_blocking(move || store.record_alert(spec))
+        )
+        .await,
+        Ok(Ok(Ok(_)))
+    )
 }
 
 struct PreparedCommand {
@@ -833,6 +1024,7 @@ async fn prepare_command_request(
     let cid = cmd.command_id;
     match cmd.command_type.as_str() {
         "CreateProject" => prepare_create_project(session, cmd),
+        "ReviseProject" => prepare_revise_project(session, cmd),
         "AssignMission" => prepare_assign_mission(session, cmd),
         "PauseMission" | "ResumeMission" | "CancelMission" => {
             prepare_mission_transition_command(state, session, cmd).await
@@ -846,6 +1038,112 @@ async fn prepare_command_request(
         )
         .with_command_id(cid)),
     }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReviseProjectPayload {
+    name: String,
+    description: String,
+    weight: i64,
+    primary_root_path: Option<String>,
+    sources: Vec<StrictProjectSource>,
+    repositories: Vec<StrictProjectRepository>,
+    settings_json: Map<String, Value>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StrictProjectSource {
+    kind: String,
+    path_or_uri: String,
+    label: String,
+    read_only: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StrictProjectRepository {
+    repo_id: String,
+    root_path: String,
+    default_branch: Option<String>,
+}
+
+fn prepare_revise_project(
+    session: &AuthenticatedSession,
+    cmd: CommandEnvelope,
+) -> Result<PreparedCommand, IpcError> {
+    let cid = cmd.command_id;
+    let invalid = || {
+        IpcError::new(
+            ErrorCode::InvalidArgument,
+            None,
+            "ReviseProject : payload ou cible invalide",
+            RetryClass::Never,
+        )
+        .with_command_id(cid)
+    };
+    let project_id = cmd.project_id.ok_or_else(invalid)?;
+    if project_id.as_uuid() != cmd.aggregate_id {
+        return Err(invalid());
+    }
+    let payload: ReviseProjectPayload =
+        serde_json::from_value(Value::Object(cmd.payload.clone())).map_err(|_| invalid())?;
+    // Sans schéma de paramètres versionné ni validation des URI distantes, refuser ces entrées.
+    if !payload.settings_json.is_empty()
+        || payload
+            .sources
+            .iter()
+            .any(|s| !matches!(s.kind.as_str(), "directory" | "git" | "local"))
+    {
+        return Err(invalid());
+    }
+    let sources = payload
+        .sources
+        .into_iter()
+        .map(|s| unleash_store::ProjectSourceSpec {
+            kind: s.kind,
+            path_or_uri: s.path_or_uri,
+            label: s.label,
+            read_only: s.read_only,
+        })
+        .collect();
+    let repositories = payload
+        .repositories
+        .into_iter()
+        .map(|r| unleash_store::ProjectRepositorySpec {
+            repo_id: r.repo_id,
+            root_path: r.root_path,
+            default_branch: r.default_branch,
+        })
+        .collect();
+    Ok(PreparedCommand {
+        req: CommitCommandRequest {
+            actor_id: session.actor_id.clone(),
+            envelope: cmd,
+            target_aggregate: AggregateKind::Project,
+            operation_id: None,
+            receipt_state: ReceiptState::Accepted,
+            result_ref: None,
+            retention_days_override: None,
+            fence_assertion: None,
+            mutation: CommandMutation::ReviseProject {
+                project_id,
+                name: payload.name,
+                description: payload.description,
+                weight: payload.weight,
+                primary_root_path: payload.primary_root_path,
+                sources,
+                repositories,
+                settings_json: Value::Object(payload.settings_json),
+            },
+            events: Vec::new(),
+            capacity_reservations: Vec::new(),
+            budget_reservations: Vec::new(),
+        },
+        stop_reason: None,
+        stop_drain_timeout: None,
+    })
 }
 
 fn prepare_create_project(
