@@ -12,7 +12,7 @@
     "worktrees/"
   ],
   "hash_algorithm": "sha256",
-  "source_tree_digest": "73b7f23c9d0eb31f844634e8ff03f2a3959cebbbe13e764d976a5297a69653a7",
+  "source_tree_digest": "abfbfd38b097b058d11dae42744f2c911f766455e6ba3f538de140b19d8769c3",
   "files": [
     {
       "path": "INDEX.md",
@@ -346,8 +346,8 @@
     },
     {
       "path": "architecture/ipc-and-apis.md",
-      "sha256": "e3f71de6f44d861325b9fa581469b09d139b74dcd0ef07f30dfd5c3a1cb77de6",
-      "bytes": 28835,
+      "sha256": "be4a0eaec2bb8a54e0e0e07f4f1ade58d251f117c5630fe6e4f7f7d3248dd6ff",
+      "bytes": 30363,
       "media_type": "text/markdown"
     },
     {
@@ -394,8 +394,8 @@
     },
     {
       "path": "architecture/sqlite-design.md",
-      "sha256": "41fb90d1dd36b7c59ca72decc7150cda998033b51746f95e17d6e93f0630ad83",
-      "bytes": 52748,
+      "sha256": "59f85bf868b44b93988e6731f1f8f5a0d6ec3104afecf45c33e36a43f43f841f",
+      "bytes": 53668,
       "media_type": "text/markdown"
     },
     {
@@ -2164,8 +2164,8 @@
     },
     {
       "path": "specs/ai-guard.md",
-      "sha256": "37c04d4f0aa924eb50dcf2cf72d3d9d68f02532b1202c458f74eecba65c1a8b5",
-      "bytes": 12736,
+      "sha256": "7e0060d02b2539a4ddf3dbfb74cb12eb77e3a023a47af044014655c7e62223b8",
+      "bytes": 13691,
       "media_type": "text/markdown"
     },
     {

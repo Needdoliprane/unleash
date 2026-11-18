@@ -49,6 +49,17 @@ Error = code, reason_code (clé toujours présente, null sans raison), message, 
 
 Les lectures initiales de M1 ont des payloads fermés. `ListProjects` et `InspectRecovery` prennent un objet vide. `GetProject` prend un objet vide et le `project_id` de l’enveloppe. `ReadPolicySummary` prend un objet vide et accepte le filtre `project_id` de l’enveloppe. `ReadSettings` prend `scope_kind` et `scope_id` et vérifie leur concordance avec le scope authentifié. Les projections SQLite et le curseur renvoyé sont lus dans une seule transaction. La lecture du manifeste de maintenance externe indique sa propre provenance.
 
+Les mutations de configuration de cette tranche utilisent des objets fermés et le décideur résolu par le daemon.
+
+| Opération | Champs du payload | Agrégat et scope |
+| --- | --- | --- |
+| `SetSettings` | `scope_kind`, `scope_id`, `patch` avec `execution_pool`, `retention_policy`, `confirm_retention_shortening` et `analyzer_paths` vide ou nul dans cette tranche | Singleton `user/default` identifié par la lignée active, ou paramètres d’un projet identifié par son UUID et contrôlé par le writer. |
+| `SetPolicy` | `scope_kind`, `scope_id`, `isolation_mode`, `policy_version`, `reason` | Politique `global/global` identifiée par la lignée active, ou politique d’un projet identifié par son UUID. |
+| `ConfigureGuard` | `config` typée du [contrat F017](../features/F017-ai-guard-integration/interfaces.md) | Configuration `default` de la lignée active. La tranche locale active `broker_only` et `none_accepted`. L’usage d’un endpoint et d’un credential tiers exige l’adaptateur qualifié. |
+| `PurgeHistory` | `scope_kind="user"`, `scope_id="default"`, `reason`, `older_than_override_ms?` | UUID de la purge créée, `expected_revision=0`, une seule création de cet agrégat. Le reçu `accepted` engage la purge logique. `InspectRecovery` rend l’issue physique et le checkpoint observés. |
+
+`ReadGuardHealth` prend un payload vide et n’effectue aucun appel réseau. Une configuration sans observation disponible affiche la santé inconnue et n’atteste aucune version ou capacité du garde.
+
 Cette table synthétise les façades. Le [catalogue client complet](client-operation-catalog.md) détaille lectures, drafts, évaluations, authentification, configuration et exports des 58 groupes de parité. F019 possède exactement 11 commandes et 5 lectures propres ; ses runs réutilisent les verbes communs. Ses noms et arguments structurants font partie du même contrat public ; les features détaillent les objets métier. Une équipe ne doit pas créer un second verbe public pour contourner revision/permission. Une requête n'écrit aucun objet durable : SearchSkills et SearchRoles restituent des candidats sans reçu ; un DiscoveryReceipt naît seulement de RecordDiscoveryDecision, après DiscoverResources.
 
 ## Sources de Run et préparation guidée
