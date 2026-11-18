@@ -91,6 +91,11 @@ async fn projections_share_watermark_and_reject_unknown_payload_and_unauthorized
         .unwrap();
     assert_eq!(list.watermark, Some(receipt.event_cursor));
     assert_eq!(list.result.as_array().unwrap().len(), 1);
+    for name in ["GetDaemonStatus", "GetHealth", "GetStateSnapshot"] {
+        assert!(
+            matches!(client.query(&query(name, None, json!({"unexpected":"DO_NOT_ECHO"}))).await, Err(ClientError::Remote(e)) if e.code == ErrorCode::InvalidArgument && !e.message.contains("DO_NOT_ECHO"))
+        );
+    }
     let one = client
         .query(&query("GetProject", Some(pid), json!({})))
         .await

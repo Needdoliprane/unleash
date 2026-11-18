@@ -449,6 +449,19 @@ async fn dispatch_query(
     session: &AuthenticatedSession,
     query: QueryEnvelope,
 ) -> Result<QueryResponse, IpcError> {
+    if !query.payload.is_empty()
+        && matches!(
+            query.query_type.as_str(),
+            "GetDaemonStatus" | "GetHealth" | "GetStateSnapshot"
+        )
+    {
+        return Err(IpcError::new(
+            ErrorCode::InvalidArgument,
+            None,
+            "Payload de requête invalide",
+            RetryClass::Never,
+        ));
+    }
     match query.query_type.as_str() {
         "GetDaemonStatus" => query_daemon_status(state, session, query.request_id).await,
         "GetHealth" => query_health(state, query.request_id).await,
@@ -1106,6 +1119,7 @@ async fn prepare_command_request(
     cmd: CommandEnvelope,
 ) -> Result<PreparedCommand, IpcError> {
     let cid = cmd.command_id;
+    validate_known_command_payload(&cmd)?;
     match cmd.command_type.as_str() {
         "CreateProject" => prepare_create_project(session, cmd),
         "ReviseProject" => prepare_revise_project(session, cmd),
@@ -1125,6 +1139,56 @@ async fn prepare_command_request(
             RetryClass::Never,
         )
         .with_command_id(cid)),
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AssignMissionPayload {
+    #[serde(rename = "completion_policy")]
+    _completion_policy: Option<String>,
+    #[serde(rename = "state")]
+    _state: Option<String>,
+    #[serde(rename = "goal_id")]
+    _goal_id: Option<Uuid>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MissionTransitionPayload {
+    #[serde(rename = "reason")]
+    _reason: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StopDaemonPayload {
+    #[serde(rename = "reason")]
+    _reason: Option<String>,
+    #[serde(rename = "drain_timeout_ms")]
+    _drain_timeout_ms: Option<u64>,
+}
+
+fn validate_known_command_payload(cmd: &CommandEnvelope) -> Result<(), IpcError> {
+    let payload = Value::Object(cmd.payload.clone());
+    let valid = match cmd.command_type.as_str() {
+        "AssignMission" => serde_json::from_value::<AssignMissionPayload>(payload).is_ok(),
+        "PauseMission" | "ResumeMission" | "CancelMission" => {
+            serde_json::from_value::<MissionTransitionPayload>(payload).is_ok()
+        }
+        "StopDaemon" => serde_json::from_value::<StopDaemonPayload>(payload).is_ok(),
+        _ => true,
+    };
+    if valid {
+        Ok(())
+    } else {
+        Err(IpcError::new(
+            ErrorCode::InvalidArgument,
+            None,
+            "Payload de commande invalide",
+            RetryClass::Never,
+        )
+        .with_command_id(cmd.command_id))
     }
 }
 
@@ -1674,11 +1738,11 @@ fn parse_assign_mission_fields(cmd: &CommandEnvelope) -> Result<AssignMissionFie
         None | Some("mechanical") => CompletionPolicy::Mechanical,
         Some("human") => CompletionPolicy::Human,
         Some("owner_agent") => CompletionPolicy::OwnerAgent,
-        Some(other) => {
+        Some(_) => {
             return Err(IpcError::new(
                 ErrorCode::InvalidArgument,
                 None,
-                format!("completion_policy inconnue : '{other}'"),
+                "completion_policy inconnue",
                 RetryClass::Never,
             )
             .with_command_id(cid));
@@ -1688,11 +1752,11 @@ fn parse_assign_mission_fields(cmd: &CommandEnvelope) -> Result<AssignMissionFie
         None | Some("active") => MissionState::Active,
         Some("proposed") => MissionState::Proposed,
         Some("ready") => MissionState::Ready,
-        Some(other) => {
+        Some(_) => {
             return Err(IpcError::new(
                 ErrorCode::InvalidArgument,
                 None,
-                format!("État initial de mission invalide pour AssignMission : '{other}'"),
+                "État initial de mission invalide pour AssignMission",
                 RetryClass::Never,
             )
             .with_command_id(cid));
@@ -2650,6 +2714,33 @@ mod tests {
             .insert(String::from("state"), Value::from("unknown_state"));
         assert_eq!(
             parse_assign_mission_fields(&bad).unwrap_err().code,
+            ErrorCode::InvalidArgument
+        );
+        bad.payload
+            .insert(String::from("state"), Value::from("DO_NOT_ECHO"));
+        assert!(
+            !parse_assign_mission_fields(&bad)
+                .unwrap_err()
+                .message
+                .contains("DO_NOT_ECHO")
+        );
+        for kind in [
+            "AssignMission",
+            "PauseMission",
+            "ResumeMission",
+            "CancelMission",
+            "StopDaemon",
+        ] {
+            bad.command_type = kind.into();
+            bad.payload = serde_json::from_value(json!({"unexpected":"DO_NOT_ECHO"})).unwrap();
+            let err = validate_known_command_payload(&bad).unwrap_err();
+            assert_eq!(err.code, ErrorCode::InvalidArgument);
+            assert!(!err.message.contains("DO_NOT_ECHO"));
+        }
+        bad.command_type = "AssignMission".into();
+        bad.payload = serde_json::from_value(json!({"state":123})).unwrap();
+        assert_eq!(
+            validate_known_command_payload(&bad).unwrap_err().code,
             ErrorCode::InvalidArgument
         );
     }
