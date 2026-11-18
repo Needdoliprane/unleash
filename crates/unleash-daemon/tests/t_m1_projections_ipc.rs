@@ -198,6 +198,17 @@ async fn projections_share_watermark_and_reject_unknown_payload_and_unauthorized
     assert!(
         matches!(scoped.query(&query("GetProject", Some(other_pid), json!({}))).await, Err(ClientError::Remote(e)) if e.code == ErrorCode::ScopeDenied)
     );
+    // Déclarer un projet permis ne prouve pas la provenance du reçu créé dans un autre projet.
+    for claimed_project in [Some(pid), None] {
+        let receipt_query = query(
+            "GetCommandReceipt",
+            claimed_project,
+            json!({"command_id":CommandId::from_u128(12)}),
+        );
+        assert!(
+            matches!(scoped.query(&receipt_query).await, Err(ClientError::Remote(e)) if e.code == ErrorCode::ScopeDenied)
+        );
+    }
     for q in [
         query("ReadPolicySummary", Some(pid), json!({})),
         query("InspectRecovery", None, json!({})),

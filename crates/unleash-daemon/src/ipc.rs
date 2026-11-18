@@ -795,6 +795,14 @@ async fn query_command_receipt(
     session: &AuthenticatedSession,
     query: QueryEnvelope,
 ) -> Result<QueryResponse, IpcError> {
+    // Le project_id de la requête est déclaré par le client, pas la provenance du reçu.
+    // Sans provenance vérifiée par le Store, refuser aussi les reçus historiques.
+    if session.allowed_projects.is_some() {
+        return Err(IpcError::from_reason(
+            ReasonCode::AccessDenied,
+            "Provenance du reçu non vérifiée pour cette portée",
+        ));
+    }
     let cmd_id_str = query
         .payload
         .get("command_id")
