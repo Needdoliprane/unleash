@@ -1,0 +1,19 @@
+{
+  "evidence_id": "EV-F018-005",
+  "test_id": "T-F018-005",
+  "requirement_id": "REQ-REC-005",
+  "commit": "aa5bd7f498f21a6ea3aadb65feea83769bed2808",
+  "command": "cargo test --locked --offline --workspace --all-features --no-fail-fast --quiet",
+  "environment": {
+    "os": "macOS 27.2.1 arm64",
+    "rustc": "rustc 1.94.1",
+    "sqlite": "bundle rusqlite du Cargo.lock testé"
+  },
+  "result": "passed",
+  "observed_at": "2026-11-18T17:14:53Z",
+  "artifacts": [
+    "crates/unleash-store/tests/t_f018_005_lineage_manifest.rs",
+    "crates/unleash-daemon/tests/e2e_m1_restore_lineage.rs"
+  ],
+  "limits": "Périmètre interne M1. Restauration locale et redémarrage réels, réemploi de l’ancienne enveloppe refusé avant recherche. La neutralisation OS multi-hôtes et les identités distantes relèvent de la recette M7."
+}
