@@ -320,6 +320,8 @@ pub struct BrokerActionSnapshot {
     pub fence: LineageFence,
     /// Dernier dispatch éventuel.
     pub dispatch_id: Option<DispatchId>,
+    /// Dernier événement de phase effectivement engagé, dans la même vue de lecture.
+    pub last_event_cursor: EventCursor,
 }
 
 /// Signature du port interne, implémenté par le Store ; aucune autorité client n'en découle.

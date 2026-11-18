@@ -42,6 +42,11 @@ fn post_snapshot_tombstone_stays_historical_without_full_response_reconstruction
     run_snapshot_case(true, EffectProgress::ReceiptTombstone);
 }
 
+#[test]
+fn full_receipt_in_snapshot_tombstoned_afterwards_never_resurrects() {
+    run_snapshot_case(false, EffectProgress::ReceiptTombstone);
+}
+
 #[expect(
     clippy::unwrap_used,
     clippy::too_many_lines,
