@@ -14,15 +14,44 @@ static TMP_SEQ: AtomicU64 = AtomicU64::new(1);
 
 /// Lit un fichier borné depuis un dossier privé ancré, sans suivre ses liens finaux.
 /// L'identité, le type et les modes sont vérifiés sur les descripteurs réellement ouverts.
-#[cfg(unix)]
 pub(crate) fn read_private_file_bounded(
     path: &Path,
     expected_uid: u32,
     limit: usize,
 ) -> Result<Option<Vec<u8>>, StoreError> {
+    use std::io::Read;
+    let refused = |message: &'static str| StoreError::EvidenceUnavailable(message.to_owned());
+    let Some(file) = open_private_file(path, expected_uid)? else {
+        return Ok(None);
+    };
+    let metadata = file.metadata()?;
+    let limit =
+        u64::try_from(limit).map_err(|_| refused("limite du manifeste maintenance invalide"))?;
+    if metadata.len() > limit {
+        return Err(refused(
+            "manifeste maintenance dépasse la limite de lecture",
+        ));
+    }
+    let mut bytes = Vec::new();
+    file.take(limit.saturating_add(1)).read_to_end(&mut bytes)?;
+    if u64::try_from(bytes.len())
+        .map_err(|_| refused("taille du manifeste maintenance invalide"))?
+        > limit
+    {
+        return Err(refused(
+            "manifeste maintenance dépasse la limite de lecture",
+        ));
+    }
+    Ok(Some(bytes))
+}
+
+#[cfg(unix)]
+pub(crate) fn open_private_file(
+    path: &Path,
+    expected_uid: u32,
+) -> Result<Option<File>, StoreError> {
     use rustix::fs::{Mode, OFlags, openat};
     use rustix::io::Errno;
-    use std::io::Read;
     use std::os::unix::fs::MetadataExt;
     use std::path::Component;
     let refused = |message: &'static str| StoreError::EvidenceUnavailable(message.to_owned());
@@ -73,24 +102,7 @@ pub(crate) fn read_private_file_bounded(
     if metadata.permissions().mode() & 0o7777 != 0o600 {
         return Err(refused("mode privé 0600 du manifeste maintenance requis"));
     }
-    let limit =
-        u64::try_from(limit).map_err(|_| refused("limite du manifeste maintenance invalide"))?;
-    if metadata.len() > limit {
-        return Err(refused(
-            "manifeste maintenance dépasse la limite de lecture",
-        ));
-    }
-    let mut bytes = Vec::new();
-    file.take(limit.saturating_add(1)).read_to_end(&mut bytes)?;
-    if u64::try_from(bytes.len())
-        .map_err(|_| refused("taille du manifeste maintenance invalide"))?
-        > limit
-    {
-        return Err(refused(
-            "manifeste maintenance dépasse la limite de lecture",
-        ));
-    }
-    Ok(Some(bytes))
+    Ok(Some(file))
 }
 
 #[cfg(unix)]
@@ -172,11 +184,10 @@ fn open_protected_system_alias(
 }
 
 #[cfg(not(unix))]
-pub(crate) fn read_private_file_bounded(
+pub(crate) fn open_private_file(
     path: &Path,
     _expected_uid: u32,
-    _limit: usize,
-) -> Result<Option<Vec<u8>>, StoreError> {
+) -> Result<Option<File>, StoreError> {
     match fs::symlink_metadata(path) {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(error) => Err(error.into()),

@@ -19,7 +19,7 @@ use crate::policies_secrets::{CallerAuthority, require_human_decider, require_re
 use crate::qualification::inspect_and_verify_build;
 use crate::restore::{
     CapsuleCoverage, MaintenanceManifestEntry, MaintenanceRestoreManifest, RestoreCapsule,
-    RestoreRequestState, read_maintenance_manifest,
+    RestoreRequestState, read_maintenance_manifest, read_maintenance_manifest_for_diagnostics,
 };
 
 /// Disposition humaine ou autorisée enregistrée sur une action `outcome_unknown` (`ResolveActionOutcome`).
@@ -1064,7 +1064,7 @@ pub(crate) fn inspect_recovery_conn(
     config: &StoreConfig,
 ) -> Result<RecoveryReport, StoreError> {
     let daemon = read_daemon_state_conn(conn)?;
-    let maintenance_manifest = read_maintenance_manifest(&config.maintenance_dir)?;
+    let maintenance_manifest = read_maintenance_manifest_for_diagnostics(&config.maintenance_dir)?;
 
     let mut restore_requests = Vec::new();
     {
@@ -1505,7 +1505,7 @@ pub(crate) fn inspect_recovery_offline_cfg(
         return Ok(report);
     }
 
-    let maintenance_manifest = read_maintenance_manifest(&config.maintenance_dir)?;
+    let maintenance_manifest = read_maintenance_manifest_for_diagnostics(&config.maintenance_dir)?;
     Ok(RecoveryReport {
         retention_purges: vec![],
         daemon_mode: Some(DaemonMode::ReadOnlyRecovery),
