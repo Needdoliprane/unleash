@@ -8,8 +8,8 @@ use std::sync::atomic::Ordering;
 use rusqlite::{Connection, OpenFlags, Transaction, TransactionBehavior};
 use unleash_domain::{
     AccountId, ActionId, ActorId, AuthorityGeneration, BackupId, CommandId, DaemonEpoch,
-    DaemonInstanceId, LeaseId, MicrosAmount, PoolId, ReceiptId, Sequence, Sha256Digest, StreamId,
-    TimestampMs,
+    DaemonInstanceId, LeaseId, MicrosAmount, PoolId, ProjectId, ReceiptId, Sequence, Sha256Digest,
+    StreamId, TimestampMs,
 };
 use unleash_protocol::{CommandEnvelope, EventEnvelope};
 use uuid::Uuid;
@@ -37,9 +37,10 @@ use crate::config::{
 use crate::error::StoreError;
 use crate::events::{
     DeadLetterItem, InboxApplyOutcome, OutboxDispatchItem, PurgeStats, ReadEventsOutcome,
-    read_dead_letters_conn, read_events_with_window, tx_ack_outbox, tx_apply_inbox_event,
-    tx_lease_outbox_batch, tx_purge_expired_inbox, tx_purge_history,
-    tx_record_non_transient_failure, tx_record_transient_failure,
+    RetentionPurgeReport, RetentionPurgeRequest, read_dead_letters_conn, read_events_with_window,
+    tx_ack_outbox, tx_apply_inbox_event, tx_execute_retention_purge, tx_lease_outbox_batch,
+    tx_purge_expired_inbox, tx_purge_history, tx_record_non_transient_failure,
+    tx_record_transient_failure,
 };
 use crate::fs_sync::{set_dir_permissions_0700, set_path_permissions};
 use crate::leases::{
@@ -55,8 +56,23 @@ use crate::objects::{
     tx_publish_object_reference, tx_release_pin, tx_tombstone_object_references,
     verify_object_file_before_publish, write_prepared_object_bytes_to_disk,
 };
+use crate::policies_secrets::{
+    AlertRecord, GuardConfigRecord, ListAlertsFilter, NewAlertSpec, PolicySummary,
+    SecretReferenceStatus, SubjectKind, SubjectSuspensionRecord, get_secret_reference_status_conn,
+    list_alerts_conn, list_secret_references_conn, read_guard_config_conn,
+    read_policy_summary_conn, read_subject_suspension_conn, record_alert_tx,
+};
+use crate::projects_settings::{
+    ProjectRecord, RetentionClass, SettingsRecord, SettingsScopeKind, get_project_conn,
+    list_projects_conn, read_settings_conn,
+};
 use crate::qualification::{
     SqliteRuntimeManifest, apply_and_verify_writer_pragmas, inspect_and_verify_build,
+};
+use crate::recovery_ops::{
+    ActionDispatchInput, RecoveryReport, inspect_recovery_conn, inspect_recovery_offline_cfg,
+    lookup_restore_receipt_cfg, reconcile_recovered_actions_after_restart_tx,
+    record_action_dispatch_tx,
 };
 use crate::restore::{
     MaintenanceRestoreManifest, RestoreActivationResult, RestoreBackupRequest,
@@ -1399,5 +1415,248 @@ impl UnleashStore {
                 Ok(updated)
             },
         )
+    }
+
+    /// Liste tous les projets persistés (`ListProjects`).
+    ///
+    /// # Errors
+    /// Retourne [`StoreError`] en cas d'erreur de lecture.
+    pub fn list_projects(&self) -> Result<Vec<ProjectRecord>, StoreError> {
+        self.read_snapshot(|conn, _ctx| list_projects_conn(conn))
+    }
+
+    /// Lit un projet par identifiant (`GetProject`).
+    ///
+    /// # Errors
+    /// Retourne [`StoreError::NotFound`] si absent ou une erreur de lecture.
+    pub fn get_project(&self, project_id: ProjectId) -> Result<ProjectRecord, StoreError> {
+        self.read_snapshot(|conn, _ctx| get_project_conn(conn, project_id))
+    }
+
+    /// Lit les paramètres typés d'une portée (`ReadSettings`), synthétisant les défauts Q-15/Q-12 si vierge.
+    ///
+    /// # Errors
+    /// Retourne [`StoreError`] en cas d'erreur de lecture.
+    pub fn read_settings(
+        &self,
+        scope_kind: SettingsScopeKind,
+        scope_id: &str,
+    ) -> Result<SettingsRecord, StoreError> {
+        let now_ms = self.config.clock.now_ms();
+        self.read_snapshot(|conn, _ctx| read_settings_conn(conn, now_ms, scope_kind, scope_id))
+    }
+
+    /// Lit le résumé agrégé de politique d'isolation et de configuration AI-Guard (`ReadPolicySummary`).
+    ///
+    /// # Errors
+    /// Retourne [`StoreError`] en cas d'erreur de lecture.
+    pub fn read_policy_summary(
+        &self,
+        project_id: Option<ProjectId>,
+    ) -> Result<PolicySummary, StoreError> {
+        self.read_snapshot(|conn, _ctx| read_policy_summary_conn(conn, project_id))
+    }
+
+    /// Lit une configuration AI-Guard par identifiant (`"default"`, etc.).
+    ///
+    /// # Errors
+    /// Retourne [`StoreError`] en cas d'erreur de lecture.
+    pub fn read_guard_config(
+        &self,
+        config_id: &str,
+    ) -> Result<Option<GuardConfigRecord>, StoreError> {
+        self.read_snapshot(|conn, _ctx| read_guard_config_conn(conn, config_id))
+    }
+
+    /// Lit l'état courant de suspension/révocation d'un sujet typé.
+    ///
+    /// # Errors
+    /// Retourne [`StoreError`] en cas d'erreur de lecture.
+    pub fn get_subject_suspension(
+        &self,
+        kind: SubjectKind,
+        subject_id: &str,
+        scope_kind: &str,
+        scope_id: &str,
+    ) -> Result<Option<SubjectSuspensionRecord>, StoreError> {
+        self.read_snapshot(|conn, _ctx| {
+            read_subject_suspension_conn(conn, kind, subject_id, scope_kind, scope_id)
+        })
+    }
+
+    /// Retourne les métadonnées d'une référence secrète opaque (`GetSecretReferenceStatus`, zéro octet secret).
+    ///
+    /// # Errors
+    /// Retourne [`StoreError::NotFound`] si absente ou une erreur de lecture.
+    pub fn get_secret_reference_status(
+        &self,
+        secret_ref_id: &str,
+    ) -> Result<SecretReferenceStatus, StoreError> {
+        self.read_snapshot(|conn, _ctx| get_secret_reference_status_conn(conn, secret_ref_id))
+    }
+
+    /// Liste les références secrètes enregistrées (métadonnées uniquement, zéro octet secret).
+    ///
+    /// # Errors
+    /// Retourne [`StoreError`] en cas d'erreur de lecture.
+    pub fn list_secret_references(
+        &self,
+        namespace: Option<&str>,
+    ) -> Result<Vec<SecretReferenceStatus>, StoreError> {
+        self.read_snapshot(|conn, _ctx| list_secret_references_conn(conn, namespace))
+    }
+
+    /// Enregistre ou met à jour une alerte durable dans `alerts`.
+    ///
+    /// # Errors
+    /// Retourne [`StoreError`] en cas d'erreur SQL ou de contrainte.
+    pub fn record_alert(&self, spec: NewAlertSpec) -> Result<AlertRecord, StoreError> {
+        self.writer
+            .submit_immediate_blocking(WriteCriticality::Normal, false, move |tx, now_ms| {
+                record_alert_tx(tx, now_ms, &spec)
+            })
+    }
+
+    /// Liste les alertes selon filtre, en remontant les alertes bloquantes actives si demandé (`ListAlerts`).
+    ///
+    /// # Errors
+    /// Retourne [`StoreError`] en cas d'erreur de lecture.
+    pub fn list_alerts(&self, filter: &ListAlertsFilter) -> Result<Vec<AlertRecord>, StoreError> {
+        self.read_snapshot(|conn, _ctx| list_alerts_conn(conn, filter))
+    }
+
+    /// Enregistre une tentative de dispatch d'action dans `action_dispatches`.
+    ///
+    /// # Errors
+    /// Retourne [`StoreError::NotFound`] si l'action n'existe pas ou une erreur SQL.
+    pub fn record_action_dispatch(&self, input: ActionDispatchInput) -> Result<(), StoreError> {
+        self.writer
+            .submit_immediate_blocking(WriteCriticality::Normal, false, move |tx, now_ms| {
+                record_action_dispatch_tx(tx, now_ms, &input)
+            })
+    }
+
+    /// Classe en `outcome_unknown` (sans retry automatique) les actions laissées `dispatching`/`in_flight`
+    /// sous une époque antérieure après redémarrage dans la même lignée.
+    ///
+    /// # Errors
+    /// Retourne [`StoreError`] en cas d'erreur SQL.
+    pub fn reconcile_recovered_actions_after_restart(&self) -> Result<Vec<ActionId>, StoreError> {
+        self.writer
+            .submit_immediate_blocking(WriteCriticality::Critical, false, |tx, now_ms| {
+                reconcile_recovered_actions_after_restart_tx(tx, now_ms)
+            })
+    }
+
+    /// Inspecte l'inventaire et l'état de récupération complet (`InspectRecovery`).
+    ///
+    /// # Errors
+    /// Retourne [`StoreError`] en cas d'erreur de lecture.
+    pub fn inspect_recovery(&self) -> Result<RecoveryReport, StoreError> {
+        let maint = self.config.maintenance_dir.clone();
+        self.read_snapshot(|conn, _ctx| inspect_recovery_conn(conn, &maint))
+    }
+
+    /// Inspecte l'état de récupération hors-ligne, y compris quand la base source est corrompue (`0600` manifest).
+    ///
+    /// # Errors
+    /// Retourne [`StoreError`] si la lecture du manifeste privé échoue.
+    pub fn inspect_recovery_offline(config: &StoreConfig) -> Result<RecoveryReport, StoreError> {
+        inspect_recovery_offline_cfg(config)
+    }
+
+    /// Recherche un reçu `RestoreBackup` par `(actor_id, command_id)` via manifeste privé `0600`
+    /// avant bascule ou `restore_manifest_records` après bascule.
+    ///
+    /// # Errors
+    /// Retourne [`StoreError`] si le manifeste ou la base est illisible de manière inattendue.
+    pub fn lookup_restore_receipt(
+        config: &StoreConfig,
+        actor_id: &str,
+        command_id: CommandId,
+    ) -> Result<Option<MaintenanceRestoreManifest>, StoreError> {
+        lookup_restore_receipt_cfg(config, actor_id, command_id)
+    }
+
+    /// Attribue une classe de rétention Q-12 et un éventuel verrou `keep_by_policy` à un objet live.
+    ///
+    /// # Errors
+    /// Retourne [`StoreError::NotFound`] si l'objet est absent ou une erreur SQL.
+    pub fn tag_object_retention(
+        &self,
+        object_hash: Sha256Digest,
+        retention_class: RetentionClass,
+        keep_by_policy: bool,
+        project_id: Option<ProjectId>,
+    ) -> Result<(), StoreError> {
+        let hash_s = object_hash.as_prefixed_str();
+        let cls_s = retention_class.as_str().to_owned();
+        let keep_i = i64::from(keep_by_policy);
+        let proj_s = project_id.map(|p| p.to_string());
+        self.writer
+            .submit_immediate_blocking(WriteCriticality::Normal, false, move |tx, _now| {
+                let updated = tx
+                    .execute(
+                        "UPDATE object_records
+                         SET retention_class = ?1, keep_by_policy = ?2, project_id = COALESCE(?3, project_id)
+                         WHERE object_hash = ?4",
+                        rusqlite::params![cls_s, keep_i, proj_s, hash_s],
+                    )
+                    .map_err(StoreError::from_rusqlite)?;
+                if updated == 0 {
+                    return Err(StoreError::NotFound(format!("object {hash_s}")));
+                }
+                Ok(())
+            })
+    }
+
+    /// Exécute une purge complète sous politique de rétention Q-12 (`unleash.retention.default.v1`),
+    /// respecte les préavis >= 24 h et les protections actives, journalise dans `retention_purges`
+    /// puis exécute `PRAGMA wal_checkpoint(TRUNCATE)`.
+    ///
+    /// # Errors
+    /// Retourne [`StoreError`] en cas d'erreur SQL ou I/O.
+    pub fn execute_retention_purge(
+        &self,
+        req: RetentionPurgeRequest,
+    ) -> Result<RetentionPurgeReport, StoreError> {
+        check_injected_fault(
+            self.config.fault_injector.as_ref(),
+            FaultTarget::Maintenance,
+        )?;
+        let before_truncates = self.writer.telemetry().truncate_checkpoints;
+        let cfg = self.config.clone();
+        let mut report = self.writer.submit_immediate_blocking(
+            WriteCriticality::Critical,
+            false,
+            move |tx, now_ms| tx_execute_retention_purge(tx, &cfg, now_ms, None, &req),
+        )?;
+        if !report.suspended_clock_uncertain {
+            let wal_tel = self.writer.maintenance_tick(true)?;
+            let truncated =
+                wal_tel.truncate_checkpoints > before_truncates || wal_tel.wal_bytes == 0;
+            if truncated {
+                let purge_id_clone = report.purge_id.clone();
+                self.writer.submit_immediate_blocking(
+                    WriteCriticality::Critical,
+                    false,
+                    move |tx, _now| {
+                        tx.execute(
+                            "UPDATE retention_purges SET wal_checkpoint_truncated = 1 WHERE purge_id = ?1",
+                            [&purge_id_clone],
+                        )
+                        .map_err(StoreError::from_rusqlite)?;
+                        Ok(())
+                    },
+                )?;
+                let final_tel = self.writer.maintenance_tick(true)?;
+                report.wal_checkpoint_truncated = final_tel.truncate_checkpoints > before_truncates;
+                report.wal_bytes_after = final_tel.wal_bytes;
+            } else {
+                report.wal_checkpoint_truncated = false;
+                report.wal_bytes_after = wal_tel.wal_bytes;
+            }
+        }
+        Ok(report)
     }
 }

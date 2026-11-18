@@ -1,12 +1,15 @@
 //! Algorithme transactionnel de commande (`CommitCommand`), reçus, tombstones et purge (`REQ-PERSIST-001`, `REQ-PERSIST-004`).
 
+use std::collections::HashMap;
+
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Map, Value};
 use unleash_domain::{
-    ActionId, ActorId, AgentId, AgentLevel, AgentState, AttemptId, AuthorityGeneration, CommandId,
-    CompletionPolicy, DaemonEpoch, DaemonMode, GoalId, GoalState, InvocationId, InvocationState,
-    MissionId, MissionState, OperationId, ProjectId, ReceiptId, ReplayWorkerId, Revision, RunId,
-    Sha256Digest, StepId, StreamId, TimestampMs,
+    ActionId, ActionState, ActorId, AgentId, AgentLevel, AgentState, AttemptId,
+    AuthorityGeneration, CommandId, CompletionPolicy, DaemonEpoch, DaemonMode, Fence, GoalId,
+    GoalState, InvocationId, InvocationState, MissionId, MissionState, OperationId, ProjectId,
+    ReceiptId, ReconcileOutcome, ReplayWorkerId, Revision, RunId, Sha256Digest, StepId, StreamId,
+    TimestampMs,
 };
 use unleash_protocol::{
     CommandEnvelope, CommandReceipt, CommandReceiptInspection, EventCausationKind, ReceiptState,
@@ -15,7 +18,22 @@ use unleash_protocol::{
 use uuid::Uuid;
 
 use crate::budgets::{BudgetReservationRequest, CapacityReservationRequest};
+use crate::events::{RetentionPurgeRequest, tx_execute_retention_purge};
 use crate::leases::FenceAssertion;
+use crate::policies_secrets::{
+    AlertState, CallerAuthority, GuardConfigInput, PolicyIsolationMode, PolicyScopeKind,
+    SecretReferenceInput, SubjectKind, SubjectStatus, ensure_subject_not_blocked_tx,
+    tx_configure_guard, tx_revoke_secret_reference, tx_set_policy, tx_set_secret_reference,
+    tx_transition_alert, tx_transition_subject,
+};
+use crate::projects_settings::{
+    ProjectRepositorySpec, ProjectSourceSpec, SettingsPatch, SettingsScopeKind, tx_revise_project,
+    tx_set_settings,
+};
+use crate::recovery_ops::{
+    ActionOutcomeDisposition, ApprovalDecision, tx_reconcile_action, tx_resolve_action_approval,
+    tx_resolve_action_outcome,
+};
 
 /// Nature d'agrégat vérifié lors d'une commande.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -38,6 +56,22 @@ pub enum AggregateKind {
     Action,
     /// Entité générique persistée dans une table clé/révision dédiée ou `workflow_runs`/`missions`.
     GenericRun,
+    /// Agrégat de paramètres (`settings`).
+    Settings,
+    /// Politique de sécurité (`security_policies`).
+    SecurityPolicy,
+    /// Configuration AI-Guard (`guard_configs`).
+    GuardConfig,
+    /// Suspension ou révocation d'un sujet (`subject_suspensions`).
+    SubjectSuspension,
+    /// Référence secrète opaque (`secret_references`).
+    SecretReference,
+    /// Alerte opérationnelle (`alerts`).
+    Alert,
+    /// Décision humaine d'approbation (`approval_resolutions`).
+    ApprovalResolution,
+    /// Audit de purge Q-12 (`retention_purges`).
+    RetentionPurge,
 }
 
 impl AggregateKind {
@@ -53,6 +87,14 @@ impl AggregateKind {
             Self::Agent => "agent",
             Self::Invocation => "invocation",
             Self::Action => "action",
+            Self::Settings => "settings",
+            Self::SecurityPolicy => "security_policy",
+            Self::GuardConfig => "guard_config",
+            Self::SubjectSuspension => "subject_suspension",
+            Self::SecretReference => "secret_reference",
+            Self::Alert => "alert",
+            Self::ApprovalResolution => "approval_resolution",
+            Self::RetentionPurge => "retention_purge",
         }
     }
 }
@@ -203,6 +245,225 @@ pub enum CommandMutation {
     },
     /// Mutation neutre sur `daemon_state` (pour tests de bout en bout / charge WAL / receipts).
     NoopDaemonBump,
+    /// Révise un projet existant (`ReviseProject` : nom, description, poids, racines/dépôts validés).
+    ReviseProject {
+        /// Identifiant du projet ciblé.
+        project_id: ProjectId,
+        /// Nouveau nom.
+        name: String,
+        /// Description mise à jour.
+        description: String,
+        /// Nouveau poids d'ordonnancement (1..=10).
+        weight: i64,
+        /// Nouvelle racine locale optionnelle (validée).
+        primary_root_path: Option<String>,
+        /// Liste mise à jour des sources.
+        sources: Vec<ProjectSourceSpec>,
+        /// Liste mise à jour des dépôts.
+        repositories: Vec<ProjectRepositorySpec>,
+        /// Paramètres JSON typés du projet.
+        settings_json: Value,
+    },
+    /// Met à jour les paramètres typés (`SetSettings` : Q-15 pool d'exécution + rétention Q-12).
+    SetSettings {
+        /// Portée des paramètres modifiés.
+        scope_kind: SettingsScopeKind,
+        /// Identifiant de portée.
+        scope_id: String,
+        /// Autorité authentifiée.
+        caller: CallerAuthority,
+        /// Patch typé des paramètres.
+        patch: SettingsPatch,
+    },
+    /// Met à jour la politique d'isolation (`SetPolicy` : `standard` ou `strict`).
+    SetPolicy {
+        /// Portée de politique.
+        scope_kind: PolicyScopeKind,
+        /// Identifiant de portée (`"global"` ou `project_id`).
+        scope_id: String,
+        /// Mode d'isolation.
+        isolation_mode: PolicyIsolationMode,
+        /// Version de politique.
+        policy_version: String,
+        /// Motif tracé.
+        reason: String,
+        /// Autorité appelante.
+        caller: CallerAuthority,
+    },
+    /// Configure l'intégration AI-Guard (`ConfigureGuard`).
+    ConfigureGuard {
+        /// Configuration typée AI-Guard.
+        config: GuardConfigInput,
+        /// Autorité appelante.
+        caller: CallerAuthority,
+    },
+    /// Suspend localement un sujet typé (`SuspendSubject`).
+    SuspendSubject {
+        /// Type de sujet.
+        subject_kind: SubjectKind,
+        /// Identifiant de sujet.
+        subject_id: String,
+        /// Portée (`global`, `project`, ...).
+        scope_kind: String,
+        /// Identifiant de portée.
+        scope_id: String,
+        /// Motif explicite.
+        reason: String,
+        /// Autorité appelante.
+        caller: CallerAuthority,
+        /// Indique si `GuardPort` a négocié et propagé la suspension.
+        guard_propagated: bool,
+    },
+    /// Rétablit localement un sujet suspendu (`ResumeSubject`, refusé si révoqué).
+    ResumeSubject {
+        /// Type de sujet.
+        subject_kind: SubjectKind,
+        /// Identifiant de sujet.
+        subject_id: String,
+        /// Portée.
+        scope_kind: String,
+        /// Identifiant de portée.
+        scope_id: String,
+        /// Motif explicite.
+        reason: String,
+        /// Autorité appelante.
+        caller: CallerAuthority,
+    },
+    /// Révoque définitivement un sujet typé (`RevokeSubject`).
+    RevokeSubject {
+        /// Type de sujet.
+        subject_kind: SubjectKind,
+        /// Identifiant de sujet.
+        subject_id: String,
+        /// Portée.
+        scope_kind: String,
+        /// Identifiant de portée.
+        scope_id: String,
+        /// Motif explicite.
+        reason: String,
+        /// Autorité appelante.
+        caller: CallerAuthority,
+        /// Indique si `GuardPort` a propagé la révocation.
+        guard_propagated: bool,
+    },
+    /// Lie ou met à jour une référence secrète opaque (`SetSecretReference`, zéro octet secret).
+    SetSecretReference {
+        /// Métadonnées et `SecretRef` opaque.
+        input: SecretReferenceInput,
+        /// Autorité appelante.
+        caller: CallerAuthority,
+    },
+    /// Révoque une référence secrète (`RevokeSecretReference`, local vs distant).
+    RevokeSecretReference {
+        /// Identifiant de liaison secrète.
+        secret_ref_id: String,
+        /// Motif explicite.
+        reason: String,
+        /// Autorité appelante.
+        caller: CallerAuthority,
+        /// Le fournisseur supporte la révocation distante.
+        remote_revocation_supported: bool,
+        /// La révocation distante est déjà confirmée.
+        remote_revocation_confirmed: bool,
+    },
+    /// Crée une action durable gouvernée avec scope, approbation et contrôle de sujet.
+    CreateGovernedAction {
+        /// Identifiant d'action.
+        action_id: ActionId,
+        /// Origine (`invocation`, `replay` ou `control_plane`).
+        origin_kind: String,
+        /// Principal de contrôle si `control_plane`.
+        control_principal_id: Option<String>,
+        /// Projet associé optionnel.
+        project_id: Option<ProjectId>,
+        /// Clé de scope concernée.
+        scope_key: Option<String>,
+        /// Run éventuel.
+        run_id: Option<RunId>,
+        /// Step éventuel.
+        step_id: Option<StepId>,
+        /// Invocation éventuelle.
+        invocation_id: Option<InvocationId>,
+        /// Tentative éventuelle.
+        attempt_id: Option<AttemptId>,
+        /// Worker de replay éventuel.
+        replay_worker_id: Option<ReplayWorkerId>,
+        /// Type d'action.
+        action_type: String,
+        /// Hash immuable du payload.
+        payload_hash: Sha256Digest,
+        /// Stratégie de réconciliation.
+        reconcile_strategy: String,
+        /// Révision de politique.
+        policy_revision: i64,
+        /// Lease optionnelle associée.
+        resource_lease_id: Option<String>,
+        /// Scope d'approbation éventuel pour `approval_required`.
+        approval_scope: Option<String>,
+        /// État initial durable.
+        initial_state: ActionState,
+        /// Sujet éventuel contrôlé contre `subject_suspensions`.
+        subject: Option<(SubjectKind, String)>,
+    },
+    /// Applique une observation vérifiée sur une action (`ReconcileAction`, F018).
+    ReconcileAction {
+        /// Identifiant d'action.
+        action_id: ActionId,
+        /// Autorité appelante habilitée.
+        caller: CallerAuthority,
+        /// Issue observée.
+        outcome: ReconcileOutcome,
+        /// Digest de preuve éventuelle (obligatoire si `ConfirmedSuccess` sans `receipt_hash`).
+        evidence_digest: Option<Sha256Digest>,
+        /// Empreinte de reçu transport éventuelle.
+        receipt_hash: Option<Sha256Digest>,
+        /// Motif explicite.
+        reason: String,
+        /// Époque source attendue pour rejeter un callback tardif (`StaleFence`).
+        expected_source_epoch: Option<DaemonEpoch>,
+        /// Fence source attendu pour rejeter un callback tardif (`StaleFence`).
+        expected_source_fence: Option<Fence>,
+    },
+    /// Enregistre une disposition humaine sur une action `outcome_unknown` (`ResolveActionOutcome`).
+    ResolveActionOutcome {
+        /// Identifiant d'action.
+        action_id: ActionId,
+        /// Décideur humain/policy habilité.
+        caller: CallerAuthority,
+        /// Disposition choisie (`actions.state` reste `outcome_unknown`).
+        disposition: ActionOutcomeDisposition,
+        /// Motif et limites explicites.
+        reason: String,
+        /// Référence de preuve éventuelle.
+        evidence_ref: Option<String>,
+    },
+    /// Enregistre la décision humaine d'approbation sur `approval_scope` et `payload_digest` exacts.
+    ResolveActionApproval {
+        /// Identifiant d'action.
+        action_id: ActionId,
+        /// Décideur humain/policy habilité.
+        caller: CallerAuthority,
+        /// Scope d'approbation exact attendu.
+        approval_scope: String,
+        /// Digest exact attendu.
+        payload_digest: Sha256Digest,
+        /// Décision (`approve` / `deny`).
+        decision: ApprovalDecision,
+        /// Motif explicite.
+        reason: String,
+    },
+    /// Fait transiter l'état d'une alerte (`acknowledged` / `resolved`).
+    AcknowledgeAlert {
+        /// Identifiant d'alerte.
+        alert_id: String,
+        /// Nouvel état cible.
+        target_state: AlertState,
+    },
+    /// Exécute une purge sous politique de rétention Q-12 (`PurgeHistory`).
+    PurgeHistory {
+        /// Paramètres et portée de la purge.
+        request: RetentionPurgeRequest,
+    },
 }
 
 /// Événement à journaliser dans la même transaction que la mutation.
@@ -522,11 +783,22 @@ pub(crate) fn tx_commit_command(
         return Ok(CommitOutcome::IdempotentReplay(receipt));
     }
 
-    // Mode `read_only_recovery` refuse les nouvelles écritures métier ordinaires
-    if daemon.mode == DaemonMode::ReadOnlyRecovery
-        && !matches!(req.mutation, CommandMutation::TransitionDaemonMode { .. })
-    {
-        return Err(StoreError::CapacityBlocked(
+    // Mode `read_only_recovery` refuse les nouvelles écritures métier ordinaires tout en
+    // autorisant les opérations d'urgence / réconciliation / arrêt / purge.
+    let allowed_in_ro_recovery = matches!(
+        req.mutation,
+        CommandMutation::TransitionDaemonMode { .. }
+            | CommandMutation::ReconcileAction { .. }
+            | CommandMutation::ResolveActionOutcome { .. }
+            | CommandMutation::ResolveActionApproval { .. }
+            | CommandMutation::AcknowledgeAlert { .. }
+            | CommandMutation::RevokeSecretReference { .. }
+            | CommandMutation::SuspendSubject { .. }
+            | CommandMutation::RevokeSubject { .. }
+            | CommandMutation::PurgeHistory { .. }
+    );
+    if daemon.mode == DaemonMode::ReadOnlyRecovery && !allowed_in_ro_recovery {
+        return Err(StoreError::RecoveryInProgress(
             "daemon en mode read_only_recovery".to_owned(),
         ));
     }
@@ -541,14 +813,20 @@ pub(crate) fn tx_commit_command(
         )?;
     }
 
+    let receipt_id = ReceiptId::from_uuid(config.id_generator.new_uuid());
+    let receipt_id_str = receipt_id.to_string();
     let expected_rev = req.envelope.expected_revision;
+    let mut generated_events = Vec::new();
     let new_rev = apply_command_mutation(
         tx,
+        config,
         &daemon,
         now_ms,
         expected_rev,
         &req.mutation,
         req.envelope.command_id,
+        receipt_id,
+        &mut generated_events,
     )?;
 
     // Réservations atomiques de capacité et de budgets
@@ -566,13 +844,11 @@ pub(crate) fn tx_commit_command(
     }
 
     // Étape 4 : Écrire events + outbox + command_receipts dans la MÊME transaction
-    let receipt_id = ReceiptId::from_uuid(config.id_generator.new_uuid());
-    let receipt_id_str = receipt_id.to_string();
-
     let mut first_seq: Option<i64> = None;
     let mut last_seq: Option<i64> = None;
+    let mut ordinal_counters: HashMap<(String, String, i64), i64> = HashMap::new();
 
-    for (ordinal, ev) in req.events.iter().enumerate() {
+    for ev in req.events.iter().chain(generated_events.iter()) {
         let event_id = config.id_generator.new_uuid().to_string();
         let payload_json = serde_json::to_string(&ev.payload)?;
         let payload_hash = canonical_sha256(&ev.payload)?;
@@ -615,8 +891,24 @@ pub(crate) fn tx_commit_command(
                 )));
             }
         };
-        let ord_i64 = i64::try_from(ordinal).unwrap_or(0);
         let agg_rev_i64 = i64::try_from(ev.aggregate_revision.as_u64()).unwrap_or(1);
+        let key = (
+            ev.aggregate_type.as_str().to_owned(),
+            ev.aggregate_id.to_string(),
+            agg_rev_i64,
+        );
+        let ord_i64 = if let Some(next) = ordinal_counters.get(&key).copied() {
+            next
+        } else {
+            tx.query_row(
+                "SELECT COALESCE(MAX(event_ordinal) + 1, 0) FROM events
+                 WHERE aggregate_type = ?1 AND aggregate_id = ?2 AND aggregate_revision = ?3",
+                rusqlite::params![&key.0, &key.1, key.2],
+                |r| r.get(0),
+            )
+            .map_err(StoreError::from_rusqlite)?
+        };
+        ordinal_counters.insert(key, ord_i64.saturating_add(1));
 
         tx.execute(
             "INSERT INTO events
@@ -746,22 +1038,103 @@ pub(crate) fn tx_commit_command(
     )
     .map_err(StoreError::from_rusqlite)?;
 
+    if matches!(
+        req.mutation,
+        CommandMutation::ReconcileAction { .. } | CommandMutation::ResolveActionOutcome { .. }
+    ) {
+        tx.execute(
+            "UPDATE recovery_scope_freezes
+             SET disposition_receipt_id = ?1
+             WHERE state = 'disposed' AND disposed_at_ms = ?2 AND disposition_receipt_id IS NULL",
+            rusqlite::params![receipt_id_str, now_ms.as_i64()],
+        )
+        .map_err(StoreError::from_rusqlite)?;
+    }
+
     cutpoints.hit(StoreCutpoint::C1BeforeCommandCommit)?;
 
     Ok(CommitOutcome::Committed(receipt))
 }
 
+fn ensure_scope_not_frozen_tx(
+    tx: &Transaction<'_>,
+    project_id: Option<ProjectId>,
+    scope_key: Option<&str>,
+    run_id: Option<RunId>,
+) -> Result<(), StoreError> {
+    let mut candidates = Vec::new();
+    if let Some(pid) = project_id {
+        candidates.push(pid.to_string());
+    }
+    if let Some(sk) = scope_key {
+        candidates.push(sk.to_owned());
+    }
+    if let Some(rid) = run_id {
+        candidates.push(rid.to_string());
+        if let Some(run_proj) = tx
+            .query_row(
+                "SELECT m.project_id
+                 FROM workflow_runs wr
+                 JOIN missions m ON m.mission_id = wr.mission_id
+                 WHERE wr.run_id = ?1",
+                [rid.to_string()],
+                |r| r.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(StoreError::from_rusqlite)?
+        {
+            candidates.push(run_proj);
+        }
+    }
+
+    let global_cnt: i64 = tx
+        .query_row(
+            "SELECT COUNT(*) FROM recovery_scope_freezes
+             WHERE state = 'frozen' AND global_freeze = 1",
+            [],
+            |r| r.get(0),
+        )
+        .map_err(StoreError::from_rusqlite)?;
+    if global_cnt > 0 {
+        return Err(StoreError::RecoveryInProgress(
+            "gel global post-restauration actif tant que la récupération n'est pas disposée"
+                .to_owned(),
+        ));
+    }
+
+    for cand in candidates {
+        let cnt: i64 = tx
+            .query_row(
+                "SELECT COUNT(*) FROM recovery_scope_freezes
+                 WHERE state = 'frozen' AND scope_id = ?1",
+                [&cand],
+                |r| r.get(0),
+            )
+            .map_err(StoreError::from_rusqlite)?;
+        if cnt > 0 {
+            return Err(StoreError::RecoveryInProgress(format!(
+                "scope '{cand}' gelé post-restauration en attente de réconciliation/disposition"
+            )));
+        }
+    }
+    Ok(())
+}
+
 #[expect(
     clippy::too_many_lines,
+    clippy::too_many_arguments,
     reason = "Dispatch exhaustif des variantes CommandMutation dans la transaction atomique"
 )]
 fn apply_command_mutation(
     tx: &Transaction<'_>,
+    config: &StoreConfig,
     daemon: &DaemonStateRow,
     now_ms: TimestampMs,
     expected_rev: Revision,
     mutation: &CommandMutation,
     cmd_id: CommandId,
+    receipt_id: ReceiptId,
+    generated_events: &mut Vec<EventAppendSpec>,
 ) -> Result<Revision, StoreError> {
     let exp_i64 = i64::try_from(expected_rev.as_u64()).unwrap_or(0);
     match mutation {
@@ -786,8 +1159,8 @@ fn apply_command_mutation(
                 });
             }
             tx.execute(
-                "INSERT INTO projects (project_id, name, weight, state, revision, created_at_ms)
-                 VALUES (?1, ?2, ?3, 'active', 1, ?4)",
+                "INSERT INTO projects (project_id, name, weight, state, revision, created_at_ms, updated_at_ms)
+                 VALUES (?1, ?2, ?3, 'active', 1, ?4, ?4)",
                 rusqlite::params![project_id.to_string(), name, weight, now_ms.as_i64()],
             )
             .map_err(StoreError::from_rusqlite)?;
@@ -1035,13 +1408,14 @@ fn apply_command_mutation(
             resource_lease_id,
         } => {
             ensure_creation_rev(expected_rev, cmd_id)?;
+            ensure_scope_not_frozen_tx(tx, None, None, *run_id)?;
             let epoch_i64 = i64::try_from(daemon.daemon_epoch.as_u64()).unwrap_or(1);
             tx.execute(
                 "INSERT INTO actions
                  (action_id, origin_kind, control_principal_id, run_id, step_id, invocation_id, attempt_id,
                   replay_worker_id, action_type, payload_hash, authorization_ref, policy_revision, resource_lease_id,
-                  authority_generation, daemon_epoch, fence, state, reconcile_strategy, provider_idempotency_key, revision, created_at_ms)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, NULL, ?11, ?12, ?13, ?14, 0, 'prepared', ?15, NULL, 1, ?16)",
+                  authority_generation, daemon_epoch, fence, state, reconcile_strategy, provider_idempotency_key, revision, created_at_ms, updated_at_ms)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, NULL, ?11, ?12, ?13, ?14, 0, 'prepared', ?15, NULL, 1, ?16, ?16)",
                 rusqlite::params![
                     action_id.to_string(),
                     origin_kind,
@@ -1160,6 +1534,527 @@ fn apply_command_mutation(
             )
             .map_err(StoreError::from_rusqlite)?;
             Ok(Revision::new(u64::try_from(next_rev).unwrap_or(1)))
+        }
+        CommandMutation::ReviseProject {
+            project_id,
+            name,
+            description,
+            weight,
+            primary_root_path,
+            sources,
+            repositories,
+            settings_json,
+        } => {
+            let new_rev = tx_revise_project(
+                tx,
+                now_ms,
+                expected_rev,
+                cmd_id,
+                *project_id,
+                name,
+                description,
+                *weight,
+                primary_root_path.as_deref(),
+                sources,
+                repositories,
+                settings_json,
+            )?;
+            let mut payload = Map::new();
+            payload.insert("name".to_owned(), Value::String(name.clone()));
+            payload.insert("weight".to_owned(), Value::Number((*weight).into()));
+            generated_events.push(EventAppendSpec {
+                event_type: "ProjectRevised".to_owned(),
+                aggregate_type: AggregateKind::Project,
+                aggregate_id: project_id.as_uuid(),
+                aggregate_revision: new_rev,
+                project_id: Some(*project_id),
+                correlation_id: project_id.as_uuid(),
+                causation_kind: EventCausationKind::Command,
+                causation_id: None,
+                payload,
+                sensitivity: Sensitivity::Project,
+                outbox_destinations: vec![],
+            });
+            Ok(new_rev)
+        }
+        CommandMutation::SetSettings {
+            scope_kind,
+            scope_id,
+            caller,
+            patch,
+        } => {
+            let new_rev = tx_set_settings(
+                tx,
+                now_ms,
+                expected_rev,
+                cmd_id,
+                *scope_kind,
+                scope_id,
+                caller,
+                patch,
+            )?;
+            let mut payload = Map::new();
+            payload.insert(
+                "scope_kind".to_owned(),
+                Value::String(scope_kind.as_str().to_owned()),
+            );
+            payload.insert("scope_id".to_owned(), Value::String(scope_id.clone()));
+            generated_events.push(EventAppendSpec {
+                event_type: "SettingsUpdated".to_owned(),
+                aggregate_type: AggregateKind::Settings,
+                aggregate_id: config.id_generator.new_uuid(),
+                aggregate_revision: new_rev,
+                project_id: None,
+                correlation_id: cmd_id.as_uuid(),
+                causation_kind: EventCausationKind::Command,
+                causation_id: None,
+                payload,
+                sensitivity: Sensitivity::Project,
+                outbox_destinations: vec![],
+            });
+            Ok(new_rev)
+        }
+        CommandMutation::SetPolicy {
+            scope_kind,
+            scope_id,
+            isolation_mode,
+            policy_version,
+            reason,
+            caller,
+        } => {
+            let new_rev = tx_set_policy(
+                tx,
+                now_ms,
+                expected_rev,
+                cmd_id,
+                *scope_kind,
+                scope_id,
+                *isolation_mode,
+                policy_version,
+                reason,
+                caller,
+            )?;
+            let mut payload = Map::new();
+            payload.insert(
+                "isolation_mode".to_owned(),
+                Value::String(isolation_mode.as_str().to_owned()),
+            );
+            payload.insert("reason".to_owned(), Value::String(reason.clone()));
+            generated_events.push(EventAppendSpec {
+                event_type: "SecurityPolicyUpdated".to_owned(),
+                aggregate_type: AggregateKind::SecurityPolicy,
+                aggregate_id: config.id_generator.new_uuid(),
+                aggregate_revision: new_rev,
+                project_id: scope_id.parse::<ProjectId>().ok(),
+                correlation_id: cmd_id.as_uuid(),
+                causation_kind: EventCausationKind::Command,
+                causation_id: None,
+                payload,
+                sensitivity: Sensitivity::Project,
+                outbox_destinations: vec![],
+            });
+            Ok(new_rev)
+        }
+        CommandMutation::ConfigureGuard {
+            config: guard_cfg,
+            caller,
+        } => {
+            let new_rev = tx_configure_guard(tx, now_ms, expected_rev, cmd_id, guard_cfg, caller)?;
+            let mut payload = Map::new();
+            payload.insert(
+                "guard_mode".to_owned(),
+                Value::String(guard_cfg.guard_mode.as_str().to_owned()),
+            );
+            payload.insert("reason".to_owned(), Value::String(guard_cfg.reason.clone()));
+            generated_events.push(EventAppendSpec {
+                event_type: "GuardConfigured".to_owned(),
+                aggregate_type: AggregateKind::GuardConfig,
+                aggregate_id: config.id_generator.new_uuid(),
+                aggregate_revision: new_rev,
+                project_id: None,
+                correlation_id: cmd_id.as_uuid(),
+                causation_kind: EventCausationKind::Command,
+                causation_id: None,
+                payload,
+                sensitivity: Sensitivity::Project,
+                outbox_destinations: vec![],
+            });
+            Ok(new_rev)
+        }
+        CommandMutation::SuspendSubject {
+            subject_kind,
+            subject_id,
+            scope_kind,
+            scope_id,
+            reason,
+            caller,
+            guard_propagated,
+        } => {
+            let new_rev = tx_transition_subject(
+                tx,
+                config.id_generator.as_ref(),
+                now_ms,
+                expected_rev,
+                cmd_id,
+                *subject_kind,
+                subject_id,
+                scope_kind,
+                scope_id,
+                SubjectStatus::Suspended,
+                reason,
+                *guard_propagated,
+                caller,
+            )?;
+            let mut payload = Map::new();
+            payload.insert(
+                "subject_kind".to_owned(),
+                Value::String(subject_kind.as_str().to_owned()),
+            );
+            payload.insert("subject_id".to_owned(), Value::String(subject_id.clone()));
+            generated_events.push(EventAppendSpec {
+                event_type: "SubjectSuspended".to_owned(),
+                aggregate_type: AggregateKind::SubjectSuspension,
+                aggregate_id: config.id_generator.new_uuid(),
+                aggregate_revision: new_rev,
+                project_id: scope_id.parse::<ProjectId>().ok(),
+                correlation_id: cmd_id.as_uuid(),
+                causation_kind: EventCausationKind::Command,
+                causation_id: None,
+                payload,
+                sensitivity: Sensitivity::Project,
+                outbox_destinations: vec![],
+            });
+            Ok(new_rev)
+        }
+        CommandMutation::ResumeSubject {
+            subject_kind,
+            subject_id,
+            scope_kind,
+            scope_id,
+            reason,
+            caller,
+        } => {
+            let new_rev = tx_transition_subject(
+                tx,
+                config.id_generator.as_ref(),
+                now_ms,
+                expected_rev,
+                cmd_id,
+                *subject_kind,
+                subject_id,
+                scope_kind,
+                scope_id,
+                SubjectStatus::Active,
+                reason,
+                false,
+                caller,
+            )?;
+            let mut payload = Map::new();
+            payload.insert(
+                "subject_kind".to_owned(),
+                Value::String(subject_kind.as_str().to_owned()),
+            );
+            payload.insert("subject_id".to_owned(), Value::String(subject_id.clone()));
+            generated_events.push(EventAppendSpec {
+                event_type: "SubjectResumed".to_owned(),
+                aggregate_type: AggregateKind::SubjectSuspension,
+                aggregate_id: config.id_generator.new_uuid(),
+                aggregate_revision: new_rev,
+                project_id: scope_id.parse::<ProjectId>().ok(),
+                correlation_id: cmd_id.as_uuid(),
+                causation_kind: EventCausationKind::Command,
+                causation_id: None,
+                payload,
+                sensitivity: Sensitivity::Project,
+                outbox_destinations: vec![],
+            });
+            Ok(new_rev)
+        }
+        CommandMutation::RevokeSubject {
+            subject_kind,
+            subject_id,
+            scope_kind,
+            scope_id,
+            reason,
+            caller,
+            guard_propagated,
+        } => {
+            let new_rev = tx_transition_subject(
+                tx,
+                config.id_generator.as_ref(),
+                now_ms,
+                expected_rev,
+                cmd_id,
+                *subject_kind,
+                subject_id,
+                scope_kind,
+                scope_id,
+                SubjectStatus::Revoked,
+                reason,
+                *guard_propagated,
+                caller,
+            )?;
+            let mut payload = Map::new();
+            payload.insert(
+                "subject_kind".to_owned(),
+                Value::String(subject_kind.as_str().to_owned()),
+            );
+            payload.insert("subject_id".to_owned(), Value::String(subject_id.clone()));
+            generated_events.push(EventAppendSpec {
+                event_type: "SubjectRevoked".to_owned(),
+                aggregate_type: AggregateKind::SubjectSuspension,
+                aggregate_id: config.id_generator.new_uuid(),
+                aggregate_revision: new_rev,
+                project_id: scope_id.parse::<ProjectId>().ok(),
+                correlation_id: cmd_id.as_uuid(),
+                causation_kind: EventCausationKind::Command,
+                causation_id: None,
+                payload,
+                sensitivity: Sensitivity::Project,
+                outbox_destinations: vec![],
+            });
+            Ok(new_rev)
+        }
+        CommandMutation::SetSecretReference { input, caller } => {
+            let new_rev = tx_set_secret_reference(tx, now_ms, expected_rev, cmd_id, input, caller)?;
+            let mut payload = Map::new();
+            payload.insert(
+                "secret_ref_id".to_owned(),
+                Value::String(input.secret_ref_id.clone()),
+            );
+            payload.insert(
+                "namespace".to_owned(),
+                Value::String(input.namespace.clone()),
+            );
+            payload.insert("purpose".to_owned(), Value::String(input.purpose.clone()));
+            generated_events.push(EventAppendSpec {
+                event_type: "SecretReferenceUpdated".to_owned(),
+                aggregate_type: AggregateKind::SecretReference,
+                aggregate_id: config.id_generator.new_uuid(),
+                aggregate_revision: new_rev,
+                project_id: input.scope_id.parse::<ProjectId>().ok(),
+                correlation_id: cmd_id.as_uuid(),
+                causation_kind: EventCausationKind::Command,
+                causation_id: None,
+                payload,
+                sensitivity: Sensitivity::Confidential,
+                outbox_destinations: vec![],
+            });
+            Ok(new_rev)
+        }
+        CommandMutation::RevokeSecretReference {
+            secret_ref_id,
+            reason,
+            caller,
+            remote_revocation_supported,
+            remote_revocation_confirmed,
+        } => {
+            let new_rev = tx_revoke_secret_reference(
+                tx,
+                now_ms,
+                expected_rev,
+                cmd_id,
+                secret_ref_id,
+                reason,
+                caller,
+                *remote_revocation_supported,
+                *remote_revocation_confirmed,
+            )?;
+            let mut payload = Map::new();
+            payload.insert(
+                "secret_ref_id".to_owned(),
+                Value::String(secret_ref_id.clone()),
+            );
+            payload.insert("reason".to_owned(), Value::String(reason.clone()));
+            generated_events.push(EventAppendSpec {
+                event_type: "SecretReferenceRevoked".to_owned(),
+                aggregate_type: AggregateKind::SecretReference,
+                aggregate_id: config.id_generator.new_uuid(),
+                aggregate_revision: new_rev,
+                project_id: None,
+                correlation_id: cmd_id.as_uuid(),
+                causation_kind: EventCausationKind::Command,
+                causation_id: None,
+                payload,
+                sensitivity: Sensitivity::Confidential,
+                outbox_destinations: vec![],
+            });
+            Ok(new_rev)
+        }
+        CommandMutation::CreateGovernedAction {
+            action_id,
+            origin_kind,
+            control_principal_id,
+            project_id,
+            scope_key,
+            run_id,
+            step_id,
+            invocation_id,
+            attempt_id,
+            replay_worker_id,
+            action_type,
+            payload_hash,
+            reconcile_strategy,
+            policy_revision,
+            resource_lease_id,
+            approval_scope,
+            initial_state,
+            subject,
+        } => {
+            ensure_creation_rev(expected_rev, cmd_id)?;
+            ensure_scope_not_frozen_tx(tx, *project_id, scope_key.as_deref(), *run_id)?;
+            if let Some((skind, sid)) = subject.as_ref() {
+                ensure_subject_not_blocked_tx(tx, *skind, sid, *project_id)?;
+            }
+            let epoch_i64 = i64::try_from(daemon.daemon_epoch.as_u64()).unwrap_or(1);
+            let auth_ref: Option<String> = if matches!(
+                initial_state,
+                ActionState::Authorized
+                    | ActionState::Dispatching
+                    | ActionState::InFlight
+                    | ActionState::ObservedSuccess
+                    | ActionState::OutcomeUnknown
+            ) {
+                Some(format!("auth-{action_id}"))
+            } else {
+                None
+            };
+            tx.execute(
+                "INSERT INTO actions
+                 (action_id, origin_kind, control_principal_id, project_id, scope_key, run_id, step_id,
+                  invocation_id, attempt_id, replay_worker_id, action_type, payload_hash,
+                  authorization_ref, policy_revision, resource_lease_id, approval_scope,
+                  subject_kind, subject_id, authority_generation, daemon_epoch, fence,
+                  state, reconcile_strategy, provider_idempotency_key, revision, created_at_ms, updated_at_ms)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16,
+                         ?17, ?18, ?19, ?20, 0, ?21, ?22, NULL, 1, ?23, ?23)",
+                rusqlite::params![
+                    action_id.to_string(),
+                    origin_kind,
+                    control_principal_id,
+                    project_id.map(|p| p.to_string()),
+                    scope_key,
+                    run_id.map(|r| r.to_string()),
+                    step_id.map(|s| s.to_string()),
+                    invocation_id.map(|i| i.to_string()),
+                    attempt_id.map(|a| a.to_string()),
+                    replay_worker_id.map(|w| w.to_string()),
+                    action_type,
+                    payload_hash.as_prefixed_str(),
+                    auth_ref,
+                    policy_revision,
+                    resource_lease_id,
+                    approval_scope,
+                    subject.as_ref().map(|(k, _)| k.as_str()),
+                    subject.as_ref().map(|(_, s)| s.as_str()),
+                    daemon.authority_generation.to_string(),
+                    epoch_i64,
+                    initial_state.to_string(),
+                    reconcile_strategy,
+                    now_ms.as_i64()
+                ],
+            )
+            .map_err(StoreError::from_rusqlite)?;
+            Ok(Revision::new(1))
+        }
+        CommandMutation::ReconcileAction {
+            action_id,
+            caller,
+            outcome,
+            evidence_digest,
+            receipt_hash,
+            reason,
+            expected_source_epoch,
+            expected_source_fence,
+        } => tx_reconcile_action(
+            tx,
+            now_ms,
+            daemon.daemon_epoch,
+            expected_rev,
+            cmd_id,
+            *action_id,
+            caller,
+            *outcome,
+            *evidence_digest,
+            *receipt_hash,
+            reason,
+            *expected_source_epoch,
+            *expected_source_fence,
+            generated_events,
+        ),
+        CommandMutation::ResolveActionOutcome {
+            action_id,
+            caller,
+            disposition,
+            reason,
+            evidence_ref,
+        } => tx_resolve_action_outcome(
+            tx,
+            now_ms,
+            expected_rev,
+            cmd_id,
+            receipt_id,
+            *action_id,
+            caller,
+            *disposition,
+            reason,
+            evidence_ref.as_deref(),
+            generated_events,
+        ),
+        CommandMutation::ResolveActionApproval {
+            action_id,
+            caller,
+            approval_scope,
+            payload_digest,
+            decision,
+            reason,
+        } => tx_resolve_action_approval(
+            tx,
+            config.id_generator.as_ref(),
+            now_ms,
+            expected_rev,
+            cmd_id,
+            receipt_id,
+            *action_id,
+            caller,
+            approval_scope,
+            *payload_digest,
+            *decision,
+            reason,
+            generated_events,
+        ),
+        CommandMutation::AcknowledgeAlert {
+            alert_id,
+            target_state,
+        } => tx_transition_alert(tx, now_ms, expected_rev, cmd_id, alert_id, *target_state),
+        CommandMutation::PurgeHistory { request } => {
+            let rep = tx_execute_retention_purge(tx, config, now_ms, Some(receipt_id), request)?;
+            if !rep.suspended_clock_uncertain {
+                let mut payload = Map::new();
+                payload.insert("purge_id".to_owned(), Value::String(rep.purge_id));
+                payload.insert(
+                    "events_tombstoned_count".to_owned(),
+                    Value::Number((rep.events_tombstoned_count as u64).into()),
+                );
+                payload.insert(
+                    "objects_purged_count".to_owned(),
+                    Value::Number((rep.objects_purged_count as u64).into()),
+                );
+                generated_events.push(EventAppendSpec {
+                    event_type: "HistoryPurged".to_owned(),
+                    aggregate_type: AggregateKind::RetentionPurge,
+                    aggregate_id: config.id_generator.new_uuid(),
+                    aggregate_revision: Revision::new(1),
+                    project_id: None,
+                    correlation_id: cmd_id.as_uuid(),
+                    causation_kind: EventCausationKind::Command,
+                    causation_id: None,
+                    payload,
+                    sensitivity: Sensitivity::Project,
+                    outbox_destinations: vec![],
+                });
+            }
+            Ok(Revision::new(1))
         }
     }
 }

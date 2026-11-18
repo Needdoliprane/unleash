@@ -99,6 +99,17 @@ pub fn set_file_permissions(file: &File, mode: u32) -> Result<(), StoreError> {
     Ok(())
 }
 
+/// Synchronise le répertoire parent d'un fichier sur disque (`fsync` sur le descripteur de dossier).
+///
+/// # Errors
+/// Retourne [`StoreError::Io`] en cas d'échec de synchronisation non bénin.
+pub fn sync_parent_dir(path: &Path) -> Result<(), StoreError> {
+    if let Some(parent) = path.parent() {
+        sync_dir(parent)?;
+    }
+    Ok(())
+}
+
 /// Applique les permissions POSIX sur un chemin de fichier.
 ///
 /// # Errors
