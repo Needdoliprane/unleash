@@ -5631,9 +5631,11 @@ name = "unleash-model-router"
 version = "0.1.0"
 dependencies = [
  "jsonschema",
+ "reqwest",
  "serde",
  "serde_json",
  "thiserror 2.0.21",
+ "tokio",
 ]
 
 [[package]]

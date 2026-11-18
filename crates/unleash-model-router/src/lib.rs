@@ -19,7 +19,11 @@ pub mod openai;
 #[cfg(test)]
 mod anthropic_tests;
 #[cfg(test)]
+mod http_fixture_tests;
+#[cfg(test)]
 mod openai_tests;
+#[cfg(test)]
+mod qualification_http;
 
 const MAX_CHUNK: usize = 1_048_576;
 const MAX_LINE: usize = 65_536;
