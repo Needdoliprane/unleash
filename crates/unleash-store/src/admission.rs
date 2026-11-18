@@ -414,9 +414,6 @@ pub(crate) fn read_snapshot(
     let mut stmt = conn.prepare(sql)?;
     let mut rows = stmt.query([])?;
     while let Some(row) = rows.next()? {
-        if queued.len() >= 4096 {
-            return Err(invalid("snapshot admission dépasse 4096 candidats"));
-        }
         let kind: String = row.get(0)?;
         let id = uuid(&row.get::<_, String>(1)?)?;
         let unit = match kind.as_str() {

@@ -1055,7 +1055,7 @@ impl UnleashStore {
 
     /// Projette les files et réservations réelles dans un seul snapshot `SQLite`.
     /// # Errors
-    /// Refuse un propriétaire actif incomplet ou une file dépassant la borne.
+    /// Refuse un propriétaire actif incomplet ou une lecture interrompue ou expirée.
     pub fn execution_admission_snapshot(
         &self,
         pool_id: PoolId,

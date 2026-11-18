@@ -196,6 +196,103 @@ fn t_f003_003_five_mixed_units_share_the_sqlite_pool() {
 }
 
 #[test]
+#[expect(
+    clippy::print_stderr,
+    reason = "Mesures locales du cas volumineux demandées pour la remise, visibles avec --nocapture"
+)]
+fn t_f003_005_control_after_more_than_4096_ineligible_candidates_is_admitted() {
+    let dir = local_test_dir("f003-large-queue").unwrap();
+    let store = UnleashStore::open(StoreConfig::new(dir.path())).unwrap();
+    let object = seed(&store, false);
+    let daemon = store.daemon_state().unwrap();
+    let seeded_at = std::time::Instant::now();
+    let control = unit(20_000);
+    store
+        .execute_in_writer_tx(WriteCriticality::Critical, move |tx, now| {
+            // Equal timestamps force the durable ID tie-break. All 4096 work
+            // entries sort before the control, and none has eligibility proof.
+            for number in 10_000..14_096 {
+                seed_invocation(tx, number, PROJECT, false, object, &daemon, now)?;
+            }
+            seed_invocation(tx, 20_000, OTHER_PROJECT, true, object, &daemon, now)
+        })
+        .unwrap();
+    let seed_elapsed = seeded_at.elapsed();
+    let read_at = std::time::Instant::now();
+    let snapshot = store.execution_admission_snapshot(POOL).unwrap();
+    let snapshot_elapsed = read_at.elapsed();
+    assert_eq!(snapshot.queued.len(), 4105);
+    let control_index = snapshot
+        .queued
+        .iter()
+        .position(|candidate| candidate.unit == control)
+        .unwrap();
+    assert!(control_index > 4096);
+    assert!(
+        snapshot
+            .queued
+            .iter()
+            .all(|candidate| candidate.eligibility_evidence.is_none())
+    );
+    let candidate = snapshot.queued.get(control_index).unwrap();
+    store
+        .record_admission_eligibility(AdmissionEligibilityObservation {
+            evidence_id: next_evidence(),
+            observer_principal_id: "admission-bench".to_owned(),
+            object_hash: object,
+            unit: control,
+            unit_revision: candidate.revision,
+            source_revision: snapshot.source_revision,
+            authority_generation: snapshot.authority_generation,
+            daemon_epoch: snapshot.daemon_epoch,
+            valid_until: unleash_domain::TimestampMs::new(i64::MAX),
+            urgency: AdmissionUrgency::UrgentControl,
+        })
+        .unwrap();
+    let eligible = store.execution_admission_snapshot(POOL).unwrap();
+    let commit_at = std::time::Instant::now();
+    let outcome = store
+        .commit_execution_admission(POOL, eligible.token, move |current| {
+            assert_eq!(current.queued.len(), 4105);
+            let admissible: Vec<_> = current
+                .queued
+                .iter()
+                .filter(|candidate| candidate.eligibility_evidence.is_some())
+                .map(|candidate| candidate.unit)
+                .collect();
+            assert_eq!(admissible, vec![control]);
+            Ok(AdmissionDecision::Admit {
+                unit: control,
+                deficit_deltas: BTreeMap::from([(
+                    Some(unleash_domain::ProjectId::from_uuid(OTHER_PROJECT)),
+                    0,
+                )]),
+                consecutive_controls: 0,
+                budgets: vec![],
+            })
+        })
+        .unwrap();
+    let commit_elapsed = commit_at.elapsed();
+    assert!(matches!(outcome, AdmissionOutcome::Admitted(ref commit) if commit.unit == control));
+    let after = store.execution_admission_snapshot(POOL).unwrap();
+    assert_eq!(after.queued.len(), 4104);
+    assert_eq!(after.pool.current_occupation, 1);
+    assert_eq!(after.pool.effective_limit, 5);
+    assert!(
+        after
+            .queued
+            .iter()
+            .all(|candidate| candidate.unit != control)
+    );
+    eprintln!(
+        "large_queue candidates=4105 control_index={control_index} seed_ms={} snapshot_ms={} commit_ms={} occupation=1 effective_limit=5",
+        seed_elapsed.as_millis(),
+        snapshot_elapsed.as_millis(),
+        commit_elapsed.as_millis()
+    );
+}
+
+#[test]
 fn t_f003_003_same_last_slot_proposal_commits_once() {
     let dir = local_test_dir("f003-race").unwrap();
     let store = Arc::new(UnleashStore::open(StoreConfig::new(dir.path())).unwrap());
