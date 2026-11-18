@@ -30,6 +30,23 @@ cargo run --locked -p unleash-cli -- tui --linear
 
 La touche `q` ferme l’interface terminal. Pour arrêter le daemon, utiliser `cargo run --locked -p unleash-cli -- daemon stop`.
 
+## Sauvegarder les données locales
+
+Avec le daemon en cours d’exécution, demander une sauvegarde manuelle.
+
+```sh
+cargo run --locked -p unleash-cli -- --json backup request
+```
+
+Le résultat contient le reçu d’acceptation et la lignée d’autorité. Copier `receipt.aggregate_id` dans `BACKUP_ID` pour consulter l’avancement.
+
+```sh
+BACKUP_ID='identifiant-de-la-sauvegarde'
+cargo run --locked -p unleash-cli -- --json backup show "$BACKUP_ID"
+```
+
+L’état `completed` donne accès au manifeste de la sauvegarde créée sous `backups/<BACKUP_ID>` dans le répertoire de données du daemon. Pour rejouer une demande, utiliser `backup request` avec les valeurs d’origine pour `--backup-id`, `--command-id` et `--authority-generation`.
+
 ## Vérifier et contribuer
 
 Le [rapport M0](qualification/m0/exit.md) indique les composants testés, les environnements et les limites de l’aperçu. Les commandes de vérification du workspace figurent dans le [workflow CI](.github/workflows/ci.yml). Voir les [règles de contribution](CONTRIBUTING.md) et le [canal de signalement sécurité](SECURITY.md).
