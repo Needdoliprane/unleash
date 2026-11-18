@@ -480,10 +480,6 @@ fn reserve_backup_destination(destination: &Path) -> Result<(), StoreError> {
 }
 
 /// Exécute le protocole complet `PrepareBackup` (barrière durable, `sqlite3_backup_step(-1)`, pins, copies, vérifications, Q-12).
-#[expect(
-    clippy::too_many_lines,
-    reason = "Orchestration atomique barrière durable, backup_step(-1), pins backup, copies vérifiées et rotation Q-12"
-)]
 pub(crate) fn prepare_backup_workflow(
     config: &StoreConfig,
     writer: &StoreWriterHandle,
@@ -563,6 +559,143 @@ pub(crate) fn prepare_backup_workflow(
         })?
     };
 
+    continue_backup_from_barrier(
+        config,
+        writer,
+        cutpoints,
+        req,
+        BackupBarrierContext {
+            backup_id,
+            source_auth,
+            created_at_ms,
+            barrier_pin_id,
+            reserved: None,
+        },
+    )
+}
+
+pub(crate) struct BackupBarrierContext {
+    backup_id: BackupId,
+    source_auth: AuthorityGeneration,
+    created_at_ms: TimestampMs,
+    barrier_pin_id: String,
+    reserved: Option<crate::ExecuteReservedBackupRequest>,
+}
+
+pub(crate) fn execute_reserved_backup_workflow(
+    config: &StoreConfig,
+    writer: &StoreWriterHandle,
+    cutpoints: &dyn CutpointObserver,
+    request: crate::ExecuteReservedBackupRequest,
+    consumed: crate::backup_requests::ConsumedBackupRequest,
+) -> Result<crate::ExecutedBackup, StoreError> {
+    ensure_managed_backup_root(config)?;
+    let record = consumed.record;
+    if record.destination_dir != config.backups_dir.join(record.backup_id.to_string()) {
+        return Err(StoreError::InvalidArgument {
+            reason: None,
+            message: "destination gérée divergente".to_owned(),
+        });
+    }
+    let req = PrepareBackupRequest {
+        destination_dir: record.destination_dir,
+        retention_tier: BackupRetentionTier::Manual,
+        coverage: "db_and_objects".to_owned(),
+    };
+    let manifest = continue_backup_from_barrier(
+        config,
+        writer,
+        cutpoints,
+        &req,
+        BackupBarrierContext {
+            backup_id: record.backup_id,
+            source_auth: record.authority_generation,
+            created_at_ms: record.created_at_ms,
+            barrier_pin_id: consumed.barrier_pin_id,
+            reserved: Some(request),
+        },
+    )?;
+    let output_digest = unleash_protocol::canonical_sha256(&serde_json::to_value(&manifest)?)?;
+    Ok(crate::ExecutedBackup {
+        manifest,
+        output_digest,
+    })
+}
+
+fn ensure_managed_backup_root(config: &StoreConfig) -> Result<(), StoreError> {
+    #[cfg(unix)]
+    use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+    let parent = config
+        .backups_dir
+        .parent()
+        .ok_or_else(|| StoreError::InvalidArgument {
+            reason: None,
+            message: "racine sauvegarde sans parent".to_owned(),
+        })?;
+    let metadata = fs::symlink_metadata(parent)?;
+    if metadata.file_type().is_symlink()
+        || !metadata.is_dir()
+        || Some(parent) != config.db_path.parent()
+    {
+        return Err(StoreError::InvalidArgument {
+            reason: None,
+            message: "parent de sauvegarde gérée non privé ou non réel".to_owned(),
+        });
+    }
+    #[cfg(unix)]
+    if metadata.permissions().mode() & 0o077 != 0 {
+        return Err(StoreError::InvalidArgument {
+            reason: None,
+            message: "parent de sauvegarde gérée non privé".to_owned(),
+        });
+    }
+    match fs::symlink_metadata(&config.backups_dir) {
+        Ok(metadata) => {
+            if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                return Err(StoreError::InvalidArgument {
+                    reason: None,
+                    message: "racine sauvegarde gérée non réelle".to_owned(),
+                });
+            }
+            #[cfg(unix)]
+            if metadata.permissions().mode() & 0o077 != 0 {
+                return Err(StoreError::InvalidArgument {
+                    reason: None,
+                    message: "racine sauvegarde gérée non privée".to_owned(),
+                });
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            let mut builder = fs::DirBuilder::new();
+            #[cfg(unix)]
+            builder.mode(0o700);
+            builder.create(&config.backups_dir)?;
+            sync_dir(parent)?;
+        }
+        Err(error) => return Err(error.into()),
+    }
+    Ok(())
+}
+
+#[expect(
+    clippy::too_many_lines,
+    reason = "Suite du protocole C11 depuis une barrière déjà durable, commune aux chemins historique et réservé"
+)]
+fn continue_backup_from_barrier(
+    config: &StoreConfig,
+    writer: &StoreWriterHandle,
+    cutpoints: &dyn CutpointObserver,
+    req: &PrepareBackupRequest,
+    context: BackupBarrierContext,
+) -> Result<BackupManifest, StoreError> {
+    let BackupBarrierContext {
+        backup_id,
+        source_auth,
+        created_at_ms,
+        barrier_pin_id,
+        reserved,
+    } = context;
+    let backup_id_str = backup_id.to_string();
     cutpoints.hit(StoreCutpoint::C11aAfterBackupBarrier)?;
 
     reserve_backup_destination(&req.destination_dir)?;
@@ -600,8 +733,10 @@ pub(crate) fn prepare_backup_workflow(
             generated_pin_ids.push(config.id_generator.new_uuid().to_string());
         }
         let pin_ids_c = generated_pin_ids.clone();
+        let preparing_revision = i64::from(reserved.is_some());
 
         writer.submit_immediate_blocking(WriteCriticality::Critical, false, move |tx, now_ms| {
+            if let Some(request)=reserved {crate::backup_requests::ensure_consumed_backup_tx(tx,request)?;}
             for (entry, pin_id) in entries.iter().zip(pin_ids_c.iter()) {
                 tx.execute(
                     "INSERT INTO object_pins
@@ -619,19 +754,21 @@ pub(crate) fn prepare_backup_workflow(
                 .map_err(StoreError::from_rusqlite)?;
             }
 
-            tx.execute(
-                "UPDATE object_pins SET state = 'released', released_at_ms = ?1 WHERE pin_id = ?2",
-                rusqlite::params![now_ms.as_i64(), barrier_c],
+            let released=tx.execute(
+                "UPDATE object_pins SET state = 'released', released_at_ms = ?1 WHERE pin_id = ?2 AND state='held' AND owner_kind='backup_job' AND owner_id=?3 AND authority_generation=?4",
+                rusqlite::params![now_ms.as_i64(), barrier_c,bkp_id_c,auth_s],
             )
             .map_err(StoreError::from_rusqlite)?;
+            if released!=1 {return Err(StoreError::RecoveryInProgress("barrière sauvegarde absente ou libérée".to_owned()));}
 
-            tx.execute(
+            let changed=tx.execute(
                 "UPDATE backup_jobs
                  SET state = 'copying', snapshot_stream_id = ?1, snapshot_sequence = ?2, revision = revision + 1
-                 WHERE backup_id = ?3",
-                rusqlite::params![stream_c, seq_i64, bkp_id_c],
+                 WHERE backup_id = ?3 AND state='preparing' AND revision=?4 AND source_authority_generation=?5",
+                rusqlite::params![stream_c, seq_i64, bkp_id_c,preparing_revision,auth_s],
             )
             .map_err(StoreError::from_rusqlite)?;
+            if changed!=1 {return Err(StoreError::RecoveryInProgress("job sauvegarde modifié avant pins/copie".to_owned()));}
 
             Ok(())
         })?;
@@ -683,17 +820,29 @@ pub(crate) fn prepare_backup_workflow(
     manifest.state = BackupJobState::Complete;
     let complete_json = serde_json::to_vec_pretty(&manifest)?;
     write_atomic_durable(&manifest_path, &complete_json, 0o600)?;
+    cutpoints.hit(StoreCutpoint::C11eAfterCompleteManifestBeforeJobCommit)?;
+    let manifest_value = serde_json::to_value(&manifest)?;
+    let manifest_digest = unleash_protocol::canonical_sha256(&manifest_value)?;
+    let manifest_json = serde_json::to_string(&manifest)?;
 
     let backups_root = config.backups_dir.clone();
     let dest_owned = req.destination_dir.clone();
     let tier = req.retention_tier;
     let bkp_id_f = backup_id_str;
+    let source_f = source_auth.to_string();
+    let copying_revision = if reserved.is_some() { 2_i64 } else { 1_i64 };
     writer.submit_immediate_blocking(WriteCriticality::Critical, false, move |tx, now_ms| {
-        tx.execute(
-            "UPDATE backup_jobs SET state = 'complete', revision = revision + 1 WHERE backup_id = ?1",
-            [bkp_id_f.as_str()],
+        if let Some(request)=reserved {crate::backup_requests::ensure_consumed_backup_tx(tx,request)?;}
+        let changed=tx.execute(
+            "UPDATE backup_jobs SET state = 'complete', revision = revision + 1 WHERE backup_id = ?1 AND state='copying' AND revision=?2 AND source_authority_generation=?3",
+            rusqlite::params![bkp_id_f,copying_revision,source_f],
         )
         .map_err(StoreError::from_rusqlite)?;
+        if changed!=1 {return Err(StoreError::RecoveryInProgress("job sauvegarde modifié avant complétion".to_owned()));}
+        if let Some(request)=reserved {
+            let changed=tx.execute("UPDATE backup_requests SET state='completed',revision=revision+1,manifest_digest=?4,manifest_json=?5 WHERE backup_id=?1 AND action_id=?2 AND dispatch_id=?3 AND state='executing' AND authority_generation=?6",rusqlite::params![request.backup_id.to_string(),request.action_id.to_string(),request.dispatch_id.to_string(),manifest_digest.as_prefixed_str(),manifest_json,source_f]).map_err(StoreError::from_rusqlite)?;
+            if changed!=1 {return Err(StoreError::RecoveryInProgress("demande sauvegarde modifiée avant complétion".to_owned()));}
+        }
 
         for pin_id in backup_pin_ids {
             tx.execute(
@@ -703,9 +852,11 @@ pub(crate) fn prepare_backup_workflow(
             .map_err(StoreError::from_rusqlite)?;
         }
 
-        apply_q12_rotation(tx, &backups_root, &dest_owned, tier)?;
+        // Le chemin réservé M1 est Manual ; aucune I/O de rotation n'entre dans sa transaction.
+        if reserved.is_none() {apply_q12_rotation(tx, &backups_root, &dest_owned, tier)?;}
         Ok(())
     })?;
+    cutpoints.hit(StoreCutpoint::C11fAfterBackupJobCommit)?;
 
     Ok(manifest)
 }

@@ -50,9 +50,10 @@ impl CutpointObserver for CutpointAdapter {
             StoreCutpoint::C11bAfterDbSnapshotBeforePins => Cutpoint::C11b,
             StoreCutpoint::C11cAfterPinsDuringCopy => Cutpoint::C11c,
             StoreCutpoint::C11dAfterManifestBeforeComplete => Cutpoint::C11d,
-            StoreCutpoint::C11MigrationInProgress | StoreCutpoint::C11RestoreBeforeActivate => {
-                Cutpoint::C11
-            }
+            StoreCutpoint::C11MigrationInProgress
+            | StoreCutpoint::C11RestoreBeforeActivate
+            | StoreCutpoint::C11eAfterCompleteManifestBeforeJobCommit
+            | StoreCutpoint::C11fAfterBackupJobCommit => Cutpoint::C11,
             StoreCutpoint::C7AfterInboxBeforeOutboxAck => Cutpoint::C7,
         };
         self.0.hit(cp).map_err(|e| StoreError::CutpointInjected {
