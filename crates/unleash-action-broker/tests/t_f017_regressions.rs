@@ -105,6 +105,17 @@ fn evaluation_of(entry: &BrokerJournalEntry) -> &AuthorizationEvaluation {
     }
 }
 
+fn retry_bound(entry: &BrokerJournalEntry) -> Option<TimestampMs> {
+    let BrokerJournalEntry::Authorization {
+        retry_not_before_ms,
+        ..
+    } = entry
+    else {
+        panic!("expected authorization result");
+    };
+    *retry_not_before_ms
+}
+
 fn same_journal_slot(a: &BrokerJournalEntry, b: &BrokerJournalEntry) -> bool {
     if evaluation_of(a).evaluation_id != evaluation_of(b).evaluation_id {
         return false;
@@ -338,12 +349,15 @@ async fn t_f017_008_unavailable_ack_loss_must_be_resolved_before_a_new_evaluatio
     });
     f.guard(guard.clone()).await.unwrap();
     let intent = f.intent();
+    let expected_bound = TimestampMs::new(f.clock.utc_ms() + 1_000);
     assert!(
         f.broker
             .authorize_action(intent.clone(), &f.authority)
             .await
             .is_err()
     );
+    let first_result = journal.attempts.lock().unwrap().get(1).unwrap().clone();
+    assert_eq!(retry_bound(&first_result), Some(expected_bound));
     f.clock.advance(Duration::from_secs(20));
     assert!(matches!(
         f.broker
@@ -361,10 +375,78 @@ async fn t_f017_008_unavailable_ack_loss_must_be_resolved_before_a_new_evaluatio
     );
     assert_eq!(f.ids.generated_count(), ids_before);
     f.clock.advance(Duration::from_secs(1));
-    f.authorize(intent).await;
+    let decision = f.authorize(intent).await;
     assert_eq!(guard.evaluate_call_count(), 2);
     let attempts = journal.attempts.lock().unwrap();
     assert_eq!(attempts.get(1), attempts.get(2));
+    assert_eq!(retry_bound(attempts.get(2).unwrap()), Some(expected_bound));
+    let next_result = attempts.last().unwrap();
+    assert_eq!(retry_bound(next_result), None);
+    assert_eq!(
+        evaluation_of(next_result).previous_evaluation_id,
+        Some(evaluation_of(&first_result).evaluation_id)
+    );
+    assert_eq!(
+        decision.evaluation_id,
+        evaluation_of(next_result).evaluation_id
+    );
+    f.spy.assert_zero_dispatches();
+    f.secrets.assert_zero_secret_resolutions();
+}
+
+#[tokio::test]
+async fn t_f017_008_cancelled_guard_keeps_the_original_retry_bound_through_ack_loss() {
+    let journal = Arc::new(StrictEvaluationJournal::default());
+    journal
+        .lose_authorization_ack
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let f = Fixture::with_journal(Some(journal.clone()));
+    let guard = Arc::new(DeterministicGuardDouble::allowing_unconditional(
+        f.clock.clone(),
+    ));
+    guard.push_outcome(ScriptedGuardOutcome::HangUntilCancelled);
+    f.guard(guard.clone()).await.unwrap();
+    let intent = f.intent();
+    {
+        let future = f.broker.authorize_action(intent.clone(), &f.authority);
+        tokio::pin!(future);
+        tokio::select! {
+            _ = &mut future => panic!("expected pending Guard evaluation"),
+            () = async { while guard.evaluate_call_count() == 0 { tokio::task::yield_now().await; } } => {},
+        }
+    }
+    let expected_bound = TimestampMs::new(f.clock.utc_ms() + 1_000);
+    f.clock.advance(Duration::from_secs(20));
+    assert!(matches!(
+        f.broker
+            .authorize_action(intent.clone(), &f.authority)
+            .await,
+        Err(ActionBrokerError::ContractViolation { .. })
+    ));
+    let first_result = journal.attempts.lock().unwrap().get(1).unwrap().clone();
+    assert_eq!(retry_bound(&first_result), Some(expected_bound));
+    f.clock.advance(Duration::from_secs(20));
+    assert!(matches!(
+        f.broker
+            .authorize_action(intent.clone(), &f.authority)
+            .await,
+        Err(ActionBrokerError::GuardUnavailable { .. })
+    ));
+    assert_eq!(guard.evaluate_call_count(), 1);
+    assert_eq!(journal.attempts.lock().unwrap().get(2), Some(&first_result));
+    let ids_before = f.ids.generated_count();
+    assert!(
+        f.broker
+            .authorize_action(intent.clone(), &f.authority)
+            .await
+            .is_err()
+    );
+    assert_eq!(f.ids.generated_count(), ids_before);
+    f.clock.advance(Duration::from_secs(1));
+    f.authorize(intent).await;
+    assert_eq!(guard.evaluate_call_count(), 2);
+    f.spy.assert_zero_dispatches();
+    f.secrets.assert_zero_secret_resolutions();
 }
 
 #[tokio::test]
