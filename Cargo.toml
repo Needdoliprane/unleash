@@ -9,6 +9,7 @@ members = [
     "crates/unleash-scheduler",
     "crates/unleash-testkit",
     "crates/unleash-browser",
+    "crates/unleash-model-router",
     "crates/unleash-process-host",
     "crates/unleash-daemon",
     "crates/unleash-cli",

@@ -1,0 +1,2 @@
+# The terminal empty line is required to dispatch an SSE event.
+fixtures/*.sse whitespace=-blank-at-eof

@@ -1,0 +1,9 @@
+event: response.created
+data: {"type":"response.created","sequence_number":0,"response":{"id":"resp_1","object":"response","created_at":1740855869,"status":"in_progress","output":[],"usage":null}}
+
+event: response.in_progress
+data: {"type":"response.in_progress","sequence_number":1,"response":{"id":"resp_1","object":"response","created_at":1740855869,"status":"in_progress","output":[],"usage":null}}
+
+event: response.incomplete
+data: {"type":"response.incomplete","sequence_number":2,"response":{"id":"resp_1","object":"response","created_at":1740855869,"status":"incomplete","incomplete_details":{"reason":"max_output_tokens"},"output":[],"usage":null}}
+
