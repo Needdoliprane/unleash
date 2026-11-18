@@ -19,6 +19,11 @@ fn action_with_post_snapshot_parent_is_visible_after_restore() {
     run_snapshot_case(true);
 }
 
+#[expect(
+    clippy::unwrap_used,
+    clippy::too_many_lines,
+    reason = "Scénario de panne partagé : fixtures, snapshot, effet externe et inspection après restore"
+)]
 fn run_snapshot_case(missing_parent: bool) {
     let source = local_test_dir("f018-007-prepared-source").unwrap();
     let target = local_test_dir("f018-007-prepared-target").unwrap();
@@ -125,22 +130,25 @@ fn run_snapshot_case(missing_parent: bool) {
             .map_err(StoreError::from_rusqlite)?;
         Ok(())
     }).unwrap();
-    let result = UnleashStore::restore_backup(
-        RestoreBackupRequest {
-            backup_dir,
-            target_data_root: target.path().to_owned(),
-            command_id: ids.new_command_id(),
-            actor_id: "user:louis".to_owned(),
-            command_digest: Sha256Digest::from_bytes(b"restore-prepared"),
-            source_authority_generation: authority,
-            source_db_unreadable: false,
-            source_db_path: Some(config.db_path),
-            source_artifacts_dir: Some(config.artifacts_dir),
-            neutralizer: Arc::new(EmptyExecutorNeutralizer),
-        },
-        StoreConfig::new(target.path()),
-    )
-    .unwrap();
+    let restore_request = RestoreBackupRequest {
+        backup_dir,
+        target_data_root: target.path().to_owned(),
+        command_id: ids.new_command_id(),
+        actor_id: "user:louis".to_owned(),
+        command_digest: Sha256Digest::from_bytes(b"restore-prepared"),
+        source_authority_generation: authority,
+        source_db_unreadable: false,
+        source_db_path: Some(config.db_path),
+        source_artifacts_dir: Some(config.artifacts_dir),
+        neutralizer: Arc::new(EmptyExecutorNeutralizer),
+    };
+    let result =
+        UnleashStore::restore_backup(restore_request.clone(), StoreConfig::new(target.path()))
+            .unwrap();
+    let retry =
+        UnleashStore::restore_backup(restore_request.clone(), StoreConfig::new(target.path()))
+            .unwrap_err();
+    assert!(matches!(retry, StoreError::StaleAuthorityGeneration { .. }));
     let restored = UnleashStore::open(StoreConfig::new(target.path())).unwrap();
     let capsule: RestoreCapsule = serde_json::from_slice(
         &restored
@@ -158,6 +166,48 @@ fn run_snapshot_case(missing_parent: bool) {
     assert!(report.items.iter().any(
         |a| a.action_id == action_id && a.state == unleash_domain::ActionState::ObservedSuccess
     ));
+    let item = report
+        .items
+        .iter()
+        .find(|item| item.action_id == action_id)
+        .unwrap();
+    assert_eq!(
+        item.provenance.as_ref().unwrap().present_in_active_ledger,
+        !missing_parent
+    );
+    assert_eq!(
+        item.last_dispatch_id.as_deref(),
+        Some("dispatch-post-snapshot")
+    );
+    let historic_authority: String = restored
+        .read_snapshot(|conn, _| {
+            conn.query_row(
+                "SELECT authority_generation FROM command_receipts WHERE receipt_id = ?1",
+                [result.command_receipt_id.to_string()],
+                |r| r.get(0),
+            )
+            .map_err(StoreError::from_rusqlite)
+        })
+        .unwrap();
+    assert_eq!(historic_authority, authority.to_string());
+    let historical_receipt = restored
+        .inspect_command_receipt(
+            &restore_request.actor_id.parse().unwrap(),
+            restore_request.command_id,
+        )
+        .unwrap();
+    let historical_receipt = match historical_receipt {
+        unleash_store::ReceiptInspectionOutcome::Full(receipt) => Some(receipt),
+        unleash_store::ReceiptInspectionOutcome::Tombstone { .. } => None,
+    }
+    .unwrap();
+    assert_eq!(historical_receipt.authority_generation, authority);
+    assert_eq!(
+        historical_receipt.lineage_status,
+        unleash_protocol::LineageStatus::Historical
+    );
+    assert_eq!(historical_receipt.receipt.state, ReceiptState::Accepted);
+
     assert!(report.frozen_scopes.iter().any(|s| s.state == "frozen"));
     assert_eq!(
         external_counter.load(std::sync::atomic::Ordering::SeqCst),

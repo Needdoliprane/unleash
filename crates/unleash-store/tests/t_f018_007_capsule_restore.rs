@@ -764,7 +764,17 @@ fn test_t_f018_007_full_capsule_dispatches_tombstones_neutralization_and_freeze(
         dependency_budget_impact: "coûts conservés, nouvelle intention distincte seulement"
             .to_owned(),
     };
+    let unrelated_receipt = decision.decision_receipt_id;
+    assert!(
+        matches!(
+            restored.dispose_frozen_scope(decision.clone()),
+            Err(StoreError::Unauthorized(_))
+        ),
+        "un reçu ReconcileAction ne porte pas une décision de scope"
+    );
+    decision.decision_receipt_id = unleash_domain::ReceiptId::from_uuid(ids.new_uuid());
     let mut wrong_actor = decision.clone();
+    wrong_actor.decision_receipt_id = unrelated_receipt;
     wrong_actor.caller.actor_id = ActorId::new("user:other").unwrap();
     assert!(matches!(
         restored.dispose_frozen_scope(wrong_actor),

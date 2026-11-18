@@ -708,15 +708,51 @@ fn ensure_source_restore_tracking(
             )
             .optional()
             .map_err(StoreError::from_rusqlite)?;
-        if let Some((st, br)) = existing_req
-            && st == "blocked"
-        {
-            return Err(StoreError::RestorationBlocked(
-                br.unwrap_or_else(|| "restauration précédemment bloquée".to_owned()),
-            ));
+        if let Some((state, reason)) = existing_req {
+            return Err(if state == "blocked" {
+                StoreError::RestorationBlocked(
+                    reason.unwrap_or_else(|| "restauration précédemment bloquée".to_owned()),
+                )
+            } else {
+                StoreError::RecoveryInProgress(format!(
+                    "restauration déjà engagée ({state}) ; inspecter le restore_id existant"
+                ))
+            });
         }
+        return Err(StoreError::IdempotencyConflict {
+            command_id: req.command_id,
+        });
     }
 
+    let source_stream: String = tx
+        .query_row(
+            "SELECT stream_id FROM daemon_state WHERE singleton = 1",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(StoreError::from_rusqlite)?;
+    let high_sequence: i64 = tx
+        .query_row(
+            "SELECT COALESCE(MAX(sequence), 0) FROM events WHERE stream_id = ?1",
+            [&source_stream],
+            |row| row.get(0),
+        )
+        .map_err(StoreError::from_rusqlite)?;
+    let source_response = serde_json::to_string(&unleash_protocol::CommandReceipt {
+        receipt_id,
+        command_id: req.command_id,
+        accepted_at: chrono::DateTime::<chrono::Utc>::from_timestamp_millis(now_ms.as_i64())
+            .unwrap_or(chrono::DateTime::UNIX_EPOCH),
+        aggregate_id: restore_id.as_uuid(),
+        new_revision: unleash_domain::Revision::INITIAL,
+        operation_id: None,
+        state: unleash_protocol::ReceiptState::Accepted,
+        event_cursor: unleash_protocol::EventCursor::new(
+            source_stream.parse()?,
+            Sequence::new(u64::try_from(high_sequence).unwrap_or(0)),
+        ),
+        result_ref: Some(format!("restore:{restore_id}")),
+    })?;
     let effective_rcpt = receipt_id.to_string();
     let existing_check: Option<String> = tx
         .query_row(
@@ -734,7 +770,7 @@ fn ensure_source_restore_tracking(
              (actor_id, command_id, authority_generation, receipt_id, request_id, command_type,
               command_digest, aggregate_id, state, response_state, response_json,
               response_retained_until_ms, first_event_seq, last_event_seq, committed_at_ms)
-             VALUES (?1, ?2, ?3, ?4, ?5, 'RestoreBackup', ?6, ?7, 'accepted', 'full', '{}', ?8, NULL, NULL, ?9)",
+             VALUES (?1, ?2, ?3, ?4, ?5, 'RestoreBackup', ?6, ?7, 'accepted', 'full', ?10, ?8, NULL, NULL, ?9)",
             rusqlite::params![
                 req.actor_id,
                 req.command_id.to_string(),
@@ -744,7 +780,8 @@ fn ensure_source_restore_tracking(
                 req.command_digest.as_prefixed_str(),
                 restore_id.to_string(),
                 now_ms.as_i64().saturating_add(30 * 86_400_000),
-                now_ms.as_i64()
+                now_ms.as_i64(),
+                source_response
             ],
         )
         .map_err(StoreError::from_rusqlite)?;
@@ -1619,6 +1656,30 @@ pub(crate) fn execute_restore_backup(
     req: &RestoreBackupRequest,
     target_config: &StoreConfig,
 ) -> Result<RestoreActivationResult, StoreError> {
+    // Une destination déjà activée est une autorité nouvelle : refuser l'ancienne commande avant tout lookup/allocation.
+    if target_config.db_path.exists() {
+        let connection =
+            Connection::open_with_flags(&target_config.db_path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+                .map_err(StoreError::from_rusqlite)?;
+        let active: Option<String> = connection
+            .query_row(
+                "SELECT authority_generation FROM daemon_state WHERE singleton = 1",
+                [],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(StoreError::from_rusqlite)?;
+        if let Some(active) = active {
+            let active = active.parse::<AuthorityGeneration>()?;
+            if active != req.source_authority_generation {
+                return Err(StoreError::StaleAuthorityGeneration {
+                    expected: active,
+                    actual: req.source_authority_generation,
+                    command_id: Some(req.command_id),
+                });
+            }
+        }
+    }
     let val = validate_backup_dir(&req.backup_dir, target_config)?;
     if req.target_data_root == req.backup_dir {
         return Err(StoreError::InvalidArgument {
@@ -1699,6 +1760,10 @@ pub(crate) fn execute_restore_backup(
                     .unwrap_or_else(|| "restauration précédemment bloquée".to_owned()),
             ));
         }
+        return Err(StoreError::RecoveryInProgress(format!(
+            "restauration {} déjà engagée ; inspecter son issue",
+            prev.restore_id
+        )));
     }
 
     let restore_id = RestoreId::from_uuid(target_config.id_generator.new_uuid());
@@ -2003,30 +2068,36 @@ pub(crate) fn execute_restore_backup(
         )
         .optional()
         .map_err(StoreError::from_rusqlite)?;
-    let target_rcpt_str = if let Some(r) = existing_target_rcpt {
-        r
+    let target_rcpt_str = if let Some(receipt) = existing_target_rcpt {
+        receipt
+    } else if use_manifest_fallback {
+        // Aucun curseur source n'est inventé quand seule la maintenance est lisible.
+        // restore_imports et restore_manifest_records portent ce reçu hors base.
+        receipt_id.to_string()
     } else {
-        let r_str = receipt_id.to_string();
+        let source_path = req.source_db_path.as_ref().ok_or_else(|| {
+            StoreError::RestoreIncomplete("source receipt unavailable".to_owned())
+        })?;
+        let source = Connection::open_with_flags(source_path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .map_err(StoreError::from_rusqlite)?;
+        let (response, retained_until, committed_at): (String, i64, i64) = source.query_row(
+            "SELECT response_json, response_retained_until_ms, committed_at_ms FROM command_receipts
+             WHERE actor_id = ?1 AND command_id = ?2 AND authority_generation = ?3",
+            rusqlite::params![req.actor_id, req.command_id.to_string(), src_auth_s],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        ).map_err(StoreError::from_rusqlite)?;
+        let original: unleash_protocol::CommandReceipt = serde_json::from_str(&response)?;
         tx.execute(
             "INSERT INTO command_receipts
              (actor_id, command_id, authority_generation, receipt_id, request_id, command_type,
               command_digest, aggregate_id, state, response_state, response_json,
               response_retained_until_ms, first_event_seq, last_event_seq, committed_at_ms)
-             VALUES (?1, ?2, ?3, ?4, ?5, 'RestoreBackup', ?6, ?7, 'completed', 'full', '{}', ?8, NULL, NULL, ?9)",
-            rusqlite::params![
-                req.actor_id,
-                req.command_id.to_string(),
-                target_auth_s,
-                r_str,
-                restore_id.to_string(),
-                req.command_digest.as_prefixed_str(),
-                restore_id.to_string(),
-                now_ms.as_i64().saturating_add(30 * 86_400_000),
-                now_ms.as_i64()
-            ],
-        )
-        .map_err(StoreError::from_rusqlite)?;
-        r_str
+             VALUES (?1, ?2, ?3, ?4, ?5, 'RestoreBackup', ?6, ?7, 'accepted', 'full', ?8, ?9, NULL, NULL, ?10)",
+            rusqlite::params![req.actor_id, req.command_id.to_string(), src_auth_s, original.receipt_id.to_string(),
+                restore_id.to_string(), req.command_digest.as_prefixed_str(), restore_id.to_string(), response,
+                retained_until, committed_at],
+        ).map_err(StoreError::from_rusqlite)?;
+        original.receipt_id.to_string()
     };
 
     // Appliquer non-régression budgétaire et deltas d'actions source
