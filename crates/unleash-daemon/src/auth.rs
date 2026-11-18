@@ -172,7 +172,7 @@ pub fn authorize_command(
     }
 
     let required = match cmd.command_type.as_str() {
-        "CreateProject" => Capability::ManageProjects,
+        "CreateProject" | "ReviseProject" => Capability::ManageProjects,
         "AssignMission" | "PauseMission" | "ResumeMission" | "CancelMission" => {
             Capability::ManageMissions
         }

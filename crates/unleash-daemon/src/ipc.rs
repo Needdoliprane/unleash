@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex, PoisonError, RwLock};
 use std::time::Duration;
 
 use rusqlite::Connection;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{UnixListener, UnixStream};
@@ -767,7 +767,7 @@ async fn handle_command_frame(
         CommitOutcome::IdempotentReplay(r) => (r, false),
     };
 
-    if newly_committed && num_events > 0 {
+    if newly_committed {
         publish_committed_events_for_command(state, &receipt, num_events).await;
     }
 
@@ -833,6 +833,7 @@ async fn prepare_command_request(
     let cid = cmd.command_id;
     match cmd.command_type.as_str() {
         "CreateProject" => prepare_create_project(session, cmd),
+        "ReviseProject" => prepare_revise_project(session, cmd),
         "AssignMission" => prepare_assign_mission(session, cmd),
         "PauseMission" | "ResumeMission" | "CancelMission" => {
             prepare_mission_transition_command(state, session, cmd).await
@@ -846,6 +847,112 @@ async fn prepare_command_request(
         )
         .with_command_id(cid)),
     }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReviseProjectPayload {
+    name: String,
+    description: String,
+    weight: i64,
+    primary_root_path: Option<String>,
+    sources: Vec<StrictProjectSource>,
+    repositories: Vec<StrictProjectRepository>,
+    settings_json: Map<String, Value>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StrictProjectSource {
+    kind: String,
+    path_or_uri: String,
+    label: String,
+    read_only: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StrictProjectRepository {
+    repo_id: String,
+    root_path: String,
+    default_branch: Option<String>,
+}
+
+fn prepare_revise_project(
+    session: &AuthenticatedSession,
+    cmd: CommandEnvelope,
+) -> Result<PreparedCommand, IpcError> {
+    let cid = cmd.command_id;
+    let invalid = || {
+        IpcError::new(
+            ErrorCode::InvalidArgument,
+            None,
+            "ReviseProject : payload ou cible invalide",
+            RetryClass::Never,
+        )
+        .with_command_id(cid)
+    };
+    let project_id = cmd.project_id.ok_or_else(invalid)?;
+    if project_id.as_uuid() != cmd.aggregate_id {
+        return Err(invalid());
+    }
+    let payload: ReviseProjectPayload =
+        serde_json::from_value(Value::Object(cmd.payload.clone())).map_err(|_| invalid())?;
+    // Sans schéma de paramètres versionné ni validation des URI distantes, refuser ces entrées.
+    if !payload.settings_json.is_empty()
+        || payload
+            .sources
+            .iter()
+            .any(|s| !matches!(s.kind.as_str(), "directory" | "git" | "local"))
+    {
+        return Err(invalid());
+    }
+    let sources = payload
+        .sources
+        .into_iter()
+        .map(|s| unleash_store::ProjectSourceSpec {
+            kind: s.kind,
+            path_or_uri: s.path_or_uri,
+            label: s.label,
+            read_only: s.read_only,
+        })
+        .collect();
+    let repositories = payload
+        .repositories
+        .into_iter()
+        .map(|r| unleash_store::ProjectRepositorySpec {
+            repo_id: r.repo_id,
+            root_path: r.root_path,
+            default_branch: r.default_branch,
+        })
+        .collect();
+    Ok(PreparedCommand {
+        req: CommitCommandRequest {
+            actor_id: session.actor_id.clone(),
+            envelope: cmd,
+            target_aggregate: AggregateKind::Project,
+            operation_id: None,
+            receipt_state: ReceiptState::Accepted,
+            result_ref: None,
+            retention_days_override: None,
+            fence_assertion: None,
+            mutation: CommandMutation::ReviseProject {
+                project_id,
+                name: payload.name,
+                description: payload.description,
+                weight: payload.weight,
+                primary_root_path: payload.primary_root_path,
+                sources,
+                repositories,
+                settings_json: Value::Object(payload.settings_json),
+            },
+            events: Vec::new(),
+            capacity_reservations: Vec::new(),
+            budget_reservations: Vec::new(),
+        },
+        stop_reason: None,
+        stop_drain_timeout: None,
+    })
 }
 
 fn prepare_create_project(
