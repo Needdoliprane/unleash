@@ -713,8 +713,16 @@ pub(crate) fn block_claimed_backup_tx(
         }
         BackupBlockReason::AuthorizationDenied => {
             tx.query_row(
-                "SELECT COUNT(*) FROM actions WHERE action_id=?1 AND state='denied'",
-                [record.action_id.to_string()],
+                "SELECT COUNT(*) FROM actions a JOIN broker_intents i USING(action_id)
+                 JOIN broker_evaluations e ON e.action_id=a.action_id
+                 JOIN broker_phase_records p ON p.action_id=a.action_id AND p.evaluation_id=e.evaluation_id
+                 JOIN events ev ON ev.event_id=p.event_id
+                 WHERE a.action_id=?1 AND a.payload_hash=?2 AND a.state='denied'
+                   AND e.state='denied' AND e.ordinal=(SELECT MAX(ordinal) FROM broker_evaluations WHERE action_id=a.action_id)
+                   AND p.phase_key='authorization' AND p.action_revision=a.revision
+                   AND ev.aggregate_type='action' AND ev.aggregate_id=a.action_id
+                   AND ev.aggregate_revision=p.action_revision AND ev.event_type='ActionAuthorizationDenied'",
+                params![record.action_id.to_string(),record.payload_digest.as_prefixed_str()],
                 |r| r.get::<_, i64>(0),
             )
             .map_err(StoreError::from_rusqlite)?
