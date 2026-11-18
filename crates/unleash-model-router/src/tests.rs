@@ -26,10 +26,13 @@ fn fragmented_tool_waits_for_terminal_and_schema_validation()
         "data: {\"type\":\"tool_end\",\"index\":0}\n\ndata: {\"type\":\"complete\"}\n\n"
     );
     let mut outcome = None;
+    let mut emissions = 0;
     for byte in stream.as_bytes() {
         for event in decoder.push(std::slice::from_ref(byte))? {
             let result = assembler.accept(&event.data)?;
             if result.is_some() {
+                assert!(event.data.contains("\"type\":\"complete\""));
+                emissions += 1;
                 outcome = result;
             }
         }
@@ -38,7 +41,60 @@ fn fragmented_tool_waits_for_terminal_and_schema_validation()
         matches!(outcome, Some(ModelOutcome::Success { ref tools, .. }) if tools.len() == 1 && tools.first().is_some_and(|tool| tool.arguments == json!({"city":"Parisé"})))
     );
     decoder.finish()?;
+    assert_eq!(emissions, 1);
+    assert!(assembler.accept(r#"{"type":"complete"}"#)?.is_none());
     assert!(assembler.finish()?.is_none());
+    Ok(())
+}
+
+#[test]
+fn conflicting_terminal_permanently_poisoned() -> Result<(), Box<dyn std::error::Error>> {
+    let mut a = assembler(json!({"type":"object"}))?;
+    assert_eq!(
+        a.accept(r#"{"type":"truncated"}"#)?,
+        Some(ModelOutcome::Truncated)
+    );
+    assert_eq!(
+        a.accept(r#"{"type":"complete"}"#),
+        Err(StreamError::InvalidEvent)
+    );
+    assert_eq!(
+        a.accept(r#"{"type":"truncated"}"#),
+        Err(StreamError::InvalidEvent)
+    );
+    assert_eq!(a.finish(), Err(StreamError::InvalidEvent));
+    Ok(())
+}
+
+#[test]
+fn sse_chunk_event_tool_count_and_utf8_limits() -> Result<(), Box<dyn std::error::Error>> {
+    let mut d = SseDecoder::new();
+    assert_eq!(
+        d.push(&vec![b'x'; 1_048_577]),
+        Err(StreamError::LimitExceeded)
+    );
+    let mut d = SseDecoder::new();
+    assert_eq!(d.push(b"data: \xff\n\n"), Err(StreamError::InvalidEvent));
+    let mut d = SseDecoder::new();
+    let line = format!("data: {}\n", "x".repeat(65_530));
+    for _ in 0..16 {
+        d.push(line.as_bytes())?;
+    }
+    assert_eq!(d.push(line.as_bytes()), Err(StreamError::LimitExceeded));
+    let mut a = assembler(json!({"type":"object"}))?;
+    for i in 0..64 {
+        assert!(
+            a.accept(
+                &json!({"type":"tool_start","index":i,"id":format!("id{i}"),"name":"n"})
+                    .to_string()
+            )?
+            .is_none()
+        );
+    }
+    assert_eq!(
+        a.accept(&json!({"type":"tool_start","index":64,"id":"id64","name":"n"}).to_string()),
+        Err(StreamError::LimitExceeded)
+    );
     Ok(())
 }
 

@@ -11,6 +11,12 @@ use serde::Deserialize;
 use serde_json::Value;
 use thiserror::Error;
 
+/// Bounded, explicitly restricted OpenAI Responses SSE dialect.
+pub mod openai;
+
+#[cfg(test)]
+mod openai_tests;
+
 const MAX_CHUNK: usize = 1_048_576;
 const MAX_LINE: usize = 65_536;
 const MAX_EVENT: usize = 1_048_576;
@@ -306,11 +312,11 @@ impl Assembler {
             return Err(StreamError::InvalidEvent);
         }
         if let Some(terminal) = &self.terminal {
-            return if payload == terminal {
-                Ok(None)
-            } else {
-                Err(StreamError::InvalidEvent)
-            };
+            if payload == terminal {
+                return Ok(None);
+            }
+            self.failed = true;
+            return Err(StreamError::InvalidEvent);
         }
         let result = self.accept_inner(payload);
         if result.is_err() {
