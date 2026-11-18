@@ -1,5 +1,11 @@
 //! REQ-CORE-003/004/005, REQ-PERSIST-001/004: mutation IPC réelle et refus strict.
-#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::too_many_lines,
+    clippy::indexing_slicing
+)]
 use serde_json::{Map, Value, json};
 use unleash_client::{ClientConfig, ClientError, UnleashClient};
 use unleash_daemon::{DaemonConfig, DaemonStartOutcome, UnleashDaemon};
@@ -11,7 +17,10 @@ use unleash_protocol::{
 use unleash_testkit::local_test_dir;
 
 fn object(v: Value) -> Map<String, Value> {
-    v.as_object().unwrap().clone()
+    match v {
+        Value::Object(map) => map,
+        _ => panic!("objet attendu"),
+    }
 }
 
 #[tokio::test]

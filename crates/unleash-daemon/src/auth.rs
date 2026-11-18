@@ -218,16 +218,17 @@ pub fn authorize_command(
 
     let required = match cmd.command_type.as_str() {
         "CreateProject" | "ReviseProject" => Capability::ManageProjects,
+        "SetSettings" | "SetPolicy" | "ConfigureGuard" | "PurgeHistory" => Capability::Administer,
         "AssignMission" | "PauseMission" | "ResumeMission" | "CancelMission" => {
             Capability::ManageMissions
         }
         "StopDaemon" => Capability::StopDaemon,
         "RecordClaim" | "RecordObservation" | "RecordJudgment" => Capability::WorkerReport,
-        other => {
+        _ => {
             return Err(IpcError::new(
                 ErrorCode::InvalidArgument,
                 None,
-                format!("Type de commande inconnu ou non supporté : '{other}'"),
+                "Type de commande inconnu ou non supporté",
                 RetryClass::Never,
             )
             .with_command_id(cmd.command_id));
@@ -279,14 +280,15 @@ pub fn authorize_query(
     }
     let required = match query.query_type.as_str() {
         "GetDaemonStatus" => Capability::QueryDaemonDiagnostic,
-        "GetHealth" => Capability::QueryState,
-        "GetStateSnapshot" | "GetCommandReceipt" | "ListProjects" | "GetProject"
-        | "ReadSettings" | "ReadPolicySummary" | "InspectRecovery" => Capability::QueryState,
-        other => {
+        "GetHealth" | "GetStateSnapshot" | "GetCommandReceipt" | "ListProjects" | "GetProject"
+        | "ReadSettings" | "ReadPolicySummary" | "ReadGuardHealth" | "InspectRecovery" => {
+            Capability::QueryState
+        }
+        _ => {
             return Err(IpcError::new(
                 ErrorCode::InvalidArgument,
                 None,
-                format!("Type de requête inconnu ou non supporté : '{other}'"),
+                "Type de requête inconnu ou non supporté",
                 RetryClass::Never,
             ));
         }
@@ -489,6 +491,14 @@ mod tests {
         );
         scoped_cmd.project_id = Some(p_ok);
         assert!(authorize_command(&session, &scoped_cmd).is_ok());
+        let mut unknown_command = scoped_cmd.clone();
+        unknown_command.command_type = String::from("DO_NOT_ECHO");
+        assert!(
+            !authorize_command(&session, &unknown_command)
+                .unwrap_err()
+                .message
+                .contains("DO_NOT_ECHO")
+        );
 
         let q_bad = QueryEnvelope {
             protocol_version: ProtocolVersion,
@@ -500,6 +510,14 @@ mod tests {
         assert_eq!(
             authorize_query(&session, &q_bad).unwrap_err().code,
             ErrorCode::ScopeDenied
+        );
+        let mut unknown_query = q_bad.clone();
+        unknown_query.query_type = String::from("DO_NOT_ECHO");
+        assert!(
+            !authorize_query(&session, &unknown_query)
+                .unwrap_err()
+                .message
+                .contains("DO_NOT_ECHO")
         );
 
         let sub_bad = SubscribeEventsRequest {

@@ -251,6 +251,8 @@ pub enum FaultTarget {
     Maintenance,
     /// Pendant l'unlink d'un objet.
     ObjectUnlink,
+    /// Après unlink (même déjà absent), avant synchronisation durable du répertoire parent.
+    ObjectDeletionSync,
 }
 
 /// Injecteur de pannes de stockage pour les tests de robustesse.
