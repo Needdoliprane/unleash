@@ -1,8 +1,4 @@
 //! REQ-REC-005 : le diagnostic n'est possible qu'après un refus dans le vrai préflight RO.
-#![expect(
-    clippy::unwrap_used,
-    reason = "Fixtures locales et injections de panne contrôlées"
-)]
 use std::sync::Arc;
 use unleash_store::{
     CutpointObserver, StoreConfig, StoreCutpoint, StoreError, StoreOpenStage, UnleashStore,
