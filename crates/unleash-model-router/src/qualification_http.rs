@@ -1,6 +1,7 @@
 //! Test-only HTTP harness. This is not a model-router authority, ledger,
 //! budget reservation, production transport, TLS implementation, or API.
 //! Endpoints are constrained to literal IPv4 loopback fixture paths.
+//! Rustls is configured, but these HTTP fixtures do not exercise a TLS handshake.
 
 use crate::{
     StreamError,
@@ -120,6 +121,7 @@ pub(crate) async fn exchange(
         },
     };
     let Ok(client) = reqwest::Client::builder()
+        .tls_backend_rustls()
         .no_proxy()
         .redirect(reqwest::redirect::Policy::none())
         .retry(reqwest::retry::never())
