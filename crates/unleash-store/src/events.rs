@@ -1009,9 +1009,12 @@ pub(crate) fn tx_execute_retention_purge(
     config: &StoreConfig,
     now_ms: TimestampMs,
     receipt_id: Option<ReceiptId>,
+    purge_aggregate_id: Option<Uuid>,
     req: &RetentionPurgeRequest,
 ) -> Result<RetentionPurgeReport, StoreError> {
-    let purge_id = config.id_generator.new_uuid().to_string();
+    let purge_id = purge_aggregate_id
+        .unwrap_or_else(|| config.id_generator.new_uuid())
+        .to_string();
     let policy = resolve_effective_retention_tx(tx, now_ms, &req.scope_kind, &req.scope_id)?;
     let clock_uncertain = config
         .clock_uncertain

@@ -1846,7 +1846,7 @@ impl UnleashStore {
         let mut report = self.writer.submit_immediate_blocking(
             WriteCriticality::Critical,
             false,
-            move |tx, now_ms| tx_execute_retention_purge(tx, &cfg, now_ms, None, &req),
+            move |tx, now_ms| tx_execute_retention_purge(tx, &cfg, now_ms, None, None, &req),
         )?;
         if !report.suspended_clock_uncertain {
             let (truncated, bytes) =
