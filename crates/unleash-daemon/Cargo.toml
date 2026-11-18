@@ -21,6 +21,7 @@ unleash-protocol.workspace = true
 unleash-platform.workspace = true
 unleash-store.workspace = true
 unleash-browser.workspace = true
+unleash-action-broker.workspace = true
 rusqlite.workspace = true
 tokio.workspace = true
 serde.workspace = true
