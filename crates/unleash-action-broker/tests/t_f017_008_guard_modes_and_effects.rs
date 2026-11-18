@@ -431,6 +431,10 @@ async fn t_f017_008_guard_modes_fallbacks_approvals_and_closed_effects_class() {
         .resolve_action_approval(
             &admin,
             ResolveActionApprovalCommand {
+                decision_receipt_id: unleash_domain::ReceiptId::from_u128(8001),
+                decision_command_digest: unleash_domain::Sha256Digest::from_bytes(
+                    b"synthetic-human-decision",
+                ),
                 action_id: app_id,
                 approval_scope,
                 payload_digest: ActionIntent::compute_payload_digest(
@@ -454,6 +458,10 @@ async fn t_f017_008_guard_modes_fallbacks_approvals_and_closed_effects_class() {
         .resolve_action_approval(
             &admin,
             ResolveActionApprovalCommand {
+                decision_receipt_id: unleash_domain::ReceiptId::from_u128(8001),
+                decision_command_digest: unleash_domain::Sha256Digest::from_bytes(
+                    b"synthetic-human-decision",
+                ),
                 action_id: app_id,
                 approval_scope,
                 payload_digest: app_digest,
@@ -501,6 +509,10 @@ async fn t_f017_008_guard_modes_fallbacks_approvals_and_closed_effects_class() {
         .resolve_action_approval(
             &admin,
             ResolveActionApprovalCommand {
+                decision_receipt_id: unleash_domain::ReceiptId::from_u128(8001),
+                decision_command_digest: unleash_domain::Sha256Digest::from_bytes(
+                    b"synthetic-human-decision",
+                ),
                 action_id: app_deny_id,
                 approval_scope: scope2,
                 payload_digest: app_deny_digest,

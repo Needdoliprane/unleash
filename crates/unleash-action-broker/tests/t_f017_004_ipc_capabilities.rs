@@ -136,6 +136,10 @@ async fn t_f017_004_worker_cannot_invoke_admin_operations_and_other_uid_rejected
         .resolve_action_approval(
             &worker,
             ResolveActionApprovalCommand {
+                decision_receipt_id: unleash_domain::ReceiptId::from_u128(8001),
+                decision_command_digest: unleash_domain::Sha256Digest::from_bytes(
+                    b"synthetic-human-decision",
+                ),
                 action_id: ids.new_action_id(),
                 approval_scope: ApprovalScopeId::from_u128(1),
                 payload_digest: Sha256Digest::from_bytes(b"payload"),

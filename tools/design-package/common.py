@@ -17,14 +17,21 @@ MEDIA = {
 IGNORED_NAMES = {".DS_Store", "__pycache__"}
 
 
-def walk(base: Path):
+def walk(base: Path, excluded_prefixes: tuple[str, ...] = ()):
     out = []
     for dp, dn, fn in os.walk(base):
-        dn[:] = [d for d in dn if d not in (".git",) and d not in IGNORED_NAMES]
+        relative_dir = Path(dp).relative_to(base)
+        dn[:] = [
+            d for d in dn
+            if d != ".git" and d not in IGNORED_NAMES
+            and not ((relative_dir / d).as_posix() + "/").startswith(excluded_prefixes)
+        ]
         for f in fn:
             if f in IGNORED_NAMES or f.endswith(".pyc"):
                 continue
-            out.append(Path(dp, f).relative_to(base).as_posix())
+            relative_file = (relative_dir / f).as_posix()
+            if not relative_file.startswith(excluded_prefixes):
+                out.append(relative_file)
     return sorted(out)
 
 
@@ -37,7 +44,7 @@ def package_files(claude: Path, manifest=None):
     m = manifest or load_manifest(claude)
     excl = set(m.get("excluded_paths", []))
     prefixes = tuple(m.get("excluded_prefixes", []))
-    return [p for p in walk(claude) if p not in excl and not (prefixes and p.startswith(prefixes))]
+    return [p for p in walk(claude, prefixes) if p not in excl]
 
 
 def checksum_scope(root: Path, manifest=None):
@@ -45,8 +52,8 @@ def checksum_scope(root: Path, manifest=None):
     claude = root / ".claude"
     m = manifest or load_manifest(claude)
     prefixes = tuple(m.get("excluded_prefixes", []))
-    scope = [".claude/" + p for p in walk(claude) if not (prefixes and p.startswith(prefixes))
-             and p not in set(m.get("excluded_paths", [])) - {"catalog/package-manifest.json"}]
+    excluded_paths = set(m.get("excluded_paths", [])) - {"catalog/package-manifest.json"}
+    scope = [".claude/" + p for p in walk(claude, prefixes) if p not in excluded_paths]
     for f in ROOT_FILES:
         if (root / f).is_file():
             scope.append(f)

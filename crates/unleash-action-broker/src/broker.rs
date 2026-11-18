@@ -12,9 +12,9 @@ use std::time::Duration;
 use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
 use unleash_domain::{
-    ActionEvent, ActionId, ActionState, ActorId, ApprovalScopeId, ClockPort, DispatchId,
-    GuardMode as DomainGuardMode, IdGeneratorPort, LineageFence, ProjectId, ReconcileOutcome,
-    Revision, Sha256Digest, TimestampMs, transition_action,
+    ActionEvent, ActionId, ActionState, ActorId, ApprovalScopeId, AuthorizationEvaluationId,
+    ClockPort, DispatchId, GuardMode as DomainGuardMode, IdGeneratorPort, LineageFence, ProjectId,
+    ReceiptId, ReconcileOutcome, Revision, Sha256Digest, TimestampMs, transition_action,
 };
 use unleash_protocol::ClientKind;
 
@@ -36,7 +36,10 @@ use crate::guard_port::{
     map_and_validate_obligations, revalidate_obligations,
 };
 use crate::isolation::{IsolationMode, IsolationProbePort, verify_isolation_requirements};
-use crate::journal::{BrokerJournalEntry, BrokerJournalPort, TestMemoryJournal};
+use crate::journal::{
+    AuthorizationCause, AuthorizationEvaluation, BrokerJournalEntry, BrokerJournalPort,
+    ObservationCause, TestMemoryJournal,
+};
 use crate::retention::redact_canaries;
 use crate::secrets::{AuthorizedSecretAccess, ResolvedSecret, SecretStore};
 
@@ -313,6 +316,10 @@ pub struct RevokeSubjectCommand {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ResolveActionApprovalCommand {
+    /// Existing durable human decision receipt, resolved by the service.
+    pub decision_receipt_id: ReceiptId,
+    /// Canonical command digest bound to the decision receipt.
+    pub decision_command_digest: Sha256Digest,
     /// Action en attente d'approbation (`approval_required`).
     pub action_id: ActionId,
     /// Périmètre d'approbation exact attendu.
@@ -411,6 +418,10 @@ pub struct SubjectRevocationReceipt {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AuthorizationDecision {
+    /// Durable evaluation that produced this authorization.
+    pub evaluation_id: AuthorizationEvaluationId,
+    /// Source evaluation when a cached decision was reused.
+    pub source_evaluation_id: Option<AuthorizationEvaluationId>,
     /// Action associée.
     pub action_id: ActionId,
     /// Référence corrélée de décision.
@@ -441,6 +452,8 @@ pub enum AuthorizationOutcome {
     Authorized(AuthorizationDecision),
     /// Action passée à `approval_required` en attente de `ResolveActionApproval`.
     ApprovalRequired {
+        /// Durable evaluation awaiting approval.
+        evaluation_id: AuthorizationEvaluationId,
         /// Action en attente.
         action_id: ActionId,
         /// Périmètre d'approbation exact.
@@ -456,6 +469,8 @@ pub enum AuthorizationOutcome {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ActionReceipt {
+    /// Evaluation used by the committed dispatch.
+    pub evaluation_id: AuthorizationEvaluationId,
     /// Identifiant de l'action.
     pub action_id: ActionId,
     /// Identifiant du dispatch physique corrélé.
@@ -672,6 +687,7 @@ impl Default for SubjectGovernance {
 
 #[derive(Debug, Clone)]
 struct ActionRecord {
+    evaluation: AuthorizationEvaluation,
     intent: ActionIntent,
     state: ActionState,
     revision: Revision,
@@ -684,9 +700,32 @@ struct ActionRecord {
     denial_or_unknown_reason: Option<String>,
     mapping_profile_id: String,
     guard_revision: Revision,
+    cache_generation: Revision,
     journal_authorization_pending: bool,
-    retry_after: Duration,
     observation_in_progress: bool,
+    observation_revision: Revision,
+    pending_observation: Option<BrokerJournalEntry>,
+    pending_approval: Option<PendingApproval>,
+}
+
+#[derive(Debug, Clone)]
+struct PendingApproval {
+    entry: BrokerJournalEntry,
+    decision: ApprovalDecision,
+    expected_revision: Revision,
+}
+
+#[derive(Debug, Clone)]
+struct EvaluationAttempt {
+    context: AuthorizationEvaluation,
+    intent: ActionIntent,
+    intent_committed: bool,
+    evaluating: bool,
+    result: Option<Result<AuthorizationOutcome, ActionBrokerError>>,
+    result_entry: Option<BrokerJournalEntry>,
+    result_committed: bool,
+    result_observed_at: Option<(TimestampMs, Duration)>,
+    retry_after: Option<Duration>,
 }
 
 struct BrokerState {
@@ -706,7 +745,9 @@ struct BrokerState {
     cache: DecisionCache,
     events: Vec<BrokerAuditEvent>,
     guard_revision: Revision,
+    cache_generation: Revision,
     authorizations_in_progress: BTreeSet<ActionId>,
+    evaluations: BTreeMap<ActionId, EvaluationAttempt>,
 }
 
 /// Médiateur unique et déterministe des effets d'actions d'OVPT Unleash (`F017`, `ADR-10`).
@@ -741,19 +782,30 @@ impl Drop for PendingJournal<'_> {
         match self.phase {
             PendingJournalPhase::Authorization => {
                 st.authorizations_in_progress.remove(&self.action_id);
-                if let Some(rec) = st.actions.get_mut(&self.action_id)
-                    && rec.journal_authorization_pending
-                {
-                    rec.journal_authorization_pending = false;
-                    if rec.state == ActionState::Authorized {
-                        rec.state = ActionState::Authorizing;
-                        rec.decision = None;
+                let cancelled = if let Some(attempt) = st.evaluations.get_mut(&self.action_id) {
+                    if attempt.evaluating && attempt.result.is_none() {
+                        let result = Err(ActionBrokerError::GuardUnavailable {
+                            reason: "Evaluation cancelled without a usable decision".into(),
+                        });
+                        attempt.result_entry = Some(BrokerJournalEntry::Authorization {
+                            evaluation: attempt.context.clone(),
+                            cause: AuthorizationCause::Evaluation,
+                            intent: attempt.intent.clone(),
+                            outcome: result.clone(),
+                        });
+                        attempt.result = Some(result);
+                        attempt.evaluating = false;
+                        true
+                    } else {
+                        false
                     }
-                    rec.retry_after = self
-                        .broker
-                        .monotonic_clock
-                        .monotonic_now()
-                        .saturating_add(Duration::from_secs(1));
+                } else {
+                    false
+                };
+                if cancelled && let Some(rec) = st.actions.get_mut(&self.action_id) {
+                    rec.state = ActionState::Authorizing;
+                    rec.decision = None;
+                    rec.journal_authorization_pending = true;
                 }
             }
             PendingJournalPhase::Observation => {
@@ -821,7 +873,9 @@ impl ActionBroker {
                 cache,
                 events: Vec::new(),
                 guard_revision: Revision::INITIAL,
+                cache_generation: Revision::INITIAL,
                 authorizations_in_progress: BTreeSet::new(),
+                evaluations: BTreeMap::new(),
             }),
         }
     }
@@ -862,6 +916,19 @@ impl ActionBroker {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
+    fn evaluation_for_action(
+        &self,
+        action_id: ActionId,
+    ) -> Result<AuthorizationEvaluation, ActionBrokerError> {
+        self.lock_state()
+            .actions
+            .get(&action_id)
+            .map(|record| record.evaluation.clone())
+            .ok_or_else(|| ActionBrokerError::NotFound {
+                resource: action_id.to_string(),
+            })
+    }
+
     fn sanitize(&self, text: &str) -> String {
         if self.canaries.is_empty() {
             return text.to_owned();
@@ -896,6 +963,7 @@ impl ActionBroker {
     pub fn set_current_fence(&self, fence: LineageFence) {
         let mut st = self.lock_state();
         st.current_fence = fence;
+        st.cache_generation = st.cache_generation.next();
     }
 
     /// Met à jour la révision de scope et invalide les décisions en cache concernées.
@@ -903,6 +971,7 @@ impl ActionBroker {
         let mut st = self.lock_state();
         st.scope_revisions.insert(project_id, new_revision);
         st.cache.invalidate_project(project_id);
+        st.cache_generation = st.cache_generation.next();
     }
 
     /// Rejette toute tentative de mutation d'autorité provenant d'une source externe non fiable
@@ -983,6 +1052,7 @@ impl ActionBroker {
         };
 
         st.cache.invalidate_project(cmd.project_id);
+        st.cache_generation = st.cache_generation.next();
         st.events.push(BrokerAuditEvent::PolicyUpdated {
             project_id: cmd.project_id,
             policy_revision: next_rev,
@@ -1142,6 +1212,7 @@ impl ActionBroker {
             st.cache.set_configured_ttl(Duration::from_secs(ttl_secs));
         }
         st.cache.clear();
+        st.cache_generation = st.cache_generation.next();
         let health_detail = format!("guard configured in mode {:?}", st.guard_mode);
         st.events.push(BrokerAuditEvent::GuardHealthChanged {
             status: health_status,
@@ -1225,6 +1296,7 @@ impl ActionBroker {
             let next_rev = gov.revision;
 
             st.cache.invalidate_subject(&key);
+            st.cache_generation = st.cache_generation.next();
             let in_flight: Vec<ActionId> = st
                 .actions
                 .iter()
@@ -1331,6 +1403,7 @@ impl ActionBroker {
             let next_rev = gov.revision;
 
             st.cache.invalidate_subject(&key);
+            st.cache_generation = st.cache_generation.next();
             st.events.push(BrokerAuditEvent::SubjectResumed {
                 subject: key.clone(),
                 reason: sanitized_reason.clone(),
@@ -1414,6 +1487,7 @@ impl ActionBroker {
             let next_rev = gov.revision;
 
             st.cache.invalidate_subject(&key);
+            st.cache_generation = st.cache_generation.next();
             st.events.push(BrokerAuditEvent::SubjectRevoked {
                 subject: key.clone(),
                 reason: sanitized_reason.clone(),
@@ -1466,64 +1540,132 @@ impl ActionBroker {
     /// # Errors
     /// Retourne `OperationNotAuthorized`, `NotFound`, `RevisionConflict`, `ContractViolation`,
     /// `SubjectSuspended`, `SubjectRevoked` ou `DomainTransitionError` projetée.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "Exact pending human-decision replay with receipt-bound provenance"
+    )]
     pub async fn resolve_action_approval(
         &self,
         caller: &CallerIdentity,
         cmd: ResolveActionApprovalCommand,
     ) -> Result<AuthorizationDecision, ActionBrokerError> {
         let id = cmd.action_id;
-        let denied = cmd.decision == ApprovalDecision::Deny;
-        let decision = self.resolve_action_approval_inner(caller, &cmd)?;
+        if let Err(error) = caller.require_admin(
+            BrokerAdminCapability::ResolveActionApproval,
+            "ResolveActionApproval",
+        ) {
+            self.lock_state()
+                .events
+                .push(BrokerAuditEvent::IncidentOpened {
+                    category: "unauthorized_approval_attempt".into(),
+                    detail: self.sanitize(&error.to_string()),
+                });
+            return Err(error);
+        }
+        let cause = AuthorizationCause::HumanApproval {
+            actor_id: caller.actor_id.clone(),
+            decision_receipt_id: cmd.decision_receipt_id,
+            decision_command_digest: cmd.decision_command_digest,
+            approval_scope: cmd.approval_scope,
+        };
+        let pending = {
+            let mut st = self.lock_state();
+            if st.authorizations_in_progress.contains(&id) {
+                return Err(ActionBrokerError::ContractViolation {
+                    reason: "Authorization commit in progress".into(),
+                    terminal_immutable: false,
+                });
+            }
+            let rec = st
+                .actions
+                .get(&id)
+                .ok_or_else(|| ActionBrokerError::NotFound {
+                    resource: id.to_string(),
+                })?;
+            let pending = rec.pending_approval.clone();
+            if let Some(pending) = &pending {
+                let matches = matches!(&pending.entry, BrokerJournalEntry::Authorization { cause: recorded, intent, .. }
+                    if recorded == &cause && intent.payload_digest == cmd.payload_digest);
+                if !matches
+                    || pending.decision != cmd.decision
+                    || pending.expected_revision != cmd.expected_revision
+                {
+                    return Err(ActionBrokerError::ContractViolation {
+                        reason: "Human decision differs from uncertain commit".into(),
+                        terminal_immutable: false,
+                    });
+                }
+            }
+            st.authorizations_in_progress.insert(id);
+            pending
+        };
         let _pending = PendingJournal {
             broker: self,
             action_id: id,
             phase: PendingJournalPhase::Authorization,
         };
-        let intent = self
-            .lock_state()
-            .actions
-            .get(&id)
-            .map(|r| r.intent.clone())
-            .ok_or_else(|| ActionBrokerError::NotFound {
-                resource: id.to_string(),
-            })?;
-        let outcome = if denied {
-            Err(ActionBrokerError::GuardDenied {
-                reason_code: "HUMAN_DENIED".into(),
-                detail: "Human approval denied".into(),
-                decision_ref: Some(decision.decision_ref.to_string()),
-            })
+        let entry = if let Some(pending) = pending {
+            pending.entry
         } else {
-            Ok(AuthorizationOutcome::Authorized(decision.clone()))
+            let decision = self.resolve_action_approval_inner(caller, &cmd)?;
+            let outcome = if cmd.decision == ApprovalDecision::Deny {
+                Err(ActionBrokerError::GuardDenied {
+                    reason_code: "HUMAN_DENIED".into(),
+                    detail: "Human approval denied".into(),
+                    decision_ref: Some(decision.decision_ref.to_string()),
+                })
+            } else {
+                Ok(AuthorizationOutcome::Authorized(decision))
+            };
+            let mut st = self.lock_state();
+            let rec = st
+                .actions
+                .get_mut(&id)
+                .ok_or_else(|| ActionBrokerError::NotFound {
+                    resource: id.to_string(),
+                })?;
+            let entry = BrokerJournalEntry::Authorization {
+                evaluation: rec.evaluation.clone(),
+                cause,
+                intent: rec.intent.clone(),
+                outcome,
+            };
+            rec.pending_approval = Some(PendingApproval {
+                entry: entry.clone(),
+                decision: cmd.decision,
+                expected_revision: cmd.expected_revision,
+            });
+            entry
         };
-        let committed = self
-            .journal
-            .append(&BrokerJournalEntry::Authorization {
-                intent,
-                outcome: outcome.clone(),
-            })
-            .await;
-        if let Some(rec) = self.lock_state().actions.get_mut(&id) {
-            rec.journal_authorization_pending = false;
-            if committed.is_err() && rec.state == ActionState::Authorized {
-                rec.state = ActionState::Authorizing;
-                rec.decision = None;
-            }
-        }
-        if committed.is_err() {
+        self.journal
+            .append(&entry)
+            .await
+            .map_err(|_| ActionBrokerError::ContractViolation {
+                reason: "Approval journal commit uncertain; retain receipt-bound decision".into(),
+                terminal_immutable: false,
+            })?;
+        let BrokerJournalEntry::Authorization { outcome, .. } = entry else {
             return Err(ActionBrokerError::ContractViolation {
-                reason: "Approval journal commit unavailable".into(),
+                reason: "Expected retained approval".into(),
                 terminal_immutable: false,
             });
+        };
+        let mut st = self.lock_state();
+        if let Some(rec) = st.actions.get_mut(&id) {
+            rec.pending_approval = None;
+            rec.journal_authorization_pending = false;
         }
-        outcome?;
-        self.lock_state()
-            .events
-            .push(BrokerAuditEvent::ActionAuthorized {
-                action_id: id,
-                decision_ref: decision.decision_ref.clone(),
-                fallback_policy_ref: decision.fallback_policy_ref.clone(),
+        let AuthorizationOutcome::Authorized(decision) = outcome? else {
+            return Err(ActionBrokerError::ContractViolation {
+                reason: "Human resolution did not authorize".into(),
+                terminal_immutable: false,
             });
+        };
+        st.events.push(BrokerAuditEvent::ActionAuthorized {
+            action_id: id,
+            decision_ref: decision.decision_ref.clone(),
+            fallback_policy_ref: decision.fallback_policy_ref.clone(),
+        });
         Ok(decision)
     }
 
@@ -1549,6 +1691,13 @@ impl ActionBroker {
         }
 
         let mut st = self.lock_state();
+        let evaluation_id = st
+            .actions
+            .get(&cmd.action_id)
+            .map(|r| r.evaluation.evaluation_id)
+            .ok_or_else(|| ActionBrokerError::NotFound {
+                resource: cmd.action_id.to_string(),
+            })?;
         let active_profile = st.mapping_profile.profile_id().to_owned();
         let active_executor = st.active_executor;
 
@@ -1633,6 +1782,8 @@ impl ActionBroker {
         if approved {
             let dref = GuardDecisionRef::new(format!("approval:{}", self.ids.new_uuid()))?;
             let decision = AuthorizationDecision {
+                evaluation_id,
+                source_evaluation_id: None,
                 action_id,
                 decision_ref: dref.clone(),
                 policy_revision,
@@ -1659,6 +1810,8 @@ impl ActionBroker {
                 reason,
             });
             Ok(AuthorizationDecision {
+                evaluation_id,
+                source_evaluation_id: None,
                 action_id: cmd.action_id,
                 decision_ref: GuardDecisionRef::new("denied_by_human")?,
                 policy_revision,
@@ -1699,94 +1852,232 @@ impl ActionBroker {
     /// Retourne l'erreur F017 exacte (`PolicyDenied`, `ScopeDenied`, `SubjectSuspended`,
     /// `SubjectRevoked`, `IsolationBackendMissing`, `GuardDenied`, `GuardObligationUnsatisfied`,
     /// `GuardUnavailable`, `GuardProtocolUnsupported`, etc.).
+    #[expect(
+        clippy::too_many_lines,
+        reason = "Serialized evaluation identity, exact journal retry and durable-result backoff"
+    )]
     pub async fn authorize_action(
         &self,
         intent: ActionIntent,
         authority: &EffectiveAuthority,
     ) -> Result<AuthorizationOutcome, ActionBrokerError> {
-        {
+        let action_id = intent.action_id;
+        let evaluation = {
             let mut st = self.lock_state();
-            if st.authorizations_in_progress.contains(&intent.action_id) {
+            if st.authorizations_in_progress.contains(&action_id) {
                 return Err(ActionBrokerError::ContractViolation {
                     reason: "Action authorization already in progress".into(),
                     terminal_immutable: false,
                 });
             }
-            if let Some(rec) = st.actions.get(&intent.action_id) {
-                if rec.state != ActionState::Authorizing
-                    || rec.journal_authorization_pending
-                    || rec.intent != intent
-                {
+            let previous_id = if let Some(attempt) = st.evaluations.get(&action_id) {
+                if attempt.intent != intent {
                     return Err(ActionBrokerError::ContractViolation {
-                        reason: "Action already registered or authorization pending".into(),
-                        terminal_immutable: rec.state.is_terminal(),
+                        reason: "Evaluation intent cannot be replaced".into(),
+                        terminal_immutable: false,
                     });
                 }
-                if self.monotonic_clock.monotonic_now() < rec.retry_after {
-                    return Err(ActionBrokerError::GuardUnavailable {
-                        reason: "Authorization retry requires backoff".into(),
-                    });
+                if attempt.result_committed {
+                    let retryable = matches!(
+                        attempt.result,
+                        Some(Err(ActionBrokerError::GuardUnavailable { .. }))
+                    );
+                    if !retryable {
+                        return attempt.result.clone().ok_or_else(|| {
+                            ActionBrokerError::ContractViolation {
+                                reason: "Durable evaluation has no result".into(),
+                                terminal_immutable: false,
+                            }
+                        })?;
+                    }
+                    if attempt
+                        .retry_after
+                        .is_none_or(|deadline| self.monotonic_clock.monotonic_now() < deadline)
+                    {
+                        return Err(ActionBrokerError::GuardUnavailable {
+                            reason: "Authorization retry requires durable result and backoff"
+                                .into(),
+                        });
+                    }
+                    Some(attempt.context.evaluation_id)
+                } else {
+                    None
                 }
-                st.actions.remove(&intent.action_id);
+            } else {
+                None
+            };
+            let resume = st
+                .evaluations
+                .get(&action_id)
+                .is_some_and(|attempt| !attempt.result_committed);
+            if !resume {
+                let context = AuthorizationEvaluation {
+                    evaluation_id: AuthorizationEvaluationId::from_uuid(self.ids.new_uuid()),
+                    previous_evaluation_id: previous_id,
+                };
+                st.evaluations.insert(
+                    action_id,
+                    EvaluationAttempt {
+                        context,
+                        intent: intent.clone(),
+                        intent_committed: false,
+                        evaluating: false,
+                        result: None,
+                        result_entry: None,
+                        result_committed: false,
+                        result_observed_at: None,
+                        retry_after: None,
+                    },
+                );
             }
-            st.authorizations_in_progress.insert(intent.action_id);
-        }
+            let context = st
+                .evaluations
+                .get(&action_id)
+                .map(|attempt| attempt.context.clone())
+                .ok_or_else(|| ActionBrokerError::NotFound {
+                    resource: action_id.to_string(),
+                })?;
+            st.authorizations_in_progress.insert(action_id);
+            context
+        };
         let _pending = PendingJournal {
             broker: self,
-            action_id: intent.action_id,
+            action_id,
             phase: PendingJournalPhase::Authorization,
         };
-        if self
-            .journal
-            .append(&BrokerJournalEntry::Authorizing {
+        let intent_committed = self
+            .lock_state()
+            .evaluations
+            .get(&action_id)
+            .is_some_and(|attempt| attempt.intent_committed);
+        if !intent_committed {
+            let entry = BrokerJournalEntry::Authorizing {
+                evaluation: evaluation.clone(),
                 intent: intent.clone(),
-            })
-            .await
-            .is_err()
-        {
-            self.lock_state()
-                .authorizations_in_progress
-                .remove(&intent.action_id);
-            return Err(ActionBrokerError::ContractViolation {
-                reason: "Authorizing journal commit unavailable".into(),
-                terminal_immutable: false,
-            });
-        }
-        let result = self.authorize_action_inner(intent.clone(), authority).await;
-        let committed = self
-            .journal
-            .append(&BrokerJournalEntry::Authorization {
-                intent: intent.clone(),
-                outcome: result.clone(),
-            })
-            .await;
-        let mut st = self.lock_state();
-        st.authorizations_in_progress.remove(&intent.action_id);
-        if let Some(rec) = st.actions.get_mut(&intent.action_id) {
-            rec.journal_authorization_pending = false;
-            rec.retry_after = self
-                .monotonic_clock
-                .monotonic_now()
-                .saturating_add(Duration::from_secs(1));
-            if committed.is_err() && rec.state == ActionState::Authorized {
-                rec.state = ActionState::Authorizing;
-                rec.decision = None;
+            };
+            self.journal.append(&entry).await.map_err(|_| {
+                ActionBrokerError::ContractViolation {
+                    reason: "Authorizing journal commit uncertain; retain evaluation identity"
+                        .into(),
+                    terminal_immutable: false,
+                }
+            })?;
+            if let Some(attempt) = self.lock_state().evaluations.get_mut(&action_id) {
+                attempt.intent_committed = true;
             }
         }
-        if committed.is_err() {
+        let known = self
+            .lock_state()
+            .evaluations
+            .get(&action_id)
+            .and_then(|attempt| attempt.result_entry.clone());
+        let entry = if let Some(entry) = known {
+            entry
+        } else {
+            if let Some(attempt) = self.lock_state().evaluations.get_mut(&action_id) {
+                attempt.evaluating = true;
+            }
+            let outcome = self
+                .authorize_action_inner(intent.clone(), authority, &evaluation)
+                .await;
+            let entry = BrokerJournalEntry::Authorization {
+                evaluation: evaluation.clone(),
+                cause: AuthorizationCause::Evaluation,
+                intent: intent.clone(),
+                outcome: outcome.clone(),
+            };
+            if let Some(attempt) = self.lock_state().evaluations.get_mut(&action_id) {
+                attempt.evaluating = false;
+                attempt.result_observed_at =
+                    Some((self.clock.now_ms(), self.monotonic_clock.monotonic_now()));
+                attempt.result = Some(outcome);
+                attempt.result_entry = Some(entry.clone());
+            }
+            entry
+        };
+        self.journal
+            .append(&entry)
+            .await
+            .map_err(|_| ActionBrokerError::ContractViolation {
+                reason: "Authorization journal commit uncertain; replay the exact recorded result"
+                    .into(),
+                terminal_immutable: false,
+            })?;
+        let BrokerJournalEntry::Authorization { outcome, .. } = entry else {
             return Err(ActionBrokerError::ContractViolation {
-                reason: "Authorization journal commit unavailable".into(),
+                reason: "Expected retained authorization result".into(),
                 terminal_immutable: false,
             });
+        };
+        let mut st = self.lock_state();
+        if let Some(attempt) = st.evaluations.get_mut(&action_id) {
+            attempt.result_committed = true;
+            if matches!(outcome, Err(ActionBrokerError::GuardUnavailable { .. })) {
+                attempt.retry_after = Some(
+                    self.monotonic_clock
+                        .monotonic_now()
+                        .saturating_add(Duration::from_secs(1)),
+                );
+            }
         }
-        if let Ok(AuthorizationOutcome::Authorized(decision)) = &result {
+        if let Some(rec) = st.actions.get_mut(&action_id) {
+            rec.journal_authorization_pending = false;
+        }
+        let cache_current = st
+            .actions
+            .get(&action_id)
+            .is_some_and(|rec| rec.cache_generation == st.cache_generation);
+        if let Ok(AuthorizationOutcome::Authorized(decision)) = &outcome
+            && !decision.from_cache
+            && decision.expiry.is_some()
+            && cache_current
+        {
+            let observed = st
+                .evaluations
+                .get(&action_id)
+                .and_then(|attempt| attempt.result_observed_at);
+            if let Some((observed_utc, observed_mono)) = observed {
+                let mapping_profile_id = st
+                    .actions
+                    .get(&action_id)
+                    .map(|rec| rec.mapping_profile_id.clone())
+                    .unwrap_or_default();
+                let key = DecisionCacheKey {
+                    project_id: intent.project_id,
+                    subject_key: cache_binding(&intent)?,
+                    verb: intent.verb.clone(),
+                    effects_class: intent.effects_class,
+                    payload_digest: intent.payload_digest,
+                    policy_revision: intent.policy_revision,
+                    scope_revision: intent.scope_revision,
+                    mapping_profile_id,
+                };
+                let subjects = intent
+                    .subject
+                    .matching_subject_refs()
+                    .into_iter()
+                    .map(|subject| subject.canonical_key())
+                    .collect();
+                st.cache.insert(
+                    key,
+                    decision.evaluation_id,
+                    decision.decision_ref.clone(),
+                    decision.applied_obligations.clone(),
+                    decision.expiry,
+                    observed_utc,
+                    observed_mono,
+                    subjects,
+                );
+            }
+        }
+        if let Ok(AuthorizationOutcome::Authorized(decision)) = &outcome {
             st.events.push(BrokerAuditEvent::ActionAuthorized {
-                action_id: intent.action_id,
+                action_id,
                 decision_ref: decision.decision_ref.clone(),
                 fallback_policy_ref: decision.fallback_policy_ref.clone(),
             });
         }
-        result
+        outcome
     }
 
     #[expect(
@@ -1797,32 +2088,43 @@ impl ActionBroker {
         &self,
         intent: ActionIntent,
         authority: &EffectiveAuthority,
+        evaluation: &AuthorizationEvaluation,
     ) -> Result<AuthorizationOutcome, ActionBrokerError> {
         let now_utc = self.clock.now_ms();
         let now_mono = self.monotonic_clock.monotonic_now();
         let action_id = intent.action_id;
+        let evaluation_id = evaluation.evaluation_id;
 
         // 1. Transition Prepared -> Authorizing et contrôles locaux déterministes.
         let initial_state = transition_action(ActionState::Prepared, ActionEvent::SubmitToBroker)?;
 
         let (guard_mode, guard_port_opt, mapping_profile, active_executor, cached_hit, eval_req) = {
             let mut st = self.lock_state();
-            if st.actions.contains_key(&action_id) {
-                return Err(ActionBrokerError::ContractViolation {
-                    reason: format!("Action {action_id} déjà enregistrée"),
-                    terminal_immutable: false,
-                });
-            }
-
             let subject_refs = intent.subject.matching_subject_refs();
             let profile_id = st.mapping_profile.profile_id().to_owned();
             let guard_revision = st.guard_revision;
+            let cache_generation = st.cache_generation;
+            let revision = st
+                .actions
+                .get(&action_id)
+                .map_or(Revision::INITIAL.next(), |record| record.revision.next());
+            if st
+                .actions
+                .get(&action_id)
+                .is_some_and(|record| !record.dispatches.is_empty())
+            {
+                return Err(ActionBrokerError::ContractViolation {
+                    reason: "An existing dispatch forbids automatic reevaluation".into(),
+                    terminal_immutable: false,
+                });
+            }
             st.actions.insert(
                 action_id,
                 ActionRecord {
+                    evaluation: evaluation.clone(),
                     intent: intent.clone(),
                     state: initial_state,
-                    revision: Revision::INITIAL.next(),
+                    revision,
                     decision: None,
                     pending_approval_scope: None,
                     verified_paths: Vec::new(),
@@ -1832,9 +2134,12 @@ impl ActionBroker {
                     denial_or_unknown_reason: None,
                     mapping_profile_id: profile_id.clone(),
                     guard_revision,
+                    cache_generation,
                     journal_authorization_pending: true,
-                    retry_after: Duration::MAX,
                     observation_in_progress: false,
+                    observation_revision: Revision::INITIAL,
+                    pending_observation: None,
+                    pending_approval: None,
                 },
             );
             st.events
@@ -1892,6 +2197,8 @@ impl ActionBroker {
             {
                 let dref = GuardDecisionRef::new(format!("local:{}", self.ids.new_uuid()))?;
                 let decision = AuthorizationDecision {
+                    evaluation_id,
+                    source_evaluation_id: None,
                     action_id,
                     decision_ref: dref,
                     policy_revision: intent.policy_revision,
@@ -1918,7 +2225,7 @@ impl ActionBroker {
                 mapping_profile_id: profile_id,
             };
             let cached_hit = st.cache.get(&cache_key, now_utc, now_mono);
-            let eval_req = GuardEvaluateRequest::from_intent(&intent);
+            let eval_req = GuardEvaluateRequest::from_intent(&intent, evaluation_id);
             (
                 st.guard_mode.clone(),
                 st.guard_port.clone(),
@@ -1939,6 +2246,8 @@ impl ActionBroker {
                 return Err(err);
             }
             let decision = AuthorizationDecision {
+                evaluation_id,
+                source_evaluation_id: Some(cached.source_evaluation_id),
                 action_id,
                 decision_ref: cached.decision_ref,
                 policy_revision: intent.policy_revision,
@@ -1991,7 +2300,6 @@ impl ActionBroker {
 
         // 4. Interprétation stricte et atomique de la réponse du garde.
         let post_now_utc = self.clock.now_ms();
-        let post_now_mono = self.monotonic_clock.monotonic_now();
         let mut st = self.lock_state();
 
         if st
@@ -2046,33 +2354,9 @@ impl ActionBroker {
                     }
                 };
 
-                let subject_keys: Vec<String> = intent
-                    .subject
-                    .matching_subject_refs()
-                    .into_iter()
-                    .map(|r| r.canonical_key())
-                    .collect();
-                let cache_key = DecisionCacheKey {
-                    project_id: intent.project_id,
-                    subject_key: cache_binding(&intent)?,
-                    verb: intent.verb.clone(),
-                    effects_class: intent.effects_class,
-                    payload_digest: intent.payload_digest,
-                    policy_revision: intent.policy_revision,
-                    scope_revision: intent.scope_revision,
-                    mapping_profile_id: mapping_profile.profile_id().to_owned(),
-                };
-                st.cache.insert(
-                    cache_key,
-                    decision_ref.clone(),
-                    obligations.clone(),
-                    expiry,
-                    post_now_utc,
-                    post_now_mono,
-                    subject_keys,
-                );
-
                 let decision = AuthorizationDecision {
+                    evaluation_id,
+                    source_evaluation_id: None,
                     action_id,
                     decision_ref,
                     policy_revision: intent.policy_revision,
@@ -2140,6 +2424,7 @@ impl ActionBroker {
                     approval_scope,
                 });
                 Ok(AuthorizationOutcome::ApprovalRequired {
+                    evaluation_id,
                     action_id,
                     approval_scope,
                     decision_ref,
@@ -2436,6 +2721,7 @@ impl ActionBroker {
         if self
             .journal
             .append(&BrokerJournalEntry::Dispatch {
+                evaluation: self.evaluation_for_action(action_id)?,
                 intent: intent.clone(),
                 decision: decision.clone(),
                 dispatch_id,
@@ -2480,6 +2766,7 @@ impl ActionBroker {
                 Err(sec_err) => {
                     let broker_err = ActionBrokerError::from(sec_err);
                     let receipt = ActionReceipt {
+                        evaluation_id: decision.evaluation_id,
                         action_id,
                         dispatch_id,
                         decision_ref: decision.decision_ref.clone(),
@@ -2495,6 +2782,7 @@ impl ActionBroker {
                             &intent,
                             receipt,
                             Some(self.sanitize(&broker_err.to_string())),
+                            ObservationCause::Execution,
                         )
                         .await
                     {
@@ -2571,6 +2859,7 @@ impl ActionBroker {
             ),
         };
         let receipt = ActionReceipt {
+            evaluation_id: decision.evaluation_id,
             action_id,
             dispatch_id,
             decision_ref: decision.decision_ref,
@@ -2586,15 +2875,74 @@ impl ActionBroker {
             remote_audit_unavailable: false,
             observed_at_ms: self.clock.now_ms(),
         };
-        self.commit_observation(&intent, receipt, reason).await
+        self.commit_observation(&intent, receipt, reason, ObservationCause::Execution)
+            .await
     }
 
     async fn commit_observation(
         &self,
         intent: &ActionIntent,
-        receipt: ActionReceipt,
+        mut receipt: ActionReceipt,
         reason: Option<String>,
+        cause: ObservationCause,
     ) -> Result<ActionReceipt, ActionBrokerError> {
+        if receipt
+            .remote_audit_ref
+            .as_ref()
+            .is_some_and(|reference| self.sanitize(reference) != *reference)
+        {
+            receipt.remote_audit_ref = None;
+            receipt.remote_audit_unavailable = true;
+        }
+        let entry = {
+            let st = self.lock_state();
+            let rec =
+                st.actions
+                    .get(&intent.action_id)
+                    .ok_or_else(|| ActionBrokerError::NotFound {
+                        resource: intent.action_id.to_string(),
+                    })?;
+            BrokerJournalEntry::Observation {
+                evaluation: rec.evaluation.clone(),
+                observation_revision: rec.observation_revision.next(),
+                cause,
+                intent: intent.clone(),
+                receipt,
+                reason: reason.clone(),
+            }
+        };
+        let receipt = self.persist_observation_entry(entry).await?;
+        if receipt.state == ActionState::OutcomeUnknown && reason.is_some() {
+            return Err(ActionBrokerError::OutcomeUnknown {
+                action_id: intent.action_id,
+                reason: reason.unwrap_or_default(),
+            });
+        }
+        if receipt.state == ActionState::ObservedFailure && reason.is_some() {
+            return Err(ActionBrokerError::ContractViolation {
+                reason: reason.unwrap_or_default(),
+                terminal_immutable: false,
+            });
+        }
+        Ok(receipt)
+    }
+
+    async fn persist_observation_entry(
+        &self,
+        entry: BrokerJournalEntry,
+    ) -> Result<ActionReceipt, ActionBrokerError> {
+        let BrokerJournalEntry::Observation {
+            intent,
+            receipt,
+            observation_revision,
+            ..
+        } = &entry
+        else {
+            return Err(ActionBrokerError::ContractViolation {
+                reason: "Expected retained observation".into(),
+                terminal_immutable: false,
+            });
+        };
         let action_id = intent.action_id;
         {
             let mut st = self.lock_state();
@@ -2610,6 +2958,30 @@ impl ActionBroker {
                     terminal_immutable: rec.state.is_terminal(),
                 });
             }
+            if receipt.evaluation_id != rec.evaluation.evaluation_id
+                || receipt.action_id != action_id
+            {
+                return Err(ActionBrokerError::ContractViolation {
+                    reason: "Observation evaluation/action mismatch".into(),
+                    terminal_immutable: false,
+                });
+            }
+            if let Some(pending) = &rec.pending_observation {
+                if pending != &entry {
+                    return Err(ActionBrokerError::ContractViolation {
+                        reason: "Resolve the exact pending observation first".into(),
+                        terminal_immutable: false,
+                    });
+                }
+            } else {
+                if *observation_revision != rec.observation_revision.next() {
+                    return Err(ActionBrokerError::ContractViolation {
+                        reason: "Observation revision changed before commit".into(),
+                        terminal_immutable: false,
+                    });
+                }
+                rec.pending_observation = Some(entry.clone());
+            }
             rec.observation_in_progress = true;
         }
         let _pending = PendingJournal {
@@ -2617,53 +2989,61 @@ impl ActionBroker {
             action_id,
             phase: PendingJournalPhase::Observation,
         };
-        let committed = self
-            .journal
-            .append(&BrokerJournalEntry::Observation {
-                intent: intent.clone(),
-                receipt: receipt.clone(),
-                reason: reason.clone(),
-            })
-            .await;
+        let committed = self.journal.append(&entry).await;
         let mut st = self.lock_state();
-        let state = if committed.is_ok() {
-            receipt.state
-        } else {
-            ActionState::OutcomeUnknown
-        };
-        if let Some(rec) = st.actions.get_mut(&action_id) {
-            if rec.state.is_terminal() {
-                return Err(ActionBrokerError::ContractViolation {
-                    reason: "Action already terminal during observation".into(),
-                    terminal_immutable: true,
-                });
-            }
-            rec.state = state;
-            rec.observation_in_progress = false;
-            rec.revision = rec.revision.next();
-            rec.enforcement_refs.clone_from(&receipt.enforcement_refs);
-            rec.denial_or_unknown_reason.clone_from(&reason);
-        }
-        if committed.is_ok() {
-            st.events.push(BrokerAuditEvent::ActionObserved {
-                action_id,
-                dispatch_id: receipt.dispatch_id,
-                state,
-            });
-        }
-        if state == ActionState::OutcomeUnknown && (committed.is_err() || reason.is_some()) {
+        let rec = st
+            .actions
+            .get_mut(&action_id)
+            .ok_or_else(|| ActionBrokerError::NotFound {
+                resource: action_id.to_string(),
+            })?;
+        rec.observation_in_progress = false;
+        if committed.is_err() {
+            rec.state = ActionState::OutcomeUnknown;
+            rec.denial_or_unknown_reason = Some("Observation journal commit uncertain".into());
             return Err(ActionBrokerError::OutcomeUnknown {
                 action_id,
-                reason: reason.unwrap_or_else(|| "Observation journal commit unavailable".into()),
+                reason: "Observation journal commit uncertain; retain exact entry".into(),
             });
         }
-        if state == ActionState::ObservedFailure {
-            return Err(ActionBrokerError::ContractViolation {
-                reason: reason.unwrap_or_else(|| "Confirmed execution failure".into()),
-                terminal_immutable: false,
-            });
+        rec.pending_observation = None;
+        rec.state = receipt.state;
+        rec.observation_revision = *observation_revision;
+        rec.revision = rec.revision.next();
+        rec.enforcement_refs.clone_from(&receipt.enforcement_refs);
+        if let BrokerJournalEntry::Observation { reason, .. } = &entry {
+            rec.denial_or_unknown_reason.clone_from(reason);
         }
-        Ok(receipt)
+        st.events.push(BrokerAuditEvent::ActionObserved {
+            action_id,
+            dispatch_id: receipt.dispatch_id,
+            state: receipt.state,
+        });
+        Ok(receipt.clone())
+    }
+
+    async fn resume_pending_observation(
+        &self,
+        action_id: ActionId,
+    ) -> Result<Option<ActionReceipt>, ActionBrokerError> {
+        let pending = self
+            .lock_state()
+            .actions
+            .get(&action_id)
+            .and_then(|rec| rec.pending_observation.clone());
+        let Some(entry) = pending else {
+            return Ok(None);
+        };
+        let receipt = self.persist_observation_entry(entry).await?;
+        // The old unknown record is durable history; an explicit fresh reconciliation may follow it.
+        if matches!(
+            receipt.state,
+            ActionState::OutcomeUnknown | ActionState::InFlight | ActionState::CancelRequested
+        ) {
+            Ok(None)
+        } else {
+            Ok(Some(receipt))
+        }
     }
 
     /// Réconcilie une action en `Dispatching`/`InFlight`/`OutcomeUnknown` en consultant la référence
@@ -2677,6 +3057,12 @@ impl ActionBroker {
         outcome: ReconcileOutcome,
         evidence_ref: Option<String>,
     ) -> Result<ActionReceipt, ActionBrokerError> {
+        if let Some(receipt) = self.resume_pending_observation(action_id).await? {
+            return Ok(receipt);
+        }
+        let cause = ObservationCause::Reconciliation {
+            evidence_ref: evidence_ref.clone(),
+        };
         let (decision_ref_opt, guard_opt) = {
             let st = self.lock_state();
             let rec = st
@@ -2711,7 +3097,7 @@ impl ActionBroker {
             remote_audit_ref,
             remote_audit_unavailable,
         )?;
-        self.commit_observation(&intent, receipt, None).await
+        self.commit_observation(&intent, receipt, None, cause).await
     }
 
     /// Applies a receipt only to its committed action/dispatch/fence and journals the observation.
@@ -2727,6 +3113,21 @@ impl ActionBroker {
         outcome: ReconcileOutcome,
         evidence_ref: Option<String>,
     ) -> Result<ActionReceipt, ActionBrokerError> {
+        // Validate the incoming identity before resuming any prior observation.
+        self.prepare_reconciliation(
+            action_id,
+            Some((dispatch_id, fence)),
+            outcome,
+            evidence_ref.clone(),
+            None,
+            false,
+        )?;
+        if let Some(receipt) = self.resume_pending_observation(action_id).await? {
+            return Ok(receipt);
+        }
+        let cause = ObservationCause::ExternalReceipt {
+            evidence_ref: evidence_ref.clone(),
+        };
         let (intent, receipt) = self.prepare_reconciliation(
             action_id,
             Some((dispatch_id, fence)),
@@ -2735,7 +3136,7 @@ impl ActionBroker {
             None,
             false,
         )?;
-        self.commit_observation(&intent, receipt, None).await
+        self.commit_observation(&intent, receipt, None, cause).await
     }
 
     fn prepare_reconciliation(
@@ -2790,11 +3191,17 @@ impl ActionBroker {
             })?;
         let mut enforcement_refs = rec.enforcement_refs.clone();
         if let Some(reference) = evidence_ref {
-            enforcement_refs.push(self.sanitize(&reference));
+            if self.sanitize(&reference) != reference {
+                return Err(ActionBrokerError::InvalidArgument {
+                    reason: "Sensitive evidence reference refused".into(),
+                });
+            }
+            enforcement_refs.push(reference);
         }
         Ok((
             rec.intent.clone(),
             ActionReceipt {
+                evaluation_id: rec.evaluation.evaluation_id,
                 action_id,
                 dispatch_id,
                 decision_ref,
@@ -2888,6 +3295,13 @@ fn handle_guard_unusable_decision(
     ids: &Arc<dyn IdGeneratorPort>,
     kind: UnusableGuardKind,
 ) -> Result<AuthorizationOutcome, ActionBrokerError> {
+    let evaluation_id = st
+        .actions
+        .get(&action_id)
+        .map(|r| r.evaluation.evaluation_id)
+        .ok_or_else(|| ActionBrokerError::NotFound {
+            resource: action_id.to_string(),
+        })?;
     match guard_mode {
         GuardMode::BrokerOnly => Err(ActionBrokerError::InvalidArgument {
             reason: String::from("État incohérent : GuardPort appelé en mode broker_only"),
@@ -2945,6 +3359,8 @@ fn handle_guard_unusable_decision(
                 Ok(()) => {
                     let dref = GuardDecisionRef::new(format!("fallback:{}", ids.new_uuid()))?;
                     let decision = AuthorizationDecision {
+                        evaluation_id,
+                        source_evaluation_id: None,
                         action_id,
                         decision_ref: dref,
                         policy_revision: intent.policy_revision,
