@@ -3,7 +3,7 @@ use serde_json::{Value, json};
 use unleash_domain::{DataLocality, MicrosAmount};
 use unleash_protocol::{
     CommandEnvelope, ProviderTestLimits, ProviderTestPhase, TestProviderProfilePayload,
-    from_json_str_strict,
+    canonicalize_to_string, from_json_str_strict,
 };
 
 fn fixture() -> Value {
@@ -172,4 +172,72 @@ fn typed_constructor_enforces_the_same_contract_as_decoding() {
         )
         .is_err()
     );
+}
+
+const JS_MAX_INTEGER: u64 = 9_007_199_254_740_991;
+
+#[test]
+fn passive_wire_integers_are_bounded_to_exact_json_range() {
+    for field in [
+        "profile_version",
+        "timeout_ms",
+        "max_calls",
+        "max_output_tokens",
+        "max_cost_usd_micros",
+    ] {
+        let mut value = fixture();
+        set(&mut value, "phase", json!("connect"));
+        if field == "profile_version" {
+            set(&mut value, field, json!(JS_MAX_INTEGER));
+        } else {
+            set_limit(&mut value, field, json!(JS_MAX_INTEGER));
+        }
+        let exact: TestProviderProfilePayload = from_json_str_strict(&value.to_string()).unwrap();
+        let canonical = canonicalize_to_string(&exact).unwrap();
+        let restored: TestProviderProfilePayload = from_json_str_strict(&canonical).unwrap();
+        assert_eq!(restored, exact, "JCS boundary {field}");
+        assert_eq!(
+            serde_json::to_value(exact).unwrap(),
+            value,
+            "boundary {field}"
+        );
+        for invalid in [JS_MAX_INTEGER + 1, u64::MAX] {
+            if field == "profile_version" {
+                set(&mut value, field, json!(invalid));
+            } else {
+                set_limit(&mut value, field, json!(invalid));
+            }
+            assert!(
+                from_json_str_strict::<TestProviderProfilePayload>(&value.to_string()).is_err(),
+                "{field}={invalid}"
+            );
+        }
+    }
+}
+
+#[test]
+fn passive_constructor_integers_are_bounded_to_exact_json_range() {
+    for index in 0..5 {
+        for (value, accepted) in [
+            (JS_MAX_INTEGER, true),
+            (JS_MAX_INTEGER + 1, false),
+            (u64::MAX, false),
+        ] {
+            let mut numbers = [1_u64; 5];
+            if let Some(slot) = numbers.get_mut(index) {
+                *slot = value;
+            }
+            let [version, timeout, calls, tokens, cost] = numbers;
+            let request = TestProviderProfilePayload::try_new(
+                "fixture-profile".to_owned(),
+                version,
+                ProviderTestPhase::Connect,
+                vec![],
+                ProviderTestLimits::new(timeout, calls, tokens, MicrosAmount::new(cost)),
+                DataLocality::ApprovedRemote,
+                "fixture-mandate".to_owned(),
+            );
+            assert_eq!(request.is_ok(), accepted, "index={index}, value={value}");
+        }
+    }
 }

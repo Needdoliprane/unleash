@@ -5,6 +5,9 @@ use std::collections::HashSet;
 use serde::{Deserialize, Serialize};
 use unleash_domain::{DataLocality, MicrosAmount};
 
+// IPC/JCS : au-delà, les clients JavaScript ne préservent plus chaque entier.
+const MAX_EXACT_JSON_INTEGER: u64 = 9_007_199_254_740_991;
+
 /// Erreur de forme ou de borne statique, sans décision d'autorité.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
@@ -15,7 +18,7 @@ pub enum ProviderTestPayloadError {
     /// Capacité invalide ou répétée.
     #[error("invalid or duplicate capability")]
     InvalidCapability,
-    /// Délai nul ou limites de génération hors profil de fixture.
+    /// Délai nul ou limites hors domaine exact JSON ou profil de fixture.
     #[error("invalid test limits")]
     InvalidLimits,
 }
@@ -119,7 +122,10 @@ impl TryFrom<RawProviderTest> for TestProviderProfilePayload {
         fn valid_ref(value: &str) -> bool {
             !value.trim().is_empty() && value.len() <= 256 && !value.chars().any(char::is_control)
         }
-        if !valid_ref(&raw.profile_id) || raw.profile_version == 0 || !valid_ref(&raw.mandate_ref) {
+        if !valid_ref(&raw.profile_id)
+            || !(1..=MAX_EXACT_JSON_INTEGER).contains(&raw.profile_version)
+            || !valid_ref(&raw.mandate_ref)
+        {
             return Err(ProviderTestPayloadError::InvalidReference);
         }
         let mut seen = HashSet::new();
@@ -131,7 +137,12 @@ impl TryFrom<RawProviderTest> for TestProviderProfilePayload {
         {
             return Err(ProviderTestPayloadError::InvalidCapability);
         }
-        if raw.limits.timeout_ms == 0 {
+        if raw.limits.timeout_ms == 0
+            || raw.limits.timeout_ms > MAX_EXACT_JSON_INTEGER
+            || raw.limits.max_calls > MAX_EXACT_JSON_INTEGER
+            || raw.limits.max_output_tokens > MAX_EXACT_JSON_INTEGER
+            || raw.limits.max_cost_usd_micros.as_u64() > MAX_EXACT_JSON_INTEGER
+        {
             return Err(ProviderTestPayloadError::InvalidLimits);
         }
         if raw.phase == ProviderTestPhase::GenerationProbe
