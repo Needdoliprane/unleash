@@ -23,7 +23,7 @@ Raccorder l’admission durable, les adaptateurs de modèles et le process-host 
 | --- | --- | --- | --- | --- |
 | f003-policy | Décision Q-15 pure dans `crates/unleash-scheduler` | — | T-F003-005 sur fixtures, 11 cas | done |
 | f012-stream | Décodeurs SSE et banc HTTP local de `crates/unleash-model-router` | — | 26 cas, notamment EOF et 429 | done |
-| t01-admission | Port transactionnel d’admission dans `crates/unleash-store`, projection des trois types d’unités et décompte durable | Scheduler et Store M1 | 14 cas SQLite, 4 105 entrées avec contrôle admis, concurrence sur la dernière place et checkpoint avant libération | intégré en `c9c030c`, clôture du worktree en cours |
+| t01-admission | Port transactionnel d’admission dans `crates/unleash-store`, projection des trois types d’unités et décompte durable | Scheduler et Store M1 | 14 cas SQLite, 4 105 entrées avec contrôle admis, concurrence sur la dernière place et checkpoint avant libération | done, intégré en `c9c030c` |
 | t02-model-http | Transport OpenAI Responses de `crates/unleash-model-router` derrière le broker, TLS loopback | Décodeurs F012 et frontière `ActionExecutorPort` | 11 essais TLS, 417 tests workspace à `7730f59` | done, intégré en `b8c4314` |
 | t03a-host-ack | Test F011 de reprise sur le même host après perte de l’acquittement de rotation | Host et PTY réels, daemon simulé | T-F011-003 ciblé et 35 tests de la crate à `c16e230` | done |
 | t03-terminal | Service de terminal et raccord IPC pour le vrai daemon, réutilisation de `unleash-process-host` | Port Store des terminaux et journal broker | T-F011-003 (crash daemon, rotation, même PTY) et états d’issue inconnue | pending |

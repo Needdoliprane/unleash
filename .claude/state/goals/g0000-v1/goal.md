@@ -45,4 +45,4 @@ Jalons : M0 → M7 — Features : F001–F019 — Exigences : 239 REQ — Invari
 | g0008-m7 | M7 | Recette A–Z, F018 pannes/restauration, `unleash-update`, packaging macOS/Ubuntu, SBOM, OSS | `qualification/m7/exit.md` | pending |
 
 ## Résultat
-M0 est clos. M1 est publié sur `origin/dev@8598866` avec les contrôles Rust et le validateur de conception verts. La CI distante reste non vérifiée (HTTP 404). M2 avance sur `goal/g0003-m2` avec le socle M1 et les premiers lots F003/F012.
+M0 est clos. M1 est publié sur `origin/dev@8598866` avec les contrôles Rust, le renderer et le validateur de conception verts. La CI distante reste à vérifier (HTTP 404). M2 avance sur `goal/g0003-m2`. L’admission SQLite et le transport TLS sont intégrés, avec 431 tests verts sur `c9c030c`. Les raccords au daemon et la matrice Q-19 restent ouverts.
