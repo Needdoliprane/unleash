@@ -23,6 +23,7 @@ pub mod migrations;
 pub mod objects;
 pub mod policies_secrets;
 pub mod projects_settings;
+pub mod provider_probes;
 pub mod qualification;
 pub mod recovery_ops;
 pub mod restore;
@@ -86,6 +87,10 @@ pub use projects_settings::{
     AnalyzerPathConfig, ExecutionPoolSettings, ProjectRecord, ProjectRepositorySpec,
     ProjectSourceSpec, RETENTION_SHORTENING_NOTICE_MS, RetentionClass, RetentionPolicySettings,
     RetentionShorteningNotice, SettingsPatch, SettingsRecord, SettingsScopeKind,
+};
+pub use provider_probes::{
+    ModelContextRef, ModelOrigin, PROVIDER_PROBE_VERB, PreparedProviderProbe,
+    ProbeGenerationLimits, ProbeProfileSnapshot, ProviderProbeContext, ProviderProbePreparation,
 };
 pub use qualification::{
     APPROVED_BACKPORT_VERSIONS, EffectivePragmaProfile, MIN_QUALIFIED_SQLITE_VERSION,
