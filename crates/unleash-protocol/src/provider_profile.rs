@@ -113,6 +113,34 @@ where
     Option::<T>::deserialize(deserializer)
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StrictDigestObject {
+    algorithm: String,
+    hex: String,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum StrictDigest {
+    String(String),
+    Object(StrictDigestObject),
+}
+
+fn deserialize_catalog_digest<'de, D>(deserializer: D) -> Result<Sha256Digest, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    use serde::de::Error;
+    match StrictDigest::deserialize(deserializer)? {
+        StrictDigest::String(value) => value.parse().map_err(D::Error::custom),
+        StrictDigest::Object(value) if value.algorithm == "sha256" => {
+            Sha256Digest::parse_hex(&value.hex).map_err(D::Error::custom)
+        }
+        StrictDigest::Object(_) => Err(D::Error::custom("unsupported digest algorithm")),
+    }
+}
+
 /// Entrée tarifaire inline bornée, sans paliers ; les champs inconnus sont refusés.
 /// Les valeurs nulles restent inconnues et ne valent pas zéro.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -155,8 +183,10 @@ pub enum ProviderPricing {
         /// Version du catalogue.
         catalog_version: String,
         /// Empreinte du snapshot à vérifier par le service.
+        #[serde(deserialize_with = "deserialize_catalog_digest")]
         catalog_digest: Sha256Digest,
         /// Empreinte de l'entrée exacte à vérifier par le service.
+        #[serde(deserialize_with = "deserialize_catalog_digest")]
         entry_digest: Sha256Digest,
         /// Traitement demandé si périmé.
         stale_policy: ProviderPricingStalePolicy,

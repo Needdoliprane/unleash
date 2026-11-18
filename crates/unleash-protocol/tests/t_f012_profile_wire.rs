@@ -278,3 +278,69 @@ fn unencrypted_remote_and_local_price_on_native_cloud_are_refused() {
     set(&mut value, "pricing", json!({"kind":"none_local"}));
     assert!(decode(&value).is_err());
 }
+
+#[test]
+fn catalog_digest_object_rejects_unrecognized_fields() {
+    let mut value = remote();
+    nested(
+        &mut value,
+        "pricing",
+        "catalog_digest",
+        json!({
+            "algorithm":"sha256", "hex":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "trusted":true
+        }),
+    );
+    assert!(decode(&value).is_err());
+}
+
+#[test]
+fn entry_digest_object_rejects_unrecognized_fields() {
+    let mut value = remote();
+    nested(
+        &mut value,
+        "pricing",
+        "entry_digest",
+        json!({
+            "algorithm":"sha256", "hex":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "principal_id":"forged"
+        }),
+    );
+    assert!(decode(&value).is_err());
+}
+
+#[test]
+fn digest_string_and_closed_object_forms_are_accepted() {
+    for field in ["catalog_digest", "entry_digest"] {
+        for digest in [
+            json!("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+            json!("sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+            json!({"algorithm":"sha256", "hex":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}),
+        ] {
+            let mut value = remote();
+            nested(&mut value, "pricing", field, digest);
+            let decoded = decode(&value).unwrap();
+            let normalized = serde_json::to_value(decoded).unwrap();
+            assert_eq!(
+                normalized.get("pricing").and_then(|p| p.get(field)),
+                Some(&json!(
+                    "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                ))
+            );
+        }
+    }
+}
+
+#[test]
+fn digest_rejects_bad_algorithm_missing_or_invalid_hex() {
+    for field in ["catalog_digest", "entry_digest"] {
+        for digest in [
+            json!({"algorithm":"sha512", "hex":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}),
+            json!({"algorithm":"sha256"}),
+            json!({"algorithm":"sha256", "hex":"invalid"}),
+            json!({"algorithm":"sha256", "hex":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}),
+        ] {
+            let mut value = remote();
+            nested(&mut value, "pricing", field, digest);
+            assert!(decode(&value).is_err(), "{field}");
+        }
+    }
+}
