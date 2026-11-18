@@ -33,8 +33,8 @@ pub use backup::{
     BoundedExportRequest, ExportCancellation, PrepareBackupRequest, ValidateBackupReport,
 };
 pub use backup_requests::{
-    BackupRequestRecord, BackupRequestState, ExecuteReservedBackupRequest, ExecutedBackup,
-    REQUEST_BACKUP_VERB,
+    BackupBlockReason, BackupRequestRecord, BackupRequestState, ExecuteReservedBackupRequest,
+    ExecutedBackup, REQUEST_BACKUP_VERB,
 };
 pub use budgets::{
     BudgetAccountCharge, BudgetAccountSnapshot, BudgetReservationRecord, BudgetReservationRequest,

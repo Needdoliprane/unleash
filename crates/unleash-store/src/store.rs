@@ -276,6 +276,30 @@ impl UnleashStore {
             })
     }
 
+    /// Bloque une demande avec motif attesté uniquement avant tout marqueur d'effet.
+    ///
+    /// # Errors
+    /// Refuse les autorités périmées, motifs non prouvés et tout effet potentiellement parti.
+    pub fn block_claimed_backup(
+        &self,
+        backup_id: BackupId,
+        authority_generation: AuthorityGeneration,
+        reason: crate::BackupBlockReason,
+    ) -> Result<crate::BackupRequestRecord, StoreError> {
+        let config = self.config.clone();
+        self.writer
+            .submit_immediate_blocking(WriteCriticality::Critical, false, move |tx, now| {
+                crate::backup_requests::block_claimed_backup_tx(
+                    tx,
+                    &config,
+                    now,
+                    backup_id,
+                    authority_generation,
+                    reason,
+                )
+            })
+    }
+
     /// Consomme une réservation une fois et exécute sa sauvegarde après le marqueur durable.
     ///
     /// # Errors
