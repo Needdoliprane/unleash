@@ -541,3 +541,82 @@ pub(crate) fn claim_backup_request_tx(
     read_backup_request_conn(tx, backup)?
         .ok_or_else(|| invalid("demande sauvegarde perdue après claim"))
 }
+
+pub(crate) struct ConsumedBackupRequest {
+    pub record: BackupRequestRecord,
+    pub barrier_pin_id: String,
+}
+
+pub(crate) fn consume_backup_request_tx(
+    tx: &Transaction<'_>,
+    config: &StoreConfig,
+    now: TimestampMs,
+    request: ExecuteReservedBackupRequest,
+) -> Result<ConsumedBackupRequest, StoreError> {
+    let daemon = read_daemon_state_tx(tx)?;
+    if daemon.authority_generation != request.authority_generation {
+        return Err(StoreError::StaleAuthorityGeneration {
+            expected: daemon.authority_generation,
+            actual: request.authority_generation,
+            command_id: None,
+        });
+    }
+    let record = read_backup_request_conn(tx, request.backup_id)?
+        .ok_or_else(|| invalid("réservation exécuteur sauvegarde absente"))?;
+    if record.authority_generation != daemon.authority_generation
+        || record.lineage_fence.epoch != daemon.daemon_epoch
+        || record.action_id != request.action_id
+        || record.state != BackupRequestState::Claimed
+        || record.dispatch_id.is_some()
+        || record.job_state != Some(BackupJobState::Preparing)
+    {
+        return Err(invalid(
+            "demande sauvegarde déjà consommée ou identité divergente",
+        ));
+    }
+    crate::broker_writer::validate_execution_dispatch_tx(
+        tx,
+        &daemon,
+        now,
+        request.action_id,
+        request.dispatch_id,
+    )?;
+    let deleting: i64 = tx
+        .query_row(
+            "SELECT COUNT(*) FROM object_records WHERE state='deleting'",
+            [],
+            |r| r.get(0),
+        )
+        .map_err(StoreError::from_rusqlite)?;
+    if deleting != 0 {
+        return Err(StoreError::RecoveryInProgress(
+            "suppression objet en cours avant sauvegarde".to_owned(),
+        ));
+    }
+    let barrier = config.id_generator.new_uuid().to_string();
+    tx.execute("INSERT INTO object_pins (pin_id,pin_kind,object_hash,object_generation,owner_kind,owner_id,authority_generation,state,created_at_ms,released_at_ms) VALUES (?1,'backup_barrier',NULL,NULL,'backup_job',?2,?3,'held',?4,NULL)",params![barrier,request.backup_id.to_string(),daemon.authority_generation.to_string(),now.as_i64()]).map_err(StoreError::from_rusqlite)?;
+    let changed=tx.execute("UPDATE backup_requests SET state='executing',revision=revision+1,dispatch_id=?2,barrier_pin_id=?3 WHERE backup_id=?1 AND action_id=?4 AND state='claimed' AND revision=?5 AND dispatch_id IS NULL",params![request.backup_id.to_string(),request.dispatch_id.to_string(),barrier,request.action_id.to_string(),as_i64(record.revision.as_u64())?]).map_err(StoreError::from_rusqlite)?;
+    if changed != 1 {
+        return Err(invalid("consommation concurrente de sauvegarde"));
+    }
+    let record = read_backup_request_conn(tx, request.backup_id)?
+        .ok_or_else(|| invalid("demande perdue après consommation"))?;
+    Ok(ConsumedBackupRequest {
+        record,
+        barrier_pin_id: barrier,
+    })
+}
+
+pub(crate) fn ensure_consumed_backup_tx(
+    tx: &Transaction<'_>,
+    request: ExecuteReservedBackupRequest,
+) -> Result<(), StoreError> {
+    let daemon = read_daemon_state_tx(tx)?;
+    let count:i64=tx.query_row("SELECT COUNT(*) FROM backup_requests r JOIN broker_dispatches d ON d.dispatch_id=r.dispatch_id JOIN actions a ON a.action_id=r.action_id WHERE r.backup_id=?1 AND r.action_id=?2 AND r.dispatch_id=?3 AND r.state='executing' AND r.authority_generation=?4 AND r.daemon_epoch=?5 AND d.authority_generation=?4 AND d.daemon_epoch=?5 AND d.fence=0 AND a.authority_generation=?4 AND a.daemon_epoch=?5 AND a.fence=0 AND a.state IN ('dispatching','in_flight')",params![request.backup_id.to_string(),request.action_id.to_string(),request.dispatch_id.to_string(),daemon.authority_generation.to_string(),as_i64(daemon.daemon_epoch.as_u64())?],|r|r.get(0)).map_err(StoreError::from_rusqlite)?;
+    if request.authority_generation != daemon.authority_generation || count != 1 {
+        return Err(invalid(
+            "exécution sauvegarde annulée, périmée ou non attribuée",
+        ));
+    }
+    Ok(())
+}

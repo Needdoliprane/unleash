@@ -275,6 +275,31 @@ impl UnleashStore {
                 crate::backup_requests::claim_backup_request_tx(tx, backup_id, authority_generation)
             })
     }
+
+    /// Consomme une réservation une fois et exécute sa sauvegarde après le marqueur durable.
+    ///
+    /// # Errors
+    /// Tout résultat incertain impose inspection ; aucun rejeu n'autorise un second effet.
+    pub fn execute_reserved_backup(
+        &self,
+        request: crate::ExecuteReservedBackupRequest,
+    ) -> Result<crate::ExecutedBackup, StoreError> {
+        let config = self.config.clone();
+        let consumed = self.writer.submit_immediate_blocking(
+            WriteCriticality::Critical,
+            false,
+            move |tx, now| {
+                crate::backup_requests::consume_backup_request_tx(tx, &config, now, request)
+            },
+        )?;
+        crate::backup::execute_reserved_backup_workflow(
+            &self.config,
+            &self.writer,
+            self.config.cutpoints.as_ref(),
+            request,
+            consumed,
+        )
+    }
     /// Engage atomiquement une phase du broker et son événement, avant tout effet.
     ///
     /// # Errors

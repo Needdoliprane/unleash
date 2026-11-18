@@ -208,6 +208,10 @@ pub enum StoreCutpoint {
     C11cAfterPinsDuringCopy,
     /// Après copie et synchronisation du manifeste, avant `complete` (`C11d`).
     C11dAfterManifestBeforeComplete,
+    /// Manifeste complet durable, avant commit de la complétion du job (`C11e`).
+    C11eAfterCompleteManifestBeforeJobCommit,
+    /// Job/manifeste SQL complets, avant acquittement de l'exécuteur (`C11f`).
+    C11fAfterBackupJobCommit,
     /// Pendant la restauration entre import capsule et activation finale (`C11`).
     C11RestoreBeforeActivate,
     /// Juste après `ApplyInboxEvent` avant acquittement outbox (`C7`).

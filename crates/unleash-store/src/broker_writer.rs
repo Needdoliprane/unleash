@@ -819,6 +819,67 @@ fn validate_executor_profile(
     Ok(())
 }
 
+pub(crate) fn validate_execution_dispatch_tx(
+    tx: &Transaction<'_>,
+    daemon: &DaemonStateRow,
+    now: TimestampMs,
+    action: ActionId,
+    dispatch: unleash_domain::DispatchId,
+) -> Result<(), StoreError> {
+    let current =
+        inspect_action_conn(tx, action)?.ok_or_else(|| invalid("action exécuteur absente"))?;
+    if current.state != ActionState::Dispatching
+        || current.dispatch_id != Some(dispatch)
+        || current.fence.authority_generation != daemon.authority_generation
+        || current.fence.epoch != daemon.daemon_epoch
+    {
+        return Err(invalid("marqueur exécuteur ou lignée non courants"));
+    }
+    let encoded: String = tx
+        .query_row(
+            "SELECT intent_json FROM broker_intents WHERE action_id=?1",
+            [action.to_string()],
+            |r| r.get(0),
+        )
+        .map_err(StoreError::from_rusqlite)?;
+    let intent: BrokerIntent =
+        serde_json::from_str(&encoded).map_err(|_| invalid("intention exécuteur illisible"))?;
+    validate_manifest(&intent)?;
+    validate_live_intent(tx, daemon, now, &intent)?;
+    let (decision,auth,epoch,fence):(String,String,i64,i64)=tx.query_row("SELECT decision_json,authority_generation,daemon_epoch,fence FROM broker_dispatches WHERE dispatch_id=?1 AND action_id=?2 AND evaluation_id=?3",params![dispatch.to_string(),action.to_string(),current.evaluation_id.to_string()],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).map_err(StoreError::from_rusqlite)?;
+    if auth != daemon.authority_generation.to_string()
+        || epoch != integer(daemon.daemon_epoch.as_u64())?
+        || fence != integer(current.fence.fence.as_u64())?
+    {
+        return Err(invalid("barrière exécuteur divergente du marqueur"));
+    }
+    let decision: BrokerAuthorizationDecision =
+        serde_json::from_str(&decision).map_err(|_| invalid("décision exécuteur illisible"))?;
+    let previous: Option<String> = tx
+        .query_row(
+            "SELECT previous_evaluation_id FROM broker_evaluations WHERE evaluation_id=?1",
+            [current.evaluation_id.to_string()],
+            |r| r.get(0),
+        )
+        .map_err(StoreError::from_rusqlite)?;
+    let evaluation = BrokerEvaluation {
+        evaluation_id: current.evaluation_id,
+        previous_evaluation_id: previous.map(|v| v.parse()).transpose()?,
+    };
+    require_current_evaluation(tx, &current, evaluation)?;
+    require_policy_unchanged(tx, &intent, evaluation)?;
+    validate_decision(&intent, evaluation, now, &decision)?;
+    validate_executor_profile(tx, &intent, &decision)?;
+    let expected = canonical_sha256(
+        &json!({"schema_version":1,"action_id":action,"evaluation":evaluation,"intent_digest":intent.intent_digest,"payload_digest":intent.payload_digest,"decision":decision,"dispatch_id":dispatch,"fence":current.fence}),
+    )?;
+    let valid:i64=tx.query_row("SELECT COUNT(*) FROM action_dispatches WHERE dispatch_id=?1 AND action_id=?2 AND request_hash=?3 AND transport_state='dispatch_committed' AND ended_at_ms IS NULL",params![dispatch.to_string(),action.to_string(),expected.as_prefixed_str()],|r|r.get(0)).map_err(StoreError::from_rusqlite)?;
+    if valid != 1 {
+        return Err(invalid("requête normalisée du dispatch divergente"));
+    }
+    Ok(())
+}
+
 #[expect(
     clippy::too_many_arguments,
     reason = "Contexte explicite de l’événement interne atomique, sans commande fictive"
