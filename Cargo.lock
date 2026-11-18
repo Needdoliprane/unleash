@@ -5684,6 +5684,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "unleash-scheduler"
+version = "0.1.0"
+dependencies = [
+ "thiserror 2.0.21",
+ "unleash-domain",
+]
+
+[[package]]
 name = "unleash-store"
 version = "0.1.0"
 dependencies = [
