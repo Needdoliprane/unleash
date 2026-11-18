@@ -423,7 +423,7 @@ impl StoreConfig {
             min_free_space_bytes: DEFAULT_MIN_FREE_SPACE_BYTES,
             default_receipt_retention_days: DEFAULT_RECEIPT_RETENTION_DAYS,
             clock_uncertain: Arc::new(AtomicBool::new(false)),
-            max_supported_schema_version: 3,
+            max_supported_schema_version: 4,
             build_policy: SqliteBuildPolicy::default(),
             clock: Arc::new(SystemUtcClock),
             monotonic_clock: Arc::new(SystemMonotonicClock::new()),

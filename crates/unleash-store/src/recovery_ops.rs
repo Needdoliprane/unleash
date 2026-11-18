@@ -1,8 +1,6 @@
 //! Opérations F018 de récupération, réconciliation et approbations humaines :
 //! `InspectRecovery`, `ReconcileAction`, `ResolveActionOutcome` et `ResolveActionApproval`.
 
-use std::path::Path;
-
 use rusqlite::{Connection, OpenFlags, OptionalExtension, Transaction};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -20,8 +18,8 @@ use crate::error::StoreError;
 use crate::policies_secrets::{CallerAuthority, require_human_decider, require_reconciler};
 use crate::qualification::inspect_and_verify_build;
 use crate::restore::{
-    CapsuleCoverage, MaintenanceManifestEntry, MaintenanceRestoreManifest, RestoreRequestState,
-    read_maintenance_manifest,
+    CapsuleCoverage, MaintenanceManifestEntry, MaintenanceRestoreManifest, RestoreCapsule,
+    RestoreRequestState, read_maintenance_manifest,
 };
 
 /// Disposition humaine ou autorisée enregistrée sur une action `outcome_unknown` (`ResolveActionOutcome`).
@@ -135,6 +133,8 @@ pub struct ActionDispatchInput {
 /// Item d'inventaire retourné par `InspectRecovery`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RecoveryItem {
+    /// Provenance de capsule si cet effet provient d'une restauration.
+    pub provenance: Option<RecoveryActionProvenance>,
     /// Identifiant de l'action.
     pub action_id: ActionId,
     /// Run parent éventuel.
@@ -173,6 +173,19 @@ pub struct RecoveryItem {
     pub revision: Revision,
 }
 
+/// Provenance durable d'un effet présent dans une capsule de restauration.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecoveryActionProvenance {
+    /// Restauration ayant conservé l'effet.
+    pub restore_id: RestoreId,
+    /// Capsule vérifiée portant l'effet et ses coûts/dispatches.
+    pub capsule_object_hash: Sha256Digest,
+    /// Lignée historique de l'effet.
+    pub source_authority_generation: AuthorityGeneration,
+    /// Faux si des parents absents du snapshot empêchent l'import dans actions.
+    pub present_in_active_ledger: bool,
+}
+
 /// Demande de restauration enregistrée dans `restore_requests`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RestoreRequestRecord {
@@ -195,6 +208,12 @@ pub struct RestoreRequestRecord {
 /// Importation de restauration enregistrée dans `restore_imports`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RestoreImportRecord {
+    /// Référence durable épinglée de la capsule.
+    pub capsule_object_hash: Sha256Digest,
+    /// Delta vérifié, y compris les effets dont les parents sont absents du snapshot.
+    pub capsule: Option<RestoreCapsule>,
+    /// Preuve manquante ou corrompue, sans masquer les scopes gelés.
+    pub capsule_error: Option<String>,
     /// Identifiant de restauration.
     pub restore_id: RestoreId,
     /// Reçu conservé.
@@ -217,9 +236,36 @@ pub struct RestoreImportRecord {
     pub revision: Revision,
 }
 
+/// Disposition interne explicite d'un scope gelé après restauration.
+/// Cette décision autorise une suite distincte et conserve l'incertitude des effets historiques.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScopeFreezeDisposition {
+    /// Scope exact à disposer.
+    pub scope_id: String,
+    /// Restauration courante ayant posé le gel.
+    pub restore_id: RestoreId,
+    /// Reçu engagé sous la lignée active par le décideur.
+    pub decision_receipt_id: ReceiptId,
+    /// Décideur résolu par le service appelant.
+    pub caller: CallerAuthority,
+    /// Justification explicite et risques acceptés.
+    pub reason: String,
+    /// Portée de la politique appliquée (global ou project).
+    pub policy_scope_kind: String,
+    /// Identifiant exact de politique.
+    pub policy_scope_id: String,
+    /// Révision de politique vérifiée transactionnellement.
+    pub policy_revision: i64,
+    /// Références des preuves examinées, sans les transformer en observation d'effet.
+    pub evidence_digests: Vec<Sha256Digest>,
+    /// Impact décidé sur dépendances et budgets.
+    pub dependency_budget_impact: String,
+}
 /// Scope gelé enregistré dans `recovery_scope_freezes`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RecoveryScopeFreezeRecord {
+    /// Décision explicite durable si le gel a été levé.
+    pub disposition: Option<ScopeFreezeDisposition>,
     /// Identifiant du scope gelé.
     pub scope_id: String,
     /// Restauration ayant posé le gel.
@@ -375,58 +421,15 @@ pub(crate) fn reconcile_recovered_actions_after_restart_tx(
     Ok(out)
 }
 
-fn dispose_scope_freezes_if_clear_tx(
-    tx: &Transaction<'_>,
-    now_ms: TimestampMs,
-    project_id: Option<ProjectId>,
-    scope_key: Option<&str>,
-) -> Result<(), StoreError> {
-    let mut candidates = Vec::new();
-    if let Some(pid) = project_id {
-        candidates.push(pid.to_string());
-    }
-    if let Some(sk) = scope_key
-        && !candidates.iter().any(|s| s == sk)
-    {
-        candidates.push(sk.to_owned());
-    }
-    for cand in candidates {
-        let remaining_in_scope: i64 = tx
-            .query_row(
-                "SELECT COUNT(*) FROM actions
-                 WHERE state IN ('dispatching', 'in_flight', 'cancel_requested', 'outcome_unknown')
-                   AND disposition IS NULL
-                   AND (scope_key = ?1 OR project_id = ?1 OR CAST(run_id AS TEXT) = ?1)",
-                [&cand],
-                |r| r.get(0),
-            )
-            .map_err(StoreError::from_rusqlite)?;
-        if remaining_in_scope == 0 {
-            tx.execute(
-                "UPDATE recovery_scope_freezes
-                 SET state = 'disposed',
-                     disposed_at_ms = ?1,
-                     disposition_receipt_id = NULL
-                 WHERE scope_id = ?2 AND state = 'frozen'",
-                rusqlite::params![now_ms.as_i64(), cand],
-            )
-            .map_err(StoreError::from_rusqlite)?;
-        }
-    }
-    Ok(())
-}
-
 #[expect(
     clippy::too_many_arguments,
     reason = "Émission atomique d'EffectOutcomeResolved et déblocage éventuel du WorkflowRun dans la même transaction"
 )]
-fn resolve_blocked_run_and_freeze_tx(
+fn resolve_blocked_run_tx(
     tx: &Transaction<'_>,
-    now_ms: TimestampMs,
     run_id: RunId,
     action_id: ActionId,
     project_id: Option<ProjectId>,
-    scope_key: Option<&str>,
     resolution_kind: &str,
     generated_events: &mut Vec<EventAppendSpec>,
 ) -> Result<(), StoreError> {
@@ -493,7 +496,6 @@ fn resolve_blocked_run_and_freeze_tx(
         });
     }
 
-    dispose_scope_freezes_if_clear_tx(tx, now_ms, project_id, scope_key)?;
     Ok(())
 }
 
@@ -558,7 +560,7 @@ pub(crate) fn tx_reconcile_action(
         .optional()
         .map_err(StoreError::from_rusqlite)?;
 
-    let Some((cur_state_s, cur_rev, action_epoch, action_fence, run_id_s, proj_id_s, scope_key)) =
+    let Some((cur_state_s, cur_rev, action_epoch, action_fence, run_id_s, proj_id_s, _scope_key)) =
         row
     else {
         return Err(StoreError::NotFound(format!("action {action_id}")));
@@ -707,18 +709,14 @@ pub(crate) fn tx_reconcile_action(
 
     if is_terminal_resolved {
         if let Some(rid) = run_id {
-            resolve_blocked_run_and_freeze_tx(
+            resolve_blocked_run_tx(
                 tx,
-                now_ms,
                 rid,
                 action_id,
                 project_id,
-                scope_key.as_deref(),
                 "reconcile_action",
                 generated_events,
             )?;
-        } else {
-            dispose_scope_freezes_if_clear_tx(tx, now_ms, project_id, scope_key.as_deref())?;
         }
     }
 
@@ -762,7 +760,7 @@ pub(crate) fn tx_resolve_action_outcome(
         .optional()
         .map_err(StoreError::from_rusqlite)?;
 
-    let Some((state_s, cur_rev, run_id_s, proj_id_s, scope_key)) = row else {
+    let Some((state_s, cur_rev, run_id_s, proj_id_s, _scope_key)) = row else {
         return Err(StoreError::NotFound(format!("action {action_id}")));
     };
     let cur_state = parse_action_state(&state_s)?;
@@ -848,18 +846,14 @@ pub(crate) fn tx_resolve_action_outcome(
     });
 
     if let Some(rid) = run_id {
-        resolve_blocked_run_and_freeze_tx(
+        resolve_blocked_run_tx(
             tx,
-            now_ms,
             rid,
             action_id,
             project_id,
-            scope_key.as_deref(),
             disposition.as_str(),
             generated_events,
         )?;
-    } else {
-        dispose_scope_freezes_if_clear_tx(tx, now_ms, project_id, scope_key.as_deref())?;
     }
 
     Ok(Revision::new(u64::try_from(next_rev).unwrap_or(1)))
@@ -1071,10 +1065,10 @@ fn classify_action_for_recovery(
 )]
 pub(crate) fn inspect_recovery_conn(
     conn: &Connection,
-    maintenance_dir: &Path,
+    config: &StoreConfig,
 ) -> Result<RecoveryReport, StoreError> {
     let daemon = read_daemon_state_conn(conn)?;
-    let maintenance_manifest = read_maintenance_manifest(maintenance_dir)?;
+    let maintenance_manifest = read_maintenance_manifest(&config.maintenance_dir)?;
 
     let mut restore_requests = Vec::new();
     {
@@ -1132,7 +1126,7 @@ pub(crate) fn inspect_recovery_conn(
             .prepare(
                 "SELECT restore_id, command_receipt_id, backup_id, source_authority_generation,
                         target_authority_generation, coverage, state, frozen_scopes_json,
-                        imported_manifest_json, revision
+                        imported_manifest_json, revision, capsule_object_hash
                  FROM restore_imports ORDER BY rowid ASC",
             )
             .map_err(StoreError::from_rusqlite)?;
@@ -1149,12 +1143,24 @@ pub(crate) fn inspect_recovery_conn(
                     r.get::<_, String>(7)?,
                     r.get::<_, Option<String>>(8)?,
                     r.get::<_, i64>(9)?,
+                    r.get::<_, String>(10)?,
                 ))
             })
             .map_err(StoreError::from_rusqlite)?;
         for item in rows {
-            let (rid, rcpt, bid, src_auth, tgt_auth, cov_s, st, frozen_s, imp_man_s, rev) =
-                item.map_err(StoreError::from_rusqlite)?;
+            let (
+                rid,
+                rcpt,
+                bid,
+                src_auth,
+                tgt_auth,
+                cov_s,
+                st,
+                frozen_s,
+                imp_man_s,
+                rev,
+                capsule_hash,
+            ) = item.map_err(StoreError::from_rusqlite)?;
             let coverage = match cov_s.as_str() {
                 "complete" => CapsuleCoverage::Complete,
                 "partial" => CapsuleCoverage::Partial,
@@ -1217,7 +1223,26 @@ pub(crate) fn inspect_recovery_conn(
                     });
                 }
             }
+            let capsule_object_hash = capsule_hash.parse::<Sha256Digest>()?;
+            let capsule_result =
+                crate::objects::read_verified_object_bytes_conn(conn, config, capsule_object_hash)
+                    .and_then(|bytes| {
+                        serde_json::from_slice::<RestoreCapsule>(&bytes).map_err(StoreError::from)
+                    });
+            let (capsule, capsule_error) = match capsule_result {
+                Ok(capsule)
+                    if capsule.restore_id.to_string() == rid
+                        && capsule.source_authority_generation.to_string() == src_auth =>
+                {
+                    (Some(capsule), None)
+                }
+                Ok(_) => (None, Some("capsule provenance mismatch".to_owned())),
+                Err(error) => (None, Some(error.to_string())),
+            };
             restore_imports.push(RestoreImportRecord {
+                capsule_object_hash,
+                capsule,
+                capsule_error,
                 restore_id: rid.parse::<RestoreId>()?,
                 command_receipt_id: rcpt.parse::<ReceiptId>()?,
                 backup_id: bid.parse::<BackupId>()?,
@@ -1258,7 +1283,15 @@ pub(crate) fn inspect_recovery_conn(
         for item in rows {
             let (scope_id, rid, reason, gf, state, cr, disp, disp_rcpt) =
                 item.map_err(StoreError::from_rusqlite)?;
+            let decision_json: Option<String> = conn.query_row(
+                "SELECT decision_json FROM recovery_scope_dispositions WHERE scope_id = ?1 AND restore_id = ?2",
+                rusqlite::params![scope_id, rid], |r| r.get(0),
+            ).optional().map_err(StoreError::from_rusqlite)?;
             frozen_scopes.push(RecoveryScopeFreezeRecord {
+                disposition: decision_json
+                    .as_deref()
+                    .map(serde_json::from_str)
+                    .transpose()?,
                 scope_id,
                 restore_id: rid.parse::<RestoreId>()?,
                 reason,
@@ -1350,6 +1383,7 @@ pub(crate) fn inspect_recovery_conn(
                 .unwrap_or_else(|| rec_st.clone().unwrap_or_else(|| format!("state:{state_s}")));
 
             items.push(RecoveryItem {
+                provenance: None,
                 action_id: aid_s.parse::<ActionId>()?,
                 run_id: rid_s.as_deref().map(str::parse::<RunId>).transpose()?,
                 invocation_id: iid_s
@@ -1374,6 +1408,66 @@ pub(crate) fn inspect_recovery_conn(
                 reason: reason_text,
                 allowed_operations,
                 revision: Revision::new(u64::try_from(rev).unwrap_or(0)),
+            });
+        }
+    }
+
+    for import in &restore_imports {
+        let Some(capsule) = &import.capsule else {
+            continue;
+        };
+        for action in &capsule.actions {
+            let provenance = RecoveryActionProvenance {
+                restore_id: import.restore_id,
+                capsule_object_hash: import.capsule_object_hash,
+                source_authority_generation: import.source_authority_generation,
+                present_in_active_ledger: false,
+            };
+            if let Some(item) = items
+                .iter_mut()
+                .find(|item| item.action_id == action.action_id)
+            {
+                item.provenance = Some(RecoveryActionProvenance {
+                    present_in_active_ledger: true,
+                    ..provenance
+                });
+                continue;
+            }
+            let dispatch = capsule
+                .dispatches
+                .iter()
+                .filter(|d| d.action_id == action.action_id)
+                .max_by_key(|d| d.ordinal);
+            let state = parse_action_state(&action.state)?;
+            let (classification, _) = classify_action_for_recovery(state, None, dispatch.is_some());
+            items.push(RecoveryItem {
+                provenance: Some(provenance),
+                action_id: action.action_id,
+                run_id: action.run_id.as_deref().map(str::parse).transpose()?,
+                invocation_id: action
+                    .invocation_id
+                    .as_deref()
+                    .map(str::parse)
+                    .transpose()?,
+                project_id: action.project_id.as_deref().map(str::parse).transpose()?,
+                scope_key: Some(action.scope_id.clone()),
+                state,
+                classification,
+                reconcile_strategy: action.reconcile_strategy.clone(),
+                reconciliation_status: None,
+                disposition: None,
+                disposition_reason: None,
+                approval_scope: None,
+                payload_hash: action.payload_hash.ok_or_else(|| {
+                    StoreError::EvidenceUnavailable("capsule action payload absent".to_owned())
+                })?,
+                last_dispatch_id: dispatch.map(|d| d.dispatch_id.clone()),
+                last_receipt_hash: dispatch
+                    .and_then(|d| d.receipt_hash.as_ref().map(ToString::to_string)),
+                reason: "post_snapshot_parent_absent".to_owned(),
+                // L'absence du parent n'accorde aucune autorité pour recréer son intention.
+                allowed_operations: vec![],
+                revision: Revision::new(action.source_revision),
             });
         }
     }
@@ -1409,7 +1503,7 @@ pub(crate) fn inspect_recovery_offline_cfg(
         && inspect_and_verify_build(&conn, &config.build_policy).is_ok()
         && let Ok(quick) = conn.pragma_query_value(None, "quick_check", |r| r.get::<_, String>(0))
         && quick.eq_ignore_ascii_case("ok")
-        && let Ok(report) = inspect_recovery_conn(&conn, &config.maintenance_dir)
+        && let Ok(report) = inspect_recovery_conn(&conn, config)
     {
         return Ok(report);
     }

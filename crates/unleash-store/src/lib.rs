@@ -80,8 +80,8 @@ pub use qualification::{
 };
 pub use recovery_ops::{
     ActionDispatchInput, ActionOutcomeDisposition, ApprovalDecision, ApprovalResolutionRecord,
-    RecoveryItem, RecoveryReport, RecoveryScopeFreezeRecord, RestoreImportRecord,
-    RestoreRequestRecord,
+    RecoveryActionProvenance, RecoveryItem, RecoveryReport, RecoveryScopeFreezeRecord,
+    RestoreImportRecord, RestoreRequestRecord, ScopeFreezeDisposition,
 };
 pub use restore::{
     CapsuleActionDelta, CapsuleBudgetDelta, CapsuleCoverage, CapsuleDispatchDelta,
@@ -90,6 +90,6 @@ pub use restore::{
     MaintenanceRestoreManifest, RestoreActivationResult, RestoreBackupRequest, RestoreCapsule,
     RestoreRequestState,
 };
-pub use store::UnleashStore;
+pub use store::{SnapshotProjection, UnleashStore};
 pub use unleash_domain::ReconcileOutcome;
 pub use writer::{HeldReaderSession, ReaderContext, ReaderControl, WalTelemetry};
