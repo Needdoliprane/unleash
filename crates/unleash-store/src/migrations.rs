@@ -694,9 +694,12 @@ fn apply_pending_migrations_inner(
             .map_err(StoreError::from_rusqlite)?;
 
         if def.version == 9 {
-            let ambiguous: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM model_call_manifests m JOIN model_calls c ON c.model_call_id=m.model_call_id WHERE c.owner_kind='provider_probe')", [], |row| row.get(0)).map_err(StoreError::from_rusqlite)?;
-            if ambiguous {
-                return Err(StoreError::InvariantViolation("V008 probe manifest has an invocation context; explicit reconciliation required before V009".to_owned()));
+            // Every legacy row will become invocation_context. Check the same
+            // ownership relation as model_call_context_owner before any copy;
+            // NOT EXISTS also rejects missing parents instead of ignoring NULL.
+            let invalid_owner: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM model_call_manifests m WHERE NOT EXISTS(SELECT 1 FROM model_calls c JOIN invocations i ON i.invocation_id=c.invocation_id JOIN context_manifests x ON x.manifest_id=m.context_manifest_id WHERE c.model_call_id=m.model_call_id AND c.owner_kind='invocation' AND x.session_id=i.session_id))", [], |row| row.get(0)).map_err(StoreError::from_rusqlite)?;
+            if invalid_owner {
+                return Err(StoreError::InvariantViolation("V008 model context does not belong to its invocation origin; explicit reconciliation required before V009".to_owned()));
             }
         }
 

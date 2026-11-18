@@ -150,6 +150,76 @@ fn t_f012_009_v009_refuses_ambiguous_probe_history_without_reclassifying_it() {
     assert_eq!(preserved.daemon_state().unwrap().schema_version, 8);
 }
 
+fn legacy_ownership_links(store: &UnleashStore) -> Vec<Vec<rusqlite::types::Value>> {
+    store.read_snapshot(|conn,_| {
+        let mut statement=conn.prepare("SELECT m.manifest_id,m.model_call_id,c.invocation_id,i.agent_id,i.session_id,m.context_manifest_id,x.session_id,m.parent_manifest_id FROM model_call_manifests m JOIN model_calls c ON c.model_call_id=m.model_call_id JOIN invocations i ON i.invocation_id=c.invocation_id JOIN context_manifests x ON x.manifest_id=m.context_manifest_id ORDER BY m.manifest_id")?;
+        let count=statement.column_count();
+        Ok(statement.query_map([],|row|(0..count).map(|index|row.get(index)).collect::<Result<Vec<_>,_>>())?.collect::<Result<Vec<_>,_>>()?)
+    }).unwrap()
+}
+
+#[test]
+fn t_f012_009_v009_refuses_cross_session_invocation_history_atomically() {
+    use unleash_store::{BackupRetentionTier, PrepareBackupRequest, StoreError};
+    let directory = local_test_dir("f012-v009-cross-session").unwrap();
+    let mut old = StoreConfig::new(directory.path());
+    old.max_supported_schema_version = 8;
+    let store = UnleashStore::open(old.clone()).unwrap();
+    seed_legacy_manifest(&store, false);
+    let hash = publish_fixture(&store);
+    let daemon = store.daemon_state().unwrap();
+    store.execute_in_writer_tx(WriteCriticality::Critical,move|tx,now| {
+        tx.execute("INSERT INTO agents(agent_id,level,state,revision) VALUES('other-agent','N','eligible',0)",[])?;
+        tx.execute("INSERT INTO sessions(session_id,agent_id,revision,state,created_at_ms) VALUES('other-session','other-agent',0,'open',?1)",[now.as_i64()])?;
+        tx.execute("INSERT INTO context_manifests(manifest_id,session_id,base_session_revision,content_hash,schema_version,created_at_ms) VALUES('other-context','other-session',0,?1,2,?2)",rusqlite::params![hash.to_string(),now.as_i64()])?;
+        tx.execute("INSERT INTO effective_bundles(bundle_hash,schema_version,role_version_id,requested_model_profile_version_id,allowed_model_policy_hash,initial_context_manifest_id,scope_id,scope_revision,content_object_hash) VALUES('other-bundle',1,'legacy-role','legacy-profile',?1,'other-context','global',0,?1)",[hash.to_string()])?;
+        tx.execute("INSERT INTO events(event_id,stream_id,aggregate_type,aggregate_id,aggregate_revision,event_ordinal,event_type,schema_version,actor_ref,actor_id,occurred_at_ms,recorded_at_ms,payload_json,payload_state,payload_hash,sensitivity,causation_kind,causation_id,causation_receipt_id,correlation_id) VALUES('other-event',?1,'invocation','other-invocation',1,0,'InvocationQueued',1,'probe-operator','probe-operator',?2,?2,'{}','full',?3,'restricted','command','legacy-receipt','legacy-receipt','legacy-command')",rusqlite::params![daemon.stream_id.to_string(),now.as_i64(),hash.to_string()])?;
+        tx.execute("INSERT INTO invocations(invocation_id,agent_id,session_id,trigger_event_id,effective_bundle_hash,context_manifest_id,state,admission_class,revision,created_at_ms) VALUES('other-invocation','other-agent','other-session','other-event','other-bundle','other-context','queued','work',1,?1)",[now.as_i64()])?;
+        // V008 accepts both FKs even though call A now refers to session B.
+        // Leave the request valid and change only its child result manifest.
+        tx.execute("UPDATE model_call_manifests SET context_manifest_id='other-context' WHERE manifest_id='legacy-result-manifest'",[])?;
+        Ok(())
+    }).unwrap();
+    let before = manifests(&store);
+    let links = legacy_ownership_links(&store);
+    let (invocations, sessions, foreign_keys): (i64, i64, i64) = store
+        .read_snapshot(|conn, _| {
+            Ok((
+                conn.query_row("SELECT COUNT(*) FROM invocations", [], |row| row.get(0))?,
+                conn.query_row("SELECT COUNT(*) FROM sessions", [], |row| row.get(0))?,
+                conn.query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |row| {
+                    row.get(0)
+                })?,
+            ))
+        })
+        .unwrap();
+    assert_eq!((invocations, sessions, foreign_keys), (2, 2, 0));
+    let backup = store
+        .prepare_backup(PrepareBackupRequest {
+            destination_dir: directory.path().join("migration-backup"),
+            retention_tier: BackupRetentionTier::Manual,
+            coverage: "db_and_objects".to_owned(),
+        })
+        .unwrap();
+    store.shutdown().unwrap();
+    assert!(
+        matches!(
+            UnleashStore::open_with_migration_backup(
+                StoreConfig::new(directory.path()),
+                Some(backup.backup_id)
+            ),
+            Err(StoreError::InvariantViolation(_))
+        ),
+        "V009 must reject the foreign-session result manifest before copying legacy rows"
+    );
+    let preserved = UnleashStore::open(old).unwrap();
+    assert_eq!(preserved.daemon_state().unwrap().schema_version, 8);
+    assert_eq!(manifests(&preserved), before);
+    assert_eq!(legacy_ownership_links(&preserved), links);
+    let (migration,objects,foreign_keys):(i64,i64,i64)=preserved.read_snapshot(|conn,_|Ok((conn.query_row("SELECT COUNT(*) FROM schema_migrations WHERE version=9",[],|row|row.get(0))?,conn.query_row("SELECT COUNT(*) FROM sqlite_master WHERE name IN ('provider_probe_contexts','model_call_manifests_v009','model_call_context_owner')",[],|row|row.get(0))?,conn.query_row("SELECT COUNT(*) FROM pragma_foreign_key_check",[],|row|row.get(0))?))).unwrap();
+    assert_eq!((migration, objects, foreign_keys), (0, 0, 0));
+}
+
 fn publish_fixture(store: &UnleashStore) -> Sha256Digest {
     let bytes = br#"{"context_mode":"explicit_unleash_history","fixture":"synthetic-probe-v1"}"#;
     let hash = Sha256Digest::from_bytes(bytes);
