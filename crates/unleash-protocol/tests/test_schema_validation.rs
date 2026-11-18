@@ -479,12 +479,31 @@ fn test_validate_ipc_hello_schema() {
         client_kind: ClientKind::Cli,
         client_version: "0.1.0".to_string(),
         capabilities: vec!["terminal".to_string(), "events".to_string()],
+        admin_proof: None,
     };
     let req_val = serde_json::to_value(&req).unwrap();
     assert!(
         validator.is_valid(&req_val),
         "HelloRequest doit valider ipc-hello.schema.json"
     );
+
+    let mut with_proof = req.clone();
+    with_proof.admin_proof = Some(unleash_protocol::AdminProof::from_bytes([42; 32]));
+    let valid_proof = serde_json::to_value(&with_proof).unwrap();
+    assert!(validator.is_valid(&valid_proof));
+    let decoded: HelloRequest = from_json_str_strict(&valid_proof.to_string()).unwrap();
+    assert!(decoded.admin_proof.is_some());
+    let mut null_proof = req_val.clone();
+    null_proof["admin_proof"] = Value::Null;
+    assert!(validator.is_valid(&null_proof));
+    let decoded_null: HelloRequest = from_json_str_strict(&null_proof.to_string()).unwrap();
+    assert!(decoded_null.admin_proof.is_none());
+    for invalid in [String::from("abc"), "AA".repeat(32), "gg".repeat(32)] {
+        let mut invalid_proof = req_val.clone();
+        invalid_proof["admin_proof"] = json!(invalid);
+        assert!(!validator.is_valid(&invalid_proof));
+        assert!(from_json_str_strict::<HelloRequest>(&invalid_proof.to_string()).is_err());
+    }
 
     let mut req_v1 = req_val.clone();
     req_v1["protocol_version"] = json!("unleash.ipc.v1");

@@ -9,7 +9,7 @@ use crate::config::{CutpointObserver, StoreCutpoint};
 use crate::error::StoreError;
 
 /// Version courante maximale du schéma gérée par cette version de `unleash-store`.
-pub const CURRENT_SCHEMA_VERSION: i64 = 2;
+pub const CURRENT_SCHEMA_VERSION: i64 = 7;
 
 /// État persisté d'une migration dans `schema_migrations`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -79,7 +79,124 @@ const MIGRATIONS: &[MigrationDef] = &[
         name: "v002_workflow_automation_registries_and_probes",
         sql: V002_SQL,
     },
+    MigrationDef {
+        version: 3,
+        name: "v003_m1_projects_policies_secrets_recovery_retention",
+        sql: V003_SQL,
+    },
+    MigrationDef {
+        version: 4,
+        name: "v004_recovery_scope_dispositions",
+        sql: V004_SQL,
+    },
+    MigrationDef {
+        version: 5,
+        name: "v005_durable_broker_phases",
+        sql: V005_SQL,
+    },
+    MigrationDef {
+        version: 6,
+        name: "v006_reserved_backup_requests",
+        sql: V006_SQL,
+    },
+    MigrationDef {
+        version: 7,
+        name: "v007_pre_dispatch_backup_block_reason",
+        sql: V007_SQL,
+    },
 ];
+
+const V007_SQL:&str="
+ALTER TABLE backup_requests ADD COLUMN block_reason TEXT CHECK (block_reason IS NULL OR block_reason IN ('guard_profile_unavailable','isolation_profile_unavailable','authorization_denied'));
+CREATE TRIGGER backup_block_reason_immutable BEFORE UPDATE ON backup_requests
+WHEN OLD.block_reason IS NOT NULL AND OLD.block_reason IS NOT NEW.block_reason
+BEGIN SELECT RAISE(ABORT,'backup block reason immutable'); END;
+";
+
+const V006_SQL: &str = "
+CREATE TABLE backup_requests (
+    backup_id TEXT PRIMARY KEY,
+    receipt_id TEXT NOT NULL UNIQUE REFERENCES command_receipts(receipt_id) DEFERRABLE INITIALLY DEFERRED,
+    action_id TEXT NOT NULL UNIQUE,
+    actor_id TEXT NOT NULL,
+    principal_id TEXT NOT NULL REFERENCES principals(principal_id),
+    authority_generation TEXT NOT NULL,
+    daemon_epoch INTEGER NOT NULL CHECK (daemon_epoch >= 0),
+    scope_revision INTEGER NOT NULL CHECK (scope_revision >= 0),
+    policy_revision INTEGER NOT NULL CHECK (policy_revision >= 0),
+    destination_path TEXT NOT NULL,
+    payload_digest TEXT NOT NULL,
+    state TEXT NOT NULL CHECK (state IN ('reserved','claimed','executing','completed','blocked')),
+    revision INTEGER NOT NULL CHECK (revision >= 1),
+    dispatch_id TEXT UNIQUE REFERENCES action_dispatches(dispatch_id),
+    barrier_pin_id TEXT UNIQUE REFERENCES object_pins(pin_id),
+    manifest_digest TEXT,
+    manifest_json TEXT,
+    created_at_ms INTEGER NOT NULL,
+    CHECK ((state IN ('executing','completed') AND dispatch_id IS NOT NULL AND barrier_pin_id IS NOT NULL) OR state NOT IN ('executing','completed')),
+    CHECK (state != 'completed' OR (manifest_digest IS NOT NULL AND manifest_json IS NOT NULL))
+) STRICT;
+CREATE TRIGGER backup_requests_immutable BEFORE UPDATE ON backup_requests
+WHEN OLD.backup_id IS NOT NEW.backup_id OR OLD.receipt_id IS NOT NEW.receipt_id
+ OR OLD.action_id IS NOT NEW.action_id OR OLD.actor_id IS NOT NEW.actor_id
+ OR OLD.principal_id IS NOT NEW.principal_id OR OLD.authority_generation IS NOT NEW.authority_generation
+ OR OLD.destination_path IS NOT NEW.destination_path OR OLD.payload_digest IS NOT NEW.payload_digest
+ OR OLD.created_at_ms IS NOT NEW.created_at_ms
+ OR (OLD.state != 'reserved' AND (OLD.daemon_epoch IS NOT NEW.daemon_epoch OR OLD.scope_revision IS NOT NEW.scope_revision OR OLD.policy_revision IS NOT NEW.policy_revision))
+ OR (OLD.dispatch_id IS NOT NULL AND OLD.dispatch_id IS NOT NEW.dispatch_id)
+ OR (OLD.barrier_pin_id IS NOT NULL AND OLD.barrier_pin_id IS NOT NEW.barrier_pin_id)
+ OR (OLD.manifest_digest IS NOT NULL AND OLD.manifest_digest IS NOT NEW.manifest_digest)
+ OR (OLD.manifest_json IS NOT NULL AND OLD.manifest_json IS NOT NEW.manifest_json)
+ OR (OLD.state != 'reserved' AND NEW.state = 'reserved')
+BEGIN SELECT RAISE(ABORT,'backup request immutable identity/provenance'); END;
+CREATE TRIGGER backup_requests_no_delete BEFORE DELETE ON backup_requests BEGIN SELECT RAISE(ABORT,'backup request durable identity'); END;
+";
+
+const V005_SQL: &str = "
+CREATE TABLE broker_intents (
+    action_id TEXT PRIMARY KEY REFERENCES actions(action_id),
+    intent_digest TEXT NOT NULL,
+    intent_json TEXT NOT NULL,
+    created_at_ms INTEGER NOT NULL
+) STRICT;
+CREATE TABLE broker_evaluations (
+    evaluation_id TEXT PRIMARY KEY,
+    action_id TEXT NOT NULL REFERENCES broker_intents(action_id),
+    previous_evaluation_id TEXT UNIQUE REFERENCES broker_evaluations(evaluation_id),
+    ordinal INTEGER NOT NULL CHECK (ordinal >= 1),
+    policy_snapshot_json TEXT NOT NULL,
+    policy_snapshot_hash TEXT NOT NULL,
+    state TEXT NOT NULL CHECK (state IN ('authorizing','authorized','approval_required','denied','retryable')),
+    retry_not_before_ms INTEGER,
+    UNIQUE (action_id, ordinal)
+) STRICT;
+CREATE TABLE broker_phase_records (
+    action_id TEXT NOT NULL REFERENCES broker_intents(action_id),
+    evaluation_id TEXT NOT NULL REFERENCES broker_evaluations(evaluation_id),
+    phase_key TEXT NOT NULL,
+    phase_json TEXT NOT NULL,
+    phase_digest TEXT NOT NULL,
+    action_revision INTEGER NOT NULL CHECK (action_revision >= 1),
+    event_id TEXT NOT NULL REFERENCES events(event_id),
+    event_sequence INTEGER NOT NULL REFERENCES events(sequence),
+    PRIMARY KEY (action_id,evaluation_id,phase_key)
+) STRICT;
+CREATE TABLE broker_dispatches (
+    dispatch_id TEXT PRIMARY KEY REFERENCES action_dispatches(dispatch_id),
+    action_id TEXT NOT NULL UNIQUE REFERENCES broker_intents(action_id),
+    evaluation_id TEXT NOT NULL REFERENCES broker_evaluations(evaluation_id),
+    decision_json TEXT NOT NULL,
+    authority_generation TEXT NOT NULL,
+    daemon_epoch INTEGER NOT NULL,
+    fence INTEGER NOT NULL
+) STRICT;
+CREATE TRIGGER broker_intents_no_update BEFORE UPDATE ON broker_intents BEGIN SELECT RAISE(ABORT,'broker intent immutable'); END;
+CREATE TRIGGER broker_intents_no_delete BEFORE DELETE ON broker_intents BEGIN SELECT RAISE(ABORT,'broker intent immutable'); END;
+CREATE TRIGGER broker_phase_records_no_update BEFORE UPDATE ON broker_phase_records BEGIN SELECT RAISE(ABORT,'broker phase immutable'); END;
+CREATE TRIGGER broker_phase_records_no_delete BEFORE DELETE ON broker_phase_records BEGIN SELECT RAISE(ABORT,'broker phase immutable'); END;
+CREATE TRIGGER broker_dispatches_no_update BEFORE UPDATE ON broker_dispatches BEGIN SELECT RAISE(ABORT,'broker dispatch immutable'); END;
+CREATE TRIGGER broker_dispatches_no_delete BEFORE DELETE ON broker_dispatches BEGIN SELECT RAISE(ABORT,'broker dispatch immutable'); END;
+";
 
 fn migration_checksum(sql: &str) -> String {
     let mut hasher = Sha256::new();
@@ -93,14 +210,28 @@ fn migration_checksum(sql: &str) -> String {
 /// # Errors
 /// Retourne [`StoreError::UnsupportedSchemaVersion`], [`StoreError::MigrationInterrupted`],
 /// [`StoreError::MigrationChecksumMismatch`], [`StoreError::MigrationBackupRequired`] ou [`StoreError::StorageCorrupt`].
-#[expect(
-    clippy::too_many_lines,
-    reason = "Validation séquentielle stricte quick_check, user_version, états, checksums et pré-sauvegarde"
-)]
 pub(crate) fn preflight_check_existing_db(
     ro_conn: &Connection,
     max_supported_version: i64,
     pre_migration_backup_id: Option<BackupId>,
+) -> Result<i64, StoreError> {
+    preflight_check_inner(
+        ro_conn,
+        max_supported_version,
+        pre_migration_backup_id,
+        false,
+    )
+}
+
+#[expect(
+    clippy::too_many_lines,
+    reason = "Validation séquentielle stricte quick_check, user_version, états, checksums et pré-sauvegarde"
+)]
+fn preflight_check_inner(
+    ro_conn: &Connection,
+    max_supported_version: i64,
+    pre_migration_backup_id: Option<BackupId>,
+    backup_verified_externally: bool,
 ) -> Result<i64, StoreError> {
     let quick: String = ro_conn
         .pragma_query_value(None, "quick_check", |r| r.get(0))
@@ -220,7 +351,7 @@ pub(crate) fn preflight_check_existing_db(
     }
 
     let target_version = max_supported_version.min(CURRENT_SCHEMA_VERSION);
-    if max_applied >= 1 && target_version > max_applied {
+    if max_applied >= 1 && target_version > max_applied && !backup_verified_externally {
         let Some(bkp_id) = pre_migration_backup_id else {
             tracing::warn!(
                 max_applied,
@@ -256,6 +387,45 @@ pub(crate) fn apply_pending_migrations(
     now_ms: TimestampMs,
     cutpoints: &dyn CutpointObserver,
 ) -> Result<MigrationReport, StoreError> {
+    apply_pending_migrations_inner(
+        conn,
+        max_supported_version,
+        pre_migration_backup_id,
+        now_ms,
+        cutpoints,
+        false,
+    )
+}
+
+/// Met à niveau un snapshot déjà validé par `validate_backup_dir` lors d'un `RestoreBackup`.
+///
+/// # Errors
+/// Retourne [`StoreError`] en cas d'échec de migration.
+pub(crate) fn apply_pending_migrations_for_restore(
+    conn: &mut Connection,
+    max_supported_version: i64,
+    verified_backup_id: BackupId,
+    now_ms: TimestampMs,
+    cutpoints: &dyn CutpointObserver,
+) -> Result<MigrationReport, StoreError> {
+    apply_pending_migrations_inner(
+        conn,
+        max_supported_version,
+        Some(verified_backup_id),
+        now_ms,
+        cutpoints,
+        true,
+    )
+}
+
+fn apply_pending_migrations_inner(
+    conn: &mut Connection,
+    max_supported_version: i64,
+    pre_migration_backup_id: Option<BackupId>,
+    now_ms: TimestampMs,
+    cutpoints: &dyn CutpointObserver,
+    backup_verified_externally: bool,
+) -> Result<MigrationReport, StoreError> {
     if max_supported_version < 1 {
         return Err(StoreError::InvalidArgument {
             reason: None,
@@ -263,8 +433,12 @@ pub(crate) fn apply_pending_migrations(
         });
     }
 
-    let current =
-        preflight_check_existing_db(conn, max_supported_version, pre_migration_backup_id)?;
+    let current = preflight_check_inner(
+        conn,
+        max_supported_version,
+        pre_migration_backup_id,
+        backup_verified_externally,
+    )?;
     let target = max_supported_version.min(CURRENT_SCHEMA_VERSION);
     let mut newly_applied = Vec::new();
 
@@ -1310,5 +1484,211 @@ CREATE TABLE IF NOT EXISTS model_catalog_snapshots (
     imported_at_ms INTEGER NOT NULL,
     content_ref TEXT NOT NULL,
     PRIMARY KEY (catalog_id, catalog_version)
+) STRICT;
+";
+
+const V003_SQL: &str = "
+ALTER TABLE projects ADD COLUMN description TEXT NOT NULL DEFAULT '';
+ALTER TABLE projects ADD COLUMN primary_root_path TEXT;
+ALTER TABLE projects ADD COLUMN sources_json TEXT NOT NULL DEFAULT '[]';
+ALTER TABLE projects ADD COLUMN repositories_json TEXT NOT NULL DEFAULT '[]';
+ALTER TABLE projects ADD COLUMN settings_json TEXT NOT NULL DEFAULT '{}';
+ALTER TABLE projects ADD COLUMN updated_at_ms INTEGER NOT NULL DEFAULT 0;
+
+ALTER TABLE actions ADD COLUMN project_id TEXT;
+ALTER TABLE actions ADD COLUMN scope_key TEXT;
+ALTER TABLE actions ADD COLUMN approval_scope TEXT;
+ALTER TABLE actions ADD COLUMN subject_kind TEXT;
+ALTER TABLE actions ADD COLUMN subject_id TEXT;
+ALTER TABLE actions ADD COLUMN reconciliation_status TEXT;
+ALTER TABLE actions ADD COLUMN disposition TEXT;
+ALTER TABLE actions ADD COLUMN disposition_reason TEXT;
+ALTER TABLE actions ADD COLUMN disposition_evidence_ref TEXT;
+ALTER TABLE actions ADD COLUMN disposition_receipt_id TEXT;
+ALTER TABLE actions ADD COLUMN disposition_decided_by TEXT;
+ALTER TABLE actions ADD COLUMN disposition_decided_at_ms INTEGER;
+ALTER TABLE actions ADD COLUMN updated_at_ms INTEGER NOT NULL DEFAULT 0;
+
+ALTER TABLE object_records ADD COLUMN retention_class TEXT NOT NULL DEFAULT 'general';
+ALTER TABLE object_records ADD COLUMN keep_by_policy INTEGER NOT NULL DEFAULT 0 CHECK (keep_by_policy IN (0, 1));
+ALTER TABLE object_records ADD COLUMN project_id TEXT;
+
+ALTER TABLE restore_imports ADD COLUMN imported_manifest_json TEXT;
+
+CREATE TABLE IF NOT EXISTS settings (
+    scope_kind TEXT NOT NULL CHECK (scope_kind IN ('user', 'project', 'repository', 'workspace')),
+    scope_id TEXT NOT NULL,
+    revision INTEGER NOT NULL DEFAULT 0 CHECK (revision >= 0),
+    execution_pool_json TEXT NOT NULL,
+    retention_policy_version TEXT NOT NULL DEFAULT 'unleash.retention.default.v1',
+    retention_policy_json TEXT NOT NULL,
+    pending_retention_policy_json TEXT,
+    pending_effective_at_ms INTEGER,
+    analyzer_paths_json TEXT NOT NULL DEFAULT '[]',
+    model_selection_bindings_json TEXT NOT NULL DEFAULT '[]',
+    extra_typed_json TEXT NOT NULL DEFAULT '{}',
+    updated_at_ms INTEGER NOT NULL,
+    updated_by_actor TEXT NOT NULL,
+    PRIMARY KEY (scope_kind, scope_id)
+) STRICT;
+
+CREATE TABLE IF NOT EXISTS security_policies (
+    scope_kind TEXT NOT NULL CHECK (scope_kind IN ('global', 'project')),
+    scope_id TEXT NOT NULL,
+    isolation_mode TEXT NOT NULL DEFAULT 'standard' CHECK (isolation_mode IN ('standard', 'strict')),
+    policy_version TEXT NOT NULL,
+    policy_digest TEXT NOT NULL CHECK (length(policy_digest) >= 16),
+    reason TEXT NOT NULL,
+    updated_by_actor TEXT NOT NULL,
+    revision INTEGER NOT NULL DEFAULT 0 CHECK (revision >= 0),
+    created_at_ms INTEGER NOT NULL,
+    updated_at_ms INTEGER NOT NULL,
+    PRIMARY KEY (scope_kind, scope_id)
+) STRICT;
+
+CREATE TABLE IF NOT EXISTS secret_references (
+    secret_ref_id TEXT PRIMARY KEY,
+    opaque_secret_ref TEXT NOT NULL UNIQUE,
+    namespace TEXT NOT NULL,
+    purpose TEXT NOT NULL,
+    secret_kind TEXT NOT NULL,
+    target_kind TEXT NOT NULL,
+    target_id TEXT NOT NULL,
+    scope_kind TEXT NOT NULL DEFAULT 'user',
+    scope_id TEXT NOT NULL DEFAULT 'default',
+    backend_kind TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('pending_import', 'active', 'locked', 'revoked_local', 'revoked_remote')),
+    local_revoked_at_ms INTEGER,
+    remote_revocation_state TEXT NOT NULL DEFAULT 'not_applicable' CHECK (remote_revocation_state IN ('not_applicable', 'unsupported', 'pending', 'confirmed', 'failed')),
+    revision INTEGER NOT NULL DEFAULT 0 CHECK (revision >= 0),
+    created_at_ms INTEGER NOT NULL,
+    updated_at_ms INTEGER NOT NULL
+) STRICT;
+
+CREATE TABLE IF NOT EXISTS guard_configs (
+    config_id TEXT PRIMARY KEY,
+    guard_mode TEXT NOT NULL CHECK (guard_mode IN ('broker_only', 'guard_optional', 'guard_required')),
+    endpoint TEXT,
+    transport TEXT NOT NULL DEFAULT 'none' CHECK (transport IN ('none', 'unix_socket', 'https_tls', 'https_mtls')),
+    secret_ref_id TEXT REFERENCES secret_references(secret_ref_id) ON DELETE SET NULL,
+    evaluate_timeout_ms INTEGER NOT NULL DEFAULT 2000 CHECK (evaluate_timeout_ms BETWEEN 100 AND 60000),
+    health_check_interval_s INTEGER NOT NULL DEFAULT 30 CHECK (health_check_interval_s BETWEEN 5 AND 3600),
+    decision_cache_max_age_s INTEGER NOT NULL DEFAULT 300 CHECK (decision_cache_max_age_s BETWEEN 0 AND 3600),
+    fallback_policy_ref TEXT,
+    guard_mapping_profile TEXT NOT NULL DEFAULT 'unverified',
+    health_status TEXT NOT NULL DEFAULT 'unknown' CHECK (health_status IN ('unknown', 'healthy', 'degraded', 'unavailable')),
+    negotiated_version TEXT,
+    capabilities_json TEXT NOT NULL DEFAULT '[]',
+    last_health_check_ms INTEGER,
+    reason TEXT NOT NULL DEFAULT '',
+    updated_by_actor TEXT NOT NULL,
+    revision INTEGER NOT NULL DEFAULT 0 CHECK (revision >= 0),
+    updated_at_ms INTEGER NOT NULL,
+    CHECK (guard_mode != 'guard_optional' OR (fallback_policy_ref IS NOT NULL AND length(trim(fallback_policy_ref)) > 0))
+) STRICT;
+
+CREATE TABLE IF NOT EXISTS subject_suspensions (
+    suspension_id TEXT PRIMARY KEY,
+    subject_kind TEXT NOT NULL,
+    subject_id TEXT NOT NULL,
+    scope_kind TEXT NOT NULL,
+    scope_id TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('active', 'suspended', 'revoked')),
+    reason TEXT NOT NULL,
+    guard_propagation_state TEXT NOT NULL DEFAULT 'local_only' CHECK (guard_propagation_state IN ('local_only', 'propagated', 'unnegotiated_warning')),
+    acted_by_actor TEXT NOT NULL,
+    revision INTEGER NOT NULL DEFAULT 0 CHECK (revision >= 0),
+    created_at_ms INTEGER NOT NULL,
+    updated_at_ms INTEGER NOT NULL,
+    UNIQUE (subject_kind, subject_id, scope_kind, scope_id)
+) STRICT;
+
+CREATE TABLE IF NOT EXISTS alerts (
+    alert_id TEXT PRIMARY KEY,
+    kind TEXT NOT NULL,
+    severity TEXT NOT NULL CHECK (severity IN ('info', 'warning', 'error', 'blocking')),
+    state TEXT NOT NULL CHECK (state IN ('active', 'acknowledged', 'resolved', 'superseded')),
+    blocking INTEGER NOT NULL DEFAULT 0 CHECK (blocking IN (0, 1)),
+    project_id TEXT REFERENCES projects(project_id) ON DELETE CASCADE,
+    subject_kind TEXT NOT NULL,
+    subject_id TEXT NOT NULL,
+    title TEXT NOT NULL,
+    summary TEXT NOT NULL,
+    reason_code TEXT,
+    evidence_ref TEXT,
+    allowed_operations_json TEXT NOT NULL DEFAULT '[]',
+    revision INTEGER NOT NULL DEFAULT 0 CHECK (revision >= 0),
+    created_at_ms INTEGER NOT NULL,
+    updated_at_ms INTEGER NOT NULL,
+    resolved_at_ms INTEGER
+) STRICT;
+
+CREATE INDEX IF NOT EXISTS idx_alerts_state_blocking
+    ON alerts (state, blocking, created_at_ms DESC);
+
+CREATE INDEX IF NOT EXISTS idx_alerts_project
+    ON alerts (project_id, state, created_at_ms DESC);
+
+CREATE TABLE IF NOT EXISTS approval_resolutions (
+    resolution_id TEXT PRIMARY KEY,
+    action_id TEXT NOT NULL REFERENCES actions(action_id) ON DELETE CASCADE,
+    approval_scope TEXT NOT NULL,
+    payload_digest TEXT NOT NULL CHECK (length(payload_digest) = 71 AND substr(payload_digest, 1, 7) = 'sha256:'),
+    decision TEXT NOT NULL CHECK (decision IN ('approve', 'deny')),
+    reason TEXT NOT NULL,
+    decided_by_actor TEXT NOT NULL,
+    decider_kind TEXT NOT NULL CHECK (decider_kind IN ('human_operator', 'policy_admin')),
+    action_revision_before INTEGER NOT NULL CHECK (action_revision_before >= 0),
+    action_revision_after INTEGER NOT NULL CHECK (action_revision_after > action_revision_before),
+    command_receipt_id TEXT NOT NULL REFERENCES command_receipts(receipt_id) ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED,
+    created_at_ms INTEGER NOT NULL
+) STRICT;
+
+CREATE TABLE IF NOT EXISTS retention_purges (
+    purge_id TEXT PRIMARY KEY,
+    policy_version TEXT NOT NULL,
+    scope_kind TEXT NOT NULL,
+    scope_id TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    requested_by_actor TEXT NOT NULL,
+    command_receipt_id TEXT REFERENCES command_receipts(receipt_id) ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED,
+    requested_older_than_ms INTEGER,
+    effective_cutoffs_json TEXT NOT NULL,
+    events_tombstoned_count INTEGER NOT NULL CHECK (events_tombstoned_count >= 0),
+    receipts_tombstoned_count INTEGER NOT NULL CHECK (receipts_tombstoned_count >= 0),
+    objects_purged_count INTEGER NOT NULL CHECK (objects_purged_count >= 0),
+    protected_skipped_count INTEGER NOT NULL CHECK (protected_skipped_count >= 0),
+    affected_backups_json TEXT NOT NULL DEFAULT '[]',
+    limitations_json TEXT NOT NULL DEFAULT '[]',
+    wal_checkpoint_truncated INTEGER NOT NULL DEFAULT 0 CHECK (wal_checkpoint_truncated IN (0, 1)),
+    executed_at_ms INTEGER NOT NULL
+) STRICT;
+
+CREATE TABLE IF NOT EXISTS restore_manifest_records (
+    entry_id TEXT PRIMARY KEY,
+    imported_by_restore_id TEXT NOT NULL REFERENCES restore_imports(restore_id) ON DELETE CASCADE,
+    source_restore_id TEXT NOT NULL,
+    command_receipt_id TEXT NOT NULL,
+    actor_id TEXT NOT NULL,
+    command_id TEXT NOT NULL,
+    command_digest TEXT NOT NULL,
+    backup_id TEXT NOT NULL,
+    source_authority_generation TEXT NOT NULL,
+    state TEXT NOT NULL,
+    blocked_reason TEXT,
+    updated_at_ms INTEGER NOT NULL,
+    imported_at_ms INTEGER NOT NULL
+) STRICT;
+";
+
+const V004_SQL: &str = "
+CREATE TABLE recovery_scope_dispositions (
+    scope_id TEXT NOT NULL REFERENCES recovery_scope_freezes(scope_id),
+    restore_id TEXT NOT NULL REFERENCES restore_imports(restore_id),
+    decision_receipt_id TEXT NOT NULL REFERENCES command_receipts(receipt_id),
+    decided_by_actor TEXT NOT NULL,
+    decision_json TEXT NOT NULL,
+    created_at_ms INTEGER NOT NULL,
+    PRIMARY KEY (scope_id, restore_id)
 ) STRICT;
 ";

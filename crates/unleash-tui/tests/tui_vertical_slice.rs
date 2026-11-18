@@ -68,6 +68,35 @@ fn buffer_text(term: &Terminal<TestBackend>) -> String {
 }
 
 #[test]
+fn t_f015_005_live_tui_does_not_report_example_state_or_attach_without_a_process() {
+    let mut state = TuiState::new(TerminalCapabilities::default());
+    let mut terminal = Terminal::new(TestBackend::new(120, 40)).expect("terminal");
+    render_once(&mut terminal, &mut state).expect("render live state");
+    let screen = buffer_text(&terminal);
+    assert!(state.agents.is_empty());
+    assert!(state.event_page.is_empty());
+    assert!(state.diff_window_cache.is_empty());
+    assert!(!screen.contains("Pool 3/5"));
+    assert!(!screen.contains("1.40 USD"));
+    assert!(!screen.contains("31 passed"));
+
+    handle_terminal_event(&mut state, key(KeyCode::Char('a')), None);
+    assert_eq!(state.mode, InputMode::Navigation);
+    assert!(!state.pty.is_attached());
+
+    apply_backend_update(&mut state, BackendUpdate::Connected { cursor: None });
+    render_once(&mut terminal, &mut state).expect("render connected state");
+    assert!(buffer_text(&terminal).contains("IPC v2: connecté"));
+
+    handle_terminal_event(&mut state, key(KeyCode::Char('?')), None);
+    render_once(&mut terminal, &mut state).expect("render keyboard help");
+    let help = buffer_text(&terminal);
+    assert!(help.contains("Aide clavier"));
+    assert!(!help.contains("100 000 events"));
+    assert!(!help.contains("a : attacher PTY"));
+}
+
+#[test]
 fn t_f015_006_009_013_keyboard_10_spaces_palette_resize_and_accessible_modes() {
     let mut state = TuiState::with_m0_fixture(TerminalCapabilities::default());
     let mut term = Terminal::new(TestBackend::new(120, 40)).expect("TestBackend 120x40");
@@ -127,7 +156,7 @@ fn t_f015_006_009_013_keyboard_10_spaces_palette_resize_and_accessible_modes() {
     assert!(!state.inspector_open);
     render_once(&mut term, &mut state).expect("render 80x24 diff sans inspecteur");
     let compact_diff = buffer_text(&term);
-    assert!(compact_diff.contains("Diff reducer.rs"));
+    assert!(compact_diff.contains("Diff (10000 lignes"));
     assert!(!compact_diff.contains("Inspecteur (i: masquer)"));
 
     handle_terminal_event(&mut state, key(KeyCode::Char('i')), None);

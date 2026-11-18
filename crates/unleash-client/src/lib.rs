@@ -21,6 +21,7 @@
 
 pub mod client;
 pub mod correlation;
+pub mod diagnostic;
 pub mod errors;
 pub mod events;
 pub mod transport;
@@ -28,6 +29,7 @@ pub mod upload;
 
 pub use client::UnleashClient;
 pub use correlation::{CommandCorrelationQueue, CorrelatedCommand, CorrelationState};
+pub use diagnostic::DiagnosticClient;
 pub use errors::ClientError;
 pub use events::{EventFollowerConfig, EventStreamReader, EventSyncUpdate, EventSynchronizer};
 pub use transport::{ClientConfig, IpcConnection};

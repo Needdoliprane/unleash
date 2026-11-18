@@ -1,0 +1,17 @@
+{
+  "evidence_id": "EV-F017-008",
+  "test_id": "T-F017-008",
+  "requirement_id": "REQ-SEC-008",
+  "commit": "aa5bd7f498f21a6ea3aadb65feea83769bed2808",
+  "command": "cargo test --locked --offline --workspace --all-features --no-fail-fast --quiet",
+  "environment": {
+    "os": "macOS 27.2.1 arm64",
+    "rustc": "rustc 1.94.1"
+  },
+  "result": "passed",
+  "observed_at": "2026-11-18T17:14:53Z",
+  "artifacts": [
+    "crates/unleash-action-broker/tests/t_f017_008_guard_modes_and_effects.rs"
+  ],
+  "limits": "Périmètre interne M1. Profils modes Guard, autorisations et obligations testés via GuardPort synthétique. Le profil réel et ses capacités négociées restent à qualifier en M6."
+}

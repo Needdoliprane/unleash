@@ -20,6 +20,8 @@ thiserror.workspace = true
 uuid.workspace = true
 sha2.workspace = true
 hex.workspace = true
+zeroize.workspace = true
+subtle = "2.6"
 chrono.workspace = true
 ts-rs.workspace = true
 

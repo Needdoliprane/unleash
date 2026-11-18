@@ -1,0 +1,17 @@
+{
+  "evidence_id": "EV-F017-011",
+  "test_id": "T-F017-011",
+  "requirement_id": "REQ-SEC-011",
+  "commit": "aa5bd7f498f21a6ea3aadb65feea83769bed2808",
+  "command": "cargo test --locked --offline --workspace --all-features --no-fail-fast --quiet",
+  "environment": {
+    "os": "macOS 27.2.1 arm64",
+    "rustc": "rustc 1.94.1"
+  },
+  "result": "passed",
+  "observed_at": "2026-11-18T17:14:53Z",
+  "artifacts": [
+    "crates/unleash-action-broker/tests/t_f017_011_retention_redaction.rs"
+  ],
+  "limits": "Périmètre interne M1. Canaris, sorties anonymisées et limites de rétention testés dans la suite broker. Les politiques d’un fournisseur réel font l’objet d’une preuve distincte."
+}

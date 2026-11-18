@@ -9,7 +9,7 @@ use std::os::unix::net::UnixListener;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use rustix::fs::{FileType, Mode, OFlags, RawMode, fstat, open};
+use rustix::fs::{FileType, Mode, OFlags, RawMode, fstat, open, openat};
 use rustix::io::Errno;
 
 use crate::errors::PlatformError;
@@ -22,6 +22,95 @@ pub const MACOS_SUN_LEN: usize = 104;
 
 /// Longueur maximale admissible en octets pour un chemin de socket Unix (`SUN_LEN - 1`).
 pub const MAX_UNIX_SOCKET_PATH_BYTES: usize = MACOS_SUN_LEN - 1;
+
+/// Nom fixe de la preuve administrative dans le rendez-vous privé.
+pub const ADMIN_PROOF_FILENAME: &str = "admin-proof";
+
+/// Lit le credential sur un fichier régulier appartenant à cet UID et de mode strict `0600`.
+/// Le fichier est ouvert relativement au descripteur vérifié du rendez-vous et la lecture
+/// est bornée à 65 octets. Une absence retourne `None` ; aucune valeur invalide ne figure
+/// dans les erreurs.
+///
+/// # Errors
+/// Retourne une erreur de validation ou de lecture si le répertoire ou le fichier est invalide.
+pub fn read_admin_credential(
+    dir: &Path,
+) -> Result<Option<zeroize::Zeroizing<String>>, PlatformError> {
+    validate_rendezvous_dir(dir)?;
+    let dir_fd = open(
+        dir,
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .map_err(|e| PlatformError::OsCall {
+        op: "open(admin rendezvous)",
+        source: std::io::Error::from(e),
+    })?;
+    let dir_stat = fstat(&dir_fd).map_err(|e| PlatformError::OsCall {
+        op: "fstat(admin rendezvous)",
+        source: std::io::Error::from(e),
+    })?;
+    if FileType::from_raw_mode(dir_stat.st_mode) != FileType::Directory
+        || dir_stat.st_uid != effective_uid()
+        || raw_mode_to_u32(dir_stat.st_mode) & 0o7777 != 0o700
+    {
+        return Err(PlatformError::InvalidPath {
+            path: dir.display().to_string(),
+            reason: String::from("Répertoire de credential invalide"),
+        });
+    }
+    let fd = match openat(
+        &dir_fd,
+        ADMIN_PROOF_FILENAME,
+        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::NONBLOCK,
+        Mode::empty(),
+    ) {
+        Ok(fd) => fd,
+        Err(Errno::NOENT) => return Ok(None),
+        Err(e) => {
+            return Err(PlatformError::OsCall {
+                op: "openat(admin credential)",
+                source: std::io::Error::from(e),
+            });
+        }
+    };
+    let st = fstat(&fd).map_err(|e| PlatformError::OsCall {
+        op: "fstat(admin credential)",
+        source: std::io::Error::from(e),
+    })?;
+    let path = dir.join(ADMIN_PROOF_FILENAME).display().to_string();
+    if FileType::from_raw_mode(st.st_mode) != FileType::RegularFile {
+        return Err(PlatformError::NotARegularFile { path });
+    }
+    if st.st_uid != effective_uid() {
+        return Err(PlatformError::OwnershipMismatch {
+            path,
+            expected_uid: effective_uid(),
+            actual_uid: st.st_uid,
+        });
+    }
+    let mode = raw_mode_to_u32(st.st_mode) & 0o7777;
+    if mode != 0o600 {
+        return Err(PlatformError::InsecurePermissions {
+            path,
+            expected_mode: 0o600,
+            actual_mode: mode,
+        });
+    }
+    let mut bytes = zeroize::Zeroizing::new(Vec::new());
+    File::from(fd).take(65).read_to_end(&mut bytes)?;
+    if bytes.len() != 64 || !bytes.iter().all(u8::is_ascii) {
+        return Err(PlatformError::InvalidPath {
+            path,
+            reason: String::from("Credential de longueur ou encodage invalide"),
+        });
+    }
+    let value = std::str::from_utf8(&bytes).map_err(|_| PlatformError::InvalidPath {
+        path,
+        reason: String::from("Credential invalide"),
+    })?;
+    Ok(Some(zeroize::Zeroizing::new(value.to_owned())))
+}
 
 #[cfg(target_os = "macos")]
 const fn raw_mode_to_u32(raw: RawMode) -> u32 {
@@ -209,6 +298,33 @@ pub fn validate_rendezvous_dir(dir: &Path) -> Result<(), PlatformError> {
 /// Retourne une [`PlatformError`] si le parent n'est pas conforme `0700`, si `SUN_LEN` est
 /// dépassé, si un symlink/répertoire occupe déjà la cible ou si `bind`/`chmod` échoue.
 pub fn bind_private_unix_listener(socket_path: &Path) -> Result<UnixListener, PlatformError> {
+    bind_private_unix_listener_with(socket_path, || Ok(()))
+}
+
+struct BoundSocketCleanup<'a> {
+    path: &'a Path,
+    device: u64,
+    inode: u64,
+    armed: bool,
+}
+
+impl Drop for BoundSocketCleanup<'_> {
+    fn drop(&mut self) {
+        if self.armed
+            && let Ok(metadata) = fs::symlink_metadata(self.path)
+            && metadata.file_type().is_socket()
+            && metadata.dev() == self.device
+            && metadata.ino() == self.inode
+        {
+            let _ = fs::remove_file(self.path);
+        }
+    }
+}
+
+fn bind_private_unix_listener_with(
+    socket_path: &Path,
+    after_bind: impl FnOnce() -> Result<(), PlatformError>,
+) -> Result<UnixListener, PlatformError> {
     validate_unix_socket_path_len(socket_path)?;
     let parent = socket_path
         .parent()
@@ -237,8 +353,23 @@ pub fn bind_private_unix_listener(socket_path: &Path) -> Result<UnixListener, Pl
     }
 
     let listener = UnixListener::bind(socket_path)?;
+    let metadata = fs::symlink_metadata(socket_path)?;
+    if !metadata.file_type().is_socket() || metadata.uid() != effective_uid() {
+        return Err(PlatformError::InvalidPath {
+            path: socket_path.display().to_string(),
+            reason: String::from("Socket créé non attribuable"),
+        });
+    }
+    let mut cleanup = BoundSocketCleanup {
+        path: socket_path,
+        device: metadata.dev(),
+        inode: metadata.ino(),
+        armed: true,
+    };
+    after_bind()?;
     fs::set_permissions(socket_path, PermissionsExt::from_mode(0o600))?;
     validate_socket_file(socket_path)?;
+    cleanup.armed = false;
     Ok(listener)
 }
 
@@ -408,4 +539,55 @@ pub fn write_private_file_atomic(path: &Path, bytes: &[u8]) -> Result<(), Platfo
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod bind_cleanup_tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+    use super::*;
+    use unleash_testkit::local_test_dir;
+
+    fn injected() -> PlatformError {
+        PlatformError::InvalidPath {
+            path: String::new(),
+            reason: "injected".into(),
+        }
+    }
+
+    #[test]
+    fn failed_post_bind_removes_owned_socket_and_preserves_foreign_entry() {
+        let dir = local_test_dir("m1-bind-cleanup").unwrap();
+        let data = local_test_dir("m1-bind-cleanup-data").unwrap();
+        fs::set_permissions(dir.path(), PermissionsExt::from_mode(0o700)).unwrap();
+        let lock = crate::AuthorityLock::acquire_in(dir.path(), data.path()).unwrap();
+        let socket = dir.path().join("control.sock");
+        assert!(bind_private_unix_listener_with(&socket, || Err(injected())).is_err());
+        assert!(!socket.exists());
+        drop(lock);
+        let _lock = crate::AuthorityLock::acquire_in(dir.path(), data.path()).unwrap();
+
+        let foreign = UnixListener::bind(&socket).unwrap();
+        let identity = fs::symlink_metadata(&socket).unwrap();
+        assert!(bind_private_unix_listener_with(&socket, || Err(injected())).is_err());
+        let after = fs::symlink_metadata(&socket).unwrap();
+        assert_eq!((after.dev(), after.ino()), (identity.dev(), identity.ino()));
+        drop(foreign);
+        fs::remove_file(&socket).unwrap();
+    }
+
+    #[test]
+    fn post_bind_cleanup_does_not_remove_replaced_file() {
+        let dir = local_test_dir("m1-bind-replaced").unwrap();
+        fs::set_permissions(dir.path(), PermissionsExt::from_mode(0o700)).unwrap();
+        let socket = dir.path().join("control.sock");
+        assert!(
+            bind_private_unix_listener_with(&socket, || {
+                fs::remove_file(&socket).unwrap();
+                fs::write(&socket, b"foreign-fixture").unwrap();
+                Err(injected())
+            })
+            .is_err()
+        );
+        assert_eq!(fs::read(&socket).unwrap(), b"foreign-fixture");
+    }
 }

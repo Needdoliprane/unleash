@@ -28,4 +28,5 @@ Le dossier `.claude/` est la référence de réalisation. Le code peut révéler
 
   `regen.py` réécrit le manifest et `CHECKSUMS.sha256` ; `validate.py` doit finir sur `0 errors`. Si une exigence, une question, un ADR, une hypothèse ou un risque a changé, lancer d'abord `python3 tools/design-package/sync.py .`, qui reprojette les sources Markdown dans `catalog/design-catalog.json` et `testing/traceability.*`. Ne jamais éditer le manifest ou les checksums à la main.
 - **Statuts de preuve.** `product_test_status` reste `not_run` dans le dossier ; les preuves réelles vont dans `qualification/evidence/` à la racine du dépôt (voir [règles de test](testing.md)).
+- Les journaux de travail temporaires sous `.claude/evidence/` sont exclus de l’export de conception et de ses checksums.
 - **Style.** Français, phrases normatives courtes, identifiants stables. Un identifiant supprimé n'est jamais réutilisé.

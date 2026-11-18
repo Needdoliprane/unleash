@@ -1,0 +1,19 @@
+{
+  "evidence_id": "EV-F018-004",
+  "test_id": "T-F018-004",
+  "requirement_id": "REQ-REC-004",
+  "commit": "aa5bd7f498f21a6ea3aadb65feea83769bed2808",
+  "command": "cargo test --locked --offline --workspace --all-features --no-fail-fast --quiet",
+  "environment": {
+    "os": "macOS 27.2.1 arm64",
+    "rustc": "rustc 1.94.1",
+    "sqlite": "bundle rusqlite du Cargo.lock testé"
+  },
+  "result": "passed",
+  "observed_at": "2026-11-18T17:14:53Z",
+  "artifacts": [
+    "crates/unleash-store/tests/t_f018_004_reconcile_outcome.rs",
+    "crates/unleash-daemon/tests/t_m1_request_backup_ipc.rs"
+  ],
+  "limits": "Périmètre interne M1. Perte d’accusé après marqueur, action inconnue au redémarrage et absence de second dispatch. L’observation et la disposition explicite sont exercées dans le Store sur effets synthétiques. Les services distants restent à qualifier."
+}

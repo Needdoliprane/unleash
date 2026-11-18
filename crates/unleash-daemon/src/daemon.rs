@@ -15,16 +15,18 @@ use unleash_domain::{
     transition_daemon_mode,
 };
 use unleash_platform::{
-    AuthorityLock, PlatformError, PlatformPaths, assert_not_under_claude,
+    ADMIN_PROOF_FILENAME, AuthorityLock, PlatformError, PlatformPaths, assert_not_under_claude,
     bind_private_unix_listener, canonical_rendezvous_dir, current_boot_identity, effective_uid,
-    validate_socket_file, verify_same_uid_peer,
+    read_admin_credential, validate_rendezvous_dir, validate_socket_file, verify_same_uid_peer,
+    write_private_file_atomic,
 };
 use unleash_protocol::{
-    ClientKind, EventCausationKind, EventEnvelope, HelloRequest, HelloResponse, MAX_FRAME_BYTES,
-    ProtocolVersion, Sensitivity, from_json_str_strict,
+    AdminProof, ClientKind, EventCausationKind, EventEnvelope, HelloRequest, HelloResponse,
+    MAX_FRAME_BYTES, ProtocolVersion, Sensitivity, from_json_str_strict,
 };
 use unleash_store::{StoreConfig, UnleashStore, WriteCriticality};
 
+use crate::auth::AdministrativeAuthVerifier;
 use crate::config::DaemonConfig;
 use crate::error::DaemonError;
 use crate::executors::{DrainReport, ExecutorDrainPort};
@@ -40,12 +42,73 @@ use crate::subscriptions::SubscriptionHub;
 
 const PROBE_CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
 
+pub(crate) fn install_admin_proof(dir: &Path) -> Result<AdminProof, DaemonError> {
+    install_admin_proof_with(dir, || Ok(()))
+}
+
+struct PendingAdminProof<'a> {
+    dir: &'a Path,
+    proof: AdminProof,
+    armed: bool,
+}
+
+impl Drop for PendingAdminProof<'_> {
+    fn drop(&mut self) {
+        if self.armed {
+            remove_owned_admin_proof(self.dir, &self.proof);
+        }
+    }
+}
+
+fn install_admin_proof_with(
+    dir: &Path,
+    after_publish: impl FnOnce() -> Result<(), DaemonError>,
+) -> Result<AdminProof, DaemonError> {
+    validate_rendezvous_dir(dir)?;
+    let mut bytes = zeroize::Zeroizing::new([0_u8; 32]);
+    getrandom::fill(&mut *bytes).map_err(|_| {
+        DaemonError::InvalidConfiguration(String::from("Génération du credential impossible"))
+    })?;
+    let mut pending = PendingAdminProof {
+        dir,
+        proof: AdminProof::from_bytes(*bytes),
+        armed: true,
+    };
+    write_private_file_atomic(
+        &dir.join(ADMIN_PROOF_FILENAME),
+        pending.proof.to_hex().as_bytes(),
+    )?;
+    after_publish()?;
+    let verified = read_admin_credential(dir)?.and_then(|value| AdminProof::from_hex(&value));
+    if !verified.is_some_and(|candidate| candidate.matches(&pending.proof)) {
+        return Err(DaemonError::InvalidConfiguration(String::from(
+            "Credential local invalide après création",
+        )));
+    }
+    pending.armed = false;
+    Ok(pending.proof.clone())
+}
+
+pub(crate) fn remove_owned_admin_proof(dir: &Path, expected: &AdminProof) {
+    match read_admin_credential(dir) {
+        Ok(None) => {}
+        Ok(Some(value)) if AdminProof::from_hex(&value).is_some_and(|p| p.matches(expected)) => {
+            if std::fs::remove_file(dir.join(ADMIN_PROOF_FILENAME)).is_err() {
+                tracing::warn!("Suppression du credential local impossible à l'arrêt");
+            }
+        }
+        _ => tracing::warn!("Credential local modifié ou inaccessible ; retrait non effectué"),
+    }
+}
+
 /// Résultat d'une tentative de démarrage du daemon.
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum DaemonStartOutcome {
     /// Nouvelle instance démarrée et prête (ou en cours de reprise si `RecoveryGate` est actif).
     Started(DaemonHandle),
+    /// Autorité diagnostique en lecture seule lorsque le store est corrompu.
+    Diagnostic(crate::diagnostic::DiagnosticHandle),
     /// Une instance active sur la même racine a répondu au handshake `Hello` (`attach_if_running=true`).
     AlreadyRunning {
         /// Réponse `HelloResponse` de l'instance rejointe.
@@ -58,6 +121,8 @@ pub enum DaemonStartOutcome {
 /// Handle de contrôle sur une instance [`UnleashDaemon`] active.
 #[derive(Debug)]
 pub struct DaemonHandle {
+    #[cfg(test)]
+    test_state: std::sync::Weak<DaemonRuntimeState>,
     socket_path: PathBuf,
     data_root: PathBuf,
     rendezvous_dir: PathBuf,
@@ -72,6 +137,10 @@ pub struct DaemonHandle {
 }
 
 impl DaemonHandle {
+    #[cfg(test)]
+    pub(crate) fn test_runtime_state(&self) -> Arc<DaemonRuntimeState> {
+        self.test_state.upgrade().expect("daemon test runtime")
+    }
     /// Chemin du socket Unix servi par le daemon.
     #[must_use]
     pub fn socket_path(&self) -> &Path {
@@ -219,7 +288,7 @@ fn resolve_paths_and_acquire_lock_blocking(
     Ok((platform_paths, data_root, rdv_dir, lock_res))
 }
 
-fn prepare_socket_listener_blocking(
+pub(crate) fn prepare_socket_listener_blocking(
     lock: AuthorityLock,
 ) -> Result<(AuthorityLock, std::os::unix::net::UnixListener, PathBuf), DaemonError> {
     lock.remove_stale_socket()?;
@@ -317,13 +386,42 @@ impl UnleashDaemon {
         store_cfg.consumer_version = config.consumer_version.clone();
         apply_store_overrides(&mut store_cfg, &config);
 
-        let store_init_res = tokio::task::spawn_blocking(move || -> Result<_, DaemonError> {
+        let diagnostic_config = store_cfg.clone();
+        let store_open_res = tokio::task::spawn_blocking(move || -> Result<_, DaemonError> {
             let boot_id = current_boot_identity()?.as_str().to_owned();
             let uid = effective_uid();
             store_cfg.owner_uid = uid;
             store_cfg.boot_identity.clone_from(&boot_id);
+            let opened = UnleashStore::open_classified(store_cfg);
+            Ok((opened, boot_id, uid))
+        })
+        .await
+        .map_err(|e| DaemonError::InvalidConfiguration(format!("Join error store open: {e}")))?;
+
+        let (opened, boot_id, uid) = store_open_res?;
+        let opened = match opened {
+            Ok(opened) => opened,
+            Err(unleash_store::StoreOpenFailure {
+                stage: unleash_store::StoreOpenStage::ReadOnlyPreflight,
+                error: unleash_store::StoreError::StorageCorrupt(_),
+            }) => {
+                let handle = crate::diagnostic::start(
+                    lock,
+                    rdv_dir,
+                    diagnostic_config,
+                    Arc::clone(&config.auth_verifier),
+                )
+                .await?;
+                return Ok(DaemonStartOutcome::Diagnostic(handle));
+            }
+            Err(failure) => {
+                let _ = tokio::task::spawn_blocking(move || drop(lock)).await;
+                return Err(DaemonError::Store(failure.error));
+            }
+        };
+
+        let store_init_res = tokio::task::spawn_blocking(move || -> Result<_, DaemonError> {
             let local_principal = format!("uid:{uid}");
-            let opened = UnleashStore::open(store_cfg)?;
             opened.register_principal(&local_principal, "user", &local_principal)?;
             let new_inst = DaemonInstanceId::from_uuid(opened.config().id_generator.new_uuid());
             let (row, prev_mode, started_ev) =
@@ -340,6 +438,33 @@ impl UnleashDaemon {
                 return Err(err);
             }
         };
+
+        // La preuve est renouvelée sous verrou et avant toute ouverture du socket.
+        let proof_dir = rdv_dir.clone();
+        let proof_result = tokio::task::spawn_blocking(move || install_admin_proof(&proof_dir))
+            .await
+            .map_err(|_| {
+                DaemonError::InvalidConfiguration(String::from(
+                    "Génération du credential interrompue",
+                ))
+            })
+            .and_then(std::convert::identity);
+        let admin_proof = match proof_result {
+            Ok(proof) => proof,
+            Err(err) => {
+                let _ = tokio::task::spawn_blocking(move || {
+                    drop(store);
+                    drop(lock);
+                })
+                .await;
+                return Err(err);
+            }
+        };
+        let auth_verifier: Arc<dyn crate::auth::AuthVerifierPort> =
+            Arc::new(AdministrativeAuthVerifier {
+                inner: Arc::clone(&config.auth_verifier),
+                expected: admin_proof.clone(),
+            });
 
         // 5. Nettoyage éventuel de socket orphelin et ouverture socket Unix privé (`0600`)
         let store_for_cleanup = Arc::clone(&store);
@@ -390,6 +515,7 @@ impl UnleashDaemon {
         let shared_mode = Arc::new(RwLock::new(DaemonMode::Recovering));
 
         let state = Arc::new(DaemonRuntimeState {
+            broker_activity: crate::broker_activity::BrokerActivity::new(),
             store: Arc::clone(&store),
             authority_generation: recovery_row.authority_generation,
             daemon_epoch: recovery_row.daemon_epoch,
@@ -397,7 +523,7 @@ impl UnleashDaemon {
             stream_id: recovery_row.stream_id,
             mode: Arc::clone(&shared_mode),
             browser_search_paths,
-            auth_verifier: Arc::clone(&config.auth_verifier),
+            auth_verifier,
             post_commit_hook: config.post_commit_hook.clone(),
             subscriptions: Arc::clone(&subscriptions),
             last_published_seq: AsyncMutex::new(Some((
@@ -454,6 +580,7 @@ impl UnleashDaemon {
             lock,
             socket_path: socket_path.clone(),
             rdv_dir: rdv_dir.clone(),
+            admin_proof,
             controller: Arc::clone(&config.executor_controller),
             drain_timeout: config.shutdown_drain_timeout,
             accept_handle,
@@ -462,6 +589,8 @@ impl UnleashDaemon {
         });
 
         let handle = DaemonHandle {
+            #[cfg(test)]
+            test_state: Arc::downgrade(&state),
             socket_path,
             data_root,
             rendezvous_dir: rdv_dir,
@@ -527,6 +656,7 @@ struct DrainCoordinatorParams {
     lock: AuthorityLock,
     socket_path: PathBuf,
     rdv_dir: PathBuf,
+    admin_proof: AdminProof,
     controller: Arc<dyn ExecutorDrainPort>,
     drain_timeout: Duration,
     accept_handle: tokio::task::JoinHandle<()>,
@@ -534,6 +664,10 @@ struct DrainCoordinatorParams {
     recovery_handle: Option<tokio::task::JoinHandle<()>>,
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "Drain, retries et libération ordonnée de l'autorité"
+)]
 fn spawn_drain_coordinator(params: DrainCoordinatorParams) {
     tokio::spawn(async move {
         let mut stop_rx = params.stop_rx;
@@ -543,18 +677,36 @@ fn spawn_drain_coordinator(params: DrainCoordinatorParams) {
         let mut accept_opt = Some(params.accept_handle);
         let mut recovery_opt = params.recovery_handle;
 
-        if let Some(req) = stop_rx.recv().await
-            && let (Some(state), Some(store)) = (
+        while let Some(mut req) = stop_rx.recv().await {
+            let (Some(state), Some(store)) = (
                 state_opt.as_ref().map(Arc::clone),
                 store_opt.as_ref().map(Arc::clone),
-            )
-        {
+            ) else {
+                break;
+            };
             state.mark_draining();
             if let Some(recovery_handle) = recovery_opt.take() {
                 let _ = recovery_handle.await;
             }
             let effective_drain_timeout =
                 req.drain_timeout_override.unwrap_or(params.drain_timeout);
+            if tokio::time::timeout(
+                effective_drain_timeout,
+                state.broker_activity.close_and_wait(),
+            )
+            .await
+            .is_err()
+            {
+                if let Some(ack) = req.ack.take() {
+                    let _ = ack.send(Err(DaemonError::InvalidConfiguration(String::from(
+                        "Travaux broker encore actifs ; verrou d'autorité conservé",
+                    ))));
+                    continue;
+                }
+                // Sans demandeur vivant, poursuivre l'arrêt dès que le travail
+                // se termine tout en conservant le verrou entre-temps.
+                state.broker_activity.close_and_wait().await;
+            }
             let res = execute_drain_and_stop(
                 &state,
                 &store,
@@ -583,11 +735,14 @@ fn spawn_drain_coordinator(params: DrainCoordinatorParams) {
                     // Libérer socket + state + UnleashStore + verrou OS flock hors thread Tokio runtime
                     // (StoreWriterHandle::drop appelle blocking_recv()).
                     let sock_drop = params.socket_path.clone();
+                    let proof_dir = params.rdv_dir.clone();
+                    let admin_proof = params.admin_proof.clone();
                     let state_drop = state_opt.take();
                     let store_drop = store_opt.take();
                     let lock_drop = lock_opt.take();
                     let _ = tokio::task::spawn_blocking(move || {
                         let _ = std::fs::remove_file(&sock_drop);
+                        remove_owned_admin_proof(&proof_dir, &admin_proof);
                         drop(state_drop);
                         drop(store_drop);
                         drop(lock_drop);
@@ -614,6 +769,9 @@ fn spawn_drain_coordinator(params: DrainCoordinatorParams) {
         }
         if let Some(recovery_handle) = recovery_opt.take() {
             recovery_handle.abort();
+        }
+        if let Some(state) = &state_opt {
+            state.broker_activity.close_and_wait().await;
         }
         let state_drop = state_opt.take();
         let store_drop = store_opt.take();
@@ -817,6 +975,7 @@ async fn probe_live_daemon_hello(socket_path: &Path) -> Result<HelloResponse, Da
         client_kind: ClientKind::Probe,
         client_version: env!("CARGO_PKG_VERSION").to_owned(),
         capabilities: Vec::new(),
+        admin_proof: None,
     };
     write_json_frame_timeout(&mut stream, &req, PROBE_CONNECT_TIMEOUT).await?;
 
@@ -850,4 +1009,44 @@ async fn probe_live_daemon_hello(socket_path: &Path) -> Result<HelloResponse, Da
     })?;
     let _ = stream.shutdown().await;
     from_json_str_strict::<HelloResponse>(text).map_err(DaemonError::from)
+}
+
+#[cfg(test)]
+mod proof_cleanup_tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+    use unleash_testkit::local_test_dir;
+
+    #[test]
+    fn failed_after_proof_publication_cleans_owned_credential_before_unlock() {
+        let data = local_test_dir("m1-proof-cleanup-data").unwrap();
+        let rdv = local_test_dir("m1-proof-cleanup-rdv").unwrap();
+        std::fs::set_permissions(rdv.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let lock = AuthorityLock::acquire_in(rdv.path(), data.path()).unwrap();
+        let result = install_admin_proof_with(rdv.path(), || {
+            Err(DaemonError::InvalidConfiguration("injected".into()))
+        });
+        assert!(result.is_err());
+        assert!(!rdv.path().join(ADMIN_PROOF_FILENAME).exists());
+        drop(lock);
+        assert!(AuthorityLock::acquire_in(rdv.path(), data.path()).is_ok());
+    }
+
+    #[test]
+    fn failed_install_preserves_credential_replaced_by_another_value() {
+        let data = local_test_dir("m1-proof-replaced-data").unwrap();
+        let rdv = local_test_dir("m1-proof-replaced-rdv").unwrap();
+        std::fs::set_permissions(rdv.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let _lock = AuthorityLock::acquire_in(rdv.path(), data.path()).unwrap();
+        let path = rdv.path().join(ADMIN_PROOF_FILENAME);
+        let replacement = "1".repeat(64);
+        let result = install_admin_proof_with(rdv.path(), || {
+            write_private_file_atomic(&path, replacement.as_bytes())?;
+            Err(DaemonError::InvalidConfiguration("injected".into()))
+        });
+        assert!(result.is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), replacement.as_bytes());
+        std::fs::remove_file(path).unwrap();
+    }
 }
