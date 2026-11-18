@@ -32,7 +32,8 @@ async fn settings_and_policy_are_authorized_typed_and_revisioned() {
         rendezvous_dir: Some(rdv.path().to_path_buf()),
         ..DaemonConfig::default()
     };
-    let DaemonStartOutcome::Started(handle) = UnleashDaemon::start(cfg).await.unwrap() else {
+    let DaemonStartOutcome::Started(handle) = UnleashDaemon::start(cfg.clone()).await.unwrap()
+    else {
         panic!("daemon attendu")
     };
     let sock = handle.socket_path().to_path_buf();
@@ -288,4 +289,35 @@ async fn settings_and_policy_are_authorized_typed_and_revisioned() {
         matches!(event, SubscribeEventsFrame::Events { events, .. } if events.iter().any(|e| e.event_type == "SettingsUpdated" && e.aggregate_id == generation.as_uuid() && e.sequence == receipt.event_cursor.sequence))
     );
     handle.shutdown_graceful("test").await.unwrap();
+    // Une observation legacy simulée et périmée ne devient pas une preuve Guard réelle.
+    let fixture_db = rusqlite::Connection::open(data.path().join("unleash-authority.db")).unwrap();
+    fixture_db.execute_batch("UPDATE guard_configs SET health_status='healthy', negotiated_version='stale', capabilities_json='[\"allow\"]', last_health_check_ms=1 WHERE config_id='default'").unwrap();
+    drop(fixture_db);
+    let DaemonStartOutcome::Started(restarted) = UnleashDaemon::start(cfg).await.unwrap() else {
+        panic!("daemon redémarré attendu")
+    };
+    let mut reopened = UnleashClient::connect(ClientConfig::new(
+        restarted.socket_path().to_path_buf(),
+        ClientKind::Cli,
+        "test",
+    ))
+    .await
+    .unwrap();
+    let health_after_restart = reopened.query(&health_query).await.unwrap();
+    assert_eq!(health_after_restart.result["health_status"], "unknown");
+    assert!(health_after_restart.result["negotiated_version"].is_null());
+    assert_eq!(health_after_restart.result["capabilities"], json!([]));
+    let policy = reopened
+        .query(&QueryEnvelope {
+            protocol_version: ProtocolVersion,
+            request_id: RequestId::from_u128(26),
+            query_type: "ReadPolicySummary".into(),
+            project_id: None,
+            payload: Map::new(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(policy.result["guard_config"]["health_status"], "unknown");
+    assert!(policy.result["guard_config"]["negotiated_version"].is_null());
+    restarted.shutdown_graceful("test").await.unwrap();
 }
