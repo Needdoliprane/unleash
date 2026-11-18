@@ -30,12 +30,12 @@ pub struct BrokerEvaluation {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum BrokerCause {
-    /// Reçu courant, avec cause_ref receipt:UUID.
+    /// Reçu courant, avec `cause_ref` receipt:UUID.
     CommandReceipt {
         /// Reçu réel préalablement engagé.
         receipt_id: ReceiptId,
     },
-    /// Événement du flux courant, avec cause_ref event:UUID.
+    /// Événement du flux courant, avec `cause_ref` event:UUID.
     Event {
         /// Événement réel préalablement engagé.
         event_id: Uuid,
@@ -48,7 +48,7 @@ pub enum BrokerCause {
 }
 
 /// Intention native exacte et champs d'autorité typés nécessaires au stockage.
-/// Le manifeste est le JSON objet complet de ActionIntent v1, pas son payload métier.
+/// Le manifeste est le JSON objet complet de `ActionIntent` v1, pas son payload métier.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct BrokerIntent {
@@ -153,7 +153,7 @@ pub enum BrokerAuthorizationOutcome {
         approval_scope: ApprovalScopeId,
         /// Référence de décision.
         decision_ref: String,
-        /// Révision fournie par le broker, distincte du CAS SQLite.
+        /// Révision fournie par le broker, distincte du CAS `SQLite`.
         revision: Revision,
     },
     /// Refus ou indisponibilité projetés sans message externe brut.
@@ -182,7 +182,7 @@ pub enum BrokerAuthorizationCause {
     },
 }
 
-/// Reçu local d'observation complet ; output_digest n'est pas un reçu fournisseur.
+/// Reçu local d'observation complet ; `output_digest` n'est pas un reçu fournisseur.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct BrokerActionReceipt {
@@ -267,14 +267,16 @@ pub enum BrokerPhase {
         intent_digest: Sha256Digest,
         /// Reçu complet conservé.
         receipt: BrokerActionReceipt,
-        /// Ordinal de la suite d'observations, indépendant de actions.revision.
+        /// Ordinal de la suite d'observations, indépendant de `actions.revision`.
         observation_revision: Revision,
         /// Provenance explicite.
         cause: BrokerObservationCause,
+        /// Raison originale conservée dans le document exact, jamais journalisée comme message.
+        reason: Option<String>,
     },
 }
 
-/// Requête interne ; expected_revision est le CAS du writer, pas l'ordinal d'observation.
+/// Requête interne ; `expected_revision` est le CAS du writer, pas l'ordinal d'observation.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct BrokerPhaseRequest {

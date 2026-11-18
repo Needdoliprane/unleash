@@ -1072,7 +1072,7 @@ pub(crate) fn tx_commit_command(
     Ok(CommitOutcome::Committed(receipt))
 }
 
-fn ensure_scope_not_frozen_tx(
+pub(crate) fn ensure_scope_not_frozen_tx(
     tx: &Transaction<'_>,
     project_id: Option<ProjectId>,
     scope_key: Option<&str>,

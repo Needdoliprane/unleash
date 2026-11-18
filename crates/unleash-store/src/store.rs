@@ -235,6 +235,45 @@ fn apply_startup_state(
 }
 
 impl UnleashStore {
+    /// Engage atomiquement une phase du broker et son événement, avant tout effet.
+    ///
+    /// # Errors
+    /// Refuse les divergences, autorités périmées et tout dispatch déjà durable.
+    pub fn commit_broker_phase(
+        &self,
+        request: crate::BrokerPhaseRequest,
+    ) -> Result<crate::BrokerPhaseCommit, StoreError> {
+        let cutpoint = match &request.phase {
+            crate::BrokerPhase::Authorizing { .. } => {
+                Some(StoreCutpoint::C3AfterBrokerIntentCommit)
+            }
+            crate::BrokerPhase::Dispatch { .. } => Some(StoreCutpoint::C4AfterBrokerDispatchCommit),
+            _ => None,
+        };
+        let config = self.config.clone();
+        let committed = self.writer.submit_immediate_blocking(
+            WriteCriticality::Normal,
+            true,
+            move |tx, now| crate::broker_writer::commit_phase_tx(tx, &config, now, &request),
+        )?;
+        if let Some(point) = cutpoint {
+            self.config.cutpoints.hit(point)?;
+        }
+        Ok(committed)
+    }
+
+    /// Lit l'identité et le CAS d'une action du journal broker.
+    ///
+    /// # Errors
+    /// Retourne les erreurs de lecture du Store.
+    pub fn inspect_broker_action(
+        &self,
+        action_id: ActionId,
+    ) -> Result<Option<crate::BrokerActionSnapshot>, StoreError> {
+        self.read_snapshot(move |conn, _| {
+            crate::broker_writer::inspect_action_conn(conn, action_id)
+        })
+    }
     /// Ouvre ou initialise la base `SQLite` qualifiée avec vérification de build, PRAGMAs et migrations.
     ///
     /// # Errors

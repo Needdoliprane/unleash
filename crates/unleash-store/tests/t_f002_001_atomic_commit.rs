@@ -40,6 +40,8 @@ impl CutpointObserver for CutpointAdapter {
             StoreCutpoint::C0BeforeCommandTx => Cutpoint::C0,
             StoreCutpoint::C1BeforeCommandCommit => Cutpoint::C1,
             StoreCutpoint::C2AfterCommandCommit => Cutpoint::C2,
+            StoreCutpoint::C3AfterBrokerIntentCommit => Cutpoint::C3,
+            StoreCutpoint::C4AfterBrokerDispatchCommit => Cutpoint::C4,
             StoreCutpoint::C10aAfterPrepPin => Cutpoint::C10a,
             StoreCutpoint::C10bBeforeDeletingReserve => Cutpoint::C10b,
             StoreCutpoint::C10cAfterDeletingIntent => Cutpoint::C10c,

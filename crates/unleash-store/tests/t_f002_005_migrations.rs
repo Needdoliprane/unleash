@@ -171,7 +171,8 @@ fn migration_v003_to_v004_preserves_history_and_requires_backup() {
         })
         .unwrap();
     store.shutdown().unwrap();
-    let v4 = StoreConfig::new(dir.path());
+    let mut v4 = StoreConfig::new(dir.path());
+    v4.max_supported_schema_version = 4;
     assert!(matches!(
         UnleashStore::open(v4.clone()),
         Err(StoreError::MigrationBackupRequired)
