@@ -184,6 +184,41 @@ fn test_validate_ipc_command_schema() {
             "CommandEnvelope doit rejeter tout payload non-objet, obtenu : {res:?}"
         );
     }
+
+    let mut probe = fixture_val.clone();
+    probe["command_type"] = json!("TestProviderProfile");
+    probe["payload"] = json!({
+        "profile_id": "fixture-profile",
+        "profile_version": 9_007_199_254_740_991_u64,
+        "phase": "generation_probe",
+        "capability_set": ["text"],
+        "limits": {
+            "timeout_ms": 60_000,
+            "max_calls": 3,
+            "max_output_tokens": 512,
+            "max_cost_usd_micros": 100_000
+        },
+        "locality": "approved_remote",
+        "mandate_ref": "fixture-mandate"
+    });
+    assert!(validator.is_valid(&probe));
+
+    let mut unicode_reference = probe.clone();
+    unicode_reference["payload"]["mandate_ref"] = json!("\u{feff}");
+    assert!(validator.is_valid(&unicode_reference));
+    unicode_reference["payload"]["mandate_ref"] = json!("\u{00a0}\u{2003}");
+    assert!(!validator.is_valid(&unicode_reference));
+
+    let mut out_of_range = probe.clone();
+    out_of_range["payload"]["profile_version"] = json!(9_007_199_254_740_992_u64);
+    assert!(!validator.is_valid(&out_of_range));
+
+    let mut unknown_origin = probe.clone();
+    unknown_origin["payload"]["origin_kind"] = json!("control_plane");
+    assert!(!validator.is_valid(&unknown_origin));
+
+    probe["payload"]["limits"]["max_calls"] = json!(4);
+    assert!(!validator.is_valid(&probe));
 }
 
 #[test]
