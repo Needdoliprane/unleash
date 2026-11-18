@@ -8,6 +8,7 @@
 #![warn(missing_docs)]
 
 pub mod backup;
+pub mod broker_phases;
 pub mod budgets;
 pub mod commands;
 pub mod config;
@@ -93,3 +94,10 @@ pub use restore::{
 pub use store::{SnapshotProjection, UnleashStore};
 pub use unleash_domain::ReconcileOutcome;
 pub use writer::{HeldReaderSession, ReaderContext, ReaderControl, WalTelemetry};
+
+pub use broker_phases::{
+    BROKER_PHASE_SCHEMA_VERSION, BrokerActionReceipt, BrokerActionSnapshot,
+    BrokerAuthorizationCause, BrokerAuthorizationDecision, BrokerAuthorizationFailure,
+    BrokerAuthorizationOutcome, BrokerCause, BrokerEvaluation, BrokerExecutor, BrokerIntent,
+    BrokerObservationCause, BrokerPhase, BrokerPhaseCommit, BrokerPhaseRequest, BrokerPhaseStore,
+};
