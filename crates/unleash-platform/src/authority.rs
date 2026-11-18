@@ -50,7 +50,7 @@ pub struct AuthorityLockMetadata {
 #[must_use = "Libérer immédiatement AuthorityLock relâcherait l'exclusivité d'autorité daemon"]
 #[derive(Debug)]
 pub struct AuthorityLock {
-    file: File,
+    file: Option<File>,
     lock_path: PathBuf,
     rendezvous_dir: PathBuf,
     metadata: AuthorityLockMetadata,
@@ -141,7 +141,7 @@ impl AuthorityLock {
                 file.sync_all()?;
 
                 Ok(Self {
-                    file,
+                    file: Some(file),
                     lock_path,
                     rendezvous_dir: rendezvous_dir.to_path_buf(),
                     metadata,
@@ -205,6 +205,26 @@ impl AuthorityLock {
         &self.metadata.socket_path
     }
 
+    /// Libère l'autorité après la fin prouvée de tous ses mutateurs admis.
+    ///
+    /// Le propriétaire doit terminer les tâches et fermer le Store avant cet appel.
+    /// La fermeture implicite par `Drop` reste un repli sans acquittement d'arrêt.
+    ///
+    /// # Errors
+    /// Retourne une erreur si l'effacement durable ou `flock(LOCK_UN)` échoue.
+    pub fn release(mut self) -> Result<(), PlatformError> {
+        if let Some(file) = self.file.as_ref() {
+            file.set_len(0)?;
+            file.sync_data()?;
+            flock(file, FlockOperation::Unlock).map_err(|errno| PlatformError::OsCall {
+                op: "flock(LOCK_UN)",
+                source: std::io::Error::from(errno),
+            })?;
+        }
+        drop(self.file.take());
+        Ok(())
+    }
+
     /// Supprime un ancien socket orphelin uniquement après acquisition du verrou exclusif,
     /// en vérifiant qu'il ne s'agit ni d'un lien symbolique ni d'un répertoire.
     ///
@@ -238,8 +258,10 @@ impl Drop for AuthorityLock {
     fn drop(&mut self) {
         // Ne JAMAIS unlink `authority.lock` (race flock + unlink sur nouvel inode).
         // Effacer les métadonnées pendant que flock est détenu, puis fermer le descripteur.
-        let _ = self.file.set_len(0);
-        let _ = self.file.sync_data();
+        if let Some(file) = &self.file {
+            let _ = file.set_len(0);
+            let _ = file.sync_data();
+        }
     }
 }
 
@@ -272,4 +294,39 @@ fn canonicalize_data_root(data_root: &Path) -> Result<PathBuf, PlatformError> {
     }
     let normalized = normalize_lexical(data_root);
     Ok(canonicalize_with_existing_prefix(&normalized).unwrap_or(normalized))
+}
+
+#[cfg(test)]
+mod shutdown_tests {
+    use super::*;
+    use unleash_testkit::local_test_dir;
+
+    // REQ-CORE-001 / T-F001-001: a duplicate open-file-description must not
+    // retain the stopped authority or later unlock its replacement.
+    #[test]
+    fn stopped_authority_releases_flock_while_a_duplicate_file_remains_open() {
+        let fixture = local_test_dir("authority-shutdown-duplicate").unwrap();
+        let rendezvous = fixture.path().join("rdv");
+        let data = fixture.path().join("data");
+        let first = AuthorityLock::acquire_in(&rendezvous, &data).unwrap();
+        let duplicate = first.file.as_ref().unwrap().try_clone().unwrap();
+        assert!(matches!(
+            AuthorityLock::acquire_in(&rendezvous, &data),
+            Err(PlatformError::DaemonAlreadyRunning { .. })
+        ));
+        first.release().unwrap();
+
+        let replacement = AuthorityLock::acquire_in(&rendezvous, &data).unwrap();
+        assert!(matches!(
+            AuthorityLock::acquire_in(&rendezvous, &data),
+            Err(PlatformError::DaemonAlreadyRunning { .. })
+        ));
+        drop(duplicate);
+        assert!(matches!(
+            AuthorityLock::acquire_in(&rendezvous, &data),
+            Err(PlatformError::DaemonAlreadyRunning { .. })
+        ));
+        drop(replacement);
+        assert!(AuthorityLock::acquire_in(&rendezvous, &data).is_ok());
+    }
 }

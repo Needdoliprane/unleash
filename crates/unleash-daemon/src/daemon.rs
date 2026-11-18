@@ -664,6 +664,143 @@ struct DrainCoordinatorParams {
     recovery_handle: Option<tokio::task::JoinHandle<()>>,
 }
 
+#[derive(Debug)]
+enum ShutdownCleanupError {
+    Pending(&'static str),
+    Failed(DaemonError),
+}
+
+impl From<DaemonError> for ShutdownCleanupError {
+    fn from(error: DaemonError) -> Self {
+        Self::Failed(error)
+    }
+}
+
+struct ShutdownResources {
+    state: Option<Arc<DaemonRuntimeState>>,
+    store: Option<Arc<UnleashStore>>,
+    lock: Option<AuthorityLock>,
+    accept: Option<tokio::task::JoinHandle<()>>,
+}
+
+impl ShutdownResources {
+    async fn take_exclusive_store(
+        &mut self,
+        timeout: Option<Duration>,
+    ) -> Result<Option<UnleashStore>, ShutdownCleanupError> {
+        let deadline = timeout.map(|duration| tokio::time::Instant::now() + duration);
+        loop {
+            if let Some(state) = self.state.take() {
+                match Arc::try_unwrap(state) {
+                    Ok(state) => drop(state),
+                    Err(state) => self.state = Some(state),
+                }
+            }
+            if self.state.is_none() {
+                let Some(store) = self.store.take() else {
+                    return Ok(None);
+                };
+                match Arc::try_unwrap(store) {
+                    Ok(store) => return Ok(Some(store)),
+                    Err(store) => self.store = Some(store),
+                }
+            }
+            if deadline.is_some_and(|end| tokio::time::Instant::now() >= end) {
+                return Err(ShutdownCleanupError::Pending(
+                    "Propriétaires du Store encore actifs ; verrou d'autorité conservé",
+                ));
+            }
+            // The timeout only bounds waiting. Exclusive ownership, rather than
+            // elapsed time or a cancelled async caller, proves the Store is idle.
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
+    async fn finish(
+        &mut self,
+        connections: &Mutex<Vec<tokio::task::JoinHandle<()>>>,
+        socket_path: &Path,
+        rendezvous_dir: &Path,
+        proof: &AdminProof,
+        timeout: Option<Duration>,
+    ) -> Result<(), ShutdownCleanupError> {
+        if let Some(state) = &self.state {
+            state.set_mode(DaemonMode::Stopped);
+            state.subscriptions.close_all();
+            state.stop_accepting();
+        }
+        if let Some(accept) = self.accept.as_mut() {
+            let result = if let Some(timeout) = timeout {
+                tokio::time::timeout(timeout, &mut *accept)
+                    .await
+                    .map_err(|_| {
+                        ShutdownCleanupError::Pending(
+                            "Acceptation IPC encore active ; verrou d'autorité conservé",
+                        )
+                    })?
+            } else {
+                accept.await
+            };
+            self.accept.take();
+            result.map_err(|error| {
+                ShutdownCleanupError::Failed(DaemonError::InvalidConfiguration(format!(
+                    "Arrêt acceptation IPC : {error}"
+                )))
+            })?;
+        }
+        if let Some(timeout) = timeout {
+            drain_active_connections(connections, timeout).await?;
+        } else {
+            drain_connection_tasks(connections, None).await?;
+        }
+        if let Some(store) = self.take_exclusive_store(timeout).await? {
+            // Never detach Store::shutdown, even if the request's wait expired.
+            tokio::task::spawn_blocking(move || store.shutdown())
+                .await
+                .map_err(|error| {
+                    DaemonError::InvalidConfiguration(format!(
+                        "Fermeture du Store interrompue : {error}",
+                    ))
+                })?
+                .map_err(DaemonError::Store)?;
+        }
+        let socket = socket_path.to_path_buf();
+        let directory = rendezvous_dir.to_path_buf();
+        let expected = proof.clone();
+        tokio::task::spawn_blocking(move || -> Result<(), DaemonError> {
+            match std::fs::remove_file(socket) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(DaemonError::Io(error)),
+            }
+            if let Some(value) = read_admin_credential(&directory)? {
+                if !AdminProof::from_hex(&value).is_some_and(|actual| actual.matches(&expected)) {
+                    return Err(DaemonError::InvalidConfiguration(String::from(
+                        "Credential local modifié ; verrou d'autorité conservé",
+                    )));
+                }
+                std::fs::remove_file(directory.join(ADMIN_PROOF_FILENAME))?;
+            }
+            Ok(())
+        })
+        .await
+        .map_err(|error| {
+            DaemonError::InvalidConfiguration(format!("Nettoyage d'autorité interrompu : {error}",))
+        })??;
+        if let Some(lock) = self.lock.take() {
+            tokio::task::spawn_blocking(move || lock.release())
+                .await
+                .map_err(|error| {
+                    DaemonError::InvalidConfiguration(format!(
+                        "Libération d'autorité interrompue : {error}",
+                    ))
+                })?
+                .map_err(DaemonError::Platform)?;
+        }
+        Ok(())
+    }
+}
+
 #[expect(
     clippy::too_many_lines,
     reason = "Drain, retries et libération ordonnée de l'autorité"
@@ -671,84 +808,99 @@ struct DrainCoordinatorParams {
 fn spawn_drain_coordinator(params: DrainCoordinatorParams) {
     tokio::spawn(async move {
         let mut stop_rx = params.stop_rx;
-        let mut state_opt = Some(params.state);
-        let mut store_opt = Some(params.store);
-        let mut lock_opt = Some(params.lock);
-        let mut accept_opt = Some(params.accept_handle);
+        let mut resources = ShutdownResources {
+            state: Some(params.state),
+            store: Some(params.store),
+            lock: Some(params.lock),
+            accept: Some(params.accept_handle),
+        };
         let mut recovery_opt = params.recovery_handle;
+        let mut stopped_report = None;
+        let mut cleanup_failure: Option<String> = None;
 
         while let Some(mut req) = stop_rx.recv().await {
-            let (Some(state), Some(store)) = (
-                state_opt.as_ref().map(Arc::clone),
-                store_opt.as_ref().map(Arc::clone),
-            ) else {
-                break;
-            };
-            state.mark_draining();
-            if let Some(recovery_handle) = recovery_opt.take() {
-                let _ = recovery_handle.await;
-            }
-            let effective_drain_timeout =
-                req.drain_timeout_override.unwrap_or(params.drain_timeout);
-            if tokio::time::timeout(
-                effective_drain_timeout,
-                state.broker_activity.close_and_wait(),
-            )
-            .await
-            .is_err()
-            {
+            if let Some(message) = &cleanup_failure {
                 if let Some(ack) = req.ack.take() {
-                    let _ = ack.send(Err(DaemonError::InvalidConfiguration(String::from(
-                        "Travaux broker encore actifs ; verrou d'autorité conservé",
-                    ))));
+                    let _ = ack.send(Err(DaemonError::InvalidConfiguration(message.clone())));
+                }
+                // A failed close/join must never become success on another call.
+                // Keep any remaining authority until the process itself ends.
+                continue;
+            }
+            if stopped_report.is_none() {
+                let (Some(state), Some(store)) = (
+                    resources.state.as_ref().map(Arc::clone),
+                    resources.store.as_ref().map(Arc::clone),
+                ) else {
+                    break;
+                };
+                state.mark_draining();
+                if let Some(recovery_handle) = recovery_opt.take()
+                    && let Err(error) = recovery_handle.await
+                {
+                    let message = format!("Tâche de reprise interrompue à l'arrêt : {error}");
+                    cleanup_failure = Some(message.clone());
+                    if let Some(ack) = req.ack.take() {
+                        let _ = ack.send(Err(DaemonError::InvalidConfiguration(message)));
+                    }
                     continue;
                 }
-                // Sans demandeur vivant, poursuivre l'arrêt dès que le travail
-                // se termine tout en conservant le verrou entre-temps.
-                state.broker_activity.close_and_wait().await;
-            }
-            let res = execute_drain_and_stop(
-                &state,
-                &store,
-                &params.rdv_dir,
-                &params.controller,
-                effective_drain_timeout,
-                &req.reason,
-            )
-            .await;
-
-            match res {
-                Ok(report) => {
-                    state.set_mode(DaemonMode::Stopped);
-                    state.subscriptions.close_all();
-                    state.stop_accepting();
-                    drop(store);
-                    drop(state);
-
-                    if let Some(accept_handle) = accept_opt.take() {
-                        let _ =
-                            tokio::time::timeout(Duration::from_millis(250), accept_handle).await;
+                let effective_drain_timeout =
+                    req.drain_timeout_override.unwrap_or(params.drain_timeout);
+                if tokio::time::timeout(
+                    effective_drain_timeout,
+                    state.broker_activity.close_and_wait(),
+                )
+                .await
+                .is_err()
+                {
+                    if let Some(ack) = req.ack.take() {
+                        let _ = ack.send(Err(DaemonError::InvalidConfiguration(String::from(
+                            "Travaux broker encore actifs ; verrou d'autorité conservé",
+                        ))));
+                        continue;
                     }
-
-                    drain_active_connections(&params.active_conns, effective_drain_timeout).await;
-
-                    // Libérer socket + state + UnleashStore + verrou OS flock hors thread Tokio runtime
-                    // (StoreWriterHandle::drop appelle blocking_recv()).
-                    let sock_drop = params.socket_path.clone();
-                    let proof_dir = params.rdv_dir.clone();
-                    let admin_proof = params.admin_proof.clone();
-                    let state_drop = state_opt.take();
-                    let store_drop = store_opt.take();
-                    let lock_drop = lock_opt.take();
-                    let _ = tokio::task::spawn_blocking(move || {
-                        let _ = std::fs::remove_file(&sock_drop);
-                        remove_owned_admin_proof(&proof_dir, &admin_proof);
-                        drop(state_drop);
-                        drop(store_drop);
-                        drop(lock_drop);
-                    })
-                    .await;
-
+                    // Sans demandeur vivant, poursuivre l'arrêt dès que le travail
+                    // se termine tout en conservant le verrou entre-temps.
+                    state.broker_activity.close_and_wait().await;
+                }
+                let result = execute_drain_and_stop(
+                    &state,
+                    &store,
+                    &params.rdv_dir,
+                    &params.controller,
+                    effective_drain_timeout,
+                    &req.reason,
+                )
+                .await;
+                match result {
+                    Ok(report) => stopped_report = Some(report),
+                    Err(error) => {
+                        if let Some(ack) = req.ack.take() {
+                            let _ = ack.send(Err(error));
+                        }
+                        continue;
+                    }
+                }
+            }
+            let timeout = req
+                .ack
+                .as_ref()
+                .map(|_| req.drain_timeout_override.unwrap_or(params.drain_timeout));
+            match resources
+                .finish(
+                    &params.active_conns,
+                    &params.socket_path,
+                    &params.rdv_dir,
+                    &params.admin_proof,
+                    timeout,
+                )
+                .await
+            {
+                Ok(()) => {
+                    let Some(report) = stopped_report.clone() else {
+                        break;
+                    };
                     let _ = params.stopped_tx.send(Some(report.clone()));
                     if let Some(ack) = req.ack {
                         let _ = ack.send(Ok(report.clone()));
@@ -759,23 +911,36 @@ fn spawn_drain_coordinator(params: DrainCoordinatorParams) {
                             let _ = ack.send(Ok(report.clone()));
                         }
                     }
+                    break;
                 }
-                Err(err) => {
+                Err(ShutdownCleanupError::Pending(message)) => {
                     if let Some(ack) = req.ack {
-                        let _ = ack.send(Err(err));
+                        let _ = ack.send(Err(DaemonError::InvalidConfiguration(message.into())));
+                    }
+                }
+                Err(ShutdownCleanupError::Failed(error)) => {
+                    cleanup_failure = Some(error.to_string());
+                    tracing::error!(error = %error, "Arrêt incomplet ; autorité non acquittée");
+                    if let Some(ack) = req.ack {
+                        let _ = ack.send(Err(error));
                     }
                 }
             }
         }
+        if cleanup_failure.is_some() {
+            // A close/join failure is not proof that a detached mutator ended.
+            // Retain the remaining authority even after its requesters disappear.
+            std::future::pending::<()>().await;
+        }
         if let Some(recovery_handle) = recovery_opt.take() {
             recovery_handle.abort();
         }
-        if let Some(state) = &state_opt {
+        if let Some(state) = &resources.state {
             state.broker_activity.close_and_wait().await;
         }
-        let state_drop = state_opt.take();
-        let store_drop = store_opt.take();
-        let lock_drop = lock_opt.take();
+        let state_drop = resources.state.take();
+        let store_drop = resources.store.take();
+        let lock_drop = resources.lock.take();
         if state_drop.is_some() || store_drop.is_some() || lock_drop.is_some() {
             let _ = tokio::task::spawn_blocking(move || {
                 drop(state_drop);
@@ -790,17 +955,50 @@ fn spawn_drain_coordinator(params: DrainCoordinatorParams) {
 async fn drain_active_connections(
     active_conns: &Mutex<Vec<tokio::task::JoinHandle<()>>>,
     timeout: Duration,
-) {
-    let tasks: Vec<tokio::task::JoinHandle<()>> = {
+) -> Result<(), ShutdownCleanupError> {
+    drain_connection_tasks(active_conns, Some(timeout)).await
+}
+
+async fn drain_connection_tasks(
+    active_conns: &Mutex<Vec<tokio::task::JoinHandle<()>>>,
+    timeout: Option<Duration>,
+) -> Result<(), ShutdownCleanupError> {
+    let tasks = {
         let mut guard = active_conns.lock().unwrap_or_else(PoisonError::into_inner);
         std::mem::take(&mut *guard)
     };
-    let wait_all = async {
-        for task in tasks {
-            let _ = task.await;
+    let deadline = timeout.map(|duration| tokio::time::Instant::now() + duration);
+    let mut pending = std::collections::VecDeque::from(tasks);
+    while let Some(mut task) = pending.pop_front() {
+        let result = if let Some(deadline) = deadline {
+            if let Ok(result) = tokio::time::timeout_at(deadline, &mut task).await {
+                result
+            } else {
+                pending.push_front(task);
+                active_conns
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .extend(pending);
+                return Err(ShutdownCleanupError::Pending(
+                    "Connexions IPC encore actives ; verrou d'autorité conservé",
+                ));
+            }
+        } else {
+            task.await
+        };
+        if let Err(error) = result {
+            active_conns
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .extend(pending);
+            return Err(ShutdownCleanupError::Failed(
+                DaemonError::InvalidConfiguration(format!(
+                    "Terminaison d'une connexion IPC interrompue : {error}"
+                )),
+            ));
         }
-    };
-    let _ = tokio::time::timeout(timeout.min(Duration::from_secs(2)), wait_all).await;
+    }
+    Ok(())
 }
 
 async fn execute_drain_and_stop(
@@ -1048,5 +1246,126 @@ mod proof_cleanup_tests {
         assert!(result.is_err());
         assert_eq!(std::fs::read(&path).unwrap(), replacement.as_bytes());
         std::fs::remove_file(path).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod shutdown_ownership_tests {
+    use super::*;
+    use unleash_testkit::local_test_dir;
+
+    // REQ-CORE-001 / REQ-CORE-007: a connection timeout must keep ownership
+    // of an admitted blocking writer until its real completion.
+    #[tokio::test]
+    async fn timed_out_connection_keeps_its_blocking_store_mutator_tracked() {
+        let directory = local_test_dir("shutdown-blocking-owner").unwrap();
+        let root = directory.path().to_path_buf();
+        let store = Arc::new(
+            tokio::task::spawn_blocking(move || UnleashStore::open(StoreConfig::new(root)))
+                .await
+                .unwrap()
+                .unwrap(),
+        );
+        let writer = Arc::clone(&store);
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(async move {
+            tokio::task::spawn_blocking(move || {
+                let _ = started_tx.send(());
+                release_rx.recv().unwrap();
+                writer
+                    .register_principal("late-mutator", "system", "fixture:late-mutator")
+                    .unwrap();
+                drop(writer);
+                let _ = done_tx.send(());
+            })
+            .await
+            .unwrap();
+        });
+        let connections = Mutex::new(vec![task]);
+        started_rx.await.unwrap();
+        let _ = drain_active_connections(&connections, Duration::ZERO).await;
+        let retained = connections
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .len();
+        let owners = Arc::strong_count(&store);
+        release_tx.send(()).unwrap();
+        done_rx.await.unwrap();
+        let _ = drain_active_connections(&connections, Duration::from_secs(5)).await;
+        tokio::task::spawn_blocking(move || drop(store))
+            .await
+            .unwrap();
+        assert!(owners > 1, "the blocking mutator must still own the Store");
+        assert_eq!(retained, 1, "timeout detached an admitted connection");
+    }
+
+    #[tokio::test]
+    async fn shutdown_keeps_authority_until_a_detached_store_owner_really_finishes() {
+        let directory = local_test_dir("shutdown-retained-store").unwrap();
+        let data = directory.path().join("data");
+        let rendezvous = directory.path().join("rdv");
+        let configuration = DaemonConfig {
+            data_root: Some(data.clone()),
+            rendezvous_dir: Some(rendezvous.clone()),
+            shutdown_drain_timeout: Duration::from_millis(10),
+            ..DaemonConfig::default()
+        };
+        let DaemonStartOutcome::Started(handle) =
+            UnleashDaemon::start(configuration.clone()).await.unwrap()
+        else {
+            panic!("a new fixture authority is required");
+        };
+        let retained_store = Arc::clone(&handle.test_state.upgrade().unwrap().store);
+        let error = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                match handle.shutdown_graceful("retained Store owner").await {
+                    Err(DaemonError::InvalidConfiguration(message))
+                        if message.starts_with("Propriétaires du Store encore actifs") =>
+                    {
+                        break;
+                    }
+                    Err(DaemonError::InvalidConfiguration(_)) => tokio::task::yield_now().await,
+                    result => panic!("shutdown cannot finish with a retained Store: {result:?}"),
+                }
+            }
+        })
+        .await;
+        assert!(error.is_ok(), "shutdown never reported the retained owner");
+        assert!(matches!(
+            AuthorityLock::acquire_in(&rendezvous, &data),
+            Err(PlatformError::DaemonAlreadyRunning { .. })
+        ));
+        tokio::task::spawn_blocking(move || drop(retained_store))
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if handle.shutdown_graceful("owner finished").await.is_ok() {
+                    break;
+                }
+            }
+        })
+        .await
+        .unwrap();
+        let DaemonStartOutcome::Started(restarted) =
+            UnleashDaemon::start(configuration).await.unwrap()
+        else {
+            panic!("authority must be immediately reusable after shutdown Ok");
+        };
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if restarted
+                    .shutdown_graceful("fixture complete")
+                    .await
+                    .is_ok()
+                {
+                    break;
+                }
+            }
+        })
+        .await
+        .unwrap();
     }
 }
