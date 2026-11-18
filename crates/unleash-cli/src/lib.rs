@@ -22,11 +22,13 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use clap::{Parser, Subcommand};
 use serde_json::{Map, Value, json};
 use thiserror::Error;
-use unleash_client::{ClientConfig, ClientError, EventStreamReader, UnleashClient};
+use unleash_client::{
+    ClientConfig, ClientError, DiagnosticClient, EventStreamReader, UnleashClient,
+};
 use unleash_domain::{AuthorityGeneration, CommandId, ProjectId, RequestId, Revision, Sequence};
 use unleash_platform::{PlatformError, SOCKET_FILENAME, canonical_rendezvous_dir};
 use unleash_protocol::{
-    ClientKind, CommandEnvelope, ProtocolVersion, QueryEnvelope, SubscribeEventsFrame,
+    ClientKind, CommandEnvelope, ProtocolVersion, QueryEnvelope, ReasonCode, SubscribeEventsFrame,
     SubscribeEventsRequest,
 };
 use uuid::Uuid;
@@ -328,7 +330,22 @@ pub async fn run_cli(cli: &Cli) -> Result<Value, CliError> {
 
     let client_cfg = ClientConfig::new(socket_path, ClientKind::Cli, env!("CARGO_PKG_VERSION"))
         .with_timeouts(timeout, timeout);
-    let mut client = UnleashClient::connect(client_cfg).await?;
+    let mut client = match UnleashClient::connect(client_cfg.clone()).await {
+        Ok(client) => client,
+        Err(ClientError::Remote(error))
+            if error.reason_code == Some(ReasonCode::StorageCorrupt)
+                && matches!(&cli.command, Commands::Status | Commands::Recovery) =>
+        {
+            let mut diagnostic = DiagnosticClient::connect(client_cfg).await?;
+            let request_id = RequestId::from_uuid(next_uuid());
+            if matches!(&cli.command, Commands::Status) {
+                return Ok(diagnostic.status(request_id).await?.result);
+            }
+            let response = diagnostic.inspect_recovery(request_id).await?;
+            return Ok(json!({"watermark": response.watermark, "result": response.result}));
+        }
+        Err(error) => return Err(error.into()),
+    };
 
     match &cli.command {
         Commands::Status => {

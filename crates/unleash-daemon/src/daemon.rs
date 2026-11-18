@@ -42,24 +42,54 @@ use crate::subscriptions::SubscriptionHub;
 
 const PROBE_CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
 
-fn install_admin_proof(dir: &Path) -> Result<AdminProof, DaemonError> {
+pub(crate) fn install_admin_proof(dir: &Path) -> Result<AdminProof, DaemonError> {
+    install_admin_proof_with(dir, || Ok(()))
+}
+
+struct PendingAdminProof<'a> {
+    dir: &'a Path,
+    proof: AdminProof,
+    armed: bool,
+}
+
+impl Drop for PendingAdminProof<'_> {
+    fn drop(&mut self) {
+        if self.armed {
+            remove_owned_admin_proof(self.dir, &self.proof);
+        }
+    }
+}
+
+fn install_admin_proof_with(
+    dir: &Path,
+    after_publish: impl FnOnce() -> Result<(), DaemonError>,
+) -> Result<AdminProof, DaemonError> {
     validate_rendezvous_dir(dir)?;
     let mut bytes = zeroize::Zeroizing::new([0_u8; 32]);
     getrandom::fill(&mut *bytes).map_err(|_| {
         DaemonError::InvalidConfiguration(String::from("Génération du credential impossible"))
     })?;
-    let proof = AdminProof::from_bytes(*bytes);
-    write_private_file_atomic(&dir.join(ADMIN_PROOF_FILENAME), proof.to_hex().as_bytes())?;
+    let mut pending = PendingAdminProof {
+        dir,
+        proof: AdminProof::from_bytes(*bytes),
+        armed: true,
+    };
+    write_private_file_atomic(
+        &dir.join(ADMIN_PROOF_FILENAME),
+        pending.proof.to_hex().as_bytes(),
+    )?;
+    after_publish()?;
     let verified = read_admin_credential(dir)?.and_then(|value| AdminProof::from_hex(&value));
-    if !verified.is_some_and(|candidate| candidate.matches(&proof)) {
+    if !verified.is_some_and(|candidate| candidate.matches(&pending.proof)) {
         return Err(DaemonError::InvalidConfiguration(String::from(
             "Credential local invalide après création",
         )));
     }
-    Ok(proof)
+    pending.armed = false;
+    Ok(pending.proof.clone())
 }
 
-fn remove_owned_admin_proof(dir: &Path, expected: &AdminProof) {
+pub(crate) fn remove_owned_admin_proof(dir: &Path, expected: &AdminProof) {
     match read_admin_credential(dir) {
         Ok(None) => {}
         Ok(Some(value)) if AdminProof::from_hex(&value).is_some_and(|p| p.matches(expected)) => {
@@ -77,6 +107,8 @@ fn remove_owned_admin_proof(dir: &Path, expected: &AdminProof) {
 pub enum DaemonStartOutcome {
     /// Nouvelle instance démarrée et prête (ou en cours de reprise si `RecoveryGate` est actif).
     Started(DaemonHandle),
+    /// Autorité diagnostique en lecture seule lorsque le store est corrompu.
+    Diagnostic(crate::diagnostic::DiagnosticHandle),
     /// Une instance active sur la même racine a répondu au handshake `Hello` (`attach_if_running=true`).
     AlreadyRunning {
         /// Réponse `HelloResponse` de l'instance rejointe.
@@ -256,7 +288,7 @@ fn resolve_paths_and_acquire_lock_blocking(
     Ok((platform_paths, data_root, rdv_dir, lock_res))
 }
 
-fn prepare_socket_listener_blocking(
+pub(crate) fn prepare_socket_listener_blocking(
     lock: AuthorityLock,
 ) -> Result<(AuthorityLock, std::os::unix::net::UnixListener, PathBuf), DaemonError> {
     lock.remove_stale_socket()?;
@@ -354,13 +386,42 @@ impl UnleashDaemon {
         store_cfg.consumer_version = config.consumer_version.clone();
         apply_store_overrides(&mut store_cfg, &config);
 
-        let store_init_res = tokio::task::spawn_blocking(move || -> Result<_, DaemonError> {
+        let diagnostic_config = store_cfg.clone();
+        let store_open_res = tokio::task::spawn_blocking(move || -> Result<_, DaemonError> {
             let boot_id = current_boot_identity()?.as_str().to_owned();
             let uid = effective_uid();
             store_cfg.owner_uid = uid;
             store_cfg.boot_identity.clone_from(&boot_id);
+            let opened = UnleashStore::open_classified(store_cfg);
+            Ok((opened, boot_id, uid))
+        })
+        .await
+        .map_err(|e| DaemonError::InvalidConfiguration(format!("Join error store open: {e}")))?;
+
+        let (opened, boot_id, uid) = store_open_res?;
+        let opened = match opened {
+            Ok(opened) => opened,
+            Err(unleash_store::StoreOpenFailure {
+                stage: unleash_store::StoreOpenStage::ReadOnlyPreflight,
+                error: unleash_store::StoreError::StorageCorrupt(_),
+            }) => {
+                let handle = crate::diagnostic::start(
+                    lock,
+                    rdv_dir,
+                    diagnostic_config,
+                    Arc::clone(&config.auth_verifier),
+                )
+                .await?;
+                return Ok(DaemonStartOutcome::Diagnostic(handle));
+            }
+            Err(failure) => {
+                let _ = tokio::task::spawn_blocking(move || drop(lock)).await;
+                return Err(DaemonError::Store(failure.error));
+            }
+        };
+
+        let store_init_res = tokio::task::spawn_blocking(move || -> Result<_, DaemonError> {
             let local_principal = format!("uid:{uid}");
-            let opened = UnleashStore::open(store_cfg)?;
             opened.register_principal(&local_principal, "user", &local_principal)?;
             let new_inst = DaemonInstanceId::from_uuid(opened.config().id_generator.new_uuid());
             let (row, prev_mode, started_ev) =
@@ -948,4 +1009,44 @@ async fn probe_live_daemon_hello(socket_path: &Path) -> Result<HelloResponse, Da
     })?;
     let _ = stream.shutdown().await;
     from_json_str_strict::<HelloResponse>(text).map_err(DaemonError::from)
+}
+
+#[cfg(test)]
+mod proof_cleanup_tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+    use unleash_testkit::local_test_dir;
+
+    #[test]
+    fn failed_after_proof_publication_cleans_owned_credential_before_unlock() {
+        let data = local_test_dir("m1-proof-cleanup-data").unwrap();
+        let rdv = local_test_dir("m1-proof-cleanup-rdv").unwrap();
+        std::fs::set_permissions(rdv.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let lock = AuthorityLock::acquire_in(rdv.path(), data.path()).unwrap();
+        let result = install_admin_proof_with(rdv.path(), || {
+            Err(DaemonError::InvalidConfiguration("injected".into()))
+        });
+        assert!(result.is_err());
+        assert!(!rdv.path().join(ADMIN_PROOF_FILENAME).exists());
+        drop(lock);
+        assert!(AuthorityLock::acquire_in(rdv.path(), data.path()).is_ok());
+    }
+
+    #[test]
+    fn failed_install_preserves_credential_replaced_by_another_value() {
+        let data = local_test_dir("m1-proof-replaced-data").unwrap();
+        let rdv = local_test_dir("m1-proof-replaced-rdv").unwrap();
+        std::fs::set_permissions(rdv.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let _lock = AuthorityLock::acquire_in(rdv.path(), data.path()).unwrap();
+        let path = rdv.path().join(ADMIN_PROOF_FILENAME);
+        let replacement = "1".repeat(64);
+        let result = install_admin_proof_with(rdv.path(), || {
+            write_private_file_atomic(&path, replacement.as_bytes())?;
+            Err(DaemonError::InvalidConfiguration("injected".into()))
+        });
+        assert!(result.is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), replacement.as_bytes());
+        std::fs::remove_file(path).unwrap();
+    }
 }

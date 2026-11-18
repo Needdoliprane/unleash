@@ -29,10 +29,11 @@ pub use canonical::{
 pub use codec::{FrameBuffer, MAX_FRAME_BYTES, read_frame, write_frame};
 pub use envelopes::{
     AdminProof, ClientKind, ClientUploadSegment, CommandEnvelope, CommandReceipt,
-    CommandReceiptInspection, EventCausation, EventCausationKind, EventCursor, EventEnvelope,
-    HelloRequest, HelloResponse, LineageStatus, MAX_CLIENT_UPLOAD_BYTES, PROTOCOL_VERSION_V1,
-    PROTOCOL_VERSION_V2, ProtocolVersion, QueryEnvelope, QueryResponse, ReceiptState, Sensitivity,
-    SubscribeEventsFrame, SubscribeEventsRequest,
+    CommandReceiptInspection, DiagnosticHelloResponse, DiagnosticMode, DiagnosticReason,
+    EventCausation, EventCausationKind, EventCursor, EventEnvelope, HelloRequest, HelloResponse,
+    LineageStatus, MAX_CLIENT_UPLOAD_BYTES, PROTOCOL_VERSION_V1, PROTOCOL_VERSION_V2,
+    ProtocolVersion, QueryEnvelope, QueryResponse, READ_ONLY_RECOVERY_CAPABILITY, ReceiptState,
+    Sensitivity, SubscribeEventsFrame, SubscribeEventsRequest,
 };
 pub use errors::{
     ErrorCode, IpcError, ProtocolError, ReasonCode, RetryClass, UnknownReasonCodeError,

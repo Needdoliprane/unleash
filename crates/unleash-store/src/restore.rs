@@ -17,7 +17,8 @@ use crate::backup::validate_backup_dir;
 use crate::config::{StoreConfig, StoreCutpoint};
 use crate::error::StoreError;
 use crate::fs_sync::{
-    set_dir_permissions_0700, set_path_permissions, sync_parent_dir, write_atomic_durable,
+    open_private_file, read_private_file_bounded, set_dir_permissions_0700, set_path_permissions,
+    sync_parent_dir, write_atomic_durable,
 };
 use crate::migrations::{CURRENT_SCHEMA_VERSION, apply_pending_migrations_for_restore};
 use crate::objects::{object_relative_path, safe_artifact_path};
@@ -317,6 +318,7 @@ pub struct CapsuleTombstoneDelta {
 
 /// Entrée historique append-only consignée dans le manifeste privé de maintenance `0600`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct MaintenanceManifestEntry {
     /// Identifiant de restauration.
     pub restore_id: RestoreId,
@@ -380,8 +382,12 @@ pub struct RestoreCapsule {
     pub sealed_at_ms: TimestampMs,
 }
 
+/// Limite réservant trois quarts de la trame IPC au reste du rapport de récupération.
+pub const MAX_MAINTENANCE_MANIFEST_BYTES: usize = unleash_protocol::MAX_FRAME_BYTES / 4;
+
 /// Manifeste privé de maintenance hors base (`0600`) utilisé quand la base source est illisible/corrompue.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct MaintenanceRestoreManifest {
     /// Identifiant de restauration.
     pub restore_id: RestoreId,
@@ -494,16 +500,59 @@ fn write_maintenance_manifest(
     Ok(())
 }
 
-/// Lit le manifeste privé de maintenance (`0600`) lorsqu'il existe (`InspectRecovery`).
+/// Lit l'historique interne complet depuis un fd qualifié, borné par son étendue fstat.
 pub(crate) fn read_maintenance_manifest(
     maintenance_dir: &Path,
 ) -> Result<Option<MaintenanceRestoreManifest>, StoreError> {
+    use std::io::Read;
     let path = maintenance_dir.join("restore-manifest.json");
-    if !path.exists() {
+    let Some(file) = open_private_file(&path, maintenance_owner_uid())? else {
         return Ok(None);
+    };
+    let extent = file.metadata()?.len();
+    let limit = extent.checked_add(1).ok_or_else(|| {
+        StoreError::EvidenceUnavailable("étendue du manifeste maintenance invalide".to_owned())
+    })?;
+    let mut reader = std::io::BufReader::new(file.take(limit));
+    let parsed = serde_json::from_reader(&mut reader).map_err(|_| {
+        StoreError::EvidenceUnavailable(
+            "manifeste maintenance non conforme au contrat fermé".to_owned(),
+        )
+    })?;
+    if reader.into_inner().limit() != 1 {
+        return Err(StoreError::EvidenceUnavailable(
+            "étendue du manifeste maintenance modifiée pendant lecture".to_owned(),
+        ));
     }
-    let bytes = fs::read(&path)?;
-    let parsed = serde_json::from_slice(&bytes)?;
+    Ok(Some(parsed))
+}
+
+fn maintenance_owner_uid() -> u32 {
+    #[cfg(unix)]
+    {
+        rustix::process::geteuid().as_raw()
+    }
+    #[cfg(not(unix))]
+    {
+        0
+    }
+}
+
+/// Projection diagnostic bornée ; le plafond IPC ne s'applique pas à la restauration interne.
+pub(crate) fn read_maintenance_manifest_for_diagnostics(
+    maintenance_dir: &Path,
+) -> Result<Option<MaintenanceRestoreManifest>, StoreError> {
+    let path = maintenance_dir.join("restore-manifest.json");
+    let owner_uid = maintenance_owner_uid();
+    let Some(bytes) = read_private_file_bounded(&path, owner_uid, MAX_MAINTENANCE_MANIFEST_BYTES)?
+    else {
+        return Ok(None);
+    };
+    let parsed = serde_json::from_slice(&bytes).map_err(|_| {
+        StoreError::EvidenceUnavailable(
+            "manifeste maintenance non conforme au contrat fermé".to_owned(),
+        )
+    })?;
     Ok(Some(parsed))
 }
 
@@ -2795,4 +2844,120 @@ pub(crate) fn execute_restore_backup(
         frozen_scopes: frozen_scopes_vec,
         capsule_object_hash: capsule_hash,
     })
+}
+
+#[cfg(test)]
+mod historical_manifest_tests {
+    use super::*;
+    use unleash_domain::IdGeneratorPort;
+
+    #[test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "Writer historique, lecture complète, projection bornée et vraie restauration du journal"
+    )]
+    fn large_private_history_remains_restorable_and_diagnostic_stays_bounded() {
+        let source = unleash_testkit::local_test_dir("maintenance-history-source").unwrap();
+        let target = unleash_testkit::local_test_dir("maintenance-history-target").unwrap();
+        let ids = std::sync::Arc::new(unleash_testkit::DeterministicIdGenerator::new(0xF018_1411));
+        let mut source_config = StoreConfig::new(source.path());
+        source_config.id_generator = ids.clone();
+        let source_store = crate::UnleashStore::open(source_config.clone()).unwrap();
+        let source_authority = source_store.active_authority_generation().unwrap();
+        let backup_dir = source.path().join("portable-history");
+        let backup = source_store
+            .prepare_backup(crate::PrepareBackupRequest {
+                destination_dir: backup_dir.clone(),
+                retention_tier: crate::BackupRetentionTier::Manual,
+                coverage: "db_and_objects".to_owned(),
+            })
+            .unwrap();
+        let mut target_config = StoreConfig::new(target.path());
+        target_config.id_generator = ids.clone();
+        let old_reason = "x".repeat(MAX_MAINTENANCE_MANIFEST_BYTES + 1);
+        let historical = MaintenanceRestoreManifest {
+            restore_id: RestoreId::from_uuid(ids.new_uuid()),
+            command_receipt_id: ReceiptId::from_uuid(ids.new_uuid()),
+            actor_id: "user:fixture".to_owned(),
+            command_id: ids.new_command_id(),
+            command_digest: Sha256Digest::from_bytes(b"historical restore"),
+            backup_id: backup.backup_id,
+            source_authority_generation: source_authority,
+            state: RestoreRequestState::Blocked,
+            blocked_reason: Some(old_reason.clone()),
+            updated_at_ms: TimestampMs::new(1),
+            history: vec![],
+        };
+        write_maintenance_manifest(&target_config.maintenance_dir, &historical).unwrap();
+        let path = target_config.maintenance_dir.join("restore-manifest.json");
+        let before = fs::read(&path).unwrap();
+        assert!(before.len() > MAX_MAINTENANCE_MANIFEST_BYTES);
+        let read = read_maintenance_manifest(&target_config.maintenance_dir)
+            .unwrap()
+            .unwrap();
+        assert_eq!(read.restore_id, historical.restore_id);
+        assert_eq!(
+            read.blocked_reason.as_ref().map(String::len),
+            Some(old_reason.len())
+        );
+        assert!(
+            crate::UnleashStore::read_maintenance_restore_manifest(&target_config.maintenance_dir)
+                .unwrap_err()
+                .to_string()
+                .contains("limite")
+        );
+        assert_eq!(fs::read(&path).unwrap(), before);
+        let request = RestoreBackupRequest {
+            backup_dir,
+            target_data_root: target.path().to_owned(),
+            command_id: ids.new_command_id(),
+            actor_id: "user:fixture".to_owned(),
+            command_digest: Sha256Digest::from_bytes(b"next restore"),
+            source_authority_generation: source_authority,
+            source_db_unreadable: false,
+            source_db_path: Some(source_config.db_path.clone()),
+            source_artifacts_dir: Some(source_config.artifacts_dir.clone()),
+            neutralizer: std::sync::Arc::new(EmptyExecutorNeutralizer),
+        };
+        let result = execute_restore_backup(&request, &target_config).unwrap();
+        let restored = crate::UnleashStore::open(target_config.clone()).unwrap();
+        let capsule: RestoreCapsule = serde_json::from_slice(
+            &restored
+                .read_verified_object_bytes(result.capsule_object_hash)
+                .unwrap(),
+        )
+        .unwrap();
+        let retained = capsule
+            .manifest_entries
+            .iter()
+            .find(|entry| entry.restore_id == historical.restore_id)
+            .unwrap();
+        assert_eq!(retained.command_id, historical.command_id);
+        assert_eq!(
+            retained
+                .blocked_reason
+                .as_ref()
+                .map(|r| Sha256Digest::from_bytes(r.as_bytes())),
+            Some(Sha256Digest::from_bytes(old_reason.as_bytes()))
+        );
+        let journal =
+            fs::read_to_string(target_config.maintenance_dir.join("restore-manifest.jsonl"))
+                .unwrap();
+        let entries: Vec<MaintenanceManifestEntry> = journal
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert!(
+            entries
+                .iter()
+                .any(|entry| entry.restore_id == historical.restore_id
+                    && entry.command_digest == historical.command_digest)
+        );
+        assert!(
+            crate::UnleashStore::read_maintenance_restore_manifest(&target_config.maintenance_dir)
+                .unwrap_err()
+                .to_string()
+                .contains("limite")
+        );
+    }
 }

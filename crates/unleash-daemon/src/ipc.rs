@@ -2718,7 +2718,7 @@ pub(crate) async fn write_json_frame_timeout<T: Serialize + Sync>(
     }
 }
 
-async fn read_raw_frame_timeout(
+pub(crate) async fn read_raw_frame_timeout(
     stream: &mut UnixStream,
     max_bytes: usize,
     timeout: Duration,

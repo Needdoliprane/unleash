@@ -471,6 +471,41 @@ pub struct HelloResponse {
     pub capabilities: Vec<String>,
 }
 
+/// Capability offered by clients which understand a separate offline diagnostic handshake.
+pub const READ_ONLY_RECOVERY_CAPABILITY: &str = "read_only_recovery_v1";
+
+/// Only mode served when durable identity cannot be read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum DiagnosticMode {
+    /// Read-only recovery without a fabricated authority or event stream.
+    ReadOnlyRecovery,
+}
+
+/// Cause established before entering the diagnostic service.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum DiagnosticReason {
+    /// Opening the existing store reported actual corruption.
+    StorageCorrupt,
+}
+
+/// Diagnostic handshake, intentionally distinct from `HelloResponse`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(deny_unknown_fields)]
+pub struct DiagnosticHelloResponse {
+    /// Protocol version.
+    pub protocol_version: ProtocolVersion,
+    /// Bounded offline mode.
+    pub mode: DiagnosticMode,
+    /// Verified reason for this diagnostic.
+    pub reason_code: DiagnosticReason,
+    /// Maximum frame size.
+    pub max_frame_bytes: u32,
+    /// Operations granted by the authenticated session.
+    pub capabilities: Vec<String>,
+}
+
 /// Demande d'abonnement au flux d'événements (`ipc-subscribe-events.schema.json`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(deny_unknown_fields)]
