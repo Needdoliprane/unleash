@@ -229,6 +229,8 @@ Aucune clé d'unicité ne contient de NULL, car SQLite tient deux NULL pour dist
 
 ## Catalogue de modèles R7
 
+Les versions établies par `SetProviderProfile` portent la paire unique `(profile_id, profile_version)` dans `provider_profiles`, la référence du contenu canonique et son digest, la portée autorisée, le principal et le reçu de configuration. La clé technique `profile_version_ref` reste la référence des probes et des appels. Le writer résout la paire exacte et contrôle le lien entre les métadonnées et le contenu. Il attribue la nouvelle version et engage le reçu dans la même transaction. Les lignes historiques dépourvues de cette liaison restent accessibles selon leurs références existantes. Elles ne peuvent servir de versions configurées sans preuve de provenance et de contenu.
+
 | Table | Colonnes minimales | Contraintes |
 |---|---|---|
 | `model_catalog_snapshots` | `catalog_id`, `catalog_version`, `digest`, `source_kind`, `published_at_ms`, `valid_until_ms`, `imported_at_ms`, `content_ref` | UNIQUE `(catalog_id,catalog_version)` ; source_kind ovpt_release/user_import/user_declared ; contenu immuable référencé par objet ; import ou saisie seulement par SetProviderProfile, jamais par récupération réseau automatique (Q-14, [F012](../features/F012-model-api-router/technical-design.md)). |
