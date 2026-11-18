@@ -13,7 +13,7 @@
     "evidence/"
   ],
   "hash_algorithm": "sha256",
-  "source_tree_digest": "7abc23afcabba0e2798329d84b3fd4806edd30c4c95407bb9cbb143ef34ba74d",
+  "source_tree_digest": "f2055931a9c9cd49c1393f418181b8cf70d8e53d9806267a8b50db418206f4fe",
   "files": [
     {
       "path": "INDEX.md",
@@ -1529,8 +1529,8 @@
     },
     {
       "path": "features/F012-model-api-router/interfaces.md",
-      "sha256": "037a0828d4264def9835d1af7858a726320d85c208981965c28dc1cfca6078a4",
-      "bytes": 21056,
+      "sha256": "114c094dd45ff6a3df8681d7fdee108e45e6f6963ad84eb33c3c8aef90d0858d",
+      "bytes": 22904,
       "media_type": "text/markdown"
     },
     {
@@ -2057,8 +2057,8 @@
     },
     {
       "path": "schemas/ipc-command.schema.json",
-      "sha256": "800f109890b03a95a92465001843f992ac2df5260fda1139dccde36da3101d14",
-      "bytes": 4486,
+      "sha256": "f83b01a657ff90ad1932328585b54affe1532f57201c50d812be6fb20b09063e",
+      "bytes": 12575,
       "media_type": "application/json"
     },
     {
