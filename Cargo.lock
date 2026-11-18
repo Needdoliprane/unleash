@@ -5627,6 +5627,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "unleash-model-router"
+version = "0.1.0"
+dependencies = [
+ "jsonschema",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "unleash-platform"
 version = "0.1.0"
 dependencies = [
