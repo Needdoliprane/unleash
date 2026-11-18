@@ -226,7 +226,8 @@ pub fn authorize_query(
 ) -> Result<(), IpcError> {
     let required = match query.query_type.as_str() {
         "GetDaemonStatus" | "GetHealth" => Capability::QueryDaemonDiagnostic,
-        "GetStateSnapshot" | "GetCommandReceipt" => Capability::QueryState,
+        "GetStateSnapshot" | "GetCommandReceipt" | "ListProjects" | "GetProject"
+        | "ReadSettings" | "ReadPolicySummary" | "InspectRecovery" => Capability::QueryState,
         other => {
             return Err(IpcError::new(
                 ErrorCode::InvalidArgument,

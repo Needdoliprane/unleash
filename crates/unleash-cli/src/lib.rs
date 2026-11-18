@@ -107,6 +107,8 @@ pub enum Commands {
         #[command(subcommand)]
         action: ProjectCommand,
     },
+    /// Rapport de récupération durable.
+    Recovery,
     /// Pilotage des missions.
     Mission {
         /// Action sur les missions.
@@ -139,6 +141,13 @@ pub enum Commands {
 /// Sous-commandes `unleash project`.
 #[derive(Debug, Subcommand)]
 pub enum ProjectCommand {
+    /// Liste les projets autorisés avec leur watermark.
+    List,
+    /// Lit un projet autorisé avec son watermark.
+    Show {
+        /// Identifiant du projet.
+        project_id: Uuid,
+    },
     /// Crée un projet via `CreateProject`.
     Create {
         /// Nom du projet.
@@ -309,14 +318,41 @@ pub async fn run_cli(cli: &Cli) -> Result<Value, CliError> {
                 .await?;
             Ok(serde_json::to_value(inspection)?)
         }
-        Commands::Project {
-            action:
-                ProjectCommand::Create {
-                    name,
-                    project_id,
-                    weight,
-                    command_id,
-                },
+        Commands::Recovery => {
+            let resp = query_simple(&mut client, "InspectRecovery", None, Map::new()).await?;
+            Ok(json!({"watermark": resp.watermark, "result": resp.result}))
+        }
+        Commands::Project { action } => run_project_command(&mut client, action).await,
+        Commands::Mission { action } => run_mission_command(&mut client, action).await,
+        Commands::Daemon { action } => run_daemon_command(&mut client, action).await,
+        Commands::Tui { .. } => Ok(json!({ "status": "exited" })),
+    }
+}
+
+async fn run_project_command(
+    client: &mut UnleashClient,
+    action: &ProjectCommand,
+) -> Result<Value, CliError> {
+    match action {
+        ProjectCommand::List => {
+            let resp = query_simple(client, "ListProjects", None, Map::new()).await?;
+            Ok(json!({"watermark": resp.watermark, "result": resp.result}))
+        }
+        ProjectCommand::Show { project_id } => {
+            let resp = query_simple(
+                client,
+                "GetProject",
+                Some(ProjectId::from_uuid(*project_id)),
+                Map::new(),
+            )
+            .await?;
+            Ok(json!({"watermark": resp.watermark, "result": resp.result}))
+        }
+        ProjectCommand::Create {
+            name,
+            project_id,
+            weight,
+            command_id,
         } => {
             let pid = ProjectId::from_uuid(project_id.unwrap_or_else(next_uuid));
             let cmd_id = CommandId::from_uuid(command_id.unwrap_or_else(next_uuid));
@@ -338,9 +374,6 @@ pub async fn run_cli(cli: &Cli) -> Result<Value, CliError> {
             let receipt = client.send_command(&env).await?;
             Ok(serde_json::to_value(receipt)?)
         }
-        Commands::Mission { action } => run_mission_command(&mut client, action).await,
-        Commands::Daemon { action } => run_daemon_command(&mut client, action).await,
-        Commands::Tui { .. } => Ok(json!({ "status": "exited" })),
     }
 }
 

@@ -450,6 +450,8 @@ async fn dispatch_query(
         "GetHealth" => query_health(state, query.request_id).await,
         "GetStateSnapshot" => query_state_snapshot(state, session, query).await,
         "GetCommandReceipt" => query_command_receipt(state, session, query).await,
+        "ListProjects" | "GetProject" | "ReadSettings" | "ReadPolicySummary"
+        | "InspectRecovery" => query_m1_projection(state, session, query).await,
         other => Err(IpcError::new(
             ErrorCode::InvalidArgument,
             None,
@@ -457,6 +459,129 @@ async fn dispatch_query(
             RetryClass::Never,
         )),
     }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SettingsQueryPayload {
+    scope_kind: unleash_store::SettingsScopeKind,
+    scope_id: String,
+}
+
+fn projection_response<T: Serialize>(
+    projection: unleash_store::SnapshotProjection<T>,
+) -> Result<(Value, EventCursor), IpcError> {
+    let value = serde_json::to_value(projection.value)
+        .map_err(|_| internal_ipc_error("Sérialisation de projection impossible", None))?;
+    Ok((value, projection.cursor))
+}
+
+async fn query_m1_projection(
+    state: &Arc<DaemonRuntimeState>,
+    session: &AuthenticatedSession,
+    query: QueryEnvelope,
+) -> Result<QueryResponse, IpcError> {
+    let invalid = || {
+        IpcError::new(
+            ErrorCode::InvalidArgument,
+            None,
+            "Paramètres de projection invalides",
+            RetryClass::Never,
+        )
+    };
+    let denied = || {
+        IpcError::from_reason(
+            ReasonCode::AccessDenied,
+            "Projection hors du périmètre autorisé",
+        )
+    };
+    let name = query.query_type.clone();
+    let project_id = query.project_id;
+    let allowed = session.allowed_projects.clone();
+    let settings = if name == "ReadSettings" {
+        let parsed: SettingsQueryPayload =
+            serde_json::from_value(Value::Object(query.payload.clone())).map_err(|_| invalid())?;
+        if parsed.scope_id.trim().is_empty() {
+            return Err(invalid());
+        }
+        match parsed.scope_kind {
+            unleash_store::SettingsScopeKind::Project => {
+                if project_id.is_none_or(|p| p.to_string() != parsed.scope_id) {
+                    return Err(invalid());
+                }
+            }
+            _ => {
+                if project_id.is_some() {
+                    return Err(invalid());
+                }
+                if allowed.is_some() {
+                    return Err(denied());
+                }
+            }
+        }
+        Some(parsed)
+    } else {
+        if !query.payload.is_empty() {
+            return Err(invalid());
+        }
+        if name == "GetProject" && project_id.is_none() {
+            return Err(invalid());
+        }
+        if name == "InspectRecovery" && project_id.is_some() {
+            return Err(invalid());
+        }
+        // Ces rapports contiennent des données globales non filtrables par projet.
+        if allowed.is_some() && matches!(name.as_str(), "ReadPolicySummary" | "InspectRecovery") {
+            return Err(denied());
+        }
+        None
+    };
+    let store = Arc::clone(&state.store);
+    let (value, cursor) =
+        tokio::task::spawn_blocking(move || -> Result<(Value, EventCursor), IpcError> {
+            let map_error = |e: StoreError| store_error_to_ipc_error(&e, None);
+            match name.as_str() {
+                "ListProjects" => {
+                    let mut snapshot = store.list_projects_snapshot().map_err(map_error)?;
+                    snapshot.value.retain(|p| {
+                        project_id.is_none_or(|id| id == p.project_id)
+                            && allowed
+                                .as_ref()
+                                .is_none_or(|ids| ids.contains(&p.project_id))
+                    });
+                    projection_response(snapshot)
+                }
+                "GetProject" => projection_response(
+                    store
+                        .get_project_snapshot(project_id.ok_or_else(invalid)?)
+                        .map_err(map_error)?,
+                ),
+                "ReadSettings" => {
+                    let settings = settings.ok_or_else(invalid)?;
+                    projection_response(
+                        store
+                            .read_settings_snapshot(settings.scope_kind, &settings.scope_id)
+                            .map_err(map_error)?,
+                    )
+                }
+                "ReadPolicySummary" => projection_response(
+                    store
+                        .read_policy_summary_snapshot(project_id)
+                        .map_err(map_error)?,
+                ),
+                "InspectRecovery" => {
+                    projection_response(store.inspect_recovery_snapshot().map_err(map_error)?)
+                }
+                _ => Err(invalid()),
+            }
+        })
+        .await
+        .map_err(|_| internal_ipc_error("Lecture de projection interrompue", None))??;
+    Ok(QueryResponse {
+        request_id: query.request_id,
+        watermark: Some(cursor),
+        result: value,
+    })
 }
 
 async fn query_daemon_status(
