@@ -1,6 +1,37 @@
 //! Partial T-F012-004/005/011: synthetic Anthropic Messages fixtures.
 use crate::StreamError;
 use crate::anthropic::{AnthropicOutcome, AnthropicStream, AnthropicUsage, StopReason};
+
+// T-F012-011 / REQ-MODEL-011: a rejected event must not corrupt partial usage.
+#[test]
+fn t_f012_011_usage_snapshot_is_atomic_and_partial() -> Result<(), Box<dyn std::error::Error>> {
+    let fixture = include_str!("../fixtures/anthropic-messages-2026-11-18-text.sse")
+        .replace("\"input_tokens\":0", "\"input_tokens\":10")
+        .replace(",\"cache_read_input_tokens\":0", "");
+    let partial = fixture
+        .split("event: message_stop")
+        .next()
+        .ok_or(StreamError::InvalidEvent)?;
+    let mut stream = AnthropicStream::new(std::collections::BTreeMap::new())?;
+    assert_eq!(stream.observed_usage(), None);
+    stream.push(partial.as_bytes())?;
+    let expected = AnthropicUsage {
+        input: Some(10),
+        output: Some(3),
+        cache_read: None,
+        cache_creation: None,
+    };
+    assert_eq!(stream.observed_usage(), Some(expected.clone()));
+    let invalid = b"event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{},\"usage\":{\"input_tokens\":20,\"output_tokens\":2}}\n\n";
+    assert_eq!(stream.push(invalid), Err(StreamError::InvalidEvent));
+    assert_eq!(stream.observed_usage(), Some(expected.clone()));
+    assert_eq!(stream.finish(), Err(StreamError::InvalidEvent));
+    let mut interrupted = AnthropicStream::new(std::collections::BTreeMap::new())?;
+    interrupted.push(partial.as_bytes())?;
+    assert_eq!(interrupted.finish(), Err(StreamError::Interrupted));
+    assert_eq!(interrupted.observed_usage(), Some(expected));
+    Ok(())
+}
 use serde_json::json;
 
 #[test]

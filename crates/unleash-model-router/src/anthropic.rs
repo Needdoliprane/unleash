@@ -98,10 +98,13 @@ impl AnthropicUsage {
             }
             Ok(())
         }
-        cumulative(&mut self.input, u.input)?;
-        cumulative(&mut self.output, u.output)?;
-        cumulative(&mut self.cache_read, u.cache_read)?;
-        cumulative(&mut self.cache_creation, u.cache_creation)
+        let mut next = self.clone();
+        cumulative(&mut next.input, u.input)?;
+        cumulative(&mut next.output, u.output)?;
+        cumulative(&mut next.cache_read, u.cache_read)?;
+        cumulative(&mut next.cache_creation, u.cache_creation)?;
+        *self = next;
+        Ok(())
     }
 }
 
@@ -224,6 +227,14 @@ pub struct AnthropicStream {
 }
 
 impl AnthropicStream {
+    /// Last fully accepted usage observation; absent counters remain unknown.
+    /// Returns `None` until an entirely valid message start has been accepted.
+    /// This is not a final result, a durable receipt, or confirmed billing.
+    #[must_use]
+    pub fn observed_usage(&self) -> Option<AnthropicUsage> {
+        self.started.then(|| self.usage.clone())
+    }
+
     /// Compile authorized tool names and their argument schemas.
     ///
     /// # Errors
