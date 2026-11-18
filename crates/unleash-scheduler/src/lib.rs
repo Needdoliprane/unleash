@@ -110,7 +110,7 @@ pub struct QueuedExecution {
     pub project_id: Option<ProjectId>,
     /// Date d'entrée en file utilisée pour le vieillissement.
     pub queued_at: TimestampMs,
-    /// Donne la priorité au contrôle urgent et autorise une demande de checkpoint.
+    /// Permet à un contrôle éligible de solliciter un checkpoint à pleine capacité.
     pub urgent: bool,
 }
 
@@ -202,11 +202,11 @@ pub enum Decision {
     Idle,
     /// Une unité éligible attend de la capacité.
     Wait {
-        /// Unité dont l'attente est observée.
+        /// Prochain candidat selon la politique d'admission.
         unit: ExecutionUnit,
         /// Cause d'attente de capacité.
         reason: CapacityWait,
-        /// Demande à enregistrer, si une cible de travail peut coopérer.
+        /// Demande coopérative dont le contrôle demandeur est dans `waiting_control`.
         checkpoint: Option<CheckpointRequest>,
     },
     /// Proposition de prochaine admission.
@@ -244,6 +244,9 @@ pub enum SchedulingError {
 /// est accessible. La réserve dure reste protégée et le mode souple permet ce tour
 /// de travail même avec une seule unité globale.
 ///
+/// À pleine capacité, le contrôle urgent qui sollicite un checkpoint est choisi
+/// indépendamment du candidat à la prochaine admission.
+///
 /// # Errors
 /// Renvoie [`SchedulingError`] quand la configuration ou l'occupation est incohérente.
 pub fn decide(snapshot: &AdmissionSnapshot<'_>) -> Result<Decision, SchedulingError> {
@@ -252,7 +255,7 @@ pub fn decide(snapshot: &AdmissionSnapshot<'_>) -> Result<Decision, SchedulingEr
     let oldest_work = snapshot
         .eligible
         .iter()
-        .filter(|entry| entry.priority() == Priority::Work)
+        .filter(|entry| entry.unit.admission_class() == AdmissionClass::Work)
         .min_by_key(|entry| entry.age_key());
 
     let work_allowed_by_reserve = settings.control_reserve_mode == ControlReserveMode::Soft
@@ -268,33 +271,30 @@ pub fn decide(snapshot: &AdmissionSnapshot<'_>) -> Result<Decision, SchedulingEr
     });
     let Some(next) = forced_work.or_else(|| {
         snapshot.eligible.iter().max_by_key(|entry| {
-            let project = snapshot.project(entry.project_id);
             (
-                entry.priority(),
-                i128::from(project.deficit) + i128::from(project.weight),
-                Reverse(entry.age_key()),
+                entry.unit.admission_class() == AdmissionClass::Control,
+                snapshot.weighted_queue_key(entry),
             )
         })
     }) else {
         return Ok(Decision::Idle);
     };
-    let priority = next.priority();
+    let class = next.unit.admission_class();
 
     let wait_reason = if snapshot.admissions_frozen {
         Some(CapacityWait::AdmissionsFrozen)
     } else if snapshot.active.len() == usize::from(settings.effective_limit) {
         Some(CapacityWait::GlobalCapacity)
-    } else if priority == Priority::Work && !work_allowed_by_reserve {
+    } else if class == AdmissionClass::Work && !work_allowed_by_reserve {
         Some(CapacityWait::HardControlReserve)
     } else {
         None
     };
     if let Some(reason) = wait_reason {
-        let checkpoint = match (reason, next.unit, next.urgent) {
-            (CapacityWait::GlobalCapacity, ExecutionUnit::Control(control), true) => {
-                checkpoint_for(snapshot, control)
-            }
-            _ => None,
+        let checkpoint = if reason == CapacityWait::GlobalCapacity {
+            checkpoint_at_capacity(snapshot)
+        } else {
+            None
         };
         return Ok(Decision::Wait {
             unit: next.unit,
@@ -308,7 +308,7 @@ pub fn decide(snapshot: &AdmissionSnapshot<'_>) -> Result<Decision, SchedulingEr
     let mut deficit_deltas: BTreeMap<_, _> = snapshot
         .eligible
         .iter()
-        .filter(|entry| entry.priority() == priority)
+        .filter(|entry| entry.unit.admission_class() == class)
         .map(|entry| {
             (
                 entry.project_id,
@@ -319,11 +319,12 @@ pub fn decide(snapshot: &AdmissionSnapshot<'_>) -> Result<Decision, SchedulingEr
     let weight_sum: i64 = deficit_deltas.values().sum();
     *deficit_deltas.entry(next.project_id).or_default() -= weight_sum;
 
-    let consecutive_controls_with_work = if priority != Priority::Work && oldest_work.is_some() {
-        snapshot.consecutive_controls_with_work.saturating_add(1)
-    } else {
-        0
-    };
+    let consecutive_controls_with_work =
+        if class == AdmissionClass::Control && oldest_work.is_some() {
+            snapshot.consecutive_controls_with_work.saturating_add(1)
+        } else {
+            0
+        };
     Ok(Decision::Admit(AdmissionPlan {
         unit: next.unit,
         deficit_deltas,
@@ -331,22 +332,7 @@ pub fn decide(snapshot: &AdmissionSnapshot<'_>) -> Result<Decision, SchedulingEr
     }))
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-enum Priority {
-    Work,
-    Control,
-    UrgentControl,
-}
-
 impl QueuedExecution {
-    fn priority(&self) -> Priority {
-        match (self.unit.admission_class(), self.urgent) {
-            (AdmissionClass::Work, _) => Priority::Work,
-            (AdmissionClass::Control, false) => Priority::Control,
-            (AdmissionClass::Control, true) => Priority::UrgentControl,
-        }
-    }
-
     fn age_key(&self) -> (TimestampMs, ExecutionUnit) {
         (self.queued_at, self.unit)
     }
@@ -355,6 +341,17 @@ impl QueuedExecution {
 impl AdmissionSnapshot<'_> {
     fn project(&self, id: Option<ProjectId>) -> ProjectFairness {
         self.projects.get(&id).copied().unwrap_or_default()
+    }
+
+    fn weighted_queue_key(
+        &self,
+        entry: &QueuedExecution,
+    ) -> (i128, Reverse<(TimestampMs, ExecutionUnit)>) {
+        let project = self.project(entry.project_id);
+        (
+            i128::from(project.deficit) + i128::from(project.weight),
+            Reverse(entry.age_key()),
+        )
     }
 }
 
@@ -386,10 +383,16 @@ fn validate(snapshot: &AdmissionSnapshot<'_>) -> Result<(), SchedulingError> {
     Ok(())
 }
 
-fn checkpoint_for(
-    snapshot: &AdmissionSnapshot<'_>,
-    control: InvocationId,
-) -> Option<CheckpointRequest> {
+fn checkpoint_at_capacity(snapshot: &AdmissionSnapshot<'_>) -> Option<CheckpointRequest> {
+    let (_, control) = snapshot
+        .eligible
+        .iter()
+        .filter_map(|entry| match (entry.unit, entry.urgent) {
+            (ExecutionUnit::Control(control), true) => Some((entry, control)),
+            _ => None,
+        })
+        .max_by_key(|(entry, _)| snapshot.weighted_queue_key(entry))?;
+
     let escalation_delay =
         Duration::from_secs(u64::from(snapshot.settings.checkpoint_escalation_s));
     if snapshot.checkpoints.iter().any(|entry| {

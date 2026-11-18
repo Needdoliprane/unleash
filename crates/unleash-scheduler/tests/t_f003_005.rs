@@ -417,6 +417,131 @@ fn t_f003_005_two_committed_controls_yield_to_oldest_eligible_work_at_c_one() ->
 }
 
 #[test]
+fn t_f003_005_checkpoint_during_work_turn_at_full_capacity() -> TestResult {
+    let mut active = mixed_work();
+    active[0] = held(1, control(90), PROJECT_C, 200, SafeBoundary);
+    active[4] = held(5, control(92), PROJECT_C, 210, SafeBoundary);
+    let projects = Projects::from([(
+        PROJECT_B,
+        ProjectFairness {
+            weight: 3,
+            deficit: 0,
+        },
+    )]);
+    let queue = [
+        queued(control(91), PROJECT_C, 220, true),
+        queued(probe(17), None, 150, false),
+    ];
+    let full = AdmissionSnapshot {
+        consecutive_controls_with_work: 2,
+        ..snapshot(&active, &queue, &projects)
+    };
+    let wait_for_work_slot = |checkpoint| Decision::Wait {
+        unit: probe(17),
+        reason: CapacityWait::GlobalCapacity,
+        checkpoint,
+    };
+    let first = request(91, 4);
+    assert_eq!(decide(&full)?, wait_for_work_slot(Some(first)));
+
+    for (elapsed, expected) in [(59, None), (60, Some(request(91, 3)))] {
+        let checkpoints = [observed(first, Some(elapsed))];
+        assert_eq!(
+            decide(&AdmissionSnapshot {
+                checkpoints: &checkpoints,
+                ..full
+            })?,
+            wait_for_work_slot(expected)
+        );
+    }
+
+    let released = [active[0], active[1], active[2], active[4]];
+    let plan = admission(&AdmissionSnapshot {
+        active: &released,
+        ..full
+    })?;
+    assert_eq!(plan.unit, probe(17));
+    assert_eq!(plan.consecutive_controls_with_work, 0);
+    assert_eq!(released.len() + 1, 5);
+    Ok(())
+}
+
+#[test]
+fn t_f003_005_urgent_and_ordinary_controls_share_project_deficit() -> TestResult {
+    let mut active = mixed_work();
+    let mut projects = Projects::new();
+    let ordinary = queued(control(96), PROJECT_B, 180, false);
+    let older_urgent = queued(control(92), PROJECT_A, 160, true);
+    let queue = [
+        ordinary,
+        older_urgent,
+        queued(control(91), PROJECT_A, 150, true),
+    ];
+    let first = admission(&snapshot(&active[..4], &queue, &projects))?;
+    assert_eq!(first.unit, control(91));
+    for (&project, &delta) in &first.deficit_deltas {
+        projects.entry(project).or_default().deficit += delta;
+    }
+
+    active[4] = held(6, first.unit, PROJECT_A, 190, Unavailable);
+    let queue = [
+        queued(control(93), PROJECT_A, 200, true),
+        older_urgent,
+        ordinary,
+    ];
+    let full = snapshot(&active, &queue, &projects);
+    let released = [active[0], active[1], active[2], active[4]];
+    let next = admission(&AdmissionSnapshot {
+        active: &released,
+        ..full
+    })?;
+    assert_eq!(next.unit, ordinary.unit);
+    assert_eq!(
+        first.deficit_deltas,
+        BTreeMap::from([(PROJECT_A, -1), (PROJECT_B, 1)])
+    );
+    assert_eq!(
+        decide(&full)?,
+        Decision::Wait {
+            unit: ordinary.unit,
+            reason: CapacityWait::GlobalCapacity,
+            checkpoint: Some(request(92, 4)),
+        }
+    );
+    assert_eq!(
+        next.deficit_deltas,
+        BTreeMap::from([(PROJECT_A, 1), (PROJECT_B, -1)])
+    );
+    Ok(())
+}
+
+#[test]
+fn t_f003_005_work_turn_can_borrow_soft_reserve_before_normal_priority_resumes() -> TestResult {
+    let mut active = mixed_work();
+    let projects = Projects::new();
+    let queue = [
+        queued(control(91), PROJECT_C, 220, false),
+        queued(probe(17), None, 160, false),
+        queued(replay(16), PROJECT_B, 140, false),
+    ];
+    let soft = AdmissionSnapshot {
+        consecutive_controls_with_work: 2,
+        ..snapshot(&active[..4], &queue, &projects)
+    };
+    let plan = admission(&soft)?;
+    assert_eq!(plan.unit, replay(16));
+    assert_eq!(plan.consecutive_controls_with_work, 0);
+
+    active[4] = held(6, plan.unit, PROJECT_B, 230, SafeBoundary);
+    let next = AdmissionSnapshot {
+        consecutive_controls_with_work: plan.consecutive_controls_with_work,
+        ..snapshot(&active[1..], &queue[..2], &projects)
+    };
+    assert_eq!(admission(&next)?.unit, control(91));
+    Ok(())
+}
+
+#[test]
 fn t_f003_005_invalid_pool_and_admission_freeze_fail_closed() -> TestResult {
     let active = mixed_work();
     let projects = Projects::new();
