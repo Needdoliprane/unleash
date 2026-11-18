@@ -876,6 +876,19 @@ pub(crate) fn tx_set_policy(
 ) -> Result<Revision, StoreError> {
     require_security_admin(caller, "SetPolicy")?;
     let scope_id = require_non_empty(scope_id, "scope_id")?;
+    if scope_kind == PolicyScopeKind::Project {
+        let project_id = scope_id.parse::<ProjectId>()?;
+        let exists: i64 = tx
+            .query_row(
+                "SELECT COUNT(*) FROM projects WHERE project_id = ?1",
+                [project_id.to_string()],
+                |row| row.get(0),
+            )
+            .map_err(StoreError::from_rusqlite)?;
+        if exists != 1 {
+            return Err(StoreError::NotFound(format!("project {project_id}")));
+        }
+    }
     let policy_version = require_non_empty(policy_version, "policy_version")?;
     let reason = require_non_empty(reason, "reason")?;
 

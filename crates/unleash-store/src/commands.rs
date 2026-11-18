@@ -826,6 +826,7 @@ pub(crate) fn tx_commit_command(
         &req.mutation,
         req.envelope.command_id,
         receipt_id,
+        &req.envelope,
         &mut generated_events,
     )?;
 
@@ -1149,6 +1150,7 @@ fn apply_command_mutation(
     mutation: &CommandMutation,
     cmd_id: CommandId,
     receipt_id: ReceiptId,
+    envelope: &CommandEnvelope,
     generated_events: &mut Vec<EventAppendSpec>,
 ) -> Result<Revision, StoreError> {
     let exp_i64 = i64::try_from(expected_rev.as_u64()).unwrap_or(0);
@@ -1598,6 +1600,17 @@ fn apply_command_mutation(
             caller,
             patch,
         } => {
+            let project_id = if *scope_kind == SettingsScopeKind::Project {
+                Some(scope_id.parse::<ProjectId>()?)
+            } else {
+                None
+            };
+            if project_id != envelope.project_id {
+                return Err(StoreError::InvalidArgument {
+                    reason: None,
+                    message: "settings project scope does not match command envelope".to_owned(),
+                });
+            }
             let new_rev = tx_set_settings(
                 tx,
                 now_ms,
@@ -1617,9 +1630,9 @@ fn apply_command_mutation(
             generated_events.push(EventAppendSpec {
                 event_type: "SettingsUpdated".to_owned(),
                 aggregate_type: AggregateKind::Settings,
-                aggregate_id: config.id_generator.new_uuid(),
+                aggregate_id: envelope.aggregate_id,
                 aggregate_revision: new_rev,
-                project_id: None,
+                project_id,
                 correlation_id: cmd_id.as_uuid(),
                 causation_kind: EventCausationKind::Command,
                 causation_id: None,
@@ -1658,7 +1671,7 @@ fn apply_command_mutation(
             generated_events.push(EventAppendSpec {
                 event_type: "SecurityPolicyUpdated".to_owned(),
                 aggregate_type: AggregateKind::SecurityPolicy,
-                aggregate_id: config.id_generator.new_uuid(),
+                aggregate_id: envelope.aggregate_id,
                 aggregate_revision: new_rev,
                 project_id: scope_id.parse::<ProjectId>().ok(),
                 correlation_id: cmd_id.as_uuid(),
@@ -1684,7 +1697,7 @@ fn apply_command_mutation(
             generated_events.push(EventAppendSpec {
                 event_type: "GuardConfigured".to_owned(),
                 aggregate_type: AggregateKind::GuardConfig,
-                aggregate_id: config.id_generator.new_uuid(),
+                aggregate_id: envelope.aggregate_id,
                 aggregate_revision: new_rev,
                 project_id: None,
                 correlation_id: cmd_id.as_uuid(),
