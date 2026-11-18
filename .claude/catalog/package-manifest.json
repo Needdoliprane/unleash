@@ -13,7 +13,7 @@
     "evidence/"
   ],
   "hash_algorithm": "sha256",
-  "source_tree_digest": "6d0f6785edd99021cf39805da4144dab25b2eaeb11e999f97e078d0b8a488aea",
+  "source_tree_digest": "47b38927302282f7d55f3102eb12cf80b1d2a1a9f19ddecc129a285eadfdb300",
   "files": [
     {
       "path": "INDEX.md",
@@ -395,8 +395,8 @@
     },
     {
       "path": "architecture/sqlite-design.md",
-      "sha256": "ebe082171b9410099ec27a28ebbb1c230c872bba575424d26c5c3cec1f98d41e",
-      "bytes": 54275,
+      "sha256": "1b7a13a24d7d6aa2446ebc39cc7f36bf96a47b7dae66de6de78e254cb5846d09",
+      "bytes": 55222,
       "media_type": "text/markdown"
     },
     {
@@ -1781,8 +1781,8 @@
     },
     {
       "path": "features/F018-reliability-recovery/interfaces.md",
-      "sha256": "5d471b6bffe1817877facf895c258721e25ce7937152cdac61606a0ff66fb039",
-      "bytes": 8778,
+      "sha256": "b73cb3266a6664a193e7fe0d39b5a4ea525f8baef0afd340c21748a4a2e5a28d",
+      "bytes": 8934,
       "media_type": "text/markdown"
     },
     {
