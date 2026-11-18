@@ -79,12 +79,34 @@ async fn main() -> ExitCode {
             wait_for_stop_or_signal(&handle).await;
             ExitCode::SUCCESS
         }
+        Ok(DaemonStartOutcome::Diagnostic(handle)) => {
+            if args.ready_json {
+                let line = json!({
+                    "status": "read_only_recovery",
+                    "socket_path": handle.socket_path().display().to_string(),
+                });
+                let mut out = std::io::stdout().lock();
+                let _ = writeln!(out, "{line}");
+                let _ = out.flush();
+            }
+            wait_for_diagnostic_stop_or_signal(&handle).await;
+            ExitCode::SUCCESS
+        }
         Ok(_) => ExitCode::SUCCESS,
         Err(err) => {
             let mut err_out = std::io::stderr().lock();
             let _ = writeln!(err_out, "{err}");
             ExitCode::FAILURE
         }
+    }
+}
+
+async fn wait_for_diagnostic_stop_or_signal(handle: &unleash_daemon::diagnostic::DiagnosticHandle) {
+    let mut sigterm = signal(SignalKind::terminate()).ok();
+    tokio::select! {
+        () = handle.wait_stopped() => {}
+        _ = tokio::signal::ctrl_c() => handle.shutdown_graceful().await,
+        () = wait_sigterm(&mut sigterm) => handle.shutdown_graceful().await,
     }
 }
 

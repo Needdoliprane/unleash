@@ -26,6 +26,7 @@ mod broker_activity;
 mod broker_journal;
 pub mod config;
 pub mod daemon;
+pub mod diagnostic;
 pub mod error;
 pub mod executors;
 pub mod ipc;

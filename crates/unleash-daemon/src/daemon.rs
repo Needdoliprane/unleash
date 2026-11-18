@@ -42,7 +42,7 @@ use crate::subscriptions::SubscriptionHub;
 
 const PROBE_CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
 
-fn install_admin_proof(dir: &Path) -> Result<AdminProof, DaemonError> {
+pub(crate) fn install_admin_proof(dir: &Path) -> Result<AdminProof, DaemonError> {
     validate_rendezvous_dir(dir)?;
     let mut bytes = zeroize::Zeroizing::new([0_u8; 32]);
     getrandom::fill(&mut *bytes).map_err(|_| {
@@ -59,7 +59,7 @@ fn install_admin_proof(dir: &Path) -> Result<AdminProof, DaemonError> {
     Ok(proof)
 }
 
-fn remove_owned_admin_proof(dir: &Path, expected: &AdminProof) {
+pub(crate) fn remove_owned_admin_proof(dir: &Path, expected: &AdminProof) {
     match read_admin_credential(dir) {
         Ok(None) => {}
         Ok(Some(value)) if AdminProof::from_hex(&value).is_some_and(|p| p.matches(expected)) => {
@@ -77,6 +77,8 @@ fn remove_owned_admin_proof(dir: &Path, expected: &AdminProof) {
 pub enum DaemonStartOutcome {
     /// Nouvelle instance démarrée et prête (ou en cours de reprise si `RecoveryGate` est actif).
     Started(DaemonHandle),
+    /// Autorité diagnostique en lecture seule lorsque le store est corrompu.
+    Diagnostic(crate::diagnostic::DiagnosticHandle),
     /// Une instance active sur la même racine a répondu au handshake `Hello` (`attach_if_running=true`).
     AlreadyRunning {
         /// Réponse `HelloResponse` de l'instance rejointe.
@@ -256,7 +258,7 @@ fn resolve_paths_and_acquire_lock_blocking(
     Ok((platform_paths, data_root, rdv_dir, lock_res))
 }
 
-fn prepare_socket_listener_blocking(
+pub(crate) fn prepare_socket_listener_blocking(
     lock: AuthorityLock,
 ) -> Result<(AuthorityLock, std::os::unix::net::UnixListener, PathBuf), DaemonError> {
     lock.remove_stale_socket()?;
@@ -354,13 +356,38 @@ impl UnleashDaemon {
         store_cfg.consumer_version = config.consumer_version.clone();
         apply_store_overrides(&mut store_cfg, &config);
 
-        let store_init_res = tokio::task::spawn_blocking(move || -> Result<_, DaemonError> {
+        let diagnostic_config = store_cfg.clone();
+        let store_open_res = tokio::task::spawn_blocking(move || -> Result<_, DaemonError> {
             let boot_id = current_boot_identity()?.as_str().to_owned();
             let uid = effective_uid();
             store_cfg.owner_uid = uid;
             store_cfg.boot_identity.clone_from(&boot_id);
-            let local_principal = format!("uid:{uid}");
             let opened = UnleashStore::open(store_cfg)?;
+            Ok((opened, boot_id, uid))
+        })
+        .await
+        .map_err(|e| DaemonError::InvalidConfiguration(format!("Join error store open: {e}")))?;
+
+        let (opened, boot_id, uid) = match store_open_res {
+            Ok(value) => value,
+            Err(DaemonError::Store(unleash_store::StoreError::StorageCorrupt(_))) => {
+                let handle = crate::diagnostic::start(
+                    lock,
+                    rdv_dir,
+                    diagnostic_config,
+                    Arc::clone(&config.auth_verifier),
+                )
+                .await?;
+                return Ok(DaemonStartOutcome::Diagnostic(handle));
+            }
+            Err(err) => {
+                let _ = tokio::task::spawn_blocking(move || drop(lock)).await;
+                return Err(err);
+            }
+        };
+
+        let store_init_res = tokio::task::spawn_blocking(move || -> Result<_, DaemonError> {
+            let local_principal = format!("uid:{uid}");
             opened.register_principal(&local_principal, "user", &local_principal)?;
             let new_inst = DaemonInstanceId::from_uuid(opened.config().id_generator.new_uuid());
             let (row, prev_mode, started_ev) =
