@@ -298,6 +298,33 @@ pub fn validate_rendezvous_dir(dir: &Path) -> Result<(), PlatformError> {
 /// Retourne une [`PlatformError`] si le parent n'est pas conforme `0700`, si `SUN_LEN` est
 /// dépassé, si un symlink/répertoire occupe déjà la cible ou si `bind`/`chmod` échoue.
 pub fn bind_private_unix_listener(socket_path: &Path) -> Result<UnixListener, PlatformError> {
+    bind_private_unix_listener_with(socket_path, || Ok(()))
+}
+
+struct BoundSocketCleanup<'a> {
+    path: &'a Path,
+    device: u64,
+    inode: u64,
+    armed: bool,
+}
+
+impl Drop for BoundSocketCleanup<'_> {
+    fn drop(&mut self) {
+        if self.armed
+            && let Ok(metadata) = fs::symlink_metadata(self.path)
+            && metadata.file_type().is_socket()
+            && metadata.dev() == self.device
+            && metadata.ino() == self.inode
+        {
+            let _ = fs::remove_file(self.path);
+        }
+    }
+}
+
+fn bind_private_unix_listener_with(
+    socket_path: &Path,
+    after_bind: impl FnOnce() -> Result<(), PlatformError>,
+) -> Result<UnixListener, PlatformError> {
     validate_unix_socket_path_len(socket_path)?;
     let parent = socket_path
         .parent()
@@ -326,8 +353,23 @@ pub fn bind_private_unix_listener(socket_path: &Path) -> Result<UnixListener, Pl
     }
 
     let listener = UnixListener::bind(socket_path)?;
+    let metadata = fs::symlink_metadata(socket_path)?;
+    if !metadata.file_type().is_socket() || metadata.uid() != effective_uid() {
+        return Err(PlatformError::InvalidPath {
+            path: socket_path.display().to_string(),
+            reason: String::from("Socket créé non attribuable"),
+        });
+    }
+    let mut cleanup = BoundSocketCleanup {
+        path: socket_path,
+        device: metadata.dev(),
+        inode: metadata.ino(),
+        armed: true,
+    };
+    after_bind()?;
     fs::set_permissions(socket_path, PermissionsExt::from_mode(0o600))?;
     validate_socket_file(socket_path)?;
+    cleanup.armed = false;
     Ok(listener)
 }
 
@@ -497,4 +539,55 @@ pub fn write_private_file_atomic(path: &Path, bytes: &[u8]) -> Result<(), Platfo
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod bind_cleanup_tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+    use super::*;
+    use unleash_testkit::local_test_dir;
+
+    fn injected() -> PlatformError {
+        PlatformError::InvalidPath {
+            path: String::new(),
+            reason: "injected".into(),
+        }
+    }
+
+    #[test]
+    fn failed_post_bind_removes_owned_socket_and_preserves_foreign_entry() {
+        let dir = local_test_dir("m1-bind-cleanup").unwrap();
+        let data = local_test_dir("m1-bind-cleanup-data").unwrap();
+        fs::set_permissions(dir.path(), PermissionsExt::from_mode(0o700)).unwrap();
+        let lock = crate::AuthorityLock::acquire_in(dir.path(), data.path()).unwrap();
+        let socket = dir.path().join("control.sock");
+        assert!(bind_private_unix_listener_with(&socket, || Err(injected())).is_err());
+        assert!(!socket.exists());
+        drop(lock);
+        let _lock = crate::AuthorityLock::acquire_in(dir.path(), data.path()).unwrap();
+
+        let foreign = UnixListener::bind(&socket).unwrap();
+        let identity = fs::symlink_metadata(&socket).unwrap();
+        assert!(bind_private_unix_listener_with(&socket, || Err(injected())).is_err());
+        let after = fs::symlink_metadata(&socket).unwrap();
+        assert_eq!((after.dev(), after.ino()), (identity.dev(), identity.ino()));
+        drop(foreign);
+        fs::remove_file(&socket).unwrap();
+    }
+
+    #[test]
+    fn post_bind_cleanup_does_not_remove_replaced_file() {
+        let dir = local_test_dir("m1-bind-replaced").unwrap();
+        fs::set_permissions(dir.path(), PermissionsExt::from_mode(0o700)).unwrap();
+        let socket = dir.path().join("control.sock");
+        assert!(
+            bind_private_unix_listener_with(&socket, || {
+                fs::remove_file(&socket).unwrap();
+                fs::write(&socket, b"foreign-fixture").unwrap();
+                Err(injected())
+            })
+            .is_err()
+        );
+        assert_eq!(fs::read(&socket).unwrap(), b"foreign-fixture");
+    }
 }
