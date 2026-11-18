@@ -18,6 +18,7 @@
 pub mod clock;
 pub mod crash_harness;
 pub mod cutpoints;
+pub mod guard_double;
 pub mod ids;
 pub mod live_guard;
 pub mod temp;
@@ -29,6 +30,11 @@ pub use crash_harness::{
     NewExternalEffect,
 };
 pub use cutpoints::{Cutpoint, CutpointAction, CutpointBarrier, CutpointController, CutpointError};
+pub use guard_double::{
+    BrokerExecutionSpy, DeterministicGuardDouble, DispatchedActionRecord, InMemoryTestSecretStore,
+    ManualClockTimer, ScriptedGuardOutcome, SecretResolutionSpy, SimulatedExecutionFailure,
+    TestIsolationProbe, assert_refused_with_zero_side_effects,
+};
 pub use ids::{DeterministicIdGenerator, IdGeneratorError, SeedDiagnosticGuard};
 pub use live_guard::{
     LIVE_MODEL_ALLOWLIST, LiveCallPermit, LiveGuardError, LiveModel, LiveProvider, LiveTestGuard,
