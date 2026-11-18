@@ -9,7 +9,7 @@ use crate::config::{CutpointObserver, StoreCutpoint};
 use crate::error::StoreError;
 
 /// Version courante maximale du schéma gérée par cette version de `unleash-store`.
-pub const CURRENT_SCHEMA_VERSION: i64 = 7;
+pub const CURRENT_SCHEMA_VERSION: i64 = 8;
 
 /// État persisté d'une migration dans `schema_migrations`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -104,7 +104,175 @@ const MIGRATIONS: &[MigrationDef] = &[
         name: "v007_pre_dispatch_backup_block_reason",
         sql: V007_SQL,
     },
+    MigrationDef {
+        version: 8,
+        name: "v008_transactional_execution_admission",
+        sql: V008_SQL,
+    },
 ];
+
+// REQ-AGENT-003/005: conservative CAS over every durable admission input.
+// Proof rows are checked separately in the writer and never become a queue.
+const V008_SQL: &str = r"
+CREATE TABLE admission_source_clock(singleton INTEGER PRIMARY KEY CHECK(singleton=1),revision INTEGER NOT NULL CHECK(revision>=0)) STRICT;
+INSERT INTO admission_source_clock VALUES(1,0);
+CREATE TABLE admission_observation_clock(singleton INTEGER PRIMARY KEY CHECK(singleton=1),revision INTEGER NOT NULL CHECK(revision>=0)) STRICT;
+INSERT INTO admission_observation_clock VALUES(1,0);
+CREATE TRIGGER admission_evidence_insert AFTER INSERT ON evidence BEGIN UPDATE admission_observation_clock SET revision=revision+1 WHERE singleton=1; END;
+CREATE TRIGGER admission_evidence_update AFTER UPDATE ON evidence BEGIN UPDATE admission_observation_clock SET revision=revision+1 WHERE singleton=1; END;
+CREATE TRIGGER admission_evidence_delete AFTER DELETE ON evidence BEGIN UPDATE admission_observation_clock SET revision=revision+1 WHERE singleton=1; END;
+CREATE TABLE execution_scheduler_state(pool_id TEXT PRIMARY KEY REFERENCES capacity_pools(pool_id),consecutive_controls INTEGER NOT NULL DEFAULT 0 CHECK(consecutive_controls>=0)) STRICT;
+CREATE TABLE execution_fairness(pool_id TEXT NOT NULL REFERENCES capacity_pools(pool_id),project_key TEXT NOT NULL,deficit INTEGER NOT NULL,PRIMARY KEY(pool_id,project_key)) STRICT;
+ALTER TABLE replay_workers ADD COLUMN queued_at_ms INTEGER;
+ALTER TABLE provider_probes ADD COLUMN queued_at_ms INTEGER;
+ALTER TABLE invocations ADD COLUMN queued_at_ms INTEGER;
+CREATE TABLE admission_eligibility_observations(observation_seq INTEGER PRIMARY KEY AUTOINCREMENT,evidence_id TEXT NOT NULL UNIQUE REFERENCES evidence(evidence_id),valid_until_ms INTEGER NOT NULL,urgency TEXT NOT NULL CHECK(urgency IN ('ordinary','urgent_control'))) STRICT;
+CREATE TRIGGER admission_eligibility_insert AFTER INSERT ON admission_eligibility_observations BEGIN UPDATE admission_observation_clock SET revision=revision+1 WHERE singleton=1; END;
+CREATE TRIGGER admission_eligibility_immutable BEFORE UPDATE ON admission_eligibility_observations BEGIN SELECT RAISE(ABORT,'eligibility observation immutable'); END;
+CREATE TRIGGER admission_eligibility_durable BEFORE DELETE ON admission_eligibility_observations BEGIN SELECT RAISE(ABORT,'eligibility observation durable'); END;
+CREATE TABLE execution_checkpoint_requests(reservation_id TEXT PRIMARY KEY REFERENCES capacity_reservations(reservation_id),waiting_control TEXT NOT NULL REFERENCES invocations(invocation_id),requested_at_ms INTEGER NOT NULL,authority_generation TEXT NOT NULL,daemon_epoch INTEGER NOT NULL) STRICT;
+CREATE TABLE execution_checkpoint_observations(reservation_id TEXT PRIMARY KEY REFERENCES capacity_reservations(reservation_id),observation_json TEXT NOT NULL,recorded_at_ms INTEGER NOT NULL) STRICT;
+CREATE TRIGGER execution_checkpoint_observation_immutable BEFORE UPDATE ON execution_checkpoint_observations BEGIN SELECT RAISE(ABORT,'checkpoint observation immutable'); END;
+CREATE TRIGGER execution_checkpoint_observation_durable BEFORE DELETE ON execution_checkpoint_observations BEGIN SELECT RAISE(ABORT,'checkpoint observation durable'); END;
+CREATE TRIGGER admission_source_actions_insert AFTER INSERT ON actions BEGIN UPDATE admission_source_clock SET revision=revision+1 WHERE singleton=1; END;
+CREATE TRIGGER admission_source_actions_update AFTER UPDATE ON actions BEGIN UPDATE admission_source_clock SET revision=revision+1 WHERE singleton=1; END;
+CREATE TRIGGER admission_source_actions_delete AFTER DELETE ON actions BEGIN UPDATE admission_source_clock SET revision=revision+1 WHERE singleton=1; END;
+CREATE TRIGGER admission_source_action_dispatches_insert AFTER INSERT ON action_dispatches BEGIN UPDATE admission_source_clock SET revision=revision+1 WHERE singleton=1; END;
+CREATE TRIGGER admission_source_action_dispatches_update AFTER UPDATE ON action_dispatches BEGIN UPDATE admission_source_clock SET revision=revision+1 WHERE singleton=1; END;
+CREATE TRIGGER admission_source_action_dispatches_delete AFTER DELETE ON action_dispatches BEGIN UPDATE admission_source_clock SET revision=revision+1 WHERE singleton=1; END;
+CREATE TRIGGER admission_source_model_calls_insert AFTER INSERT ON model_calls BEGIN UPDATE admission_source_clock SET revision=revision+1 WHERE singleton=1; END;
+CREATE TRIGGER admission_source_model_calls_update AFTER UPDATE ON model_calls BEGIN UPDATE admission_source_clock SET revision=revision+1 WHERE singleton=1; END;
+CREATE TRIGGER admission_source_model_calls_delete AFTER DELETE ON model_calls BEGIN UPDATE admission_source_clock SET revision=revision+1 WHERE singleton=1; END;
+CREATE TRIGGER admission_source_model_call_manifests_insert AFTER INSERT ON model_call_manifests BEGIN UPDATE admission_source_clock SET revision=revision+1 WHERE singleton=1; END;
+CREATE TRIGGER admission_source_model_call_manifests_update AFTER UPDATE ON model_call_manifests BEGIN UPDATE admission_source_clock SET revision=revision+1 WHERE singleton=1; END;
+CREATE TRIGGER admission_source_model_call_manifests_delete AFTER DELETE ON model_call_manifests BEGIN UPDATE admission_source_clock SET revision=revision+1 WHERE singleton=1; END;
+CREATE TRIGGER admission_source_processes_insert AFTER INSERT ON processes BEGIN UPDATE admission_source_clock SET revision=revision+1 WHERE singleton=1; END;
+CREATE TRIGGER admission_source_processes_update AFTER UPDATE ON processes BEGIN UPDATE admission_source_clock SET revision=revision+1 WHERE singleton=1; END;
+CREATE TRIGGER admission_source_processes_delete AFTER DELETE ON processes BEGIN UPDATE admission_source_clock SET revision=revision+1 WHERE singleton=1; END;
+CREATE TRIGGER admission_source_workflow_versions_insert AFTER INSERT ON workflow_versions BEGIN UPDATE admission_source_clock SET revision=revision+1 WHERE singleton=1; END;
+CREATE TRIGGER admission_source_workflow_versions_update AFTER UPDATE ON workflow_versions BEGIN UPDATE admission_source_clock SET revision=revision+1 WHERE singleton=1; END;
+CREATE TRIGGER admission_source_workflow_versions_delete AFTER DELETE ON workflow_versions BEGIN UPDATE admission_source_clock SET revision=revision+1 WHERE singleton=1; END;
+CREATE TRIGGER admission_source_workflow_timers_insert AFTER INSERT ON workflow_timers BEGIN UPDATE admission_source_clock SET revision=revision+1 WHERE singleton=1; END;
+CREATE TRIGGER admission_source_workflow_timers_update AFTER UPDATE ON workflow_timers BEGIN UPDATE admission_source_clock SET revision=revision+1 WHERE singleton=1; END;
+CREATE TRIGGER admission_source_workflow_timers_delete AFTER DELETE ON workflow_timers BEGIN UPDATE admission_source_clock SET revision=revision+1 WHERE singleton=1; END;
+CREATE TRIGGER admission_source_registry_entries_insert AFTER INSERT ON registry_entries BEGIN UPDATE admission_source_clock SET revision=revision+1 WHERE singleton=1; END;
+CREATE TRIGGER admission_source_registry_entries_update AFTER UPDATE ON registry_entries BEGIN UPDATE admission_source_clock SET revision=revision+1 WHERE singleton=1; END;
+CREATE TRIGGER admission_source_registry_entries_delete AFTER DELETE ON registry_entries BEGIN UPDATE admission_source_clock SET revision=revision+1 WHERE singleton=1; END;
+CREATE TRIGGER admission_source_registry_versions_insert AFTER INSERT ON registry_versions BEGIN UPDATE admission_source_clock SET revision=revision+1 WHERE singleton=1; END;
+CREATE TRIGGER admission_source_registry_versions_update AFTER UPDATE ON registry_versions BEGIN UPDATE admission_source_clock SET revision=revision+1 WHERE singleton=1; END;
+CREATE TRIGGER admission_source_registry_versions_delete AFTER DELETE ON registry_versions BEGIN UPDATE admission_source_clock SET revision=revision+1 WHERE singleton=1; END;
+CREATE TRIGGER admission_source_registry_bindings_insert AFTER INSERT ON registry_bindings BEGIN UPDATE admission_source_clock SET revision=revision+1 WHERE singleton=1; END;
+CREATE TRIGGER admission_source_registry_bindings_update AFTER UPDATE ON registry_bindings BEGIN UPDATE admission_source_clock SET revision=revision+1 WHERE singleton=1; END;
+CREATE TRIGGER admission_source_registry_bindings_delete AFTER DELETE ON registry_bindings BEGIN UPDATE admission_source_clock SET revision=revision+1 WHERE singleton=1; END;
+CREATE TRIGGER admission_source_automation_versions_insert AFTER INSERT ON automation_versions BEGIN UPDATE admission_source_clock SET revision=revision+1 WHERE singleton=1; END;
+CREATE TRIGGER admission_source_automation_versions_update AFTER UPDATE ON automation_versions BEGIN UPDATE admission_source_clock SET revision=revision+1 WHERE singleton=1; END;
+CREATE TRIGGER admission_source_automation_versions_delete AFTER DELETE ON automation_versions BEGIN UPDATE admission_source_clock SET revision=revision+1 WHERE singleton=1; END;
+CREATE TRIGGER admission_source_automation_runs_insert AFTER INSERT ON automation_runs BEGIN UPDATE admission_source_clock SET revision=revision+1 WHERE singleton=1; END;
+CREATE TRIGGER admission_source_automation_runs_update AFTER UPDATE ON automation_runs BEGIN UPDATE admission_source_clock SET revision=revision+1 WHERE singleton=1; END;
+CREATE TRIGGER admission_source_automation_runs_delete AFTER DELETE ON automation_runs BEGIN UPDATE admission_source_clock SET revision=revision+1 WHERE singleton=1; END;
+CREATE TRIGGER admission_source_events_insert AFTER INSERT ON events BEGIN UPDATE admission_source_clock SET revision=revision+1 WHERE singleton=1; END;
+CREATE TRIGGER admission_source_events_update AFTER UPDATE ON events BEGIN UPDATE admission_source_clock SET revision=revision+1 WHERE singleton=1; END;
+CREATE TRIGGER admission_source_events_delete AFTER DELETE ON events BEGIN UPDATE admission_source_clock SET revision=revision+1 WHERE singleton=1; END;
+CREATE TRIGGER admission_source_execution_checkpoint_requests_insert AFTER INSERT ON execution_checkpoint_requests BEGIN UPDATE admission_source_clock SET revision=revision+1 WHERE singleton=1; END;
+CREATE TRIGGER admission_source_execution_checkpoint_requests_update AFTER UPDATE ON execution_checkpoint_requests BEGIN UPDATE admission_source_clock SET revision=revision+1 WHERE singleton=1; END;
+CREATE TRIGGER admission_source_execution_checkpoint_requests_delete AFTER DELETE ON execution_checkpoint_requests BEGIN UPDATE admission_source_clock SET revision=revision+1 WHERE singleton=1; END;
+CREATE TRIGGER admission_source_daemon_state_insert AFTER INSERT ON daemon_state BEGIN UPDATE admission_source_clock SET revision=revision+1 WHERE singleton=1; END;
+CREATE TRIGGER admission_source_daemon_state_update AFTER UPDATE ON daemon_state BEGIN UPDATE admission_source_clock SET revision=revision+1 WHERE singleton=1; END;
+CREATE TRIGGER admission_source_daemon_state_delete AFTER DELETE ON daemon_state BEGIN UPDATE admission_source_clock SET revision=revision+1 WHERE singleton=1; END;
+CREATE TRIGGER admission_source_capacity_pools_insert AFTER INSERT ON capacity_pools BEGIN UPDATE admission_source_clock SET revision=revision+1 WHERE singleton=1; END;
+CREATE TRIGGER admission_source_capacity_pools_update AFTER UPDATE ON capacity_pools BEGIN UPDATE admission_source_clock SET revision=revision+1 WHERE singleton=1; END;
+CREATE TRIGGER admission_source_capacity_pools_delete AFTER DELETE ON capacity_pools BEGIN UPDATE admission_source_clock SET revision=revision+1 WHERE singleton=1; END;
+CREATE TRIGGER admission_source_capacity_reservations_insert AFTER INSERT ON capacity_reservations BEGIN UPDATE admission_source_clock SET revision=revision+1 WHERE singleton=1; END;
+CREATE TRIGGER admission_source_capacity_reservations_update AFTER UPDATE ON capacity_reservations BEGIN UPDATE admission_source_clock SET revision=revision+1 WHERE singleton=1; END;
+CREATE TRIGGER admission_source_capacity_reservations_delete AFTER DELETE ON capacity_reservations BEGIN UPDATE admission_source_clock SET revision=revision+1 WHERE singleton=1; END;
+CREATE TRIGGER admission_source_execution_reservation_owners_insert AFTER INSERT ON execution_reservation_owners BEGIN UPDATE admission_source_clock SET revision=revision+1 WHERE singleton=1; END;
+CREATE TRIGGER admission_source_execution_reservation_owners_update AFTER UPDATE ON execution_reservation_owners BEGIN UPDATE admission_source_clock SET revision=revision+1 WHERE singleton=1; END;
+CREATE TRIGGER admission_source_execution_reservation_owners_delete AFTER DELETE ON execution_reservation_owners BEGIN UPDATE admission_source_clock SET revision=revision+1 WHERE singleton=1; END;
+CREATE TRIGGER admission_source_projects_insert AFTER INSERT ON projects BEGIN UPDATE admission_source_clock SET revision=revision+1 WHERE singleton=1; END;
+CREATE TRIGGER admission_source_projects_update AFTER UPDATE ON projects BEGIN UPDATE admission_source_clock SET revision=revision+1 WHERE singleton=1; END;
+CREATE TRIGGER admission_source_projects_delete AFTER DELETE ON projects BEGIN UPDATE admission_source_clock SET revision=revision+1 WHERE singleton=1; END;
+CREATE TRIGGER admission_source_principals_insert AFTER INSERT ON principals BEGIN UPDATE admission_source_clock SET revision=revision+1 WHERE singleton=1; END;
+CREATE TRIGGER admission_source_principals_update AFTER UPDATE ON principals BEGIN UPDATE admission_source_clock SET revision=revision+1 WHERE singleton=1; END;
+CREATE TRIGGER admission_source_principals_delete AFTER DELETE ON principals BEGIN UPDATE admission_source_clock SET revision=revision+1 WHERE singleton=1; END;
+CREATE TRIGGER admission_source_agents_insert AFTER INSERT ON agents BEGIN UPDATE admission_source_clock SET revision=revision+1 WHERE singleton=1; END;
+CREATE TRIGGER admission_source_agents_update AFTER UPDATE ON agents BEGIN UPDATE admission_source_clock SET revision=revision+1 WHERE singleton=1; END;
+CREATE TRIGGER admission_source_agents_delete AFTER DELETE ON agents BEGIN UPDATE admission_source_clock SET revision=revision+1 WHERE singleton=1; END;
+CREATE TRIGGER admission_source_sessions_insert AFTER INSERT ON sessions BEGIN UPDATE admission_source_clock SET revision=revision+1 WHERE singleton=1; END;
+CREATE TRIGGER admission_source_sessions_update AFTER UPDATE ON sessions BEGIN UPDATE admission_source_clock SET revision=revision+1 WHERE singleton=1; END;
+CREATE TRIGGER admission_source_sessions_delete AFTER DELETE ON sessions BEGIN UPDATE admission_source_clock SET revision=revision+1 WHERE singleton=1; END;
+CREATE TRIGGER admission_source_context_manifests_insert AFTER INSERT ON context_manifests BEGIN UPDATE admission_source_clock SET revision=revision+1 WHERE singleton=1; END;
+CREATE TRIGGER admission_source_context_manifests_update AFTER UPDATE ON context_manifests BEGIN UPDATE admission_source_clock SET revision=revision+1 WHERE singleton=1; END;
+CREATE TRIGGER admission_source_context_manifests_delete AFTER DELETE ON context_manifests BEGIN UPDATE admission_source_clock SET revision=revision+1 WHERE singleton=1; END;
+CREATE TRIGGER admission_source_effective_bundles_insert AFTER INSERT ON effective_bundles BEGIN UPDATE admission_source_clock SET revision=revision+1 WHERE singleton=1; END;
+CREATE TRIGGER admission_source_effective_bundles_update AFTER UPDATE ON effective_bundles BEGIN UPDATE admission_source_clock SET revision=revision+1 WHERE singleton=1; END;
+CREATE TRIGGER admission_source_effective_bundles_delete AFTER DELETE ON effective_bundles BEGIN UPDATE admission_source_clock SET revision=revision+1 WHERE singleton=1; END;
+CREATE TRIGGER admission_source_invocations_insert AFTER INSERT ON invocations BEGIN UPDATE admission_source_clock SET revision=revision+1 WHERE singleton=1; END;
+CREATE TRIGGER admission_source_invocations_update AFTER UPDATE ON invocations BEGIN UPDATE admission_source_clock SET revision=revision+1 WHERE singleton=1; END;
+CREATE TRIGGER admission_source_invocations_delete AFTER DELETE ON invocations BEGIN UPDATE admission_source_clock SET revision=revision+1 WHERE singleton=1; END;
+CREATE TRIGGER admission_source_invocation_attempts_insert AFTER INSERT ON invocation_attempts BEGIN UPDATE admission_source_clock SET revision=revision+1 WHERE singleton=1; END;
+CREATE TRIGGER admission_source_invocation_attempts_update AFTER UPDATE ON invocation_attempts BEGIN UPDATE admission_source_clock SET revision=revision+1 WHERE singleton=1; END;
+CREATE TRIGGER admission_source_invocation_attempts_delete AFTER DELETE ON invocation_attempts BEGIN UPDATE admission_source_clock SET revision=revision+1 WHERE singleton=1; END;
+CREATE TRIGGER admission_source_replay_workers_insert AFTER INSERT ON replay_workers BEGIN UPDATE admission_source_clock SET revision=revision+1 WHERE singleton=1; END;
+CREATE TRIGGER admission_source_replay_workers_update AFTER UPDATE ON replay_workers BEGIN UPDATE admission_source_clock SET revision=revision+1 WHERE singleton=1; END;
+CREATE TRIGGER admission_source_replay_workers_delete AFTER DELETE ON replay_workers BEGIN UPDATE admission_source_clock SET revision=revision+1 WHERE singleton=1; END;
+CREATE TRIGGER admission_source_provider_probes_insert AFTER INSERT ON provider_probes BEGIN UPDATE admission_source_clock SET revision=revision+1 WHERE singleton=1; END;
+CREATE TRIGGER admission_source_provider_probes_update AFTER UPDATE ON provider_probes BEGIN UPDATE admission_source_clock SET revision=revision+1 WHERE singleton=1; END;
+CREATE TRIGGER admission_source_provider_probes_delete AFTER DELETE ON provider_probes BEGIN UPDATE admission_source_clock SET revision=revision+1 WHERE singleton=1; END;
+CREATE TRIGGER admission_source_provider_profiles_insert AFTER INSERT ON provider_profiles BEGIN UPDATE admission_source_clock SET revision=revision+1 WHERE singleton=1; END;
+CREATE TRIGGER admission_source_provider_profiles_update AFTER UPDATE ON provider_profiles BEGIN UPDATE admission_source_clock SET revision=revision+1 WHERE singleton=1; END;
+CREATE TRIGGER admission_source_provider_profiles_delete AFTER DELETE ON provider_profiles BEGIN UPDATE admission_source_clock SET revision=revision+1 WHERE singleton=1; END;
+CREATE TRIGGER admission_source_workflow_runs_insert AFTER INSERT ON workflow_runs BEGIN UPDATE admission_source_clock SET revision=revision+1 WHERE singleton=1; END;
+CREATE TRIGGER admission_source_workflow_runs_update AFTER UPDATE ON workflow_runs BEGIN UPDATE admission_source_clock SET revision=revision+1 WHERE singleton=1; END;
+CREATE TRIGGER admission_source_workflow_runs_delete AFTER DELETE ON workflow_runs BEGIN UPDATE admission_source_clock SET revision=revision+1 WHERE singleton=1; END;
+CREATE TRIGGER admission_source_step_instances_insert AFTER INSERT ON step_instances BEGIN UPDATE admission_source_clock SET revision=revision+1 WHERE singleton=1; END;
+CREATE TRIGGER admission_source_step_instances_update AFTER UPDATE ON step_instances BEGIN UPDATE admission_source_clock SET revision=revision+1 WHERE singleton=1; END;
+CREATE TRIGGER admission_source_step_instances_delete AFTER DELETE ON step_instances BEGIN UPDATE admission_source_clock SET revision=revision+1 WHERE singleton=1; END;
+CREATE TRIGGER admission_source_tasks_insert AFTER INSERT ON tasks BEGIN UPDATE admission_source_clock SET revision=revision+1 WHERE singleton=1; END;
+CREATE TRIGGER admission_source_tasks_update AFTER UPDATE ON tasks BEGIN UPDATE admission_source_clock SET revision=revision+1 WHERE singleton=1; END;
+CREATE TRIGGER admission_source_tasks_delete AFTER DELETE ON tasks BEGIN UPDATE admission_source_clock SET revision=revision+1 WHERE singleton=1; END;
+CREATE TRIGGER admission_source_missions_insert AFTER INSERT ON missions BEGIN UPDATE admission_source_clock SET revision=revision+1 WHERE singleton=1; END;
+CREATE TRIGGER admission_source_missions_update AFTER UPDATE ON missions BEGIN UPDATE admission_source_clock SET revision=revision+1 WHERE singleton=1; END;
+CREATE TRIGGER admission_source_missions_delete AFTER DELETE ON missions BEGIN UPDATE admission_source_clock SET revision=revision+1 WHERE singleton=1; END;
+CREATE TRIGGER admission_source_security_policies_insert AFTER INSERT ON security_policies BEGIN UPDATE admission_source_clock SET revision=revision+1 WHERE singleton=1; END;
+CREATE TRIGGER admission_source_security_policies_update AFTER UPDATE ON security_policies BEGIN UPDATE admission_source_clock SET revision=revision+1 WHERE singleton=1; END;
+CREATE TRIGGER admission_source_security_policies_delete AFTER DELETE ON security_policies BEGIN UPDATE admission_source_clock SET revision=revision+1 WHERE singleton=1; END;
+CREATE TRIGGER admission_source_subject_suspensions_insert AFTER INSERT ON subject_suspensions BEGIN UPDATE admission_source_clock SET revision=revision+1 WHERE singleton=1; END;
+CREATE TRIGGER admission_source_subject_suspensions_update AFTER UPDATE ON subject_suspensions BEGIN UPDATE admission_source_clock SET revision=revision+1 WHERE singleton=1; END;
+CREATE TRIGGER admission_source_subject_suspensions_delete AFTER DELETE ON subject_suspensions BEGIN UPDATE admission_source_clock SET revision=revision+1 WHERE singleton=1; END;
+CREATE TRIGGER admission_source_settings_insert AFTER INSERT ON settings BEGIN UPDATE admission_source_clock SET revision=revision+1 WHERE singleton=1; END;
+CREATE TRIGGER admission_source_settings_update AFTER UPDATE ON settings BEGIN UPDATE admission_source_clock SET revision=revision+1 WHERE singleton=1; END;
+CREATE TRIGGER admission_source_settings_delete AFTER DELETE ON settings BEGIN UPDATE admission_source_clock SET revision=revision+1 WHERE singleton=1; END;
+CREATE TRIGGER admission_source_guard_configs_insert AFTER INSERT ON guard_configs BEGIN UPDATE admission_source_clock SET revision=revision+1 WHERE singleton=1; END;
+CREATE TRIGGER admission_source_guard_configs_update AFTER UPDATE ON guard_configs BEGIN UPDATE admission_source_clock SET revision=revision+1 WHERE singleton=1; END;
+CREATE TRIGGER admission_source_guard_configs_delete AFTER DELETE ON guard_configs BEGIN UPDATE admission_source_clock SET revision=revision+1 WHERE singleton=1; END;
+CREATE TRIGGER admission_source_secret_references_insert AFTER INSERT ON secret_references BEGIN UPDATE admission_source_clock SET revision=revision+1 WHERE singleton=1; END;
+CREATE TRIGGER admission_source_secret_references_update AFTER UPDATE ON secret_references BEGIN UPDATE admission_source_clock SET revision=revision+1 WHERE singleton=1; END;
+CREATE TRIGGER admission_source_secret_references_delete AFTER DELETE ON secret_references BEGIN UPDATE admission_source_clock SET revision=revision+1 WHERE singleton=1; END;
+CREATE TRIGGER admission_source_recovery_scope_freezes_insert AFTER INSERT ON recovery_scope_freezes BEGIN UPDATE admission_source_clock SET revision=revision+1 WHERE singleton=1; END;
+CREATE TRIGGER admission_source_recovery_scope_freezes_update AFTER UPDATE ON recovery_scope_freezes BEGIN UPDATE admission_source_clock SET revision=revision+1 WHERE singleton=1; END;
+CREATE TRIGGER admission_source_recovery_scope_freezes_delete AFTER DELETE ON recovery_scope_freezes BEGIN UPDATE admission_source_clock SET revision=revision+1 WHERE singleton=1; END;
+CREATE TRIGGER admission_source_resource_leases_insert AFTER INSERT ON resource_leases BEGIN UPDATE admission_source_clock SET revision=revision+1 WHERE singleton=1; END;
+CREATE TRIGGER admission_source_resource_leases_update AFTER UPDATE ON resource_leases BEGIN UPDATE admission_source_clock SET revision=revision+1 WHERE singleton=1; END;
+CREATE TRIGGER admission_source_resource_leases_delete AFTER DELETE ON resource_leases BEGIN UPDATE admission_source_clock SET revision=revision+1 WHERE singleton=1; END;
+CREATE TRIGGER admission_source_resource_fences_insert AFTER INSERT ON resource_fences BEGIN UPDATE admission_source_clock SET revision=revision+1 WHERE singleton=1; END;
+CREATE TRIGGER admission_source_resource_fences_update AFTER UPDATE ON resource_fences BEGIN UPDATE admission_source_clock SET revision=revision+1 WHERE singleton=1; END;
+CREATE TRIGGER admission_source_resource_fences_delete AFTER DELETE ON resource_fences BEGIN UPDATE admission_source_clock SET revision=revision+1 WHERE singleton=1; END;
+CREATE TRIGGER admission_source_budget_accounts_insert AFTER INSERT ON budget_accounts BEGIN UPDATE admission_source_clock SET revision=revision+1 WHERE singleton=1; END;
+CREATE TRIGGER admission_source_budget_accounts_update AFTER UPDATE ON budget_accounts BEGIN UPDATE admission_source_clock SET revision=revision+1 WHERE singleton=1; END;
+CREATE TRIGGER admission_source_budget_accounts_delete AFTER DELETE ON budget_accounts BEGIN UPDATE admission_source_clock SET revision=revision+1 WHERE singleton=1; END;
+CREATE TRIGGER admission_source_budget_reservations_insert AFTER INSERT ON budget_reservations BEGIN UPDATE admission_source_clock SET revision=revision+1 WHERE singleton=1; END;
+CREATE TRIGGER admission_source_budget_reservations_update AFTER UPDATE ON budget_reservations BEGIN UPDATE admission_source_clock SET revision=revision+1 WHERE singleton=1; END;
+CREATE TRIGGER admission_source_budget_reservations_delete AFTER DELETE ON budget_reservations BEGIN UPDATE admission_source_clock SET revision=revision+1 WHERE singleton=1; END;
+CREATE TRIGGER admission_source_object_records_insert AFTER INSERT ON object_records BEGIN UPDATE admission_source_clock SET revision=revision+1 WHERE singleton=1; END;
+CREATE TRIGGER admission_source_object_records_update AFTER UPDATE ON object_records BEGIN UPDATE admission_source_clock SET revision=revision+1 WHERE singleton=1; END;
+CREATE TRIGGER admission_source_object_records_delete AFTER DELETE ON object_records BEGIN UPDATE admission_source_clock SET revision=revision+1 WHERE singleton=1; END;
+CREATE TRIGGER admission_source_execution_fairness_insert AFTER INSERT ON execution_fairness BEGIN UPDATE admission_source_clock SET revision=revision+1 WHERE singleton=1; END;
+CREATE TRIGGER admission_source_execution_fairness_update AFTER UPDATE ON execution_fairness BEGIN UPDATE admission_source_clock SET revision=revision+1 WHERE singleton=1; END;
+CREATE TRIGGER admission_source_execution_fairness_delete AFTER DELETE ON execution_fairness BEGIN UPDATE admission_source_clock SET revision=revision+1 WHERE singleton=1; END;
+CREATE TRIGGER admission_source_execution_scheduler_state_insert AFTER INSERT ON execution_scheduler_state BEGIN UPDATE admission_source_clock SET revision=revision+1 WHERE singleton=1; END;
+CREATE TRIGGER admission_source_execution_scheduler_state_update AFTER UPDATE ON execution_scheduler_state BEGIN UPDATE admission_source_clock SET revision=revision+1 WHERE singleton=1; END;
+CREATE TRIGGER admission_source_execution_scheduler_state_delete AFTER DELETE ON execution_scheduler_state BEGIN UPDATE admission_source_clock SET revision=revision+1 WHERE singleton=1; END;
+";
 
 const V007_SQL:&str="
 ALTER TABLE backup_requests ADD COLUMN block_reason TEXT CHECK (block_reason IS NULL OR block_reason IN ('guard_profile_unavailable','isolation_profile_unavailable','authorization_denied'));

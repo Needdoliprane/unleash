@@ -1053,6 +1053,108 @@ impl UnleashStore {
         self.read_snapshot(|conn, _ctx| tx_read_execution_pool(conn, pool_id))
     }
 
+    /// Projette les files et réservations réelles dans un seul snapshot `SQLite`.
+    /// # Errors
+    /// Refuse un propriétaire actif incomplet ou une lecture interrompue ou expirée.
+    pub fn execution_admission_snapshot(
+        &self,
+        pool_id: PoolId,
+    ) -> Result<crate::ExecutionAdmissionSnapshot, StoreError> {
+        self.read_snapshot(|conn, _| {
+            crate::admission::read_snapshot(conn, pool_id, self.config.clock.now_ms())
+        })
+    }
+
+    /// Conserve l'observation privilégiée de préconditions exactes ; aucun accès client.
+    /// # Errors
+    /// Refuse ancienne incarnation, révision, claim ou observateur non attribuable.
+    pub fn record_admission_eligibility(
+        &self,
+        observation: crate::AdmissionEligibilityObservation,
+    ) -> Result<(), StoreError> {
+        self.execute_in_writer_tx(WriteCriticality::Normal, move |tx, now| {
+            crate::admission::record_eligibility(tx, now, &observation)
+        })
+    }
+
+    /// Consulte la politique pure sous le writer, puis engage tous ses effets atomiquement.
+    /// La closure ne fait aucune I/O et ne doit pas rappeler le Store.
+    /// # Errors
+    /// Refuse un snapshot périmé, une précondition absente, un fence ou des deltas invalides.
+    pub fn commit_execution_admission<F>(
+        &self,
+        pool_id: PoolId,
+        source_revision: crate::AdmissionSnapshotToken,
+        decide: F,
+    ) -> Result<crate::AdmissionOutcome, StoreError>
+    where
+        F: FnOnce(
+                &crate::ExecutionAdmissionSnapshot,
+            ) -> Result<crate::AdmissionDecision, StoreError>
+            + Send
+            + 'static,
+    {
+        let config = self.config.clone();
+        self.execute_in_writer_tx(WriteCriticality::Normal, move |tx, now| {
+            crate::admission::commit(tx, &config, now, pool_id, source_revision, decide)
+        })
+    }
+
+    /// Journalise une demande coopérative ; ne rend aucune capacité.
+    /// # Errors
+    /// Refuse contrôle, cible ou faisceau obsolète et demande déjà présente.
+    pub fn request_execution_checkpoint(
+        &self,
+        waiting: unleash_domain::InvocationId,
+        target: crate::ExecutionContinuation,
+    ) -> Result<unleash_protocol::EventCursor, StoreError> {
+        let config = self.config.clone();
+        self.execute_in_writer_tx(WriteCriticality::Critical, move |tx, now| {
+            crate::admission::request_checkpoint(tx, &config, now, waiting, &target)
+        })
+    }
+
+    /// Lie quatre observations durables à une continuation exacte, sans la libérer.
+    /// Le producteur interne doit réellement observer le host et le canal modèle.
+    /// # Errors
+    /// Refuse claim, référence absente, autre identité/fence ou rejeu divergent.
+    pub fn record_execution_checkpoint(
+        &self,
+        observation: crate::ExecutionCheckpointObservation,
+    ) -> Result<(), StoreError> {
+        self.execute_in_writer_tx(WriteCriticality::Critical, move |tx, now| {
+            crate::admission::record_checkpoint(tx, now, &observation)
+        })
+    }
+
+    /// Termine la tentative, neutralise sa lease et rend son unité atomiquement.
+    /// # Errors
+    /// Sans preuves persistées et toujours valides, conserve l'unité intégralement.
+    pub fn complete_execution_checkpoint(
+        &self,
+        reservation: unleash_domain::ReservationId,
+        reason: unleash_domain::WaitReason,
+    ) -> Result<unleash_protocol::EventCursor, StoreError> {
+        let config = self.config.clone();
+        self.execute_in_writer_tx(WriteCriticality::Critical, move |tx, now| {
+            crate::admission::complete_checkpoint(tx, &config, now, reservation, reason)
+        })
+    }
+
+    /// Remet en file une unité dont le checkpoint a été disposé dans cette incarnation.
+    /// # Errors
+    /// Refuse un terminal, une ancienne lignée ou une continuation encore active.
+    pub fn requeue_checkpointed_execution(
+        &self,
+        unit: crate::AdmissionUnit,
+        expected: unleash_domain::Revision,
+    ) -> Result<unleash_protocol::EventCursor, StoreError> {
+        let config = self.config.clone();
+        self.execute_in_writer_tx(WriteCriticality::Normal, move |tx, now| {
+            crate::admission::requeue(tx, &config, now, unit, expected)
+        })
+    }
+
     /// Libère une réservation de capacité et lève le gel de drainage si `occupation <= requested_limit`.
     ///
     /// # Errors

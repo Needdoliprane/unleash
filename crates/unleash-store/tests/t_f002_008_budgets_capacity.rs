@@ -445,6 +445,21 @@ fn test_t_f002_008_atomic_multi_account_budgets_unknown_and_capacity_pool() {
         })
         .unwrap();
     let res_third = ReservationId::from_u128(8003);
+    // A historical reservation which has provably never started: real queued
+    // invocation, no physical attempt and no action. Unknown replay owners are
+    // no longer considered evidence that execution has stopped (REQ-AGENT-004).
+    let drain_inv = InvocationId::from_u128(8803);
+    store.execute_in_writer_tx(WriteCriticality::Critical, move |tx, _| {
+        let old=inv_id.to_string();
+        let agent=AgentId::from_u128(8803).to_string();
+        let session=unleash_domain::SessionId::from_u128(8803).to_string();
+        let manifest=unleash_domain::ManifestId::from_u128(8803).to_string();
+        tx.execute("INSERT INTO agents(agent_id,level,project_id,state,revision) SELECT ?1,'N',a.project_id,'eligible',0 FROM agents a JOIN invocations i ON i.agent_id=a.agent_id WHERE i.invocation_id=?2",rusqlite::params![agent,old])?;
+        tx.execute("INSERT INTO sessions(session_id,agent_id,revision,state,created_at_ms) SELECT ?1,?2,0,'open',s.created_at_ms FROM sessions s JOIN invocations i ON i.session_id=s.session_id WHERE i.invocation_id=?3",rusqlite::params![session,agent,old])?;
+        tx.execute("INSERT INTO context_manifests(manifest_id,session_id,base_session_revision,content_hash,schema_version,created_at_ms) SELECT ?1,?2,0,m.content_hash,1,m.created_at_ms FROM context_manifests m JOIN invocations i ON i.context_manifest_id=m.manifest_id WHERE i.invocation_id=?3",rusqlite::params![manifest,session,old])?;
+        tx.execute("INSERT INTO invocations(invocation_id,agent_id,session_id,trigger_event_id,effective_bundle_hash,context_manifest_id,state,admission_class,revision,created_at_ms) SELECT ?1,?2,?3,trigger_event_id,effective_bundle_hash,?4,'queued','work',0,created_at_ms FROM invocations WHERE invocation_id=?5",rusqlite::params![drain_inv.to_string(),agent,session,manifest,old])?;
+        Ok(())
+    }).unwrap();
     store
         .commit_command(CommitCommandRequest {
             actor_id: ActorId::new("user:louis").unwrap(),
@@ -471,9 +486,12 @@ fn test_t_f002_008_atomic_multi_account_budgets_unknown_and_capacity_pool() {
             capacity_reservations: vec![CapacityReservationRequest {
                 reservation_id: res_third,
                 pool_id,
-                execution_owner: None,
-                owner_type: "replay_worker".to_owned(),
-                owner_id: "rw-drain-2".to_owned(),
+                execution_owner: Some(ExecutionOwner::AgentInvocation {
+                    invocation_id: drain_inv,
+                    attempt_id: None,
+                }),
+                owner_type: "agent_invocation".to_owned(),
+                owner_id: drain_inv.to_string(),
                 admission_class: Some(AdmissionClass::Work),
                 amount: 1,
             }],

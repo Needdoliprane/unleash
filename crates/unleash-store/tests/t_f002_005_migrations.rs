@@ -269,7 +269,10 @@ fn migrations_v005_to_v007_preserve_legacy_jobs_without_fabricated_requests() {
         Err(StoreError::MigrationBackupRequired)
     ));
     let store = UnleashStore::open_with_migration_backup(v7, Some(backup.backup_id)).unwrap();
-    assert_eq!(store.daemon_state().unwrap().schema_version, 7);
+    assert_eq!(
+        store.daemon_state().unwrap().schema_version,
+        unleash_store::CURRENT_SCHEMA_VERSION
+    );
     let (retained, requests, jobs): (String, i64, i64) = store
         .read_snapshot(|conn, _| {
             Ok((

@@ -84,6 +84,23 @@ L'invariant somme des réservations actives ≤ effective_limit ≤ hard_limit n
 
 Il n'existe pas de table de file distincte : chaque unité en attente d'admission (invocation `queued`, replay_worker ou provider_probe non admis) porte dans sa propre ligne `admission_class TEXT?` (control/work) et sa raison de file `wait_reason?`, colonnes de `invocations`, `replay_workers` et `provider_probes` ; la file persistée par projet, classe et raison de [scheduling](../specs/scheduling.md) est la projection de ces colonnes. La classe est écrite par le writer à chaque mise en file d'après la cause durable de l'admission, jamais déduite d'un champ fourni par un modèle ; elle est non nulle tant que l'unité est en file ou admise et vaut toujours `work` pour replay_worker et provider_probe. Elle est recopiée dans `capacity_reservations.admission_class` à l'admission. Les règles de prêt de la réserve, de demande de checkpoint et d'anti-famine sont celles de [scheduling](../specs/scheduling.md) (Q-15).
 
+### Port transactionnel d’admission V008
+
+La migration additive V008 inscrit `queued_at_ms` dans chacune des trois tables d’unités. La projection d’admission couvre toutes les lignes en file. Les dates historiques absentes des replay workers et des probes demeurent inconnues. Les preuves et raisons d’attente sont corrélées à chaque unité.
+
+| Table | Rôle |
+|---|---|
+| `admission_source_clock` et `admission_observation_clock` | Révisions des faits qui peuvent changer une décision et des publications, mises à jour ou retraits d’observations. |
+| `execution_scheduler_state` et `execution_fairness` | Rafale de contrôles et déficit pondéré par pool et projet, avec une portée utilisateur distincte. |
+| `admission_eligibility_observations` | Métadonnées immuables de la preuve d’éligibilité, de son échéance et de l’urgence. L’ordinal de publication départage les observations au même instant. |
+| `execution_checkpoint_requests` et `execution_checkpoint_observations` | Demande rattachée à la réservation cible et observations immuables de la mise en sûreté sous la même autorité. |
+
+Le port Store joint au snapshot un jeton avec lignée, époque, révisions des faits et observations, et première échéance susceptible de changer l’éligibilité. Le writer revalide ce jeton et fournit son snapshot à la fonction de décision pure dans la transaction. La réservation d’une unité typée, la tentative et la lease applicables, les budgets liés à l’action, les deltas d’équité, l’événement et l’outbox s’engagent ensemble.
+
+Le checkpoint conserve l’unité comptée jusqu’à la validation des quatre observations liées à la même réservation, unité, révision, lease, lignée, époque, fence et identité de boot. Elles attestent la publication du checkpoint, la quiescence locale du canal modèle, la neutralisation de la continuation et la disposition des ressources. Le writer vérifie les preuves avant d’engager la mise en attente et la libération. La réadmission crée une nouvelle réservation et, pour une invocation, une nouvelle tentative.
+
+Le raccord au runtime doit authentifier les producteurs de ces observations et réconcilier les anciennes époques avant de reprendre leur capacité. L’extension d’une demande à une nouvelle cible attend une observation monotone qualifiée. L’horodatage UTC journalise l’événement.
+
 Les budgets global, projet et fournisseur sont réservés dans la même transaction pour une action. Une estimation non bornée n'assure pas un plafond financier : l'action est refusée (INV-051) si son coût maximal ne peut pas être borné par limites de requête et tarification effective ; seule une politique `pricing_stale_policy=warn` explicite d'un profil admet un tarif périmé, jamais un tarif absent (Q-14). Le coût réel supérieur à l'estimation est néanmoins enregistré ; il ne disparaît pas pour maintenir artificiellement le CHECK. Un résultat/cout inconnu conserve sa réserve et bloque sa réutilisation.
 
 ## Actions, processus et preuves

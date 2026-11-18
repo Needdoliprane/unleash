@@ -7,6 +7,7 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+pub mod admission;
 pub mod backup;
 pub mod backup_requests;
 pub mod broker_phases;
@@ -28,6 +29,12 @@ pub mod restore;
 pub mod store;
 pub mod writer;
 
+pub use admission::{
+    ActiveAdmission, AdmissionCandidate, AdmissionCommit, AdmissionDecision,
+    AdmissionEligibilityObservation, AdmissionOutcome, AdmissionSnapshotToken, AdmissionUnit,
+    AdmissionUrgency, ExecutionAdmissionSnapshot, ExecutionCheckpointObservation,
+    ExecutionCheckpointRequestRecord, ExecutionContinuation,
+};
 pub use backup::{
     BackupJobState, BackupManifest, BackupObjectEntry, BackupRetentionTier, BoundedExportOutcome,
     BoundedExportRequest, ExportCancellation, PrepareBackupRequest, ValidateBackupReport,
