@@ -12,7 +12,7 @@
     "worktrees/"
   ],
   "hash_algorithm": "sha256",
-  "source_tree_digest": "bd304cb00adba311f34ef3c5ef9edd49f58ad18b80760f2c07a92f29c95b3ad0",
+  "source_tree_digest": "73b7f23c9d0eb31f844634e8ff03f2a3959cebbbe13e764d976a5297a69653a7",
   "files": [
     {
       "path": "INDEX.md",
@@ -346,8 +346,8 @@
     },
     {
       "path": "architecture/ipc-and-apis.md",
-      "sha256": "ecb5fccdd63412fa37b3bf24f95c16bd6b9e4378e857fe6cc4161ce8a1e21fe5",
-      "bytes": 27490,
+      "sha256": "e3f71de6f44d861325b9fa581469b09d139b74dcd0ef07f30dfd5c3a1cb77de6",
+      "bytes": 28835,
       "media_type": "text/markdown"
     },
     {
@@ -364,8 +364,8 @@
     },
     {
       "path": "architecture/runtime-lifecycle.md",
-      "sha256": "bb36da540459bbad6227b6471e40761e6ab5bf4d79c762d0080945bafecab05a",
-      "bytes": 14777,
+      "sha256": "c8f45af2ab1a811389c98a36c0d2005d76731e9a86b2dcd20bf650cc3aa3f212",
+      "bytes": 15842,
       "media_type": "text/markdown"
     },
     {
@@ -394,8 +394,8 @@
     },
     {
       "path": "architecture/sqlite-design.md",
-      "sha256": "cfb0d279f6769c0cdf19e2ccffc7bfbeb1a9aeedc3fd4ebae392eb8f5edf04f2",
-      "bytes": 52253,
+      "sha256": "41fb90d1dd36b7c59ca72decc7150cda998033b51746f95e17d6e93f0630ad83",
+      "bytes": 52748,
       "media_type": "text/markdown"
     },
     {
@@ -2068,8 +2068,8 @@
     },
     {
       "path": "schemas/ipc-hello.schema.json",
-      "sha256": "1124d69e748b729e5bdd0f0df6b5fe9db15c872d3bc7775c077a7593f64ad06e",
-      "bytes": 2699,
+      "sha256": "f40c131a7f5a58a0597e590e35ba2c3b359b642369febf51ec2fe5a71976395d",
+      "bytes": 2989,
       "media_type": "application/json"
     },
     {

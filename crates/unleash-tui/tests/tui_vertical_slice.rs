@@ -87,6 +87,13 @@ fn t_f015_005_live_tui_does_not_report_example_state_or_attach_without_a_process
     apply_backend_update(&mut state, BackendUpdate::Connected { cursor: None });
     render_once(&mut terminal, &mut state).expect("render connected state");
     assert!(buffer_text(&terminal).contains("IPC v2: connecté"));
+
+    handle_terminal_event(&mut state, key(KeyCode::Char('?')), None);
+    render_once(&mut terminal, &mut state).expect("render keyboard help");
+    let help = buffer_text(&terminal);
+    assert!(help.contains("Aide clavier"));
+    assert!(!help.contains("100 000 events"));
+    assert!(!help.contains("a : attacher PTY"));
 }
 
 #[test]
