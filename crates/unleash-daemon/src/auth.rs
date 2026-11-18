@@ -218,7 +218,9 @@ pub fn authorize_command(
 
     let required = match cmd.command_type.as_str() {
         "CreateProject" | "ReviseProject" => Capability::ManageProjects,
-        "SetSettings" | "SetPolicy" | "ConfigureGuard" | "PurgeHistory" => Capability::Administer,
+        "SetSettings" | "SetPolicy" | "ConfigureGuard" | "PurgeHistory" | "RequestBackup" => {
+            Capability::Administer
+        }
         "AssignMission" | "PauseMission" | "ResumeMission" | "CancelMission" => {
             Capability::ManageMissions
         }
@@ -281,9 +283,8 @@ pub fn authorize_query(
     let required = match query.query_type.as_str() {
         "GetDaemonStatus" => Capability::QueryDaemonDiagnostic,
         "GetHealth" | "GetStateSnapshot" | "GetCommandReceipt" | "ListProjects" | "GetProject"
-        | "ReadSettings" | "ReadPolicySummary" | "ReadGuardHealth" | "InspectRecovery" => {
-            Capability::QueryState
-        }
+        | "ReadSettings" | "ReadPolicySummary" | "ReadGuardHealth" | "InspectRecovery"
+        | "GetBackupManifest" => Capability::QueryState,
         _ => {
             return Err(IpcError::new(
                 ErrorCode::InvalidArgument,

@@ -9,7 +9,7 @@ use crate::config::{CutpointObserver, StoreCutpoint};
 use crate::error::StoreError;
 
 /// Version courante maximale du schéma gérée par cette version de `unleash-store`.
-pub const CURRENT_SCHEMA_VERSION: i64 = 4;
+pub const CURRENT_SCHEMA_VERSION: i64 = 6;
 
 /// État persisté d'une migration dans `schema_migrations`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -89,7 +89,102 @@ const MIGRATIONS: &[MigrationDef] = &[
         name: "v004_recovery_scope_dispositions",
         sql: V004_SQL,
     },
+    MigrationDef {
+        version: 5,
+        name: "v005_durable_broker_phases",
+        sql: V005_SQL,
+    },
+    MigrationDef {
+        version: 6,
+        name: "v006_reserved_backup_requests",
+        sql: V006_SQL,
+    },
 ];
+
+const V006_SQL: &str = "
+CREATE TABLE backup_requests (
+    backup_id TEXT PRIMARY KEY,
+    receipt_id TEXT NOT NULL UNIQUE REFERENCES command_receipts(receipt_id) DEFERRABLE INITIALLY DEFERRED,
+    action_id TEXT NOT NULL UNIQUE,
+    actor_id TEXT NOT NULL,
+    principal_id TEXT NOT NULL REFERENCES principals(principal_id),
+    authority_generation TEXT NOT NULL,
+    daemon_epoch INTEGER NOT NULL CHECK (daemon_epoch >= 0),
+    scope_revision INTEGER NOT NULL CHECK (scope_revision >= 0),
+    policy_revision INTEGER NOT NULL CHECK (policy_revision >= 0),
+    destination_path TEXT NOT NULL,
+    payload_digest TEXT NOT NULL,
+    state TEXT NOT NULL CHECK (state IN ('reserved','claimed','executing','completed','blocked')),
+    revision INTEGER NOT NULL CHECK (revision >= 1),
+    dispatch_id TEXT UNIQUE REFERENCES action_dispatches(dispatch_id),
+    barrier_pin_id TEXT UNIQUE REFERENCES object_pins(pin_id),
+    manifest_digest TEXT,
+    manifest_json TEXT,
+    created_at_ms INTEGER NOT NULL,
+    CHECK ((state IN ('executing','completed') AND dispatch_id IS NOT NULL AND barrier_pin_id IS NOT NULL) OR state NOT IN ('executing','completed')),
+    CHECK (state != 'completed' OR (manifest_digest IS NOT NULL AND manifest_json IS NOT NULL))
+) STRICT;
+CREATE TRIGGER backup_requests_immutable BEFORE UPDATE ON backup_requests
+WHEN OLD.backup_id IS NOT NEW.backup_id OR OLD.receipt_id IS NOT NEW.receipt_id
+ OR OLD.action_id IS NOT NEW.action_id OR OLD.actor_id IS NOT NEW.actor_id
+ OR OLD.principal_id IS NOT NEW.principal_id OR OLD.authority_generation IS NOT NEW.authority_generation
+ OR OLD.destination_path IS NOT NEW.destination_path OR OLD.payload_digest IS NOT NEW.payload_digest
+ OR OLD.created_at_ms IS NOT NEW.created_at_ms
+ OR (OLD.state != 'reserved' AND (OLD.daemon_epoch IS NOT NEW.daemon_epoch OR OLD.scope_revision IS NOT NEW.scope_revision OR OLD.policy_revision IS NOT NEW.policy_revision))
+ OR (OLD.dispatch_id IS NOT NULL AND OLD.dispatch_id IS NOT NEW.dispatch_id)
+ OR (OLD.barrier_pin_id IS NOT NULL AND OLD.barrier_pin_id IS NOT NEW.barrier_pin_id)
+ OR (OLD.manifest_digest IS NOT NULL AND OLD.manifest_digest IS NOT NEW.manifest_digest)
+ OR (OLD.manifest_json IS NOT NULL AND OLD.manifest_json IS NOT NEW.manifest_json)
+ OR (OLD.state != 'reserved' AND NEW.state = 'reserved')
+BEGIN SELECT RAISE(ABORT,'backup request immutable identity/provenance'); END;
+CREATE TRIGGER backup_requests_no_delete BEFORE DELETE ON backup_requests BEGIN SELECT RAISE(ABORT,'backup request durable identity'); END;
+";
+
+const V005_SQL: &str = "
+CREATE TABLE broker_intents (
+    action_id TEXT PRIMARY KEY REFERENCES actions(action_id),
+    intent_digest TEXT NOT NULL,
+    intent_json TEXT NOT NULL,
+    created_at_ms INTEGER NOT NULL
+) STRICT;
+CREATE TABLE broker_evaluations (
+    evaluation_id TEXT PRIMARY KEY,
+    action_id TEXT NOT NULL REFERENCES broker_intents(action_id),
+    previous_evaluation_id TEXT UNIQUE REFERENCES broker_evaluations(evaluation_id),
+    ordinal INTEGER NOT NULL CHECK (ordinal >= 1),
+    policy_snapshot_json TEXT NOT NULL,
+    policy_snapshot_hash TEXT NOT NULL,
+    state TEXT NOT NULL CHECK (state IN ('authorizing','authorized','approval_required','denied','retryable')),
+    retry_not_before_ms INTEGER,
+    UNIQUE (action_id, ordinal)
+) STRICT;
+CREATE TABLE broker_phase_records (
+    action_id TEXT NOT NULL REFERENCES broker_intents(action_id),
+    evaluation_id TEXT NOT NULL REFERENCES broker_evaluations(evaluation_id),
+    phase_key TEXT NOT NULL,
+    phase_json TEXT NOT NULL,
+    phase_digest TEXT NOT NULL,
+    action_revision INTEGER NOT NULL CHECK (action_revision >= 1),
+    event_id TEXT NOT NULL REFERENCES events(event_id),
+    event_sequence INTEGER NOT NULL REFERENCES events(sequence),
+    PRIMARY KEY (action_id,evaluation_id,phase_key)
+) STRICT;
+CREATE TABLE broker_dispatches (
+    dispatch_id TEXT PRIMARY KEY REFERENCES action_dispatches(dispatch_id),
+    action_id TEXT NOT NULL UNIQUE REFERENCES broker_intents(action_id),
+    evaluation_id TEXT NOT NULL REFERENCES broker_evaluations(evaluation_id),
+    decision_json TEXT NOT NULL,
+    authority_generation TEXT NOT NULL,
+    daemon_epoch INTEGER NOT NULL,
+    fence INTEGER NOT NULL
+) STRICT;
+CREATE TRIGGER broker_intents_no_update BEFORE UPDATE ON broker_intents BEGIN SELECT RAISE(ABORT,'broker intent immutable'); END;
+CREATE TRIGGER broker_intents_no_delete BEFORE DELETE ON broker_intents BEGIN SELECT RAISE(ABORT,'broker intent immutable'); END;
+CREATE TRIGGER broker_phase_records_no_update BEFORE UPDATE ON broker_phase_records BEGIN SELECT RAISE(ABORT,'broker phase immutable'); END;
+CREATE TRIGGER broker_phase_records_no_delete BEFORE DELETE ON broker_phase_records BEGIN SELECT RAISE(ABORT,'broker phase immutable'); END;
+CREATE TRIGGER broker_dispatches_no_update BEFORE UPDATE ON broker_dispatches BEGIN SELECT RAISE(ABORT,'broker dispatch immutable'); END;
+CREATE TRIGGER broker_dispatches_no_delete BEFORE DELETE ON broker_dispatches BEGIN SELECT RAISE(ABORT,'broker dispatch immutable'); END;
+";
 
 fn migration_checksum(sql: &str) -> String {
     let mut hasher = Sha256::new();

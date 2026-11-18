@@ -6,10 +6,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use unleash_domain::{
     ActionId, ActionState, ActorId, AgentId, AgentLevel, AgentState, AttemptId,
-    AuthorityGeneration, CommandId, CompletionPolicy, DaemonEpoch, DaemonMode, Fence, GoalId,
-    GoalState, InvocationId, InvocationState, MissionId, MissionState, OperationId, ProjectId,
-    ReceiptId, ReconcileOutcome, ReplayWorkerId, Revision, RunId, Sha256Digest, StepId, StreamId,
-    TimestampMs,
+    AuthorityGeneration, BackupId, CommandId, CompletionPolicy, DaemonEpoch, DaemonMode, Fence,
+    GoalId, GoalState, InvocationId, InvocationState, MissionId, MissionState, OperationId,
+    ProjectId, ReceiptId, ReconcileOutcome, ReplayWorkerId, Revision, RunId, Sha256Digest, StepId,
+    StreamId, TimestampMs,
 };
 use unleash_protocol::{
     CommandEnvelope, CommandReceipt, CommandReceiptInspection, EventCausationKind, ReceiptState,
@@ -72,6 +72,8 @@ pub enum AggregateKind {
     ApprovalResolution,
     /// Audit de purge Q-12 (`retention_purges`).
     RetentionPurge,
+    /// Demande et job de sauvegarde (`backup_requests`, `backup_jobs`).
+    BackupJob,
 }
 
 impl AggregateKind {
@@ -95,6 +97,7 @@ impl AggregateKind {
             Self::Alert => "alert",
             Self::ApprovalResolution => "approval_resolution",
             Self::RetentionPurge => "retention_purge",
+            Self::BackupJob => "backup_job",
         }
     }
 }
@@ -102,6 +105,11 @@ impl AggregateKind {
 /// Mutation pure décidée par le domaine et exécutée atomiquement par [`CommitCommandRequest`].
 #[derive(Debug, Clone)]
 pub enum CommandMutation {
+    /// Réserve une sauvegarde manuelle gérée, sans I/O filesystem.
+    RequestBackup {
+        /// Identité client stable égale à l'agrégat de l'enveloppe.
+        backup_id: BackupId,
+    },
     /// Crée un nouveau projet.
     CreateProject {
         /// Identifiant du projet.
@@ -749,6 +757,7 @@ pub(crate) fn tx_commit_command(
             command_id: Some(req.envelope.command_id),
         });
     }
+    crate::backup_requests::validate_request_backup_envelope(req)?;
 
     // Étape 2 : Rechercher `(actor_id, command_id)` dans `command_receipts`
     let actor_str = req.actor_id.as_str();
@@ -827,6 +836,7 @@ pub(crate) fn tx_commit_command(
         req.envelope.command_id,
         receipt_id,
         &req.envelope,
+        &req.actor_id,
         &mut generated_events,
     )?;
 
@@ -995,7 +1005,12 @@ pub(crate) fn tx_commit_command(
     } else {
         None
     };
-    let effective_receipt_state = if purge_id.is_some() {
+    let reserved_backup = if let CommandMutation::RequestBackup { backup_id } = &req.mutation {
+        Some(*backup_id)
+    } else {
+        None
+    };
+    let effective_receipt_state = if purge_id.is_some() || reserved_backup.is_some() {
         ReceiptState::Accepted
     } else {
         req.receipt_state
@@ -1014,6 +1029,7 @@ pub(crate) fn tx_commit_command(
         ),
         result_ref: purge_id
             .map(|id| format!("retention-purge:{id}"))
+            .or_else(|| reserved_backup.map(|id| format!("backup:{id}")))
             .or_else(|| req.result_ref.clone()),
     };
     let receipt_json = serde_json::to_string(&receipt)?;
@@ -1072,7 +1088,7 @@ pub(crate) fn tx_commit_command(
     Ok(CommitOutcome::Committed(receipt))
 }
 
-fn ensure_scope_not_frozen_tx(
+pub(crate) fn ensure_scope_not_frozen_tx(
     tx: &Transaction<'_>,
     project_id: Option<ProjectId>,
     scope_key: Option<&str>,
@@ -1151,10 +1167,21 @@ fn apply_command_mutation(
     cmd_id: CommandId,
     receipt_id: ReceiptId,
     envelope: &CommandEnvelope,
+    actor_id: &ActorId,
     generated_events: &mut Vec<EventAppendSpec>,
 ) -> Result<Revision, StoreError> {
     let exp_i64 = i64::try_from(expected_rev.as_u64()).unwrap_or(0);
     match mutation {
+        CommandMutation::RequestBackup { backup_id } => crate::backup_requests::reserve_backup_tx(
+            tx,
+            config,
+            daemon,
+            now_ms,
+            *backup_id,
+            receipt_id,
+            actor_id,
+            generated_events,
+        ),
         CommandMutation::CreateProject {
             project_id,
             name,

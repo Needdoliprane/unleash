@@ -171,7 +171,8 @@ fn migration_v003_to_v004_preserves_history_and_requires_backup() {
         })
         .unwrap();
     store.shutdown().unwrap();
-    let v4 = StoreConfig::new(dir.path());
+    let mut v4 = StoreConfig::new(dir.path());
+    v4.max_supported_schema_version = 4;
     assert!(matches!(
         UnleashStore::open(v4.clone()),
         Err(StoreError::MigrationBackupRequired)
@@ -195,4 +196,45 @@ fn migration_v003_to_v004_preserves_history_and_requires_backup() {
         store.daemon_state().unwrap().stream_id
     );
     assert_eq!(snapshot.cursor.sequence.as_u64(), 0);
+}
+
+#[test]
+fn migration_v004_to_v005_requires_backup_and_preserves_v004_checksum() {
+    let dir = local_test_dir("f018-v004-v005").unwrap();
+    let mut v4 = StoreConfig::new(dir.path());
+    v4.max_supported_schema_version = 4;
+    let store = UnleashStore::open(v4).unwrap();
+    let checksum: String = store
+        .read_snapshot(|conn, _| {
+            conn.query_row(
+                "SELECT checksum_sha256 FROM schema_migrations WHERE version=4",
+                [],
+                |r| r.get(0),
+            )
+            .map_err(StoreError::from_rusqlite)
+        })
+        .unwrap();
+    let backup = store
+        .prepare_backup(PrepareBackupRequest {
+            destination_dir: dir.path().join("backup-v004"),
+            retention_tier: BackupRetentionTier::Manual,
+            coverage: "db_and_objects".to_owned(),
+        })
+        .unwrap();
+    store.shutdown().unwrap();
+    let mut v5 = StoreConfig::new(dir.path());
+    v5.max_supported_schema_version = 5;
+    assert!(matches!(
+        UnleashStore::open(v5.clone()),
+        Err(StoreError::MigrationBackupRequired)
+    ));
+    let store = UnleashStore::open_with_migration_backup(v5, Some(backup.backup_id)).unwrap();
+    assert_eq!(store.daemon_state().unwrap().schema_version, 5);
+    let (retained,tables):(String,i64)=store.read_snapshot(|conn,_| {
+        let retained=conn.query_row("SELECT checksum_sha256 FROM schema_migrations WHERE version=4",[],|r|r.get(0)).map_err(StoreError::from_rusqlite)?;
+        let tables=conn.query_row("SELECT COUNT(*) FROM sqlite_master WHERE name IN ('broker_intents','broker_evaluations','broker_phase_records','broker_dispatches') AND type='table'",[],|r|r.get(0)).map_err(StoreError::from_rusqlite)?;
+        Ok((retained,tables))
+    }).unwrap();
+    assert_eq!(retained, checksum);
+    assert_eq!(tables, 4);
 }

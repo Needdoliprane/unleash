@@ -235,6 +235,110 @@ fn apply_startup_state(
 }
 
 impl UnleashStore {
+    /// Lit la demande réservée et l'état réel de son job dans le même snapshot.
+    ///
+    /// # Errors
+    /// Retourne les erreurs de lecture du Store.
+    pub fn inspect_backup_request(
+        &self,
+        backup_id: BackupId,
+    ) -> Result<Option<crate::BackupRequestRecord>, StoreError> {
+        self.read_snapshot(move |conn, _| {
+            crate::backup_requests::read_backup_request_conn(conn, backup_id)
+        })
+    }
+
+    /// Demande, job, pins, manifeste attesté et watermark dans le même snapshot.
+    ///
+    /// # Errors
+    /// Retourne les erreurs de lecture ou d'intégrité de la projection.
+    pub fn inspect_backup_request_snapshot(
+        &self,
+        backup_id: BackupId,
+    ) -> Result<SnapshotProjection<Option<crate::BackupRequestRecord>>, StoreError> {
+        self.project_snapshot(move |conn| {
+            crate::backup_requests::read_backup_request_conn(conn, backup_id)
+        })
+    }
+
+    /// Prend une demande une seule fois avant Guard ; une issue incertaine exige inspection.
+    ///
+    /// # Errors
+    /// Refuse les lignées, états, principaux ou scopes incompatibles.
+    pub fn claim_backup_request(
+        &self,
+        backup_id: BackupId,
+        authority_generation: AuthorityGeneration,
+    ) -> Result<crate::BackupRequestRecord, StoreError> {
+        self.writer
+            .submit_immediate_blocking(WriteCriticality::Normal, true, move |tx, _| {
+                crate::backup_requests::claim_backup_request_tx(tx, backup_id, authority_generation)
+            })
+    }
+
+    /// Consomme une réservation une fois et exécute sa sauvegarde après le marqueur durable.
+    ///
+    /// # Errors
+    /// Tout résultat incertain impose inspection ; aucun rejeu n'autorise un second effet.
+    pub fn execute_reserved_backup(
+        &self,
+        request: crate::ExecuteReservedBackupRequest,
+    ) -> Result<crate::ExecutedBackup, StoreError> {
+        let config = self.config.clone();
+        let consumed = self.writer.submit_immediate_blocking(
+            WriteCriticality::Critical,
+            false,
+            move |tx, now| {
+                crate::backup_requests::consume_backup_request_tx(tx, &config, now, request)
+            },
+        )?;
+        crate::backup::execute_reserved_backup_workflow(
+            &self.config,
+            &self.writer,
+            self.config.cutpoints.as_ref(),
+            request,
+            consumed,
+        )
+    }
+    /// Engage atomiquement une phase du broker et son événement, avant tout effet.
+    ///
+    /// # Errors
+    /// Refuse les divergences, autorités périmées et tout dispatch déjà durable.
+    pub fn commit_broker_phase(
+        &self,
+        request: crate::BrokerPhaseRequest,
+    ) -> Result<crate::BrokerPhaseCommit, StoreError> {
+        let cutpoint = match &request.phase {
+            crate::BrokerPhase::Authorizing { .. } => {
+                Some(StoreCutpoint::C3AfterBrokerIntentCommit)
+            }
+            crate::BrokerPhase::Dispatch { .. } => Some(StoreCutpoint::C4AfterBrokerDispatchCommit),
+            _ => None,
+        };
+        let config = self.config.clone();
+        let committed = self.writer.submit_immediate_blocking(
+            WriteCriticality::Normal,
+            true,
+            move |tx, now| crate::broker_writer::commit_phase_tx(tx, &config, now, &request),
+        )?;
+        if let Some(point) = cutpoint {
+            self.config.cutpoints.hit(point)?;
+        }
+        Ok(committed)
+    }
+
+    /// Lit l'identité et le CAS d'une action du journal broker.
+    ///
+    /// # Errors
+    /// Retourne les erreurs de lecture du Store.
+    pub fn inspect_broker_action(
+        &self,
+        action_id: ActionId,
+    ) -> Result<Option<crate::BrokerActionSnapshot>, StoreError> {
+        self.read_snapshot(move |conn, _| {
+            crate::broker_writer::inspect_action_conn(conn, action_id)
+        })
+    }
     /// Ouvre ou initialise la base `SQLite` qualifiée avec vérification de build, PRAGMAs et migrations.
     ///
     /// # Errors
