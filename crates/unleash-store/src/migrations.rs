@@ -9,7 +9,7 @@ use crate::config::{CutpointObserver, StoreCutpoint};
 use crate::error::StoreError;
 
 /// Version courante maximale du schéma gérée par cette version de `unleash-store`.
-pub const CURRENT_SCHEMA_VERSION: i64 = 4;
+pub const CURRENT_SCHEMA_VERSION: i64 = 5;
 
 /// État persisté d'une migration dans `schema_migrations`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -89,7 +89,58 @@ const MIGRATIONS: &[MigrationDef] = &[
         name: "v004_recovery_scope_dispositions",
         sql: V004_SQL,
     },
+    MigrationDef {
+        version: 5,
+        name: "v005_durable_broker_phases",
+        sql: V005_SQL,
+    },
 ];
+
+const V005_SQL: &str = "
+CREATE TABLE broker_intents (
+    action_id TEXT PRIMARY KEY REFERENCES actions(action_id),
+    intent_digest TEXT NOT NULL,
+    intent_json TEXT NOT NULL,
+    created_at_ms INTEGER NOT NULL
+) STRICT;
+CREATE TABLE broker_evaluations (
+    evaluation_id TEXT PRIMARY KEY,
+    action_id TEXT NOT NULL REFERENCES broker_intents(action_id),
+    previous_evaluation_id TEXT UNIQUE REFERENCES broker_evaluations(evaluation_id),
+    ordinal INTEGER NOT NULL CHECK (ordinal >= 1),
+    policy_snapshot_json TEXT NOT NULL,
+    policy_snapshot_hash TEXT NOT NULL,
+    state TEXT NOT NULL CHECK (state IN ('authorizing','authorized','approval_required','denied','retryable')),
+    retry_not_before_ms INTEGER,
+    UNIQUE (action_id, ordinal)
+) STRICT;
+CREATE TABLE broker_phase_records (
+    action_id TEXT NOT NULL REFERENCES broker_intents(action_id),
+    evaluation_id TEXT NOT NULL REFERENCES broker_evaluations(evaluation_id),
+    phase_key TEXT NOT NULL,
+    phase_json TEXT NOT NULL,
+    phase_digest TEXT NOT NULL,
+    action_revision INTEGER NOT NULL CHECK (action_revision >= 1),
+    event_id TEXT NOT NULL REFERENCES events(event_id),
+    event_sequence INTEGER NOT NULL REFERENCES events(sequence),
+    PRIMARY KEY (action_id,evaluation_id,phase_key)
+) STRICT;
+CREATE TABLE broker_dispatches (
+    dispatch_id TEXT PRIMARY KEY REFERENCES action_dispatches(dispatch_id),
+    action_id TEXT NOT NULL UNIQUE REFERENCES broker_intents(action_id),
+    evaluation_id TEXT NOT NULL REFERENCES broker_evaluations(evaluation_id),
+    decision_json TEXT NOT NULL,
+    authority_generation TEXT NOT NULL,
+    daemon_epoch INTEGER NOT NULL,
+    fence INTEGER NOT NULL
+) STRICT;
+CREATE TRIGGER broker_intents_no_update BEFORE UPDATE ON broker_intents BEGIN SELECT RAISE(ABORT,'broker intent immutable'); END;
+CREATE TRIGGER broker_intents_no_delete BEFORE DELETE ON broker_intents BEGIN SELECT RAISE(ABORT,'broker intent immutable'); END;
+CREATE TRIGGER broker_phase_records_no_update BEFORE UPDATE ON broker_phase_records BEGIN SELECT RAISE(ABORT,'broker phase immutable'); END;
+CREATE TRIGGER broker_phase_records_no_delete BEFORE DELETE ON broker_phase_records BEGIN SELECT RAISE(ABORT,'broker phase immutable'); END;
+CREATE TRIGGER broker_dispatches_no_update BEFORE UPDATE ON broker_dispatches BEGIN SELECT RAISE(ABORT,'broker dispatch immutable'); END;
+CREATE TRIGGER broker_dispatches_no_delete BEFORE DELETE ON broker_dispatches BEGIN SELECT RAISE(ABORT,'broker dispatch immutable'); END;
+";
 
 fn migration_checksum(sql: &str) -> String {
     let mut hasher = Sha256::new();

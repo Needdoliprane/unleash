@@ -186,6 +186,10 @@ pub enum StoreCutpoint {
     C1BeforeCommandCommit,
     /// Juste après `COMMIT` de commande, avant retour au client (`C2`).
     C2AfterCommandCommit,
+    /// Intention broker engagée, avant Guard ou tout marqueur de dispatch (`C3`).
+    C3AfterBrokerIntentCommit,
+    /// Marqueur broker engagé, avant retour autorisant l'effet (`C4`).
+    C4AfterBrokerDispatchCommit,
     /// Juste après `COMMIT` du pin de préparation objet (`C10a`).
     C10aAfterPrepPin,
     /// Lors de la sélection/réservation de suppression objet (`C10b`).
@@ -425,7 +429,7 @@ impl StoreConfig {
             min_free_space_bytes: DEFAULT_MIN_FREE_SPACE_BYTES,
             default_receipt_retention_days: DEFAULT_RECEIPT_RETENTION_DAYS,
             clock_uncertain: Arc::new(AtomicBool::new(false)),
-            max_supported_schema_version: 4,
+            max_supported_schema_version: crate::migrations::CURRENT_SCHEMA_VERSION,
             build_policy: SqliteBuildPolicy::default(),
             clock: Arc::new(SystemUtcClock),
             monotonic_clock: Arc::new(SystemMonotonicClock::new()),

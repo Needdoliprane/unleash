@@ -9,6 +9,7 @@
 
 pub mod backup;
 pub mod broker_phases;
+mod broker_writer;
 pub mod budgets;
 pub mod commands;
 pub mod config;
