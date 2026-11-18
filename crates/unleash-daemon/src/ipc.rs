@@ -987,8 +987,10 @@ async fn handle_command_frame(
         }
     };
 
-    if matches!(prepared.req.mutation, CommandMutation::CreateMission { .. })
-        && let Err(ipc) = ensure_principal_registered(&state.store, session).await
+    if matches!(
+        prepared.req.mutation,
+        CommandMutation::CreateMission { .. } | CommandMutation::RequestBackup { .. }
+    ) && let Err(ipc) = ensure_principal_registered(&state.store, session).await
     {
         let _ = write_json_frame_timeout(stream, &ipc, RESPONSE_WRITE_TIMEOUT).await;
         return false;
@@ -1002,7 +1004,7 @@ async fn handle_command_frame(
             Ok(Ok(o)) => o,
             Ok(Err(err)) => {
                 let mut ipc = store_error_to_ipc_error(&err, Some(cmd.command_id));
-                if cmd.command_type == "PurgeHistory"
+                if matches!(cmd.command_type.as_str(), "PurgeHistory" | "RequestBackup")
                     && matches!(
                         err,
                         StoreError::StorageBusy(_)
@@ -1018,7 +1020,7 @@ async fn handle_command_frame(
                     publish_existing_receipt_cursor(state, session, cmd.command_id).await;
                     ipc.retry_class = RetryClass::AfterReconciliation;
                     ipc.message = String::from(
-                        "Issue de purge indéterminée ; inspecter le reçu et la récupération",
+                        "Issue de commande indéterminée ; inspecter le reçu et la récupération",
                     );
                 }
                 let _ = write_json_frame_timeout(stream, &ipc, RESPONSE_WRITE_TIMEOUT).await;
@@ -1041,6 +1043,10 @@ async fn handle_command_frame(
 
     if newly_committed {
         publish_committed_events_for_command(state, &receipt, num_events).await;
+    }
+
+    if cmd.command_type == "RequestBackup" {
+        crate::backup_service::start(state, unleash_domain::BackupId::from_uuid(cmd.aggregate_id));
     }
 
     if newly_committed && let Some(stop_reason) = prepared.stop_reason.take() {
@@ -1174,6 +1180,7 @@ async fn prepare_command_request(
         "CreateProject" => prepare_create_project(session, cmd),
         "ReviseProject" => prepare_revise_project(session, cmd),
         "PurgeHistory" => prepare_purge_history(session, cmd),
+        "RequestBackup" => prepare_request_backup(session, cmd),
         "SetSettings" | "SetPolicy" | "ConfigureGuard" => {
             prepare_admin_command(state, session, cmd)
         }
@@ -1190,6 +1197,55 @@ async fn prepare_command_request(
         )
         .with_command_id(cid)),
     }
+}
+
+fn prepare_request_backup(
+    session: &AuthenticatedSession,
+    cmd: CommandEnvelope,
+) -> Result<PreparedCommand, IpcError> {
+    validate_request_backup_command(&cmd)?;
+    let backup_id = unleash_domain::BackupId::from_uuid(cmd.aggregate_id);
+    Ok(PreparedCommand {
+        req: CommitCommandRequest {
+            actor_id: session.actor_id.clone(),
+            envelope: cmd,
+            target_aggregate: AggregateKind::BackupJob,
+            operation_id: None,
+            receipt_state: ReceiptState::Accepted,
+            result_ref: None,
+            retention_days_override: None,
+            fence_assertion: None,
+            mutation: CommandMutation::RequestBackup { backup_id },
+            events: Vec::new(),
+            capacity_reservations: Vec::new(),
+            budget_reservations: Vec::new(),
+        },
+        stop_reason: None,
+        stop_drain_timeout: None,
+    })
+}
+
+fn validate_request_backup_command(cmd: &CommandEnvelope) -> Result<(), IpcError> {
+    if !cmd.payload.is_empty() || cmd.project_id.is_some() || cmd.aggregate_id.is_nil() {
+        return Err(IpcError::new(
+            ErrorCode::InvalidArgument,
+            None,
+            "Paramètres de sauvegarde invalides",
+            RetryClass::Never,
+        )
+        .with_command_id(cmd.command_id));
+    }
+    if cmd.expected_revision != Revision::INITIAL {
+        return Err(store_error_to_ipc_error(
+            &StoreError::RevisionConflict {
+                current_revision: Revision::INITIAL,
+                expected_revision: cmd.expected_revision,
+                command_id: Some(cmd.command_id),
+            },
+            Some(cmd.command_id),
+        ));
+    }
+    Ok(())
 }
 
 #[derive(Deserialize)]

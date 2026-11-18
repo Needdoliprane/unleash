@@ -17,6 +17,7 @@
 #![warn(missing_docs)]
 
 pub mod auth;
+mod backup_service;
 mod broker_activity;
 #[allow(
     dead_code,
