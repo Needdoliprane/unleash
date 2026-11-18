@@ -97,6 +97,14 @@ async fn projections_share_watermark_and_reject_unknown_payload_and_unauthorized
         .unwrap();
     assert_eq!(one.watermark, Some(receipt.event_cursor));
     assert_eq!(one.result["name"], "IPC");
+    let invalid_receipt = query(
+        "GetCommandReceipt",
+        None,
+        json!({"command_id":CommandId::from_u128(2), "unexpected":"DO_NOT_ECHO"}),
+    );
+    assert!(
+        matches!(client.query(&invalid_receipt).await, Err(ClientError::Remote(e)) if e.code == ErrorCode::InvalidArgument && !e.message.contains("DO_NOT_ECHO"))
+    );
     for q in [
         query(
             "ReadSettings",

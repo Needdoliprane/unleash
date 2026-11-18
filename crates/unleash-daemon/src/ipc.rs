@@ -790,6 +790,12 @@ async fn query_state_snapshot(
     })
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReceiptQueryPayload {
+    command_id: CommandId,
+}
+
 async fn query_command_receipt(
     state: &Arc<DaemonRuntimeState>,
     session: &AuthenticatedSession,
@@ -803,27 +809,16 @@ async fn query_command_receipt(
             "Provenance du reçu non vérifiée pour cette portée",
         ));
     }
-    let cmd_id_str = query
-        .payload
-        .get("command_id")
-        .and_then(Value::as_str)
-        .ok_or_else(|| {
+    let payload: ReceiptQueryPayload = serde_json::from_value(Value::Object(query.payload))
+        .map_err(|_| {
             IpcError::new(
                 ErrorCode::InvalidArgument,
                 None,
-                "GetCommandReceipt requiert payload.command_id (UUID)",
+                "Payload GetCommandReceipt invalide",
                 RetryClass::Never,
             )
         })?;
-    let uuid = Uuid::parse_str(cmd_id_str).map_err(|err| {
-        IpcError::new(
-            ErrorCode::InvalidArgument,
-            None,
-            format!("command_id invalide dans GetCommandReceipt : {err}"),
-            RetryClass::Never,
-        )
-    })?;
-    let cmd_id = CommandId::from_uuid(uuid);
+    let cmd_id = payload.command_id;
     let store = Arc::clone(&state.store);
     let actor_id = session.actor_id.clone();
 
