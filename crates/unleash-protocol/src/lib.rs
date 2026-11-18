@@ -20,6 +20,7 @@ pub mod codec;
 pub mod envelopes;
 pub mod errors;
 pub mod operations;
+pub mod provider_probe;
 pub mod strict_json;
 pub mod ts_export;
 
@@ -39,5 +40,8 @@ pub use errors::{
     ErrorCode, IpcError, ProtocolError, ReasonCode, RetryClass, UnknownReasonCodeError,
 };
 pub use operations::{OperationKind, OperationName, UnknownOperationError};
+pub use provider_probe::{
+    ProviderTestLimits, ProviderTestPayloadError, ProviderTestPhase, TestProviderProfilePayload,
+};
 pub use strict_json::{from_json_str_strict, parse_json_value_strict};
 pub use ts_export::{generate_all_ts_files, write_ts_bindings};
