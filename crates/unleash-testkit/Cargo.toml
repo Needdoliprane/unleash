@@ -13,6 +13,8 @@ workspace = true
 
 [dependencies]
 unleash-domain.workspace = true
+unleash-action-broker.workspace = true
+tokio.workspace = true
 thiserror.workspace = true
 uuid.workspace = true
 serde.workspace = true
