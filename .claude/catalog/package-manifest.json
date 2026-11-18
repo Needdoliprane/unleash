@@ -13,7 +13,7 @@
     "evidence/"
   ],
   "hash_algorithm": "sha256",
-  "source_tree_digest": "38950a72b6410e864d8be5b89dd4a633ebe719e95966f14358e206257d4851d5",
+  "source_tree_digest": "bc2c47d6e08484c32d6bd9b5d1c07a2eddb313333cd294a97a3069c542ac9824",
   "files": [
     {
       "path": "INDEX.md",
@@ -395,8 +395,8 @@
     },
     {
       "path": "architecture/sqlite-design.md",
-      "sha256": "b05392d2241ec01b8ae6e05f5129ef55f3ee494e88a1dc5eda9a8fb15128e463",
-      "bytes": 58387,
+      "sha256": "a70be468fd7b35cf020e2c0d419b4b707c65a939b17828658c88a50643fedfc7",
+      "bytes": 60095,
       "media_type": "text/markdown"
     },
     {

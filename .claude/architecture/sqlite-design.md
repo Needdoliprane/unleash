@@ -204,6 +204,14 @@ La référence de contexte du manifeste suit l’union fermée [F012](../feature
 
 Le même writer réserve dans le pool global et applique les mêmes barrières de reprise et de restauration aux probes. Les migrations vérifient l’exclusivité des variantes, les clés étrangères et l’unicité des tentatives avant activation du schéma.
 
+### Préparation transactionnelle V009
+
+La préparation d’un `generation_probe` lie le reçu de commande, l’acteur et son principal, la portée, la lignée, l’époque et la référence exacte du profil. Le service authentifié atteste la résolution de la paire demandée `(profile_id, version)`. Le writer fige la paire, la référence résolue et les métadonnées disponibles dans `provider_probe_contexts`. Ce contexte est immuable et son digest porte sur le JSON canonique. L’écriture réserve les identifiants d’action, d’appel et de manifeste, sans occuper le pool ni engager de budget. Le rejeu compatible restitue le même reçu et les mêmes identifiants.
+
+La transaction `Authorizing` vérifie le lien du contexte avec le reçu et l’intention. Elle matérialise l’action, l’appel et le manifeste de requête ensemble avant l’admission. Le port d’admission V008 contrôle à nouveau les identités, l’époque, les données figées, l’échéance et les comptes applicables avant la prise de capacité. Un profil `none_local` conserve l’absence de prix et de réservation monétaire. Le writer contrôle aussi un dépassement déjà constaté sur un compte applicable. Une restauration conserve le contexte comme historique sous sa lignée d’origine. Un contexte absent ou issu d’une autre lignée ne permet pas une nouvelle admission du probe.
+
+Cette préparation n’autorise aucun dispatch à elle seule. Le service doit encore apporter le producteur du profil, la preuve de placement, le coffre applicable et le transport réconciliable. Les phases passives conservent les contrats d’effet décrits par [F012](../features/F012-model-api-router/interfaces.md).
+
 ## Registres versionnés R7
 
 Skill Registry et Role Registry restent distincts dans le domaine, les commandes, les événements et les écrans ; ils partagent ce stockage versionné adressé par contenu ([ADR-06](adr/ADR-06-skill-role-registry.md)). Une entrée est identifiée par `(entry_kind, scope_kind, scope_owner_key, entry_id)` ; les tables filles la référencent par cette FK composite.
