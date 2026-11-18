@@ -23,8 +23,8 @@ Raccorder l’admission durable, les adaptateurs de modèles et le process-host 
 | --- | --- | --- | --- | --- |
 | f003-policy | Décision Q-15 pure dans `crates/unleash-scheduler` | — | T-F003-005 sur fixtures, 11 cas | done |
 | f012-stream | Décodeurs SSE et banc HTTP local de `crates/unleash-model-router` | — | 26 cas, notamment EOF et 429 | done |
-| t01-admission | Port transactionnel d’admission dans `crates/unleash-store`, projection des trois types d’unités et décompte durable | Scheduler et Store M1 | SQLite, mélange 5/6, concurrence sur dernière place, checkpoint avant libération | pending, réservé à `/root/m1_store` |
-| t02-model-http | Transport borné de `crates/unleash-model-router`, premier dialecte testé avec TLS loopback | Décodeurs F012 et frontière `ActionExecutorPort` | Certificat valide, refus avant réseau, 429/EOF sans second POST | pending, réservé à `/root/m2_stream` |
+| t01-admission | Port transactionnel d’admission dans `crates/unleash-store`, projection des trois types d’unités et décompte durable | Scheduler et Store M1 | SQLite, mélange 5/6, concurrence sur dernière place, checkpoint avant libération | in_progress, `/root/m1_store` |
+| t02-model-http | Transport borné de `crates/unleash-model-router`, premier dialecte testé avec TLS loopback | Décodeurs F012 et frontière `ActionExecutorPort` | Certificat valide, refus avant réseau, 429/EOF sans second POST | in_progress, `/root/m2_stream` |
 | t03-terminal | Service de terminal et raccord IPC pour le vrai daemon, réutilisation de `unleash-process-host` | Port Store des terminaux et journal broker | T-F011-003 (crash daemon, rotation, même PTY) et états d’issue inconnue | pending |
 | t04-probe | Raccord `TestProviderProfile` authentifié avec propriétaire réel du probe, admission, budget, auteur du dispatch et résultat corrélé | t01 et t02 | Deux dialectes en essai local de bout en bout, refus sans connexion, coupure après dispatch | pending |
 | t05-qualification | Gates M2, preuves F003/F011/F012 et matrice Q-19 applicables | t01 à t04 | Résultats réels, limites et publication | pending |
