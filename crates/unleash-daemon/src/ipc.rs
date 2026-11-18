@@ -26,8 +26,9 @@ use unleash_protocol::{
     SubscribeEventsRequest, from_json_str_strict, parse_json_value_strict,
 };
 use unleash_store::{
-    AggregateKind, CommandMutation, CommitCommandRequest, CommitOutcome, EventAppendSpec,
-    ReadEventsOutcome, ReceiptInspectionOutcome, StoreError, UnleashStore,
+    AggregateKind, AlertSeverity, CommandMutation, CommitCommandRequest, CommitOutcome,
+    EventAppendSpec, NewAlertSpec, ReadEventsOutcome, ReceiptInspectionOutcome, StoreError,
+    UnleashStore,
 };
 use uuid::Uuid;
 
@@ -841,7 +842,11 @@ async fn handle_command_frame(
     session: &AuthenticatedSession,
     cmd: CommandEnvelope,
 ) -> bool {
-    if let Err(ipc) = authorize_command(session, &cmd) {
+    if let Err(mut ipc) = authorize_command(session, &cmd) {
+        if !audit_security_denial(state, session, &cmd, &ipc).await {
+            ipc.message = String::from("Commande refusée ; audit indisponible ou indéterminé");
+            tracing::warn!("Échec ou délai dépassé lors de l'audit du refus de commande");
+        }
         let _ = write_json_frame_timeout(stream, &ipc, RESPONSE_WRITE_TIMEOUT).await;
         return false;
     }
@@ -924,6 +929,56 @@ async fn handle_command_frame(
 
     let _ = write_json_frame_timeout(stream, &receipt, RESPONSE_WRITE_TIMEOUT).await;
     false
+}
+
+async fn audit_security_denial(
+    state: &Arc<DaemonRuntimeState>,
+    session: &AuthenticatedSession,
+    cmd: &CommandEnvelope,
+    error: &IpcError,
+) -> bool {
+    let reason = match error.code {
+        ErrorCode::AuthenticationFailed => "AUTHENTICATION_FAILED",
+        ErrorCode::CapabilityDenied => "OPERATION_NOT_AUTHORIZED",
+        ErrorCode::ScopeDenied => "ACCESS_DENIED",
+        _ => return true,
+    };
+    let Ok(operation) = cmd.command_type.parse::<unleash_protocol::OperationName>() else {
+        return true;
+    };
+    if operation.kind() != unleash_protocol::OperationKind::Command {
+        return true;
+    }
+    let Ok(digest) = unleash_protocol::canonical_sha256(&json!({
+        "actor": session.actor_id.as_str(), "operation": operation.as_str(),
+        "command_id": cmd.command_id, "reason": reason,
+    })) else {
+        return false;
+    };
+    let digest = digest.to_string();
+    let spec = NewAlertSpec {
+        alert_id: format!("security-denial:{digest}"),
+        kind: String::from("security_denial"),
+        severity: AlertSeverity::Warning,
+        blocking: false,
+        project_id: None,
+        subject_kind: operation.as_str().to_owned(),
+        subject_id: digest,
+        title: String::from("Commande refusée"),
+        summary: String::from("Une commande a été refusée par le contrôle d'autorité local."),
+        reason_code: Some(reason.to_owned()),
+        evidence_ref: None,
+        allowed_operations: Vec::new(),
+    };
+    let store = Arc::clone(&state.store);
+    matches!(
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            tokio::task::spawn_blocking(move || store.record_alert(spec))
+        )
+        .await,
+        Ok(Ok(Ok(_)))
+    )
 }
 
 struct PreparedCommand {

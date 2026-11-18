@@ -59,6 +59,18 @@ fn install_admin_proof(dir: &Path) -> Result<AdminProof, DaemonError> {
     Ok(proof)
 }
 
+fn remove_owned_admin_proof(dir: &Path, expected: &AdminProof) {
+    match read_admin_credential(dir) {
+        Ok(None) => {}
+        Ok(Some(value)) if AdminProof::from_hex(&value).is_some_and(|p| p.matches(expected)) => {
+            if std::fs::remove_file(dir.join(ADMIN_PROOF_FILENAME)).is_err() {
+                tracing::warn!("Suppression du credential local impossible à l'arrêt");
+            }
+        }
+        _ => tracing::warn!("Credential local modifié ou inaccessible ; retrait non effectué"),
+    }
+}
+
 /// Résultat d'une tentative de démarrage du daemon.
 #[derive(Debug)]
 #[non_exhaustive]
@@ -384,7 +396,7 @@ impl UnleashDaemon {
         let auth_verifier: Arc<dyn crate::auth::AuthVerifierPort> =
             Arc::new(AdministrativeAuthVerifier {
                 inner: Arc::clone(&config.auth_verifier),
-                expected: admin_proof,
+                expected: admin_proof.clone(),
             });
 
         // 5. Nettoyage éventuel de socket orphelin et ouverture socket Unix privé (`0600`)
@@ -500,6 +512,7 @@ impl UnleashDaemon {
             lock,
             socket_path: socket_path.clone(),
             rdv_dir: rdv_dir.clone(),
+            admin_proof,
             controller: Arc::clone(&config.executor_controller),
             drain_timeout: config.shutdown_drain_timeout,
             accept_handle,
@@ -573,6 +586,7 @@ struct DrainCoordinatorParams {
     lock: AuthorityLock,
     socket_path: PathBuf,
     rdv_dir: PathBuf,
+    admin_proof: AdminProof,
     controller: Arc<dyn ExecutorDrainPort>,
     drain_timeout: Duration,
     accept_handle: tokio::task::JoinHandle<()>,
@@ -629,11 +643,14 @@ fn spawn_drain_coordinator(params: DrainCoordinatorParams) {
                     // Libérer socket + state + UnleashStore + verrou OS flock hors thread Tokio runtime
                     // (StoreWriterHandle::drop appelle blocking_recv()).
                     let sock_drop = params.socket_path.clone();
+                    let proof_dir = params.rdv_dir.clone();
+                    let admin_proof = params.admin_proof.clone();
                     let state_drop = state_opt.take();
                     let store_drop = store_opt.take();
                     let lock_drop = lock_opt.take();
                     let _ = tokio::task::spawn_blocking(move || {
                         let _ = std::fs::remove_file(&sock_drop);
+                        remove_owned_admin_proof(&proof_dir, &admin_proof);
                         drop(state_drop);
                         drop(store_drop);
                         drop(lock_drop);

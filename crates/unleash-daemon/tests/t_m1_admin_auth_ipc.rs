@@ -156,9 +156,24 @@ async fn admin_requires_proof_and_reloads_after_daemon_rotation() {
             .unwrap()
             .clone(),
     };
+    let mut denied_cmd = cmd.clone();
+    denied_cmd
+        .payload
+        .insert("untrusted_secret".into(), json!("DO_NOT_RECORD_ME"));
+    for _ in 0..2 {
+        assert!(
+            matches!(unprivileged.send_command(&denied_cmd).await, Err(ClientError::Remote(e)) if e.code == ErrorCode::CapabilityDenied)
+        );
+    }
+    // Une panne du writer ne transforme pas le refus en succès ni en faux audit.
+    let blocker = rusqlite::Connection::open(data.path().join("unleash-authority.db")).unwrap();
+    blocker.execute_batch("BEGIN IMMEDIATE").unwrap();
+    let mut failed_audit = denied_cmd.clone();
+    failed_audit.command_id = CommandId::from_u128(99);
     assert!(
-        matches!(unprivileged.send_command(&cmd).await, Err(ClientError::Remote(e)) if e.code == ErrorCode::CapabilityDenied)
+        matches!(unprivileged.send_command(&failed_audit).await, Err(ClientError::Remote(e)) if e.code == ErrorCode::CapabilityDenied && e.message.contains("audit"))
     );
+    blocker.execute_batch("ROLLBACK").unwrap();
     let mut admin =
         UnleashClient::connect(ClientConfig::new(socket.clone(), ClientKind::Cli, "test"))
             .await
@@ -184,11 +199,16 @@ async fn admin_requires_proof_and_reloads_after_daemon_rotation() {
         matches!(probe.query(&private).await, Err(ClientError::Remote(e)) if e.code == ErrorCode::CapabilityDenied)
     );
     handle.shutdown_graceful("test").await.unwrap();
+    assert!(read_admin_credential(rdv.path()).unwrap().is_none());
     let DaemonStartOutcome::Started(handle2) = UnleashDaemon::start(cfg).await.unwrap() else {
         panic!("daemon redémarré attendu")
     };
     let proof2 = read_admin_credential(rdv.path()).unwrap().unwrap();
     assert!(*proof1 != *proof2);
+    let conn = rusqlite::Connection::open(data.path().join("unleash-authority.db")).unwrap();
+    let (count, text): (i64, String) = conn.query_row("SELECT COUNT(*), COALESCE(GROUP_CONCAT(alert_id || subject_kind || subject_id || summary), '') FROM alerts WHERE kind = 'security_denial'", [], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
+    assert_eq!(count, 1);
+    assert!(!text.contains("DO_NOT_RECORD_ME"));
     let stale = raw_hello(
         handle2.socket_path(),
         ClientKind::Cli,
