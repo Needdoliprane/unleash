@@ -1,0 +1,19 @@
+{
+  "evidence_id": "EV-F017-010",
+  "test_id": "T-F017-010",
+  "requirement_id": "REQ-SEC-010",
+  "commit": "aa5bd7f498f21a6ea3aadb65feea83769bed2808",
+  "command": "cargo test --locked --offline --workspace --all-features --no-fail-fast --quiet",
+  "environment": {
+    "os": "macOS 27.2.1 arm64",
+    "rustc": "rustc 1.94.1"
+  },
+  "result": "passed",
+  "observed_at": "2026-11-18T17:14:53Z",
+  "artifacts": [
+    "crates/unleash-action-broker/tests/t_f017_010_traceability_reconciliation.rs",
+    "crates/unleash-daemon/tests/t_m1_request_backup_ipc.rs",
+    "crates/unleash-store/tests/t_f018_012_broker_phases.rs"
+  ],
+  "limits": "Périmètre interne M1. Perte d’accusé, issue inconnue et doublon sur fixtures, complétés par le journal SQLite C4 et le vrai RequestBackup avec un dispatch unique."
+}
