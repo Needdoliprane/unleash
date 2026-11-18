@@ -1405,7 +1405,7 @@ impl UnleashStore {
     /// Lit le manifeste privé de maintenance `0600` (`InspectRecovery` lorsque source corrompue).
     ///
     /// # Errors
-    /// Retourne [`StoreError`] si le manifeste est absent ou corrompu.
+    /// Retourne [`StoreError`] si le manifeste n'est pas privé, borné ou conforme ; absent renvoie `None`.
     pub fn read_maintenance_restore_manifest(
         maintenance_dir: &Path,
     ) -> Result<Option<MaintenanceRestoreManifest>, StoreError> {

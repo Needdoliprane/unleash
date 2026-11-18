@@ -1002,3 +1002,64 @@ fn strict_profile_and_durable_denial_can_block_only_before_dispatch() {
         assert!(!record.destination_dir.exists());
     }
 }
+
+#[test]
+fn generic_denied_action_cannot_attest_a_broker_authorization_refusal() {
+    let directory = local_test_dir("f018-013-false-denial").unwrap();
+    let ids = Arc::new(DeterministicIdGenerator::new(0xF018_1310));
+    let mut config = StoreConfig::new(directory.path());
+    config.id_generator = ids.clone();
+    let store = UnleashStore::open(config).unwrap();
+    store
+        .register_principal("p-sys", "system", "p-sys")
+        .unwrap();
+    let backup = BackupId::from_uuid(ids.new_uuid());
+    store.commit_command(request(&store, &ids, backup)).unwrap();
+    let record = store
+        .claim_backup_request(backup, store.active_authority_generation().unwrap())
+        .unwrap();
+    let mut generic = request(&store, &ids, backup);
+    generic.envelope.command_type = "CreateGovernedAction".to_owned();
+    generic.envelope.aggregate_id = record.action_id.as_uuid();
+    generic.target_aggregate = AggregateKind::Action;
+    generic.mutation = CommandMutation::CreateGovernedAction {
+        action_id: record.action_id,
+        origin_kind: "control_plane".to_owned(),
+        control_principal_id: Some("p-sys".to_owned()),
+        project_id: None,
+        scope_key: Some("global".to_owned()),
+        run_id: None,
+        step_id: None,
+        invocation_id: None,
+        attempt_id: None,
+        replay_worker_id: None,
+        action_type: unleash_store::REQUEST_BACKUP_VERB.to_owned(),
+        payload_hash: record.payload_digest,
+        reconcile_strategy: "observe_then_decide".to_owned(),
+        policy_revision: 0,
+        resource_lease_id: None,
+        approval_scope: None,
+        initial_state: unleash_domain::ActionState::Denied,
+        subject: None,
+    };
+    store.commit_command(generic).unwrap();
+    assert!(
+        store
+            .inspect_broker_action(record.action_id)
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        store
+            .block_claimed_backup(
+                backup,
+                record.authority_generation,
+                unleash_store::BackupBlockReason::AuthorizationDenied
+            )
+            .is_err()
+    );
+    assert_eq!(
+        store.inspect_backup_request(backup).unwrap().unwrap().state,
+        BackupRequestState::Claimed
+    );
+}
