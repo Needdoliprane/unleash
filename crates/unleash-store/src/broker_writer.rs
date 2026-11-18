@@ -78,6 +78,11 @@ pub(crate) fn inspect_action_conn(
     ).optional().map_err(StoreError::from_rusqlite)?;
     row.map(
         |(state, revision, digest, evaluation, authority, epoch, fence, dispatch)| {
+            let (stream,sequence):(String,i64)=conn.query_row(
+                "SELECT e.stream_id,e.sequence FROM broker_phase_records p JOIN events e ON e.event_id=p.event_id
+                 WHERE p.action_id=?1 ORDER BY p.action_revision DESC LIMIT 1",
+                [action.to_string()],|r|Ok((r.get(0)?,r.get(1)?))
+            ).map_err(StoreError::from_rusqlite)?;
             Ok(BrokerActionSnapshot {
                 action_id: action,
                 state: crate::recovery_ops::parse_action_state(&state)?,
@@ -94,6 +99,7 @@ pub(crate) fn inspect_action_conn(
                     Fence::new(u64::try_from(fence).map_err(|_| invalid("fence broker corrompu"))?),
                 ),
                 dispatch_id: dispatch.map(|d| d.parse()).transpose()?,
+                last_event_cursor: EventCursor::new(stream.parse()?,Sequence::new(u64::try_from(sequence).map_err(|_|invalid("séquence broker corrompue"))?)),
             })
         },
     )
@@ -343,6 +349,11 @@ fn validate_decision(
     now: TimestampMs,
     decision: &BrokerAuthorizationDecision,
 ) -> Result<(), StoreError> {
+    if decision.from_cache || decision.source_evaluation_id.is_some() {
+        return Err(invalid(
+            "provenance et TTL de cache non attestés au port durable",
+        ));
+    }
     if decision.action_id != intent.action_id
         || decision.evaluation_id != evaluation.evaluation_id
         || decision.payload_digest != intent.payload_digest
@@ -399,6 +410,24 @@ pub(crate) fn commit_phase_tx(
         });
     }
     let action = request.phase.action_id();
+    let action_authority: Option<String> = tx
+        .query_row(
+            "SELECT authority_generation FROM actions WHERE action_id=?1",
+            [action.to_string()],
+            |r| r.get(0),
+        )
+        .optional()
+        .map_err(StoreError::from_rusqlite)?;
+    if let Some(authority) = action_authority {
+        let authority = authority.parse()?;
+        if authority != daemon.authority_generation {
+            return Err(StoreError::StaleAuthorityGeneration {
+                expected: daemon.authority_generation,
+                actual: authority,
+                command_id: None,
+            });
+        }
+    }
     if matches!(request.phase, BrokerPhase::Dispatch { .. }) {
         let markers: i64 = tx
             .query_row(
@@ -509,12 +538,6 @@ pub(crate) fn commit_phase_tx(
             let (state, eval_state, backoff, event_name) = match outcome {
                 BrokerAuthorizationOutcome::Authorized { decision } => {
                     validate_decision(&intent, request.evaluation, now, decision)?;
-                    if let Some(source) = decision.source_evaluation_id {
-                        let source_record:Option<String>=tx.query_row("SELECT phase_json FROM broker_phase_records WHERE evaluation_id=?1 AND phase_key='authorization'",[source.to_string()],|r|r.get(0)).optional().map_err(StoreError::from_rusqlite)?;
-                        if source_record.is_none() {
-                            return Err(invalid("évaluation source du cache absente"));
-                        }
-                    }
                     tx.execute(
                         "UPDATE actions SET state='authorized',authorization_ref=?2 WHERE action_id=?1",
                         params![action.to_string(), decision.decision_ref],
@@ -551,16 +574,17 @@ pub(crate) fn commit_phase_tx(
                             "ActionAuthorizationDenied",
                         )
                     } else {
-                        if failure.retry_class != RetryClass::AfterBackoff
-                            || failure
-                                .retry_not_before_ms
-                                .is_none_or(|at| at.as_i64() <= now.as_i64())
-                        {
-                            return Err(invalid("reprise broker sans backoff durable qualifié"));
+                        let retryable = failure.retry_class == RetryClass::AfterBackoff;
+                        if retryable != failure.retry_not_before_ms.is_some() {
+                            return Err(invalid("classe de reprise/backoff broker incohérents"));
                         }
                         (
                             ActionState::Authorizing,
-                            "retryable",
+                            if retryable {
+                                "retryable"
+                            } else {
+                                "authorizing"
+                            },
                             failure.retry_not_before_ms.map(|at| at.as_i64()),
                             "ActionAuthorizationDeferred",
                         )
@@ -568,7 +592,11 @@ pub(crate) fn commit_phase_tx(
                 }
             };
             tx.execute("UPDATE broker_evaluations SET state=?2,retry_not_before_ms=?3 WHERE evaluation_id=?1",params![request.evaluation.evaluation_id.to_string(),eval_state,backoff]).map_err(StoreError::from_rusqlite)?;
-            (state, event_name, json!({"outcome":outcome,"cause":cause}))
+            (
+                state,
+                event_name,
+                json!({"outcome_digest":canonical_sha256(&serde_json::to_value(outcome)?)?,"cause_kind":match cause {BrokerAuthorizationCause::Evaluation=>"evaluation",BrokerAuthorizationCause::HumanApproval {..}=>"human_approval"}}),
+            )
         }
         BrokerPhase::Dispatch {
             decision,
