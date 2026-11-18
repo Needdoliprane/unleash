@@ -6,7 +6,7 @@
 use std::collections::{BTreeMap, VecDeque};
 use std::time::Duration;
 
-use unleash_domain::{ProjectId, Revision, Sha256Digest, TimestampMs};
+use unleash_domain::{AuthorizationEvaluationId, ProjectId, Revision, Sha256Digest, TimestampMs};
 
 use crate::effects::EffectsClass;
 use crate::guard_port::{GuardDecisionRef, InternalObligation};
@@ -38,6 +38,8 @@ pub struct DecisionCacheKey {
 /// Entrée stockée dans le cache pour une décision `Allow` munie d'une `expiry`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CachedDecision {
+    /// Evaluation that obtained the original decision, distinct from a retry predecessor.
+    pub source_evaluation_id: AuthorizationEvaluationId,
     /// Référence de décision originale.
     pub decision_ref: GuardDecisionRef,
     /// Obligations internes validées devant être réimposées à la réutilisation.
@@ -104,6 +106,7 @@ impl DecisionCache {
     pub fn insert(
         &mut self,
         key: DecisionCacheKey,
+        source_evaluation_id: AuthorizationEvaluationId,
         decision_ref: GuardDecisionRef,
         obligations: Vec<InternalObligation>,
         expiry: Option<TimestampMs>,
@@ -142,6 +145,7 @@ impl DecisionCache {
 
         let project_id = key.project_id;
         let cached = CachedDecision {
+            source_evaluation_id,
             decision_ref,
             obligations,
             expires_at_utc,
@@ -240,6 +244,7 @@ mod tests {
         // Sans expiry -> aucun cache.
         cache.insert(
             key.clone(),
+            AuthorizationEvaluationId::from_u128(1),
             GuardDecisionRef::new("d0").unwrap(),
             Vec::new(),
             None,
@@ -252,6 +257,7 @@ mod tests {
         // Avec expiry à +600s -> plafonné à 300s monotones.
         cache.insert(
             key.clone(),
+            AuthorizationEvaluationId::from_u128(1),
             GuardDecisionRef::new("d1").unwrap(),
             Vec::new(),
             Some(TimestampMs::new(1_600_000)),
