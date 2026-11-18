@@ -73,7 +73,7 @@ fn spawn_daemon(data: &Path, rendezvous: &Path) -> (ChildGuard, Value) {
         .expect("daemon ready timeout")
         .unwrap();
     let ready: Value = serde_json::from_str(&line).expect("daemon ready JSON");
-    assert_eq!(ready["status"], "ready");
+    assert_eq!(text_at(&ready, "/status"), "ready");
     (guard, ready)
 }
 
@@ -108,9 +108,9 @@ fn run_cli_json(socket: &Path, args: &[&str]) -> Value {
 
 fn stop_daemon(child: &mut ChildGuard, socket: &Path) {
     let stop = run_cli_json(socket, &["daemon", "stop"]);
-    assert_eq!(stop["stop_outcome"], "complete");
-    assert_eq!(stop["retained_services"], json!([]));
-    assert_eq!(stop["unknown_services"], json!([]));
+    assert_eq!(text_at(&stop, "/stop_outcome"), "complete");
+    assert_eq!(stop.get("retained_services"), Some(&json!([])));
+    assert_eq!(stop.get("unknown_services"), Some(&json!([])));
     child.wait_clean();
     assert!(!socket.exists(), "source socket survived clean stop");
 }
@@ -136,7 +136,11 @@ impl ExecutorNeutralizer for CheckedNoExecutors {
                     &std::fs::read(manifest).map_err(|error| error.to_string())?,
                 )
                 .map_err(|error| error.to_string())?;
-                if !value["executors"].as_array().is_some_and(Vec::is_empty) {
+                if !value
+                    .get("executors")
+                    .and_then(Value::as_array)
+                    .is_some_and(Vec::is_empty)
+                {
                     return Err("source host inventory is not empty".into());
                 }
             }
@@ -174,8 +178,18 @@ impl ExecutorNeutralizer for CheckedNoExecutors {
     }
 }
 
-fn projects(snapshot: &Value) -> &Vec<Value> {
-    snapshot["snapshot"]["projects"].as_array().unwrap()
+fn text_at<'a>(value: &'a Value, pointer: &str) -> &'a str {
+    value
+        .pointer(pointer)
+        .and_then(Value::as_str)
+        .unwrap_or_else(|| panic!("Expected a string at JSON pointer {pointer}"))
+}
+
+fn projects(snapshot: &Value) -> &[Value] {
+    snapshot
+        .pointer("/snapshot/projects")
+        .and_then(Value::as_array)
+        .expect("project rows in snapshot")
 }
 
 #[test]
@@ -202,11 +216,8 @@ fn e2e_m1_restore_preserves_lineage_receipt_and_prevents_second_effect() {
     let pre_id = pre_project.to_string();
 
     let (mut first, ready) = spawn_daemon(&source, &rendezvous);
-    let source_generation: AuthorityGeneration = ready["authority_generation"]
-        .as_str()
-        .unwrap()
-        .parse()
-        .unwrap();
+    let source_generation: AuthorityGeneration =
+        text_at(&ready, "/authority_generation").parse().unwrap();
     let pre_receipt = run_cli_json(
         &socket,
         &[
@@ -236,7 +247,10 @@ fn e2e_m1_restore_preserves_lineage_receipt_and_prevents_second_effect() {
     store.shutdown().unwrap();
 
     let (mut second, ready) = spawn_daemon(&source, &rendezvous);
-    assert_eq!(ready["authority_generation"], source_generation.to_string());
+    assert_eq!(
+        text_at(&ready, "/authority_generation"),
+        source_generation.to_string()
+    );
     let mut source_client = runtime
         .block_on(UnleashClient::connect(ClientConfig::new(
             socket.clone(),
@@ -265,9 +279,9 @@ fn e2e_m1_restore_preserves_lineage_receipt_and_prevents_second_effect() {
     assert_eq!(post_receipt.state, ReceiptState::Accepted);
     assert_eq!(projects(&run_cli_json(&socket, &["snapshot"])).len(), 2);
     let source_inspection = run_cli_json(&socket, &["receipt", &pinned.command_id.to_string()]);
-    assert_eq!(source_inspection["lineage_status"], "current");
+    assert_eq!(text_at(&source_inspection, "/lineage_status"), "current");
     assert_eq!(
-        source_inspection["receipt"]["receipt_id"],
+        text_at(&source_inspection, "/receipt/receipt_id"),
         post_receipt.receipt_id.to_string()
     );
     drop(source_client);
@@ -308,12 +322,15 @@ fn e2e_m1_restore_preserves_lineage_receipt_and_prevents_second_effect() {
 
     let (mut third, ready) = spawn_daemon(&target, &rendezvous);
     assert_eq!(
-        ready["authority_generation"],
+        text_at(&ready, "/authority_generation"),
         activated.target_authority_generation.to_string()
     );
     let before = run_cli_json(&socket, &["snapshot"]);
     assert_eq!(projects(&before).len(), 1);
-    assert_eq!(projects(&before).first().unwrap()["project_id"], pre_id);
+    assert_eq!(
+        text_at(projects(&before).first().unwrap(), "/project_id"),
+        pre_id
+    );
     let mut client = runtime
         .block_on(UnleashClient::connect(ClientConfig::new(
             socket.clone(),
@@ -342,13 +359,10 @@ fn e2e_m1_restore_preserves_lineage_receipt_and_prevents_second_effect() {
         .unwrap();
     assert_eq!(dispatches, 0);
     drop(connection);
-    let historical_pre = run_cli_json(
-        &socket,
-        &["receipt", pre_receipt["command_id"].as_str().unwrap()],
-    );
-    assert_eq!(historical_pre["lineage_status"], "historical");
+    let historical_pre = run_cli_json(&socket, &["receipt", text_at(&pre_receipt, "/command_id")]);
+    assert_eq!(text_at(&historical_pre, "/lineage_status"), "historical");
     assert_eq!(
-        historical_pre["authority_generation"],
+        text_at(&historical_pre, "/authority_generation"),
         source_generation.to_string()
     );
 
