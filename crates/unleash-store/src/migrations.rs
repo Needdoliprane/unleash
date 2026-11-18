@@ -9,7 +9,7 @@ use crate::config::{CutpointObserver, StoreCutpoint};
 use crate::error::StoreError;
 
 /// Version courante maximale du schéma gérée par cette version de `unleash-store`.
-pub const CURRENT_SCHEMA_VERSION: i64 = 8;
+pub const CURRENT_SCHEMA_VERSION: i64 = 9;
 
 /// État persisté d'une migration dans `schema_migrations`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -109,7 +109,81 @@ const MIGRATIONS: &[MigrationDef] = &[
         name: "v008_transactional_execution_admission",
         sql: V008_SQL,
     },
+    MigrationDef {
+        version: 9,
+        name: "v009_provider_probe_context_union",
+        sql: V009_SQL,
+    },
 ];
+
+const V009_SQL: &str = r"
+PRAGMA defer_foreign_keys=ON;
+CREATE TABLE provider_probe_contexts (
+    probe_id TEXT PRIMARY KEY REFERENCES provider_probes(probe_id),
+    receipt_id TEXT NOT NULL UNIQUE REFERENCES command_receipts(receipt_id) DEFERRABLE INITIALLY DEFERRED,
+    actor_id TEXT NOT NULL,
+    principal_id TEXT NOT NULL REFERENCES principals(principal_id),
+    project_id TEXT REFERENCES projects(project_id),
+    profile_version_ref TEXT NOT NULL REFERENCES provider_profiles(profile_version_ref),
+    authority_generation TEXT NOT NULL,
+    daemon_epoch INTEGER NOT NULL CHECK(daemon_epoch>=0),
+    action_id TEXT NOT NULL UNIQUE,
+    model_call_id TEXT NOT NULL UNIQUE,
+    manifest_id TEXT NOT NULL UNIQUE,
+    preparation_digest TEXT NOT NULL,
+    context_digest TEXT NOT NULL UNIQUE,
+    context_json TEXT NOT NULL,
+    created_at_ms INTEGER NOT NULL
+) STRICT;
+CREATE TRIGGER provider_probe_contexts_no_update BEFORE UPDATE ON provider_probe_contexts BEGIN SELECT RAISE(ABORT,'provider probe context immutable'); END;
+CREATE TRIGGER provider_probe_contexts_no_delete BEFORE DELETE ON provider_probe_contexts BEGIN SELECT RAISE(ABORT,'provider probe context durable'); END;
+CREATE TRIGGER admission_source_probe_context_insert AFTER INSERT ON provider_probe_contexts BEGIN UPDATE admission_source_clock SET revision=revision+1 WHERE singleton=1; END;
+CREATE TRIGGER admission_source_probe_context_update AFTER UPDATE ON provider_probe_contexts BEGIN UPDATE admission_source_clock SET revision=revision+1 WHERE singleton=1; END;
+CREATE TRIGGER admission_source_probe_context_delete AFTER DELETE ON provider_probe_contexts BEGIN UPDATE admission_source_clock SET revision=revision+1 WHERE singleton=1; END;
+
+CREATE TABLE model_call_manifests_v009 (
+    manifest_id TEXT PRIMARY KEY,
+    model_call_id TEXT NOT NULL REFERENCES model_calls(model_call_id),
+    manifest_kind TEXT NOT NULL CHECK(manifest_kind IN ('request','result')),
+    ordinal INTEGER NOT NULL CHECK(ordinal>=1),
+    parent_manifest_id TEXT REFERENCES model_call_manifests_v009(manifest_id),
+    context_manifest_id TEXT REFERENCES context_manifests(manifest_id),
+    provider_id TEXT NOT NULL,
+    resolved_model_id TEXT NOT NULL,
+    capabilities_hash TEXT NOT NULL,
+    allowed_model_policy_hash TEXT NOT NULL,
+    request_payload_hash TEXT NOT NULL,
+    usage_object_hash TEXT,
+    result_object_hash TEXT,
+    content_object_hash TEXT NOT NULL REFERENCES object_records(object_hash),
+    created_at_ms INTEGER NOT NULL,
+    context_kind TEXT NOT NULL DEFAULT 'invocation_context' CHECK(context_kind IN ('invocation_context','provider_probe_context')),
+    provider_probe_context_id TEXT REFERENCES provider_probe_contexts(probe_id),
+    UNIQUE(model_call_id,manifest_kind,ordinal),
+    CHECK((context_kind='invocation_context' AND context_manifest_id IS NOT NULL AND provider_probe_context_id IS NULL)
+       OR (context_kind='provider_probe_context' AND context_manifest_id IS NULL AND provider_probe_context_id IS NOT NULL))
+) STRICT;
+INSERT INTO model_call_manifests_v009
+ (manifest_id,model_call_id,manifest_kind,ordinal,parent_manifest_id,context_manifest_id,provider_id,resolved_model_id,capabilities_hash,allowed_model_policy_hash,request_payload_hash,usage_object_hash,result_object_hash,content_object_hash,created_at_ms,context_kind,provider_probe_context_id)
+ SELECT manifest_id,model_call_id,manifest_kind,ordinal,parent_manifest_id,context_manifest_id,provider_id,resolved_model_id,capabilities_hash,allowed_model_policy_hash,request_payload_hash,usage_object_hash,result_object_hash,content_object_hash,created_at_ms,'invocation_context',NULL FROM model_call_manifests;
+DROP TABLE model_call_manifests;
+ALTER TABLE model_call_manifests_v009 RENAME TO model_call_manifests;
+CREATE TRIGGER model_call_context_owner BEFORE INSERT ON model_call_manifests
+WHEN NOT EXISTS (
+ SELECT 1 FROM model_calls c
+ LEFT JOIN invocations i ON i.invocation_id=c.invocation_id
+ LEFT JOIN context_manifests x ON x.manifest_id=NEW.context_manifest_id
+ LEFT JOIN provider_probe_contexts p ON p.probe_id=NEW.provider_probe_context_id
+ WHERE c.model_call_id=NEW.model_call_id AND
+ ((NEW.context_kind='invocation_context' AND c.owner_kind='invocation' AND x.session_id=i.session_id)
+ OR (NEW.context_kind='provider_probe_context' AND c.owner_kind='provider_probe' AND p.probe_id=c.provider_probe_id)))
+BEGIN SELECT RAISE(ABORT,'model context does not belong to model origin'); END;
+CREATE TRIGGER model_call_manifests_no_update BEFORE UPDATE ON model_call_manifests BEGIN SELECT RAISE(ABORT,'model call manifest immutable'); END;
+CREATE TRIGGER model_call_manifests_no_delete BEFORE DELETE ON model_call_manifests BEGIN SELECT RAISE(ABORT,'model call manifest durable'); END;
+CREATE TRIGGER admission_source_model_call_manifests_insert AFTER INSERT ON model_call_manifests BEGIN UPDATE admission_source_clock SET revision=revision+1 WHERE singleton=1; END;
+CREATE TRIGGER admission_source_model_call_manifests_update AFTER UPDATE ON model_call_manifests BEGIN UPDATE admission_source_clock SET revision=revision+1 WHERE singleton=1; END;
+CREATE TRIGGER admission_source_model_call_manifests_delete AFTER DELETE ON model_call_manifests BEGIN UPDATE admission_source_clock SET revision=revision+1 WHERE singleton=1; END;
+";
 
 // REQ-AGENT-003/005: conservative CAS over every durable admission input.
 // Proof rows are checked separately in the writer and never become a queue.
@@ -619,8 +693,28 @@ fn apply_pending_migrations_inner(
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(StoreError::from_rusqlite)?;
 
+        if def.version == 9 {
+            let ambiguous: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM model_call_manifests m JOIN model_calls c ON c.model_call_id=m.model_call_id WHERE c.owner_kind='provider_probe')", [], |row| row.get(0)).map_err(StoreError::from_rusqlite)?;
+            if ambiguous {
+                return Err(StoreError::InvariantViolation("V008 probe manifest has an invocation context; explicit reconciliation required before V009".to_owned()));
+            }
+        }
+
         tx.execute_batch(def.sql)
             .map_err(StoreError::from_rusqlite)?;
+
+        if def.version == 9 {
+            let violations: i64 = tx
+                .query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |row| {
+                    row.get(0)
+                })
+                .map_err(StoreError::from_rusqlite)?;
+            if violations != 0 {
+                return Err(StoreError::InvariantViolation(
+                    "V009 context migration foreign key violation".to_owned(),
+                ));
+            }
+        }
 
         let bkp_str = pre_migration_backup_id.map(|id| id.to_string());
         tx.execute(

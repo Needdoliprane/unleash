@@ -413,6 +413,16 @@ impl UnleashStore {
             crate::broker_writer::inspect_action_conn(conn, action_id)
         })
     }
+
+    /// Lit le contexte réel de préparation d'un probe, sans accès réseau ni secret.
+    /// # Errors
+    /// Refuse un document durable illisible ou un digest divergent.
+    pub fn inspect_provider_probe(
+        &self,
+        probe_id: unleash_domain::ProviderProbeId,
+    ) -> Result<Option<crate::PreparedProviderProbe>, StoreError> {
+        self.read_snapshot(|conn, _| crate::provider_probes::read_context(conn, probe_id))
+    }
     /// Ouvre ou initialise la base `SQLite` qualifiée avec vérification de build, PRAGMAs et migrations.
     ///
     /// # Errors
