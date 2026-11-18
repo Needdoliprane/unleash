@@ -8,6 +8,7 @@
 #![warn(missing_docs)]
 
 pub mod backup;
+pub mod backup_requests;
 pub mod broker_phases;
 mod broker_writer;
 pub mod budgets;
@@ -30,6 +31,10 @@ pub mod writer;
 pub use backup::{
     BackupJobState, BackupManifest, BackupObjectEntry, BackupRetentionTier, BoundedExportOutcome,
     BoundedExportRequest, ExportCancellation, PrepareBackupRequest, ValidateBackupReport,
+};
+pub use backup_requests::{
+    BackupRequestRecord, BackupRequestState, ExecuteReservedBackupRequest, ExecutedBackup,
+    REQUEST_BACKUP_VERB,
 };
 pub use budgets::{
     BudgetAccountCharge, BudgetAccountSnapshot, BudgetReservationRecord, BudgetReservationRequest,

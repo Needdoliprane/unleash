@@ -235,6 +235,46 @@ fn apply_startup_state(
 }
 
 impl UnleashStore {
+    /// Lit la demande réservée et l'état réel de son job dans le même snapshot.
+    ///
+    /// # Errors
+    /// Retourne les erreurs de lecture du Store.
+    pub fn inspect_backup_request(
+        &self,
+        backup_id: BackupId,
+    ) -> Result<Option<crate::BackupRequestRecord>, StoreError> {
+        self.read_snapshot(move |conn, _| {
+            crate::backup_requests::read_backup_request_conn(conn, backup_id)
+        })
+    }
+
+    /// Demande, job, pins, manifeste attesté et watermark dans le même snapshot.
+    ///
+    /// # Errors
+    /// Retourne les erreurs de lecture ou d'intégrité de la projection.
+    pub fn inspect_backup_request_snapshot(
+        &self,
+        backup_id: BackupId,
+    ) -> Result<SnapshotProjection<Option<crate::BackupRequestRecord>>, StoreError> {
+        self.project_snapshot(move |conn| {
+            crate::backup_requests::read_backup_request_conn(conn, backup_id)
+        })
+    }
+
+    /// Prend une demande une seule fois avant Guard ; une issue incertaine exige inspection.
+    ///
+    /// # Errors
+    /// Refuse les lignées, états, principaux ou scopes incompatibles.
+    pub fn claim_backup_request(
+        &self,
+        backup_id: BackupId,
+        authority_generation: AuthorityGeneration,
+    ) -> Result<crate::BackupRequestRecord, StoreError> {
+        self.writer
+            .submit_immediate_blocking(WriteCriticality::Normal, true, move |tx, _| {
+                crate::backup_requests::claim_backup_request_tx(tx, backup_id, authority_generation)
+            })
+    }
     /// Engage atomiquement une phase du broker et son événement, avant tout effet.
     ///
     /// # Errors

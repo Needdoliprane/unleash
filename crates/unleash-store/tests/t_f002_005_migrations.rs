@@ -222,7 +222,8 @@ fn migration_v004_to_v005_requires_backup_and_preserves_v004_checksum() {
         })
         .unwrap();
     store.shutdown().unwrap();
-    let v5 = StoreConfig::new(dir.path());
+    let mut v5 = StoreConfig::new(dir.path());
+    v5.max_supported_schema_version = 5;
     assert!(matches!(
         UnleashStore::open(v5.clone()),
         Err(StoreError::MigrationBackupRequired)
