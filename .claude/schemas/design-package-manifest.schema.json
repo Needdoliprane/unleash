@@ -64,9 +64,13 @@
       }
     },
     "excluded_prefixes": {
-      "const": [
-        "state/",
-        "worktrees/"
+      "oneOf": [
+        {
+          "const": ["state/", "worktrees/"]
+        },
+        {
+          "const": ["state/", "worktrees/", "evidence/"]
+        }
       ]
     }
   },

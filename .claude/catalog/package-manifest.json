@@ -9,10 +9,11 @@
   ],
   "excluded_prefixes": [
     "state/",
-    "worktrees/"
+    "worktrees/",
+    "evidence/"
   ],
   "hash_algorithm": "sha256",
-  "source_tree_digest": "abfbfd38b097b058d11dae42744f2c911f766455e6ba3f538de140b19d8769c3",
+  "source_tree_digest": "8db09cccf79513bea27602aeb76793faefe0566c8fc7281728db72d8fbdb9544",
   "files": [
     {
       "path": "INDEX.md",
@@ -394,8 +395,8 @@
     },
     {
       "path": "architecture/sqlite-design.md",
-      "sha256": "59f85bf868b44b93988e6731f1f8f5a0d6ec3104afecf45c33e36a43f43f841f",
-      "bytes": 53668,
+      "sha256": "ebe082171b9410099ec27a28ebbb1c230c872bba575424d26c5c3cec1f98d41e",
+      "bytes": 54275,
       "media_type": "text/markdown"
     },
     {
@@ -1780,8 +1781,8 @@
     },
     {
       "path": "features/F018-reliability-recovery/interfaces.md",
-      "sha256": "962cb8f465f64dc6a8ad33a3208470738a55d10c3f5ea45c5babe0be97247ed3",
-      "bytes": 7192,
+      "sha256": "9cbc61a1e8f27bdc16fdd9687242997956047caaddd2fc67aec715afd058828a",
+      "bytes": 8282,
       "media_type": "text/markdown"
     },
     {
@@ -1942,8 +1943,8 @@
     },
     {
       "path": "rules/design-dossier.md",
-      "sha256": "9b8cd221f407bd243a87cdfb38c9162785c9011bc478cd2591b94439926cdb8e",
-      "bytes": 2239,
+      "sha256": "688c83fc7f3c187bc331d5ef3a35bfa0b765003cacc384054478bf349084857a",
+      "bytes": 2363,
       "media_type": "text/markdown"
     },
     {
@@ -2014,8 +2015,8 @@
     },
     {
       "path": "schemas/design-package-manifest.schema.json",
-      "sha256": "1c168ac185647cce7ff4f5fe08ad242a5bbefa715a437153a0bc0060c4ca8835",
-      "bytes": 1785,
+      "sha256": "1bb0ee70bb35189dd4f96c5f124389e3041621e5ba0b14f14ea66928d7ac45e3",
+      "bytes": 1888,
       "media_type": "application/json"
     },
     {
@@ -2188,8 +2189,8 @@
     },
     {
       "path": "specs/document-package-ingestion.md",
-      "sha256": "371aadc1410f97c0c8c297b5fff49868f8d303e929ac419661de0dbebb481db3",
-      "bytes": 13188,
+      "sha256": "e416ebc66903434c08d1f8c45ac0683e9577eb1525c7ee32633d004bc68f327d",
+      "bytes": 13409,
       "media_type": "text/markdown"
     },
     {
@@ -2320,8 +2321,8 @@
     },
     {
       "path": "testing/crash-recovery-tests.md",
-      "sha256": "096b124a96df7229e1edd81b0f79871c4c21dad8fe6e239e535a471d613eb7ae",
-      "bytes": 13435,
+      "sha256": "6f16f8b85bf11565f332f9ba8de6b4bbd150ee7361728c26cc95e02431ac8a1c",
+      "bytes": 13947,
       "media_type": "text/markdown"
     },
     {
