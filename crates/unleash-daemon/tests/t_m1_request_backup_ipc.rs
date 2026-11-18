@@ -274,11 +274,20 @@ async fn request_backup_is_authenticated_idempotent_and_physically_verified() {
 
 #[tokio::test]
 async fn required_guard_without_adapter_blocks_backup_before_dispatch() {
+    assert_unqualified_profile_blocks_backup(false).await;
+}
+
+#[tokio::test]
+async fn strict_isolation_without_backend_blocks_backup_before_dispatch() {
+    assert_unqualified_profile_blocks_backup(true).await;
+}
+
+async fn assert_unqualified_profile_blocks_backup(strict: bool) {
     use std::os::unix::fs::PermissionsExt;
     use unleash_domain::ActorId;
     use unleash_store::{
         AggregateKind, CallerAuthority, CallerRole, CommandMutation, CommitCommandRequest,
-        GuardConfigInput, GuardPolicyMode, GuardTransport,
+        GuardConfigInput, GuardPolicyMode, GuardTransport, PolicyIsolationMode, PolicyScopeKind,
     };
     let rdv = local_test_dir("m1-guard-backup-rdv").unwrap();
     std::fs::set_permissions(rdv.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
@@ -289,28 +298,28 @@ async fn required_guard_without_adapter_blocks_backup_before_dispatch() {
         let store = UnleashStore::open(StoreConfig::new(seed_dir)).unwrap();
         let generation = store.daemon_state().unwrap().authority_generation;
         let actor = ActorId::new("fixture-admin").unwrap();
-        store
-            .commit_command(CommitCommandRequest {
-                actor_id: actor.clone(),
-                envelope: CommandEnvelope {
-                    protocol_version: ProtocolVersion,
-                    request_id: RequestId::from_u128(910),
-                    command_id: CommandId::from_u128(911),
-                    authority_generation: generation,
-                    actor_ref: None,
-                    project_id: None,
-                    aggregate_id: generation.as_uuid(),
-                    expected_revision: Revision::INITIAL,
-                    command_type: "ConfigureGuard".into(),
-                    payload: Map::new(),
+        let caller = CallerAuthority {
+            actor_id: actor.clone(),
+            role: CallerRole::PolicyAdmin,
+        };
+        let (command_type, target_aggregate, mutation) = if strict {
+            (
+                "SetPolicy",
+                AggregateKind::SecurityPolicy,
+                CommandMutation::SetPolicy {
+                    scope_kind: PolicyScopeKind::Global,
+                    scope_id: "global".into(),
+                    isolation_mode: PolicyIsolationMode::Strict,
+                    policy_version: "test-v1".into(),
+                    reason: "test fixture".into(),
+                    caller,
                 },
-                target_aggregate: AggregateKind::GuardConfig,
-                operation_id: None,
-                receipt_state: ReceiptState::Completed,
-                result_ref: None,
-                retention_days_override: None,
-                fence_assertion: None,
-                mutation: CommandMutation::ConfigureGuard {
+            )
+        } else {
+            (
+                "ConfigureGuard",
+                AggregateKind::GuardConfig,
+                CommandMutation::ConfigureGuard {
                     config: GuardConfigInput {
                         config_id: "default".into(),
                         guard_mode: GuardPolicyMode::GuardRequired,
@@ -324,11 +333,32 @@ async fn required_guard_without_adapter_blocks_backup_before_dispatch() {
                         guard_mapping_profile: "none_accepted".into(),
                         reason: "test fixture".into(),
                     },
-                    caller: CallerAuthority {
-                        actor_id: actor,
-                        role: CallerRole::PolicyAdmin,
-                    },
+                    caller,
                 },
+            )
+        };
+        store
+            .commit_command(CommitCommandRequest {
+                actor_id: actor.clone(),
+                envelope: CommandEnvelope {
+                    protocol_version: ProtocolVersion,
+                    request_id: RequestId::from_u128(910),
+                    command_id: CommandId::from_u128(911),
+                    authority_generation: generation,
+                    actor_ref: None,
+                    project_id: None,
+                    aggregate_id: generation.as_uuid(),
+                    expected_revision: Revision::INITIAL,
+                    command_type: command_type.into(),
+                    payload: Map::new(),
+                },
+                target_aggregate,
+                operation_id: None,
+                receipt_state: ReceiptState::Completed,
+                result_ref: None,
+                retention_days_override: None,
+                fence_assertion: None,
+                mutation,
                 events: Vec::new(),
                 capacity_reservations: Vec::new(),
                 budget_reservations: Vec::new(),
@@ -386,7 +416,14 @@ async fn required_guard_without_adapter_blocks_backup_before_dispatch() {
     })
     .await
     .expect("refus Guard durable attendu");
-    assert_eq!(result.result["blocked_reason"], "guard_profile_unavailable");
+    assert_eq!(
+        result.result["blocked_reason"],
+        if strict {
+            "isolation_profile_unavailable"
+        } else {
+            "guard_profile_unavailable"
+        }
+    );
     assert!(result.result["manifest"].is_null());
     let store_cfg = StoreConfig::new(&data_dir);
     assert!(!store_cfg.backups_dir.join(backup_id.to_string()).exists());
