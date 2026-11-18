@@ -686,6 +686,10 @@ async fn lost_dispatch_ack_never_launches_or_reissues_backup() {
 #[tokio::test]
 async fn stop_after_dispatch_keeps_lock_until_the_admitted_backup_finishes() {
     use std::os::unix::fs::PermissionsExt;
+    use unleash_daemon::DaemonError;
+
+    const BROKER_DRAIN_ACTIVE: &str = "Travaux broker encore actifs ; verrou d'autorité conservé";
+
     let rdv = local_test_dir("m1-stop-c4-rdv").unwrap();
     std::fs::set_permissions(rdv.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
     let data = local_test_dir("m1-stop-c4-data").unwrap();
@@ -741,7 +745,10 @@ async fn stop_after_dispatch_keeps_lock_until_the_admitted_backup_finishes() {
     }).await.unwrap();
     assert_eq!(before, ("dispatching".into(), 1));
     assert!(!backup_dir.exists());
-    assert!(handle.shutdown_graceful("stop au marqueur").await.is_err());
+    assert!(matches!(
+        handle.shutdown_graceful("stop au marqueur").await,
+        Err(DaemonError::InvalidConfiguration(message)) if message == BROKER_DRAIN_ACTIVE
+    ));
     assert!(matches!(
         UnleashDaemon::start(cfg.clone()).await,
         Err(unleash_daemon::DaemonError::DaemonAlreadyRunning { .. }
@@ -750,7 +757,20 @@ async fn stop_after_dispatch_keeps_lock_until_the_admitted_backup_finishes() {
     *pause.release.lock().unwrap() = true;
     pause.condvar.notify_one();
     drop(client);
-    handle.shutdown_graceful("drain terminé").await.unwrap();
+    // Le marqueur libère le travail admis. Chaque requête d'arrêt garde son
+    // propre délai, tandis que ce test borne l'observation de la fin du drain.
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            match handle.shutdown_graceful("drain terminé").await {
+                Ok(_) => break,
+                Err(DaemonError::InvalidConfiguration(message))
+                    if message == BROKER_DRAIN_ACTIVE => {}
+                Err(error) => panic!("erreur inattendue après reprise du drain : {error}"),
+            }
+        }
+    })
+    .await
+    .expect("le drain de la sauvegarde admise doit se terminer");
     assert!(backup_dir.join("manifest.json").is_file());
     let DaemonStartOutcome::Started(restarted) = UnleashDaemon::start(cfg).await.unwrap() else {
         panic!("redémarrage attendu")
