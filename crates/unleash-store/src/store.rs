@@ -76,7 +76,7 @@ use crate::recovery_ops::{
 };
 use crate::restore::{
     MaintenanceRestoreManifest, RestoreActivationResult, RestoreBackupRequest,
-    execute_restore_backup, read_maintenance_manifest,
+    execute_restore_backup, read_maintenance_manifest_for_diagnostics,
 };
 use crate::writer::{
     HeldReaderSession, ReaderContext, ReaderRegistry, StoreWriterHandle, WalTelemetry,
@@ -1472,7 +1472,7 @@ impl UnleashStore {
     pub fn read_maintenance_restore_manifest(
         maintenance_dir: &Path,
     ) -> Result<Option<MaintenanceRestoreManifest>, StoreError> {
-        read_maintenance_manifest(maintenance_dir)
+        read_maintenance_manifest_for_diagnostics(maintenance_dir)
     }
 
     /// Déclenche une vérification et expiration des lecteurs dépassant 5 s ainsi qu'un checkpoint WAL.
