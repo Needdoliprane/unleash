@@ -523,9 +523,9 @@ fn draw_help_overlay(frame: &mut Frame<'_>, area: Rect, state: &TuiState) {
         "1..0 : changer d'espace (10 espaces)\n\
          Tab / Shift+Tab : panneau suivant / precedent\n\
          j / k / Haut / Bas : defiler / selectionner\n\
-         n / p : page suivante / precedente timeline (100 000 events)\n\
+         n / p : page suivante / precedente de l'activite\n\
          / : filtrer agents et timeline · Ctrl+P : palette de commandes\n\
-         e : editeur multiligne · a : attacher PTY (Ctrl+] pour detacher)\n\
+         e : editeur multiligne\n\
          i : ouvrir/fermer inspecteur · q : quitter sans arreter le daemon",
     )
     .block(block)
