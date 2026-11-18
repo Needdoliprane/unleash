@@ -222,6 +222,7 @@ fn validate_live_intent(
     now: TimestampMs,
     intent: &BrokerIntent,
 ) -> Result<(), StoreError> {
+    crate::backup_requests::validate_backup_intent_tx(tx, daemon, intent)?;
     if daemon.mode != DaemonMode::Ready {
         return Err(StoreError::RecoveryInProgress(
             "daemon indisponible pour dispatch broker".to_owned(),
@@ -715,6 +716,7 @@ pub(crate) fn commit_phase_tx(
             }
             // Empreinte de la preuve LOCALE complète conservée dans phase_json, aucune attribution fournisseur.
             let local_hash = canonical_sha256(&exact)?;
+            crate::backup_requests::validate_backup_observation_tx(tx, &daemon, receipt)?;
             tx.execute("UPDATE action_dispatches SET ended_at_ms=?2,transport_state=?3,receipt_hash=?4 WHERE dispatch_id=?1",params![receipt.dispatch_id.to_string(),receipt.observed_at_ms.as_i64(),receipt.state.to_string(),local_hash.as_prefixed_str()]).map_err(StoreError::from_rusqlite)?;
             (
                 receipt.state,

@@ -913,6 +913,61 @@ fn writer_revalidates_principal_and_exact_guard_snapshot_before_marker() {
 }
 
 #[test]
+fn writer_rechecks_changed_scope_and_durable_freeze_before_dispatch() {
+    for freeze in [false, true] {
+        let (store, intent, evaluation, ids, _directory) = fixture();
+        let decision = authorize(&store, &intent, evaluation);
+        if freeze {
+            let capsule_hash = Sha256Digest::from_bytes(b"synthetic freeze fixture");
+            store
+                .prepare_object(PrepareObjectRequest {
+                    object_hash: capsule_hash,
+                    byte_length: 24,
+                    media_type: "application/json".to_owned(),
+                    owner_kind: "fixture".to_owned(),
+                    owner_id: "freeze".to_owned(),
+                })
+                .unwrap();
+            let source = ids.new_uuid().to_string();
+            let target = intent.lineage_fence.authority_generation.to_string();
+            store.execute_in_writer_tx(WriteCriticality::Normal,move |tx,_| {
+                // Fixture relationnelle : la logique capsule/restauration est couverte par T-F018-007.
+                tx.execute("INSERT INTO restore_imports (restore_id,command_receipt_id,backup_id,source_authority_generation,target_authority_generation,capsule_object_hash,coverage,state,frozen_scopes_json,revision) VALUES ('freeze-fixture','fixture-receipt','fixture-backup',?1,?2,?3,'complete','activated','[]',1)",rusqlite::params![source,target,capsule_hash.as_prefixed_str()]).map_err(StoreError::from_rusqlite)?;
+                tx.execute("INSERT INTO recovery_scope_freezes (scope_id,restore_id,reason,global_freeze,state,created_at_ms) VALUES ('global','freeze-fixture','synthetic fixture',1,'frozen',0)",[]).map_err(StoreError::from_rusqlite)?;
+                Ok(())
+            }).unwrap();
+        } else {
+            store.execute_in_writer_tx(WriteCriticality::Normal,|tx,_| {
+                tx.execute("UPDATE settings SET revision=revision+1 WHERE scope_kind='user' AND scope_id='default'",[]).map_err(StoreError::from_rusqlite)?;
+                Ok(())
+            }).unwrap();
+        }
+        assert!(
+            store
+                .commit_broker_phase(request(
+                    &intent,
+                    evaluation,
+                    2,
+                    BrokerPhase::Dispatch {
+                        action_id: intent.action_id,
+                        intent_digest: intent.intent_digest,
+                        decision,
+                        dispatch_id: DispatchId::from_uuid(ids.new_uuid()),
+                        fence: intent.lineage_fence
+                    }
+                ))
+                .is_err()
+        );
+        let snapshot = store
+            .inspect_broker_action(intent.action_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(snapshot.state, ActionState::Authorized);
+        assert!(snapshot.dispatch_id.is_none());
+    }
+}
+
+#[test]
 fn writer_rejects_wrong_fence_decision_and_digest_even_with_current_cas() {
     let (store, intent, evaluation, ids, _directory) = fixture();
     let decision = authorize(&store, &intent, evaluation);
