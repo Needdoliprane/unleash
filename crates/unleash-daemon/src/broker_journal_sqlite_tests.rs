@@ -13,6 +13,7 @@ use std::sync::{
     Arc, Mutex,
     atomic::{AtomicBool, AtomicUsize, Ordering},
 };
+use std::time::Duration;
 use unleash_action_broker::{
     ActionBroker, ActionBrokerError, ActionExecutionFailure, ActionExecutionResult,
     ActionExecutorPort, ActionIntent, ActionProvenance, ActionSubject, AuthorityLayer,
@@ -82,13 +83,15 @@ async fn daemon_publishes_the_committed_broker_cursor_to_live_ipc() {
     let cfg = DaemonConfig {
         data_root: Some(data.path().to_path_buf()),
         rendezvous_dir: Some(rdv.path().to_path_buf()),
+        shutdown_drain_timeout: Duration::from_millis(200),
         store_overrides: crate::StoreOverrides {
             cutpoints: Some(pause.clone()),
             ..Default::default()
         },
         ..DaemonConfig::default()
     };
-    let DaemonStartOutcome::Started(handle) = UnleashDaemon::start(cfg).await.unwrap() else {
+    let DaemonStartOutcome::Started(handle) = UnleashDaemon::start(cfg.clone()).await.unwrap()
+    else {
         panic!("daemon attendu");
     };
     let runtime = handle.test_runtime_state();
@@ -160,7 +163,7 @@ async fn daemon_publishes_the_committed_broker_cursor_to_live_ipc() {
             + 60_000,
     );
     let action_id = intent.action_id;
-    let journal = SqliteBrokerJournal::new(Arc::clone(&runtime));
+    let journal = SqliteBrokerJournal::new(&runtime);
     journal
         .append(&BrokerJournalEntry::Authorizing { evaluation, intent })
         .await
@@ -287,11 +290,58 @@ async fn daemon_publishes_the_committed_broker_cursor_to_live_ipc() {
         matches!(frame, SubscribeEventsFrame::Events { events, .. } if events.iter().any(|e|
         e.event_type == "ActionAuthorizationRequested" && e.sequence.as_u64() == u64::try_from(uncertain_sequence).unwrap()))
     );
+    // Un travail bloqué après commit empêche la libération du verrou d'autorité.
+    *pause.released.lock().unwrap() = false;
+    pause.armed.store(true, Ordering::SeqCst);
+    let (mut evaluation, mut pending) = super::tests::fixture();
+    evaluation.evaluation_id = unleash_domain::AuthorizationEvaluationId::from_u128(701);
+    pending.action_id = unleash_domain::ActionId::from_u128(700);
+    pending.subject = ActionSubject::new_control_plane(
+        ActorId::new("p-sys").unwrap(),
+        format!("receipt:{}", cause.receipt_id),
+    )
+    .unwrap();
+    pending.lineage_fence = LineageFence::new(generation, runtime.daemon_epoch, Fence::ZERO);
+    pending.action_deadline = TimestampMs::new(
+        i64::try_from(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis(),
+        )
+        .unwrap()
+            + 60_000,
+    );
+    let publisher = Arc::clone(&journal);
+    let pending_task = tokio::spawn(async move {
+        publisher
+            .append(&BrokerJournalEntry::Authorizing {
+                evaluation,
+                intent: pending,
+            })
+            .await
+    });
+    tokio::time::timeout(Duration::from_secs(5), pause.entered.notified())
+        .await
+        .unwrap();
+    assert!(handle.shutdown_graceful("busy test").await.is_err());
+    assert!(matches!(
+        UnleashDaemon::start(cfg.clone()).await,
+        Err(crate::DaemonError::DaemonAlreadyRunning { .. }
+            | crate::DaemonError::AuthorityAlreadyActive { .. })
+    ));
+    *pause.released.lock().unwrap() = true;
+    pause.condvar.notify_one();
+    pending_task.await.unwrap().unwrap();
     drop(journal);
     drop(stream);
     drop(client);
     drop(runtime);
     handle.shutdown_graceful("test").await.unwrap();
+    let DaemonStartOutcome::Started(restarted) = UnleashDaemon::start(cfg).await.unwrap() else {
+        panic!("redémarrage attendu");
+    };
+    restarted.shutdown_graceful("test").await.unwrap();
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]

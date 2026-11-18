@@ -454,6 +454,7 @@ impl UnleashDaemon {
         let shared_mode = Arc::new(RwLock::new(DaemonMode::Recovering));
 
         let state = Arc::new(DaemonRuntimeState {
+            broker_activity: crate::broker_activity::BrokerActivity::new(),
             store: Arc::clone(&store),
             authority_generation: recovery_row.authority_generation,
             daemon_epoch: recovery_row.daemon_epoch,
@@ -602,6 +603,10 @@ struct DrainCoordinatorParams {
     recovery_handle: Option<tokio::task::JoinHandle<()>>,
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "Drain, retries et libération ordonnée de l'autorité"
+)]
 fn spawn_drain_coordinator(params: DrainCoordinatorParams) {
     tokio::spawn(async move {
         let mut stop_rx = params.stop_rx;
@@ -611,18 +616,36 @@ fn spawn_drain_coordinator(params: DrainCoordinatorParams) {
         let mut accept_opt = Some(params.accept_handle);
         let mut recovery_opt = params.recovery_handle;
 
-        if let Some(req) = stop_rx.recv().await
-            && let (Some(state), Some(store)) = (
+        while let Some(mut req) = stop_rx.recv().await {
+            let (Some(state), Some(store)) = (
                 state_opt.as_ref().map(Arc::clone),
                 store_opt.as_ref().map(Arc::clone),
-            )
-        {
+            ) else {
+                break;
+            };
             state.mark_draining();
             if let Some(recovery_handle) = recovery_opt.take() {
                 let _ = recovery_handle.await;
             }
             let effective_drain_timeout =
                 req.drain_timeout_override.unwrap_or(params.drain_timeout);
+            if tokio::time::timeout(
+                effective_drain_timeout,
+                state.broker_activity.close_and_wait(),
+            )
+            .await
+            .is_err()
+            {
+                if let Some(ack) = req.ack.take() {
+                    let _ = ack.send(Err(DaemonError::InvalidConfiguration(String::from(
+                        "Travaux broker encore actifs ; verrou d'autorité conservé",
+                    ))));
+                    continue;
+                }
+                // Sans demandeur vivant, poursuivre l'arrêt dès que le travail
+                // se termine tout en conservant le verrou entre-temps.
+                state.broker_activity.close_and_wait().await;
+            }
             let res = execute_drain_and_stop(
                 &state,
                 &store,
@@ -685,6 +708,9 @@ fn spawn_drain_coordinator(params: DrainCoordinatorParams) {
         }
         if let Some(recovery_handle) = recovery_opt.take() {
             recovery_handle.abort();
+        }
+        if let Some(state) = &state_opt {
+            state.broker_activity.close_and_wait().await;
         }
         let state_drop = state_opt.take();
         let store_drop = store_opt.take();

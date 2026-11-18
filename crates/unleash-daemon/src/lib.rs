@@ -17,6 +17,7 @@
 #![warn(missing_docs)]
 
 pub mod auth;
+mod broker_activity;
 #[allow(
     dead_code,
     reason = "Raccordement runtime différé à la publication des événements et au producteur qualifié"

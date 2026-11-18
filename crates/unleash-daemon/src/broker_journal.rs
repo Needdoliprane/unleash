@@ -4,7 +4,7 @@
 //! requiring evidence remain closed until their verifiers exist.
 
 use crate::ipc::{DaemonRuntimeState, publish_committed_events_ordered};
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 use unleash_action_broker::{
     ActionBrokerError, ActionIntent, ActionProvenance, AuthorizationCause, AuthorizationDecision,
     AuthorizationOutcome, BoxFuture, BrokerJournalEntry, BrokerJournalError, BrokerJournalPort,
@@ -22,16 +22,16 @@ use unleash_store::{
 /// Broker journal backed by a durable Store port.
 pub(crate) struct SqliteBrokerJournal {
     store: Arc<UnleashStore>,
-    runtime: Option<Arc<DaemonRuntimeState>>,
+    runtime: Option<Weak<DaemonRuntimeState>>,
 }
 
 impl SqliteBrokerJournal {
     /// Connect the journal to its Store port. This does not activate effects.
     #[must_use]
-    pub(crate) fn new(runtime: Arc<DaemonRuntimeState>) -> Self {
+    pub(crate) fn new(runtime: &Arc<DaemonRuntimeState>) -> Self {
         Self {
             store: Arc::clone(&runtime.store),
-            runtime: Some(runtime),
+            runtime: Some(Arc::downgrade(runtime)),
         }
     }
 
@@ -282,12 +282,26 @@ impl BrokerJournalPort for SqliteBrokerJournal {
             let (evaluation, intent, phase) = project(entry)?;
             let store = Arc::clone(&self.store);
             let runtime = self.runtime.clone();
+            let activity = match &runtime {
+                Some(runtime) => Some(Arc::new(
+                    runtime
+                        .upgrade()
+                        .ok_or(BrokerJournalError)?
+                        .broker_activity
+                        .admit()
+                        .ok_or(BrokerJournalError)?,
+                )),
+                None => None,
+            };
             // L'opération détachée poursuit aussi la publication si son appelant
             // est annulé après mise en file du writer.
             tokio::spawn(async move {
+                let worker_activity = activity.clone();
+                let activity_guard = activity;
                 let action_id = intent.action_id;
                 let recovery_store = Arc::clone(&store);
                 let result = tokio::task::spawn_blocking(move || {
+                    let _worker_activity = worker_activity;
                     let dispatch = matches!(phase, BrokerPhase::Dispatch { .. });
                     let expected_revision = store
                         .inspect_broker_action(intent.action_id)
@@ -309,8 +323,10 @@ impl BrokerJournalPort for SqliteBrokerJournal {
                     // Une erreur peut suivre un commit. La lecture ne confirme
                     // pas la phase demandée : elle permet seulement de publier
                     // un curseur effectivement engagé, puis l'erreur demeure.
-                    if let Some(runtime) = runtime {
+                    if let Some(runtime) = runtime.and_then(|runtime| runtime.upgrade()) {
+                        let recovery_activity = activity_guard.clone();
                         let snapshot = tokio::task::spawn_blocking(move || {
+                            let _recovery_activity = recovery_activity;
                             recovery_store.inspect_broker_action(action_id)
                         })
                         .await;
@@ -333,6 +349,9 @@ impl BrokerJournalPort for SqliteBrokerJournal {
                     return Err(BrokerJournalError);
                 }
                 if let Some(runtime) = runtime {
+                    let Some(runtime) = runtime.upgrade() else {
+                        return Err(BrokerJournalError);
+                    };
                     if commit.event_cursor.stream_id != runtime.stream_id {
                         return Err(BrokerJournalError);
                     }

@@ -59,6 +59,7 @@ pub(crate) struct StopRequest {
 
 /// État d'exécution partagé entre la boucle d'acceptation IPC et les connexions clientes.
 pub(crate) struct DaemonRuntimeState {
+    pub(crate) broker_activity: Arc<crate::broker_activity::BrokerActivity>,
     pub(crate) store: Arc<UnleashStore>,
     pub(crate) authority_generation: AuthorityGeneration,
     pub(crate) daemon_epoch: DaemonEpoch,
