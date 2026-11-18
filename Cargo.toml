@@ -6,6 +6,7 @@ members = [
     "crates/unleash-platform",
     "crates/unleash-client",
     "crates/unleash-store",
+    "crates/unleash-action-broker",
     "crates/unleash-testkit",
     "crates/unleash-browser",
     "crates/unleash-process-host",
@@ -56,6 +57,7 @@ unleash-protocol = { version = "0.1.0", path = "crates/unleash-protocol" }
 unleash-platform = { version = "0.1.0", path = "crates/unleash-platform" }
 unleash-client = { version = "0.1.0", path = "crates/unleash-client" }
 unleash-store = { version = "0.1.0", path = "crates/unleash-store" }
+unleash-action-broker = { version = "0.1.0", path = "crates/unleash-action-broker" }
 unleash-testkit = { version = "0.1.0", path = "crates/unleash-testkit" }
 unleash-browser = { version = "0.1.0", path = "crates/unleash-browser" }
 unleash-process-host = { version = "0.1.0", path = "crates/unleash-process-host" }

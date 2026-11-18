@@ -23,7 +23,7 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use unleash_domain::{
@@ -42,7 +42,7 @@ use unleash_process_host::{
     ProcessHostServer, ProcessInspector, ResourceKind, SandboxProbeOutcome, StrictIsolationSpec,
     reconcile_after_lost_host, store_canary_secrets, store_control_secret,
 };
-use unleash_protocol::{ErrorCode, ReasonCode, RetryClass};
+use unleash_protocol::{ErrorCode, ReasonCode, RetryClass, read_frame, write_frame};
 use unleash_testkit::{ExternalEffectOracle, local_test_dir};
 
 const ENV_ROLE: &str = "UNLEASH_SPIKE_RUNTIME_ROLE";
@@ -169,14 +169,63 @@ fn read_all_spool_text(client: &mut HostClient, hdr: HostCommandHeader, secret: 
             strict_cursor: false,
         })
         .unwrap();
-    let HostResponse::LogChunk { result } = resp else {
-        panic!("réponse ReadLog inattendue : {resp:?}");
+    spool_text(resp)
+}
+
+fn spool_text(response: HostResponse) -> String {
+    let HostResponse::LogChunk { result } = response else {
+        panic!("réponse ReadLog inattendue : {response:?}");
     };
     let mut combined = Vec::new();
     for seg in &result.segments {
         combined.extend_from_slice(&seg.bytes);
     }
     String::from_utf8_lossy(&combined).into_owned()
+}
+
+/// Une écriture PTY acquittée ne prouve pas que le drainer a rempli le spool.
+/// Attendre son marqueur lu par IPC, avec le budget existant partagé entre les I/O.
+fn wait_for_spool_marker(
+    socket: &Path,
+    header: HostCommandHeader,
+    secret: &str,
+    marker: &str,
+) -> String {
+    let deadline = Instant::now() + IO_TIMEOUT;
+    unleash_platform::validate_socket_file(socket).unwrap();
+    let mut stream = UnixStream::connect(socket).unwrap();
+    unleash_platform::verify_same_uid_peer(&stream).unwrap();
+    let request = serde_json::to_vec(&HostRequest::ReadLog {
+        header,
+        secret: secret.to_owned(),
+        after_offset: 0,
+        max_bytes: 1024 * 1024,
+        strict_cursor: false,
+    })
+    .unwrap();
+    loop {
+        let remaining = deadline
+            .checked_duration_since(Instant::now())
+            .expect("échéance atteinte avant lecture du marqueur durable du spool");
+        stream.set_write_timeout(Some(remaining)).unwrap();
+        write_frame(&mut stream, &request).unwrap();
+        let remaining = deadline
+            .checked_duration_since(Instant::now())
+            .expect("échéance atteinte après envoi de ReadLog");
+        stream.set_read_timeout(Some(remaining)).unwrap();
+        let response = read_frame(&mut stream)
+            .expect("lecture du spool avant échéance")
+            .expect("EOF inattendu pendant l'attente du spool");
+        let text = spool_text(serde_json::from_slice(&response).unwrap());
+        assert!(
+            Instant::now() <= deadline,
+            "réponse ReadLog reçue après l'échéance du spool"
+        );
+        if text.contains(marker) {
+            return text;
+        }
+        std::thread::yield_now();
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -602,6 +651,18 @@ fn t_f011_003_sigkill_daemon_during_active_pty_survives_and_reattaches_same_line
         Fence::new(1),
     )
     .unwrap();
+    // connect() n'atteste pas encore que le thread serveur a lié ce canal à
+    // l'ancienne génération d'authentification. Son acquittement ReadLog le fait.
+    let old_channel_ack = pre_rotation_channel
+        .call(&HostRequest::ReadLog {
+            header: mk_header(run_uuid, gen_a, 1, 1, 8),
+            secret: secret_1.to_owned(),
+            after_offset: 0,
+            max_bytes: 1024,
+            strict_cursor: false,
+        })
+        .unwrap();
+    assert!(matches!(old_channel_ack, HostResponse::LogChunk { .. }));
     let mut client = HostClient::connect(
         &host_sock,
         run_uuid,
@@ -626,7 +687,18 @@ fn t_f011_003_sigkill_daemon_during_active_pty_survives_and_reattaches_same_line
         }
     ));
 
-    // Tout ancien canal connecté avant rotation est invalidé immédiatement
+    let current_channel_ack = client
+        .call(&HostRequest::ReadLog {
+            header: mk_header(run_uuid, gen_a, 2, 1, 19),
+            secret: secret_2.to_owned(),
+            after_offset: 0,
+            max_bytes: 1024,
+            strict_cursor: false,
+        })
+        .unwrap();
+    assert!(matches!(current_channel_ack, HostResponse::LogChunk { .. }));
+
+    // Le canal acquitté avant rotation est invalidé immédiatement.
     let stale_chan_resp = pre_rotation_channel
         .call(&HostRequest::ReadLog {
             header: mk_header(run_uuid, gen_a, 2, 1, 9),
@@ -956,18 +1028,15 @@ fn t_f011_006_t_f011_010_sigkill_host_preserves_logs_and_stop_reports_detached_d
     let (mut pty_sock, mut pty_reader) = accept_sync_client(&sync_listener);
     assert_eq!(read_line_timeout(&mut pty_reader), "PTY_READY");
 
-    // Synchroniser les logs durables avant SIGKILL du host
-    let mut client = HostClient::connect(
+    // PTY_READY atteste le flush du worker, pas le drainage asynchrone par le
+    // host. Ne provoquer le crash qu'après lecture du marqueur dans le spool.
+    let logs = wait_for_spool_marker(
         &host_sock,
-        run_uuid,
-        gen_a,
-        DaemonEpoch::new(1),
-        Fence::new(1),
-    )
-    .unwrap();
-    let logs = read_all_spool_text(&mut client, mk_header(run_uuid, gen_a, 1, 1, 1), secret);
+        mk_header(run_uuid, gen_a, 1, 1, 1),
+        secret,
+        "PTY_PRE_KILL_DATA",
+    );
     assert!(logs.contains("PTY_PRE_KILL_DATA"));
-    drop(client);
 
     host_child.kill().unwrap();
     let _ = host_child.wait().unwrap();

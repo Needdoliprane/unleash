@@ -8,6 +8,9 @@
 #![warn(missing_docs)]
 
 pub mod backup;
+pub mod backup_requests;
+pub mod broker_phases;
+mod broker_writer;
 pub mod budgets;
 pub mod commands;
 pub mod config;
@@ -17,7 +20,10 @@ pub mod fs_sync;
 pub mod leases;
 pub mod migrations;
 pub mod objects;
+pub mod policies_secrets;
+pub mod projects_settings;
 pub mod qualification;
+pub mod recovery_ops;
 pub mod restore;
 pub mod store;
 pub mod writer;
@@ -25,6 +31,10 @@ pub mod writer;
 pub use backup::{
     BackupJobState, BackupManifest, BackupObjectEntry, BackupRetentionTier, BoundedExportOutcome,
     BoundedExportRequest, ExportCancellation, PrepareBackupRequest, ValidateBackupReport,
+};
+pub use backup_requests::{
+    BackupBlockReason, BackupRequestRecord, BackupRequestState, ExecuteReservedBackupRequest,
+    ExecutedBackup, REQUEST_BACKUP_VERB,
 };
 pub use budgets::{
     BudgetAccountCharge, BudgetAccountSnapshot, BudgetReservationRecord, BudgetReservationRequest,
@@ -47,9 +57,9 @@ pub use config::{
 };
 pub use error::StoreError;
 pub use events::{
-    DeadLetterItem, InboxApplyOutcome, MAX_OUTBOX_AGGREGATE_PARALLELISM,
+    AffectedBackupEntry, DeadLetterItem, InboxApplyOutcome, MAX_OUTBOX_AGGREGATE_PARALLELISM,
     MAX_OUTBOX_NON_TRANSIENT_ATTEMPTS, OutboxDispatchItem, OutboxState, PurgeStats,
-    ReadEventsOutcome,
+    ReadEventsOutcome, RetentionPurgeReport, RetentionPurgeRequest, RetentionPurgeStatusRecord,
 };
 pub use leases::{AcquireLeaseRequest, FenceAssertion, LeaseState, ResourceLeaseRecord};
 pub use migrations::{CURRENT_SCHEMA_VERSION, MigrationRecord, MigrationReport, MigrationState};
@@ -58,16 +68,42 @@ pub use objects::{
     PrepareObjectDeletionRequest, PrepareObjectRequest, PreparedObjectHandle,
     PublishObjectReferenceRequest,
 };
+pub use policies_secrets::{
+    AlertRecord, AlertSeverity, AlertState, CallerAuthority, CallerRole, GuardConfigInput,
+    GuardConfigRecord, GuardHealthStatus, GuardPolicyMode, GuardPropagationState, GuardTransport,
+    ListAlertsFilter, NewAlertSpec, PolicyIsolationMode, PolicyScopeKind, PolicySummary,
+    RemoteRevocationState, SecretRefState, SecretReferenceInput, SecretReferenceStatus,
+    SecurityPolicyRecord, SubjectKind, SubjectStatus, SubjectSuspensionRecord,
+};
+pub use projects_settings::{
+    AnalyzerPathConfig, ExecutionPoolSettings, ProjectRecord, ProjectRepositorySpec,
+    ProjectSourceSpec, RETENTION_SHORTENING_NOTICE_MS, RetentionClass, RetentionPolicySettings,
+    RetentionShorteningNotice, SettingsPatch, SettingsRecord, SettingsScopeKind,
+};
 pub use qualification::{
     APPROVED_BACKPORT_VERSIONS, EffectivePragmaProfile, MIN_QUALIFIED_SQLITE_VERSION,
     SqliteBuildPolicy, SqliteRuntimeManifest, WITHDRAWN_SQLITE_VERSIONS, compiled_sqlite_source_id,
     compiled_sqlite_version, validate_build_metadata,
 };
-pub use restore::{
-    CapsuleActionDelta, CapsuleBudgetDelta, CapsuleCoverage, CapsuleReceiptDelta,
-    EmptyExecutorNeutralizer, ExecutorInventoryItem, ExecutorNeutralizer,
-    MaintenanceRestoreManifest, RestoreActivationResult, RestoreBackupRequest, RestoreCapsule,
-    RestoreRequestState,
+pub use recovery_ops::{
+    ActionDispatchInput, ActionOutcomeDisposition, ApprovalDecision, ApprovalResolutionRecord,
+    RecoveryActionProvenance, RecoveryItem, RecoveryReport, RecoveryScopeFreezeRecord,
+    RestoreImportRecord, RestoreRequestRecord, ScopeFreezeDisposition,
 };
-pub use store::UnleashStore;
+pub use restore::{
+    CapsuleActionDelta, CapsuleBudgetDelta, CapsuleCoverage, CapsuleDispatchDelta,
+    CapsuleReceiptDelta, CapsuleReceiptResponseState, CapsuleReceiptRetention,
+    CapsuleTombstoneDelta, CapsuleTombstoneKind, EmptyExecutorNeutralizer, ExecutorInventoryItem,
+    ExecutorNeutralizer, MaintenanceManifestEntry, MaintenanceRestoreManifest,
+    RestoreActivationResult, RestoreBackupRequest, RestoreCapsule, RestoreRequestState,
+};
+pub use store::{SnapshotProjection, StoreOpenFailure, StoreOpenStage, UnleashStore};
+pub use unleash_domain::ReconcileOutcome;
 pub use writer::{HeldReaderSession, ReaderContext, ReaderControl, WalTelemetry};
+
+pub use broker_phases::{
+    BROKER_PHASE_SCHEMA_VERSION, BrokerActionReceipt, BrokerActionSnapshot,
+    BrokerAuthorizationCause, BrokerAuthorizationDecision, BrokerAuthorizationFailure,
+    BrokerAuthorizationOutcome, BrokerCause, BrokerEvaluation, BrokerExecutor, BrokerIntent,
+    BrokerObservationCause, BrokerPhase, BrokerPhaseCommit, BrokerPhaseRequest, BrokerPhaseStore,
+};

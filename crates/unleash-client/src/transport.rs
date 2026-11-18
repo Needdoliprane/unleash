@@ -10,9 +10,9 @@ use serde::de::DeserializeOwned;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
 use unleash_domain::{AuthorityGeneration, StreamId};
-use unleash_platform::{validate_socket_file, verify_same_uid_peer};
+use unleash_platform::{read_admin_credential, validate_socket_file, verify_same_uid_peer};
 use unleash_protocol::{
-    ClientKind, HelloRequest, HelloResponse, IpcError, MAX_FRAME_BYTES, ProtocolError,
+    AdminProof, ClientKind, HelloRequest, HelloResponse, IpcError, MAX_FRAME_BYTES, ProtocolError,
     ProtocolVersion, from_json_str_strict,
 };
 
@@ -38,6 +38,8 @@ pub struct ClientConfig {
     pub request_timeout: Duration,
     /// Active le contrôle `0700`/`0600`/`SUN_LEN` et `LOCAL_PEERCRED`/`SO_PEERCRED` (activé par défaut).
     pub verify_socket_security: bool,
+    /// Charge la preuve locale pour les clients humains ; peut être désactivé pour le diagnostic.
+    pub load_admin_credential: bool,
 }
 
 impl ClientConfig {
@@ -57,6 +59,7 @@ impl ClientConfig {
             connect_timeout: DEFAULT_CONNECT_TIMEOUT,
             request_timeout: DEFAULT_REQUEST_TIMEOUT,
             verify_socket_security: true,
+            load_admin_credential: true,
         }
     }
 
@@ -64,6 +67,13 @@ impl ClientConfig {
     #[must_use]
     pub fn with_capabilities(mut self, capabilities: Vec<String>) -> Self {
         self.requested_capabilities = capabilities;
+        self
+    }
+
+    /// Désactive explicitement le chargement du credential pour un accès diagnostic borné.
+    #[must_use]
+    pub const fn without_admin_credential(mut self) -> Self {
+        self.load_admin_credential = false;
         self
     }
 
@@ -98,30 +108,14 @@ impl IpcConnection {
     /// - [`ClientError::Timeout`] si la connexion ou le handshake dépasse `connect_timeout`.
     /// - [`ClientError::Remote`] / [`ClientError::Protocol`] si le serveur rejette v2.
     pub async fn connect(config: &ClientConfig) -> Result<Self, ClientError> {
-        if config.verify_socket_security {
-            validate_socket_file(&config.socket_path)?;
-        }
-
-        let connect_ms = duration_to_ms(config.connect_timeout);
-        let mut stream = tokio::time::timeout(
-            config.connect_timeout,
-            UnixStream::connect(&config.socket_path),
-        )
-        .await
-        .map_err(|_| ClientError::Timeout {
-            operation: "UnixStream::connect",
-            timeout_ms: connect_ms,
-        })??;
-
-        if config.verify_socket_security {
-            verify_same_uid_peer(&stream)?;
-        }
-
+        let mut stream = connect_verified_peer(config).await?;
+        let admin_proof = load_admin_proof(config);
         let hello_req = HelloRequest {
             protocol_version: ProtocolVersion,
             client_kind: config.client_kind,
             client_version: config.client_version.clone(),
             capabilities: config.requested_capabilities.clone(),
+            admin_proof,
         };
 
         write_json_frame_async(
@@ -294,6 +288,45 @@ impl IpcConnection {
     }
 }
 
+pub(crate) async fn connect_verified_peer(
+    config: &ClientConfig,
+) -> Result<UnixStream, ClientError> {
+    if config.verify_socket_security {
+        validate_socket_file(&config.socket_path)?;
+    }
+    let stream = tokio::time::timeout(
+        config.connect_timeout,
+        UnixStream::connect(&config.socket_path),
+    )
+    .await
+    .map_err(|_| ClientError::Timeout {
+        operation: "UnixStream::connect",
+        timeout_ms: duration_to_ms(config.connect_timeout),
+    })??;
+    if config.verify_socket_security {
+        verify_same_uid_peer(&stream)?;
+    }
+    Ok(stream)
+}
+
+pub(crate) fn load_admin_proof(config: &ClientConfig) -> Option<AdminProof> {
+    if config.verify_socket_security
+        && config.load_admin_credential
+        && matches!(
+            config.client_kind,
+            ClientKind::Cli | ClientKind::Tui | ClientKind::Gui
+        )
+    {
+        config
+            .socket_path
+            .parent()
+            .and_then(|dir| read_admin_credential(dir).ok().flatten())
+            .and_then(|value| AdminProof::from_hex(&value))
+    } else {
+        None
+    }
+}
+
 pub(crate) async fn write_json_frame_async<T: Serialize>(
     stream: &mut UnixStream,
     value: &T,
@@ -301,7 +334,7 @@ pub(crate) async fn write_json_frame_async<T: Serialize>(
     timeout: Duration,
     op: &'static str,
 ) -> Result<(), ClientError> {
-    let encoded = serde_json::to_vec(value).map_err(ProtocolError::Json)?;
+    let encoded = zeroize::Zeroizing::new(serde_json::to_vec(value).map_err(ProtocolError::Json)?);
     let max_u32 = u32::try_from(max_bytes).unwrap_or(u32::MAX);
     if encoded.len() > max_bytes || encoded.len() > MAX_FRAME_BYTES {
         let len_u32 = u32::try_from(encoded.len()).unwrap_or(u32::MAX);

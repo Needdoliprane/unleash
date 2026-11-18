@@ -53,7 +53,8 @@ pub use process_identity::{
     verify_process_identity,
 };
 pub use rendezvous::{
-    MACOS_SUN_LEN, MAX_UNIX_SOCKET_PATH_BYTES, bind_private_unix_listener,
-    ensure_private_rendezvous_dir, read_private_file_to_string, validate_rendezvous_dir,
-    validate_socket_file, validate_unix_socket_path_len, write_private_file_atomic,
+    ADMIN_PROOF_FILENAME, MACOS_SUN_LEN, MAX_UNIX_SOCKET_PATH_BYTES, bind_private_unix_listener,
+    ensure_private_rendezvous_dir, read_admin_credential, read_private_file_to_string,
+    validate_rendezvous_dir, validate_socket_file, validate_unix_socket_path_len,
+    write_private_file_atomic,
 };

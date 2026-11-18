@@ -1,0 +1,33 @@
+[package]
+name = "unleash-action-broker"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+repository.workspace = true
+description = "OVPT Unleash — Broker déterministe d'actions, autorité effective, isolation, secrets, port GuardPort versionné et profil none_accepted (F017, ADR-10)"
+
+[lints]
+workspace = true
+
+[dependencies]
+unleash-domain.workspace = true
+unleash-protocol.workspace = true
+unleash-platform.workspace = true
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serde_jcs.workspace = true
+thiserror.workspace = true
+sha2.workspace = true
+hex.workspace = true
+uuid.workspace = true
+chrono.workspace = true
+secrecy.workspace = true
+zeroize.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+unleash-testkit.workspace = true
+proptest.workspace = true

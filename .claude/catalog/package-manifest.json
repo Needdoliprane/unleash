@@ -9,10 +9,11 @@
   ],
   "excluded_prefixes": [
     "state/",
-    "worktrees/"
+    "worktrees/",
+    "evidence/"
   ],
   "hash_algorithm": "sha256",
-  "source_tree_digest": "bd304cb00adba311f34ef3c5ef9edd49f58ad18b80760f2c07a92f29c95b3ad0",
+  "source_tree_digest": "47b38927302282f7d55f3102eb12cf80b1d2a1a9f19ddecc129a285eadfdb300",
   "files": [
     {
       "path": "INDEX.md",
@@ -346,8 +347,8 @@
     },
     {
       "path": "architecture/ipc-and-apis.md",
-      "sha256": "ecb5fccdd63412fa37b3bf24f95c16bd6b9e4378e857fe6cc4161ce8a1e21fe5",
-      "bytes": 27490,
+      "sha256": "da5f63763dafe3909b22ce2c66a8c43f5e17bd91d3740a567293a2203f670a69",
+      "bytes": 31139,
       "media_type": "text/markdown"
     },
     {
@@ -364,8 +365,8 @@
     },
     {
       "path": "architecture/runtime-lifecycle.md",
-      "sha256": "bb36da540459bbad6227b6471e40761e6ab5bf4d79c762d0080945bafecab05a",
-      "bytes": 14777,
+      "sha256": "c8f45af2ab1a811389c98a36c0d2005d76731e9a86b2dcd20bf650cc3aa3f212",
+      "bytes": 15842,
       "media_type": "text/markdown"
     },
     {
@@ -394,8 +395,8 @@
     },
     {
       "path": "architecture/sqlite-design.md",
-      "sha256": "cfb0d279f6769c0cdf19e2ccffc7bfbeb1a9aeedc3fd4ebae392eb8f5edf04f2",
-      "bytes": 52253,
+      "sha256": "1b7a13a24d7d6aa2446ebc39cc7f36bf96a47b7dae66de6de78e254cb5846d09",
+      "bytes": 55222,
       "media_type": "text/markdown"
     },
     {
@@ -1780,8 +1781,8 @@
     },
     {
       "path": "features/F018-reliability-recovery/interfaces.md",
-      "sha256": "962cb8f465f64dc6a8ad33a3208470738a55d10c3f5ea45c5babe0be97247ed3",
-      "bytes": 7192,
+      "sha256": "b73cb3266a6664a193e7fe0d39b5a4ea525f8baef0afd340c21748a4a2e5a28d",
+      "bytes": 8934,
       "media_type": "text/markdown"
     },
     {
@@ -1942,8 +1943,8 @@
     },
     {
       "path": "rules/design-dossier.md",
-      "sha256": "9b8cd221f407bd243a87cdfb38c9162785c9011bc478cd2591b94439926cdb8e",
-      "bytes": 2239,
+      "sha256": "688c83fc7f3c187bc331d5ef3a35bfa0b765003cacc384054478bf349084857a",
+      "bytes": 2363,
       "media_type": "text/markdown"
     },
     {
@@ -2014,8 +2015,8 @@
     },
     {
       "path": "schemas/design-package-manifest.schema.json",
-      "sha256": "1c168ac185647cce7ff4f5fe08ad242a5bbefa715a437153a0bc0060c4ca8835",
-      "bytes": 1785,
+      "sha256": "1bb0ee70bb35189dd4f96c5f124389e3041621e5ba0b14f14ea66928d7ac45e3",
+      "bytes": 1888,
       "media_type": "application/json"
     },
     {
@@ -2068,8 +2069,8 @@
     },
     {
       "path": "schemas/ipc-hello.schema.json",
-      "sha256": "1124d69e748b729e5bdd0f0df6b5fe9db15c872d3bc7775c077a7593f64ad06e",
-      "bytes": 2699,
+      "sha256": "a63ee5b8b43d130fa67e86aeb165b95f84688784d7be5b3d586a095a55038929",
+      "bytes": 3731,
       "media_type": "application/json"
     },
     {
@@ -2164,8 +2165,8 @@
     },
     {
       "path": "specs/ai-guard.md",
-      "sha256": "37c04d4f0aa924eb50dcf2cf72d3d9d68f02532b1202c458f74eecba65c1a8b5",
-      "bytes": 12736,
+      "sha256": "7e0060d02b2539a4ddf3dbfb74cb12eb77e3a023a47af044014655c7e62223b8",
+      "bytes": 13691,
       "media_type": "text/markdown"
     },
     {
@@ -2188,8 +2189,8 @@
     },
     {
       "path": "specs/document-package-ingestion.md",
-      "sha256": "371aadc1410f97c0c8c297b5fff49868f8d303e929ac419661de0dbebb481db3",
-      "bytes": 13188,
+      "sha256": "e416ebc66903434c08d1f8c45ac0683e9577eb1525c7ee32633d004bc68f327d",
+      "bytes": 13409,
       "media_type": "text/markdown"
     },
     {
@@ -2320,8 +2321,8 @@
     },
     {
       "path": "testing/crash-recovery-tests.md",
-      "sha256": "096b124a96df7229e1edd81b0f79871c4c21dad8fe6e239e535a471d613eb7ae",
-      "bytes": 13435,
+      "sha256": "6f16f8b85bf11565f332f9ba8de6b4bbd150ee7361728c26cc95e02431ac8a1c",
+      "bytes": 13947,
       "media_type": "text/markdown"
     },
     {

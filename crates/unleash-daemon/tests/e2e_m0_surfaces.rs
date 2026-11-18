@@ -436,7 +436,7 @@ async fn e2e_m0_cross_surface_cli_gui_tui_and_client_convergence() {
         draw_tx,
     };
     let mut terminal = Terminal::new(backend).unwrap();
-    let mut tui_state = TuiState::with_m0_fixture(TerminalCapabilities::default());
+    let mut tui_state = TuiState::new(TerminalCapabilities::default());
     let (cmd_tx, cmd_rx) = mpsc::channel::<BackendCommand>(16);
     let (upd_tx, upd_rx) = mpsc::channel::<BackendUpdate>(MAX_NOTIFICATION_QUEUE);
     let io_task = tokio::spawn(run_backend_io_worker(
@@ -455,7 +455,7 @@ async fn e2e_m0_cross_surface_cli_gui_tui_and_client_convergence() {
     );
     let cmd_tx_driver = cmd_tx.clone();
     let tui_driver_fut = async move {
-        wait_for_screen_containing(&mut draw_rx, &["IPC v2: seq"]).await;
+        wait_for_screen_containing(&mut draw_rx, &["IPC v2: connecté"]).await;
         cmd_tx_driver
             .send(BackendCommand::ExecuteQuery {
                 operation: OperationName::GetStateSnapshot,
@@ -484,7 +484,9 @@ async fn e2e_m0_cross_surface_cli_gui_tui_and_client_convergence() {
     assert!(tui_state.should_quit);
     assert_eq!(tui_state.active_space, Space::Agents);
     let final_tui_screen = terminal.backend().snapshot_text();
-    assert!(final_tui_screen.contains("IPC v2: seq"));
+    assert!(final_tui_screen.contains("IPC v2: connecté"));
+    assert!(!final_tui_screen.contains("Pool 3/5"));
+    assert!(tui_state.agents.is_empty());
     assert!(final_tui_screen.contains("GetStateSnapshot:"));
     assert!(final_tui_screen.contains("Espace : Agents"));
 

@@ -1,0 +1,19 @@
+{
+  "evidence_id": "EV-F018-009",
+  "test_id": "T-F018-009",
+  "requirement_id": "REQ-REC-009",
+  "commit": "aa5bd7f498f21a6ea3aadb65feea83769bed2808",
+  "command": "cargo test --locked --offline --workspace --all-features --no-fail-fast --quiet",
+  "environment": {
+    "os": "macOS 27.2.1 arm64",
+    "rustc": "rustc 1.94.1",
+    "sqlite": "bundle rusqlite du Cargo.lock testé"
+  },
+  "result": "passed",
+  "observed_at": "2026-11-18T17:14:53Z",
+  "artifacts": [
+    "crates/unleash-store/tests/t_f018_009_projects_policies_secrets.rs",
+    "crates/unleash-daemon/tests/t_m1_request_backup_ipc.rs"
+  ],
+  "limits": "Périmètre interne M1. Projection locale IPC du job, du manifeste, de la lignée et de l’issue broker sur un watermark. Parité des trois interfaces et diagnostic final de base illisible traités séparément."
+}

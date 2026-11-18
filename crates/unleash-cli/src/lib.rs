@@ -22,11 +22,13 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use clap::{Parser, Subcommand};
 use serde_json::{Map, Value, json};
 use thiserror::Error;
-use unleash_client::{ClientConfig, ClientError, EventStreamReader, UnleashClient};
-use unleash_domain::{CommandId, ProjectId, RequestId, Revision, Sequence};
+use unleash_client::{
+    ClientConfig, ClientError, DiagnosticClient, EventStreamReader, UnleashClient,
+};
+use unleash_domain::{AuthorityGeneration, CommandId, ProjectId, RequestId, Revision, Sequence};
 use unleash_platform::{PlatformError, SOCKET_FILENAME, canonical_rendezvous_dir};
 use unleash_protocol::{
-    ClientKind, CommandEnvelope, ProtocolVersion, QueryEnvelope, SubscribeEventsFrame,
+    ClientKind, CommandEnvelope, ProtocolVersion, QueryEnvelope, ReasonCode, SubscribeEventsFrame,
     SubscribeEventsRequest,
 };
 use uuid::Uuid;
@@ -44,6 +46,21 @@ pub enum CliError {
     /// Erreur du client IPC `unleash-client`.
     #[error("Erreur client IPC : {0}")]
     Client(#[from] ClientError),
+
+    /// Demande de sauvegarde sans reçu obtenu par le client.
+    #[error(
+        "Reçu indisponible pour la sauvegarde {backup_id}, commande {command_id}, lignée {authority_generation}. {source}"
+    )]
+    BackupReceiptMissing {
+        /// Agrégat ciblé par la demande.
+        backup_id: Uuid,
+        /// Identité immuable de la commande pour l'inspection.
+        command_id: CommandId,
+        /// Lignée épinglée avant l'envoi.
+        authority_generation: AuthorityGeneration,
+        /// Erreur retournée lors de l'envoi ou de la lecture du reçu.
+        source: Box<ClientError>,
+    },
 
     /// Argument utilisateur invalide.
     #[error("Argument CLI invalide : {0}")]
@@ -107,6 +124,14 @@ pub enum Commands {
         #[command(subcommand)]
         action: ProjectCommand,
     },
+    /// Rapport de récupération durable.
+    Recovery,
+    /// Demande ou consulte une sauvegarde manuelle.
+    Backup {
+        /// Action sur les sauvegardes.
+        #[command(subcommand)]
+        action: BackupCommand,
+    },
     /// Pilotage des missions.
     Mission {
         /// Action sur les missions.
@@ -136,9 +161,38 @@ pub enum Commands {
     },
 }
 
+/// Sous-commandes `unleash backup`.
+#[derive(Debug, Subcommand)]
+pub enum BackupCommand {
+    /// Demande une sauvegarde manuelle et affiche le reçu d'acceptation.
+    Request {
+        /// Identifiant de la sauvegarde, généré si omis.
+        #[arg(long)]
+        backup_id: Option<Uuid>,
+        /// Identifiant d'une commande à rejouer avec sa lignée d'origine.
+        #[arg(long, requires_all = ["backup_id", "authority_generation"])]
+        command_id: Option<Uuid>,
+        /// Lignée d'origine de la commande lors d'un rejeu explicite.
+        #[arg(long, requires = "command_id")]
+        authority_generation: Option<Uuid>,
+    },
+    /// Consulte l'état d'une sauvegarde et son manifeste lorsqu'il est disponible.
+    Show {
+        /// Identifiant de la sauvegarde.
+        backup_id: Uuid,
+    },
+}
+
 /// Sous-commandes `unleash project`.
 #[derive(Debug, Subcommand)]
 pub enum ProjectCommand {
+    /// Liste les projets autorisés avec leur watermark.
+    List,
+    /// Lit un projet autorisé avec son watermark.
+    Show {
+        /// Identifiant du projet.
+        project_id: Uuid,
+    },
     /// Crée un projet via `CreateProject`.
     Create {
         /// Nom du projet.
@@ -276,7 +330,22 @@ pub async fn run_cli(cli: &Cli) -> Result<Value, CliError> {
 
     let client_cfg = ClientConfig::new(socket_path, ClientKind::Cli, env!("CARGO_PKG_VERSION"))
         .with_timeouts(timeout, timeout);
-    let mut client = UnleashClient::connect(client_cfg).await?;
+    let mut client = match UnleashClient::connect(client_cfg.clone()).await {
+        Ok(client) => client,
+        Err(ClientError::Remote(error))
+            if error.reason_code == Some(ReasonCode::StorageCorrupt)
+                && matches!(&cli.command, Commands::Status | Commands::Recovery) =>
+        {
+            let mut diagnostic = DiagnosticClient::connect(client_cfg).await?;
+            let request_id = RequestId::from_uuid(next_uuid());
+            if matches!(&cli.command, Commands::Status) {
+                return Ok(diagnostic.status(request_id).await?.result);
+            }
+            let response = diagnostic.inspect_recovery(request_id).await?;
+            return Ok(json!({"watermark": response.watermark, "result": response.result}));
+        }
+        Err(error) => return Err(error.into()),
+    };
 
     match &cli.command {
         Commands::Status => {
@@ -309,14 +378,87 @@ pub async fn run_cli(cli: &Cli) -> Result<Value, CliError> {
                 .await?;
             Ok(serde_json::to_value(inspection)?)
         }
-        Commands::Project {
-            action:
-                ProjectCommand::Create {
-                    name,
-                    project_id,
-                    weight,
-                    command_id,
-                },
+        Commands::Recovery => {
+            let resp = query_simple(&mut client, "InspectRecovery", None, Map::new()).await?;
+            Ok(json!({"watermark": resp.watermark, "result": resp.result}))
+        }
+        Commands::Backup { action } => run_backup_command(&mut client, action).await,
+        Commands::Project { action } => run_project_command(&mut client, action).await,
+        Commands::Mission { action } => run_mission_command(&mut client, action).await,
+        Commands::Daemon { action } => run_daemon_command(&mut client, action).await,
+        Commands::Tui { .. } => Ok(json!({ "status": "exited" })),
+    }
+}
+
+async fn run_backup_command(
+    client: &mut UnleashClient,
+    action: &BackupCommand,
+) -> Result<Value, CliError> {
+    match action {
+        BackupCommand::Request {
+            backup_id,
+            command_id,
+            authority_generation,
+        } => {
+            let envelope = CommandEnvelope {
+                protocol_version: ProtocolVersion,
+                request_id: RequestId::from_uuid(next_uuid()),
+                command_id: CommandId::from_uuid(command_id.unwrap_or_else(next_uuid)),
+                authority_generation: authority_generation
+                    .map(AuthorityGeneration::from_uuid)
+                    .unwrap_or(client.hello().authority_generation),
+                actor_ref: None,
+                project_id: None,
+                aggregate_id: backup_id.unwrap_or_else(next_uuid),
+                expected_revision: Revision::INITIAL,
+                command_type: String::from("RequestBackup"),
+                payload: Map::new(),
+            };
+            let receipt = client.send_command(&envelope).await.map_err(|source| {
+                CliError::BackupReceiptMissing {
+                    backup_id: envelope.aggregate_id,
+                    command_id: envelope.command_id,
+                    authority_generation: envelope.authority_generation,
+                    source: Box::new(source),
+                }
+            })?;
+            Ok(json!({
+                "authority_generation": envelope.authority_generation,
+                "receipt": receipt,
+            }))
+        }
+        BackupCommand::Show { backup_id } => {
+            let payload = Map::from_iter([(String::from("backup_id"), json!(backup_id))]);
+            let resp = query_simple(client, "GetBackupManifest", None, payload).await?;
+            Ok(json!({"watermark": resp.watermark, "result": resp.result}))
+        }
+    }
+}
+
+async fn run_project_command(
+    client: &mut UnleashClient,
+    action: &ProjectCommand,
+) -> Result<Value, CliError> {
+    match action {
+        ProjectCommand::List => {
+            let resp = query_simple(client, "ListProjects", None, Map::new()).await?;
+            Ok(json!({"watermark": resp.watermark, "result": resp.result}))
+        }
+        ProjectCommand::Show { project_id } => {
+            let resp = query_simple(
+                client,
+                "GetProject",
+                Some(ProjectId::from_uuid(*project_id)),
+                Map::new(),
+            )
+            .await?;
+            Ok(json!({"watermark": resp.watermark, "result": resp.result}))
+        }
+        ProjectCommand::Create {
+            name,
+            project_id,
+            weight,
+            command_id,
         } => {
             let pid = ProjectId::from_uuid(project_id.unwrap_or_else(next_uuid));
             let cmd_id = CommandId::from_uuid(command_id.unwrap_or_else(next_uuid));
@@ -338,9 +480,6 @@ pub async fn run_cli(cli: &Cli) -> Result<Value, CliError> {
             let receipt = client.send_command(&env).await?;
             Ok(serde_json::to_value(receipt)?)
         }
-        Commands::Mission { action } => run_mission_command(&mut client, action).await,
-        Commands::Daemon { action } => run_daemon_command(&mut client, action).await,
-        Commands::Tui { .. } => Ok(json!({ "status": "exited" })),
     }
 }
 
@@ -707,6 +846,26 @@ fn next_uuid() -> Uuid {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn backup_request_accepts_only_a_complete_retry_identity() {
+        let request = ["unleash", "backup", "request"];
+        assert!(Cli::try_parse_from(request).is_ok());
+
+        let backup_id = "00000000-0000-4000-8000-000000000001";
+        let command_id = "00000000-0000-4000-8000-000000000002";
+        let authority_generation = "00000000-0000-4000-8000-000000000003";
+        let with_ids =
+            request
+                .into_iter()
+                .chain(["--backup-id", backup_id, "--command-id", command_id]);
+        assert!(Cli::try_parse_from(with_ids.clone()).is_err());
+        assert!(
+            Cli::try_parse_from(with_ids.chain(["--authority-generation", authority_generation]))
+                .is_ok()
+        );
+        assert!(Cli::try_parse_from(["unleash", "backup", "show", backup_id]).is_ok());
+    }
 
     #[test]
     fn cli_parses_all_core_m0_commands_and_json_flag() {

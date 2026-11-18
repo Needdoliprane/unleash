@@ -40,6 +40,8 @@ Le marqueur durable de dispatch précède toute I/O susceptible d'effet. Si l'ex
 | C11b | Snapshot DB terminé, pins exacts non encore acquis | Barrière protège les objets jusqu'à lecture du graphe du snapshot et acquisition atomique des pins ; aucun manifeste final. |
 | C11c | Pins acquis puis copie objets interrompue | GC concurrent ne retire aucun objet nécessaire ; reprise ou abandon réconcilié conserve/libère les pins explicitement. |
 | C11d | Octets/manifeste synchronisés, état complete non committé | Vérifier destination puis publier complete sans nouvelle copie d'effet ; complete implique tous les hashes/couvertures vérifiables. |
+| C11e | Manifeste complet sur disque, transaction de complétion du job géré en attente | La lecture du job conserve l’état incomplet et le manifeste absent. Le marqueur durable bloque un nouveau dispatch. La validation portable atteste séparément les octets du jeu. |
+| C11f | Transaction du job complet engagée, réponse de l’exécuteur perdue | Le job et son manifeste corrélé restent complets. L’observation d’action demeure indéterminée après redémarrage et le dispatch reste unique. |
 
 Inclure une purge autorisée alors qu'un producteur ou un backup possède un pin : elle doit attendre sa clôture ou obtenir un abandon réconcilié, sans retirer le pin par simple mise à jour. Injecter un second crash pendant chacun des chemins de récupération. Les fixtures testent aussi fichier absent, hash divergent et génération de chemin inattendue ; aucun unlink opportuniste d'un chemin étranger n'est permis.
 

@@ -226,6 +226,8 @@ pub struct PaletteCommand {
 /// État de connexion IPC affiché dans la barre de contexte.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConnectionBanner {
+    /// Connexion initiale en cours.
+    Connecting,
     /// Connecté au daemon avec curseur courant.
     Connected {
         /// Curseur courant synchronisé.
@@ -243,7 +245,7 @@ pub enum ConnectionBanner {
     },
 }
 
-/// État complet de l'application TUI (10 espaces + charge M0 + éditeur + PTY).
+/// État de l'application TUI.
 #[derive(Debug)]
 pub struct TuiState {
     /// Espace actif parmi les 10 espaces.
@@ -304,22 +306,22 @@ pub struct TuiState {
     pub status_line: String,
     /// Demande d'arrêt propre du client (n'arrête jamais le daemon).
     pub should_quit: bool,
+    /// Les données et leases simulés sont réservés au banc M0.
+    pub(crate) fixture: bool,
 }
 
 impl TuiState {
-    /// Construit l'état M0 préchargé avec 1 000 agents logiques, 100 000 événements paginés
-    /// (fenêtre de 200) et un diff de 10 000 lignes.
+    /// Construit l'état initial du client avant la connexion au daemon.
     #[must_use]
-    pub fn with_m0_fixture(capabilities: TerminalCapabilities) -> Self {
-        let agents = build_m0_agents(M0_TOTAL_AGENTS);
-        let mut state = Self {
+    pub fn new(capabilities: TerminalCapabilities) -> Self {
+        Self {
             active_space: Space::Overview,
             focus: FocusPane::AgentTree,
             mode: InputMode::Navigation,
             capabilities,
             inspector_open: true,
-            connection: ConnectionBanner::Connected { cursor: None },
-            agents,
+            connection: ConnectionBanner::Connecting,
+            agents: Vec::new(),
             visible_agent_indices: Vec::new(),
             collapsed_agent_ids: std::collections::HashSet::new(),
             selected_agent_pos: 0,
@@ -328,25 +330,44 @@ impl TuiState {
             event_page: Vec::new(),
             event_page_offset: 0,
             selected_event_pos: 0,
-            total_events: M0_TOTAL_EVENTS,
-            total_diff_lines: M0_TOTAL_DIFF_LINES,
+            total_events: 0,
+            total_diff_lines: 0,
             diff_scroll_line: 0,
             diff_window_cache: Vec::new(),
-            editor: TuiEditor::new(
-                "name: reconcile-csv\nmode: supervised\n# Éditeur intégré TUI (ropey + unicode)\n",
-            ),
-            pty: PtyPanel::new("proc-run-9b4a2c10", 18, 80),
+            editor: TuiEditor::new(""),
+            pty: PtyPanel::new("", 18, 80),
             palette_commands: build_palette_commands(),
             palette_query: String::new(),
             palette_selected: 0,
             notification_queue: VecDeque::with_capacity(64),
             dropped_notifications: 0,
-            draft_base_revision: Revision::new(413),
+            draft_base_revision: Revision::INITIAL,
             status_line: String::from(
                 "Prêt · Tab: panneau · /: filtre · Ctrl+P: palette · ?: aide · q: quitter",
             ),
             should_quit: false,
-        };
+            fixture: false,
+        }
+    }
+
+    /// Construit la charge de test M0 avec 1 000 agents, 100 000 événements
+    /// paginés et un diff de 10 000 lignes.
+    #[must_use]
+    pub fn with_m0_fixture(capabilities: TerminalCapabilities) -> Self {
+        let mut state = Self::new(capabilities);
+        state.fixture = true;
+        state.connection = ConnectionBanner::Connected { cursor: None };
+        state.agents = build_m0_agents(M0_TOTAL_AGENTS);
+        state.total_events = M0_TOTAL_EVENTS;
+        state.total_diff_lines = M0_TOTAL_DIFF_LINES;
+        state.editor = TuiEditor::new(
+            "name: reconcile-csv\nmode: supervised\n# Éditeur intégré TUI (ropey + unicode)\n",
+        );
+        state.pty = PtyPanel::new("proc-run-9b4a2c10", 18, 80);
+        state
+            .pty
+            .process_output(b"[unleash-pty] fixture du banc M0\r\n");
+        state.draft_base_revision = Revision::new(413);
         state.recompute_visible_agents();
         state.load_event_page(0);
         state.load_diff_window(0, 40);
@@ -380,8 +401,11 @@ impl TuiState {
         }
     }
 
-    /// Charge au plus `EVENT_PAGE_LIMIT` (200) événements à partir d'`offset` dans le journal de 100 000.
+    /// Charge une page bornée du jeu de données de test.
     pub fn load_event_page(&mut self, offset: usize) {
+        if !self.fixture {
+            return;
+        }
         let clamped_offset = offset.min(self.total_events.saturating_sub(1));
         let needle = self.filter_query.trim().to_lowercase();
         let mut items = Vec::with_capacity(EVENT_PAGE_LIMIT);
@@ -421,8 +445,11 @@ impl TuiState {
         }
     }
 
-    /// Charge uniquement une fenêtre bornée du diff de 10 000 lignes.
+    /// Charge une fenêtre bornée du diff de test.
     pub fn load_diff_window(&mut self, start_line: usize, count: usize) {
+        if !self.fixture {
+            return;
+        }
         let safe_start = start_line.min(self.total_diff_lines.saturating_sub(1));
         let end = (safe_start + count.max(1)).min(self.total_diff_lines);
         let mut lines = Vec::with_capacity(end.saturating_sub(safe_start));
