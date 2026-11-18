@@ -455,7 +455,7 @@ async fn dispatch_query(
         "GetStateSnapshot" => query_state_snapshot(state, session, query).await,
         "GetCommandReceipt" => query_command_receipt(state, session, query).await,
         "ListProjects" | "GetProject" | "ReadSettings" | "ReadPolicySummary"
-        | "InspectRecovery" => query_m1_projection(state, session, query).await,
+        | "ReadGuardHealth" | "InspectRecovery" => query_m1_projection(state, session, query).await,
         other => Err(IpcError::new(
             ErrorCode::InvalidArgument,
             None,
@@ -480,19 +480,75 @@ fn projection_response<T: Serialize>(
     Ok((value, projection.cursor))
 }
 
+fn invalid_projection() -> IpcError {
+    IpcError::new(
+        ErrorCode::InvalidArgument,
+        None,
+        "Paramètres de projection invalides",
+        RetryClass::Never,
+    )
+}
+
+fn retain_unverified_guard_health(guard: &mut unleash_store::GuardConfigRecord) {
+    guard.health_status = unleash_store::GuardHealthStatus::Unknown;
+    guard.negotiated_version = None;
+    guard.capabilities.clear();
+    guard.last_health_check_ms = None;
+    if guard.guard_mapping_profile != "none_accepted" {
+        guard.guard_mapping_profile = String::from("unverified");
+    }
+}
+
+fn read_guard_health(store: &UnleashStore) -> Result<(Value, EventCursor), IpcError> {
+    let snapshot = store
+        .read_policy_summary_snapshot(None)
+        .map_err(|e| store_error_to_ipc_error(&e, None))?;
+    let value = snapshot.value.guard_config.map(|mut guard| {
+        retain_unverified_guard_health(&mut guard);
+        json!({
+            "guard_mode": guard.guard_mode, "guard_mapping_profile": guard.guard_mapping_profile,
+            "health_status": "unknown", "negotiated_version": null,
+            "capabilities": [], "last_health_check_ms": null,
+        })
+    });
+    projection_response(unleash_store::SnapshotProjection {
+        value,
+        cursor: snapshot.cursor,
+    })
+}
+
+fn parse_settings_query(
+    query: &QueryEnvelope,
+    restricted: bool,
+) -> Result<SettingsQueryPayload, IpcError> {
+    let parsed: SettingsQueryPayload = serde_json::from_value(Value::Object(query.payload.clone()))
+        .map_err(|_| invalid_projection())?;
+    match parsed.scope_kind {
+        unleash_store::SettingsScopeKind::Project
+            if query
+                .project_id
+                .is_some_and(|p| p.to_string() == parsed.scope_id) => {}
+        unleash_store::SettingsScopeKind::User
+            if query.project_id.is_none() && parsed.scope_id == "default" =>
+        {
+            if restricted {
+                return Err(IpcError::from_reason(
+                    ReasonCode::AccessDenied,
+                    "Projection hors du périmètre autorisé",
+                ));
+            }
+        }
+        _ => return Err(invalid_projection()),
+    }
+    Ok(parsed)
+}
+
 async fn query_m1_projection(
     state: &Arc<DaemonRuntimeState>,
     session: &AuthenticatedSession,
     query: QueryEnvelope,
 ) -> Result<QueryResponse, IpcError> {
-    let invalid = || {
-        IpcError::new(
-            ErrorCode::InvalidArgument,
-            None,
-            "Paramètres de projection invalides",
-            RetryClass::Never,
-        )
-    };
+    let invalid = invalid_projection;
     let denied = || {
         IpcError::from_reason(
             ReasonCode::AccessDenied,
@@ -503,27 +559,7 @@ async fn query_m1_projection(
     let project_id = query.project_id;
     let allowed = session.allowed_projects.clone();
     let settings = if name == "ReadSettings" {
-        let parsed: SettingsQueryPayload =
-            serde_json::from_value(Value::Object(query.payload.clone())).map_err(|_| invalid())?;
-        if parsed.scope_id.trim().is_empty() {
-            return Err(invalid());
-        }
-        match parsed.scope_kind {
-            unleash_store::SettingsScopeKind::Project => {
-                if project_id.is_none_or(|p| p.to_string() != parsed.scope_id) {
-                    return Err(invalid());
-                }
-            }
-            _ => {
-                if project_id.is_some() {
-                    return Err(invalid());
-                }
-                if allowed.is_some() {
-                    return Err(denied());
-                }
-            }
-        }
-        Some(parsed)
+        Some(parse_settings_query(&query, allowed.is_some())?)
     } else {
         if !query.payload.is_empty() {
             return Err(invalid());
@@ -531,11 +567,16 @@ async fn query_m1_projection(
         if name == "GetProject" && project_id.is_none() {
             return Err(invalid());
         }
-        if name == "InspectRecovery" && project_id.is_some() {
+        if matches!(name.as_str(), "InspectRecovery" | "ReadGuardHealth") && project_id.is_some() {
             return Err(invalid());
         }
         // Ces rapports contiennent des données globales non filtrables par projet.
-        if allowed.is_some() && matches!(name.as_str(), "ReadPolicySummary" | "InspectRecovery") {
+        if allowed.is_some()
+            && matches!(
+                name.as_str(),
+                "ReadPolicySummary" | "ReadGuardHealth" | "InspectRecovery"
+            )
+        {
             return Err(denied());
         }
         None
@@ -568,11 +609,16 @@ async fn query_m1_projection(
                             .map_err(map_error)?,
                     )
                 }
-                "ReadPolicySummary" => projection_response(
-                    store
+                "ReadPolicySummary" => {
+                    let mut snapshot = store
                         .read_policy_summary_snapshot(project_id)
-                        .map_err(map_error)?,
-                ),
+                        .map_err(map_error)?;
+                    if let Some(guard) = &mut snapshot.value.guard_config {
+                        retain_unverified_guard_health(guard);
+                    }
+                    projection_response(snapshot)
+                }
+                "ReadGuardHealth" => read_guard_health(&store),
                 "InspectRecovery" => {
                     projection_response(store.inspect_recovery_snapshot().map_err(map_error)?)
                 }
@@ -889,7 +935,26 @@ async fn handle_command_frame(
         match tokio::task::spawn_blocking(move || store_ref.commit_command(req_to_commit)).await {
             Ok(Ok(o)) => o,
             Ok(Err(err)) => {
-                let ipc = store_error_to_ipc_error(&err, Some(cmd.command_id));
+                let mut ipc = store_error_to_ipc_error(&err, Some(cmd.command_id));
+                if cmd.command_type == "PurgeHistory"
+                    && matches!(
+                        err,
+                        StoreError::StorageBusy(_)
+                            | StoreError::StorageFull(_)
+                            | StoreError::StorageUnavailable(_)
+                            | StoreError::StorageCorrupt(_)
+                            | StoreError::Io(_)
+                            | StoreError::CutpointInjected { .. }
+                    )
+                {
+                    // Le Store peut avoir committé avant une erreur de finalisation physique.
+                    // La recherche ci-dessous ne change pas la réponse en succès.
+                    publish_existing_receipt_cursor(state, session, cmd.command_id).await;
+                    ipc.retry_class = RetryClass::AfterReconciliation;
+                    ipc.message = String::from(
+                        "Issue de purge indéterminée ; inspecter le reçu et la récupération",
+                    );
+                }
                 let _ = write_json_frame_timeout(stream, &ipc, RESPONSE_WRITE_TIMEOUT).await;
                 return false;
             }
@@ -929,6 +994,22 @@ async fn handle_command_frame(
 
     let _ = write_json_frame_timeout(stream, &receipt, RESPONSE_WRITE_TIMEOUT).await;
     false
+}
+
+async fn publish_existing_receipt_cursor(
+    state: &Arc<DaemonRuntimeState>,
+    session: &AuthenticatedSession,
+    command_id: CommandId,
+) {
+    let store = Arc::clone(&state.store);
+    let actor = session.actor_id.clone();
+    if let Ok(Ok(ReceiptInspectionOutcome::Full(inspection))) =
+        tokio::task::spawn_blocking(move || store.inspect_command_receipt(&actor, command_id)).await
+        && inspection.lineage_status == unleash_protocol::LineageStatus::Current
+        && inspection.receipt.event_cursor.stream_id == state.stream_id
+    {
+        publish_committed_events_for_command(state, &inspection.receipt, 1).await;
+    }
 }
 
 async fn audit_security_denial(
@@ -1025,6 +1106,10 @@ async fn prepare_command_request(
     match cmd.command_type.as_str() {
         "CreateProject" => prepare_create_project(session, cmd),
         "ReviseProject" => prepare_revise_project(session, cmd),
+        "PurgeHistory" => prepare_purge_history(session, cmd),
+        "SetSettings" | "SetPolicy" | "ConfigureGuard" => {
+            prepare_admin_command(state, session, cmd)
+        }
         "AssignMission" => prepare_assign_mission(session, cmd),
         "PauseMission" | "ResumeMission" | "CancelMission" => {
             prepare_mission_transition_command(state, session, cmd).await
@@ -1038,6 +1123,321 @@ async fn prepare_command_request(
         )
         .with_command_id(cid)),
     }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PurgeHistoryPayload {
+    scope_kind: String,
+    scope_id: String,
+    reason: String,
+    older_than_override_ms: Option<TimestampMs>,
+}
+
+fn prepare_purge_history(
+    session: &AuthenticatedSession,
+    cmd: CommandEnvelope,
+) -> Result<PreparedCommand, IpcError> {
+    let cid = cmd.command_id;
+    let invalid = || {
+        IpcError::new(
+            ErrorCode::InvalidArgument,
+            None,
+            "Périmètre ou paramètres de purge invalides",
+            RetryClass::Never,
+        )
+        .with_command_id(cid)
+    };
+    let payload: PurgeHistoryPayload =
+        serde_json::from_value(Value::Object(cmd.payload.clone())).map_err(|_| invalid())?;
+    // Le Store courant sélectionne globalement ; ne pas présenter cette opération comme limitée à un projet.
+    if payload.scope_kind != "user"
+        || payload.scope_id != "default"
+        || cmd.project_id.is_some()
+        || cmd.aggregate_id.is_nil()
+        || payload.reason.trim().is_empty()
+        || payload.reason.len() > 1024
+    {
+        return Err(invalid());
+    }
+    if cmd.expected_revision != Revision::INITIAL {
+        return Err(store_error_to_ipc_error(
+            &StoreError::RevisionConflict {
+                current_revision: Revision::INITIAL,
+                expected_revision: cmd.expected_revision,
+                command_id: Some(cid),
+            },
+            Some(cid),
+        ));
+    }
+    let request = unleash_store::RetentionPurgeRequest {
+        scope_kind: payload.scope_kind,
+        scope_id: payload.scope_id,
+        requested_by_actor: session.actor_id.as_str().to_owned(),
+        reason: payload.reason,
+        older_than_override_ms: payload.older_than_override_ms,
+        is_automatic_sweep: false,
+    };
+    Ok(PreparedCommand {
+        req: CommitCommandRequest {
+            actor_id: session.actor_id.clone(),
+            envelope: cmd,
+            target_aggregate: AggregateKind::RetentionPurge,
+            operation_id: None,
+            receipt_state: ReceiptState::Accepted,
+            result_ref: None,
+            retention_days_override: None,
+            fence_assertion: None,
+            mutation: CommandMutation::PurgeHistory { request },
+            events: Vec::new(),
+            capacity_reservations: Vec::new(),
+            budget_reservations: Vec::new(),
+        },
+        stop_reason: None,
+        stop_drain_timeout: None,
+    })
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SetSettingsPayload {
+    scope_kind: unleash_store::SettingsScopeKind,
+    scope_id: String,
+    patch: Value,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SetPolicyPayload {
+    scope_kind: unleash_store::PolicyScopeKind,
+    scope_id: String,
+    isolation_mode: unleash_store::PolicyIsolationMode,
+    policy_version: String,
+    reason: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ConfigureGuardPayload {
+    config: Value,
+}
+
+fn has_only_keys(value: &Value, keys: &[&str]) -> bool {
+    value
+        .as_object()
+        .is_some_and(|object| object.keys().all(|key| keys.contains(&key.as_str())))
+}
+
+fn strict_settings_patch(value: Value) -> Option<unleash_store::SettingsPatch> {
+    if !has_only_keys(
+        &value,
+        &[
+            "execution_pool",
+            "retention_policy",
+            "confirm_retention_shortening",
+            "analyzer_paths",
+        ],
+    ) {
+        return None;
+    }
+    let object = value.as_object()?;
+    if let Some(pool) = object.get("execution_pool").filter(|v| !v.is_null())
+        && !has_only_keys(
+            pool,
+            &[
+                "max_active_executions",
+                "control_reserve_mode",
+                "control_reserved_units",
+                "control_burst_limit",
+                "checkpoint_escalation_s",
+                "project_weight",
+            ],
+        )
+    {
+        return None;
+    }
+    if let Some(policy) = object.get("retention_policy").filter(|v| !v.is_null())
+        && !has_only_keys(
+            policy,
+            &[
+                "policy_version",
+                "command_receipts_min_days",
+                "events_min_days",
+                "model_payloads_days",
+                "tool_terminal_logs_days",
+                "browser_artifacts_days",
+                "dirty_captures_days",
+                "automation_data_days",
+                "document_copies_days",
+                "export_artifacts_days",
+                "logs_telemetry_days",
+                "local_backups_daily",
+                "local_backups_weekly",
+                "max_backup_rotation_days",
+            ],
+        )
+    {
+        return None;
+    }
+    // Les chemins d'analyseurs ne sont pas encore validés jusqu'au binaire/source effectif.
+    if let Some(paths) = object.get("analyzer_paths").filter(|v| !v.is_null())
+        && !paths.as_array().is_some_and(Vec::is_empty)
+    {
+        return None;
+    }
+    serde_json::from_value(value).ok()
+}
+
+fn prepare_guard_mutation(
+    state: &DaemonRuntimeState,
+    cmd: &CommandEnvelope,
+    raw: Value,
+    caller: unleash_store::CallerAuthority,
+) -> Result<(AggregateKind, CommandMutation), IpcError> {
+    let invalid = || {
+        IpcError::new(
+            ErrorCode::InvalidArgument,
+            None,
+            "Commande administrative invalide ou non prise en charge",
+            RetryClass::Never,
+        )
+        .with_command_id(cmd.command_id)
+    };
+    let payload: ConfigureGuardPayload = serde_json::from_value(raw).map_err(|_| invalid())?;
+    if cmd.project_id.is_some()
+        || cmd.aggregate_id != state.authority_generation.as_uuid()
+        || !has_only_keys(
+            &payload.config,
+            &[
+                "config_id",
+                "guard_mode",
+                "endpoint",
+                "transport",
+                "secret_ref_id",
+                "evaluate_timeout_ms",
+                "health_check_interval_s",
+                "decision_cache_max_age_s",
+                "fallback_policy_ref",
+                "guard_mapping_profile",
+                "reason",
+            ],
+        )
+    {
+        return Err(invalid());
+    }
+    let config: unleash_store::GuardConfigInput =
+        serde_json::from_value(payload.config).map_err(|_| invalid())?;
+    if config.config_id != "default"
+        || config.guard_mode != unleash_store::GuardPolicyMode::BrokerOnly
+        || config.endpoint.is_some()
+        || config.transport != unleash_store::GuardTransport::None
+        || config.secret_ref_id.is_some()
+        || config.fallback_policy_ref.is_some()
+        || config.guard_mapping_profile != "none_accepted"
+        || config.reason.len() > 1024
+    {
+        return Err(invalid());
+    }
+    Ok((
+        AggregateKind::GuardConfig,
+        CommandMutation::ConfigureGuard { config, caller },
+    ))
+}
+
+fn prepare_admin_command(
+    state: &DaemonRuntimeState,
+    session: &AuthenticatedSession,
+    cmd: CommandEnvelope,
+) -> Result<PreparedCommand, IpcError> {
+    let cid = cmd.command_id;
+    let invalid = || {
+        IpcError::new(
+            ErrorCode::InvalidArgument,
+            None,
+            "Commande administrative invalide ou non prise en charge",
+            RetryClass::Never,
+        )
+        .with_command_id(cid)
+    };
+    let caller = unleash_store::CallerAuthority {
+        actor_id: session.actor_id.clone(),
+        role: unleash_store::CallerRole::PolicyAdmin,
+    };
+    let raw = Value::Object(cmd.payload.clone());
+    let (kind, mutation) = match cmd.command_type.as_str() {
+        "SetSettings" => {
+            let payload: SetSettingsPayload = serde_json::from_value(raw).map_err(|_| invalid())?;
+            match payload.scope_kind {
+                unleash_store::SettingsScopeKind::User
+                    if payload.scope_id == "default"
+                        && cmd.project_id.is_none()
+                        && cmd.aggregate_id == state.authority_generation.as_uuid() => {}
+                unleash_store::SettingsScopeKind::Project
+                    if cmd.project_id.is_some_and(|id| {
+                        id.to_string() == payload.scope_id && id.as_uuid() == cmd.aggregate_id
+                    }) => {}
+                _ => return Err(invalid()),
+            }
+            let patch = strict_settings_patch(payload.patch).ok_or_else(invalid)?;
+            (
+                AggregateKind::Settings,
+                CommandMutation::SetSettings {
+                    scope_kind: payload.scope_kind,
+                    scope_id: payload.scope_id,
+                    caller,
+                    patch,
+                },
+            )
+        }
+        "SetPolicy" => {
+            let payload: SetPolicyPayload = serde_json::from_value(raw).map_err(|_| invalid())?;
+            match payload.scope_kind {
+                unleash_store::PolicyScopeKind::Global
+                    if payload.scope_id == "global"
+                        && cmd.project_id.is_none()
+                        && cmd.aggregate_id == state.authority_generation.as_uuid() => {}
+                unleash_store::PolicyScopeKind::Project
+                    if cmd.project_id.is_some_and(|id| {
+                        id.to_string() == payload.scope_id && id.as_uuid() == cmd.aggregate_id
+                    }) => {}
+                _ => return Err(invalid()),
+            }
+            if payload.reason.len() > 1024 || payload.policy_version.len() > 128 {
+                return Err(invalid());
+            }
+            (
+                AggregateKind::SecurityPolicy,
+                CommandMutation::SetPolicy {
+                    scope_kind: payload.scope_kind,
+                    scope_id: payload.scope_id,
+                    isolation_mode: payload.isolation_mode,
+                    policy_version: payload.policy_version,
+                    reason: payload.reason,
+                    caller,
+                },
+            )
+        }
+        "ConfigureGuard" => prepare_guard_mutation(state, &cmd, raw, caller)?,
+        _ => return Err(invalid()),
+    };
+    Ok(PreparedCommand {
+        req: CommitCommandRequest {
+            actor_id: session.actor_id.clone(),
+            envelope: cmd,
+            target_aggregate: kind,
+            operation_id: None,
+            receipt_state: ReceiptState::Accepted,
+            result_ref: None,
+            retention_days_override: None,
+            fence_assertion: None,
+            mutation,
+            events: Vec::new(),
+            capacity_reservations: Vec::new(),
+            budget_reservations: Vec::new(),
+        },
+        stop_reason: None,
+        stop_drain_timeout: None,
+    })
 }
 
 #[derive(Deserialize)]

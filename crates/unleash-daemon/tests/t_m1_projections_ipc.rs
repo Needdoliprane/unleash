@@ -1,5 +1,11 @@
 //! REQ-CORE-003/004/010 et REQ-REC-009 : projections IPC et watermark cohérent.
-#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::too_many_lines,
+    clippy::indexing_slicing
+)]
 use serde_json::{Map, Value, json};
 use unleash_client::{ClientConfig, ClientError, UnleashClient};
 use unleash_daemon::{
@@ -26,12 +32,15 @@ impl AuthVerifierPort for ScopedTestVerifier {
 }
 
 fn query(name: &str, project_id: Option<ProjectId>, payload: Value) -> QueryEnvelope {
+    let Value::Object(payload) = payload else {
+        panic!("objet attendu")
+    };
     QueryEnvelope {
         protocol_version: ProtocolVersion,
         request_id: RequestId::from_u128(10),
         query_type: name.into(),
         project_id,
-        payload: payload.as_object().unwrap().clone(),
+        payload,
     }
 }
 
@@ -92,7 +101,7 @@ async fn projections_share_watermark_and_reject_unknown_payload_and_unauthorized
         query(
             "ReadSettings",
             None,
-            json!({"scope_kind":"user", "scope_id":"user"}),
+            json!({"scope_kind":"user", "scope_id":"default"}),
         ),
         query("ReadPolicySummary", None, json!({})),
         query("InspectRecovery", None, json!({})),
@@ -101,11 +110,18 @@ async fn projections_share_watermark_and_reject_unknown_payload_and_unauthorized
         assert_eq!(result.watermark, Some(receipt.event_cursor));
         assert!(result.result.is_object());
     }
+    let absent_guard = client
+        .query(&query("ReadGuardHealth", None, json!({})))
+        .await
+        .unwrap();
+    assert!(absent_guard.result.is_null());
+    assert_eq!(absent_guard.watermark, Some(receipt.event_cursor));
     for name in [
         "ListProjects",
         "GetProject",
         "ReadPolicySummary",
         "InspectRecovery",
+        "ReadGuardHealth",
     ] {
         assert!(
             matches!(client.query(&query(name, Some(pid), json!({"surprise":"secret"}))).await, Err(ClientError::Remote(e)) if e.code == ErrorCode::InvalidArgument && !e.message.contains("secret"))
@@ -185,10 +201,11 @@ async fn projections_share_watermark_and_reject_unknown_payload_and_unauthorized
     for q in [
         query("ReadPolicySummary", Some(pid), json!({})),
         query("InspectRecovery", None, json!({})),
+        query("ReadGuardHealth", None, json!({})),
         query(
             "ReadSettings",
             None,
-            json!({"scope_kind":"user", "scope_id":"user"}),
+            json!({"scope_kind":"user", "scope_id":"default"}),
         ),
     ] {
         assert!(

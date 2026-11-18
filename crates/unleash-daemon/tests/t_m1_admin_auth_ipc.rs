@@ -1,5 +1,11 @@
 //! REQ-CORE-004 : preuve administrative liée au daemon et contrôlée sur UDS.
-#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::too_many_lines,
+    clippy::indexing_slicing
+)]
 use serde_json::{Map, json};
 use unleash_client::{ClientConfig, ClientError, UnleashClient};
 use unleash_daemon::{DaemonConfig, DaemonStartOutcome, UnleashDaemon};
@@ -81,6 +87,18 @@ async fn admin_requires_proof_and_reloads_after_daemon_rotation() {
     .await;
     assert!(
         !probe_with_proof
+            .capabilities
+            .iter()
+            .any(|cap| cap == "administer")
+    );
+    let worker_with_proof = raw_hello(
+        &socket,
+        ClientKind::Worker,
+        AdminProof::from_hex(&proof1).unwrap(),
+    )
+    .await;
+    assert!(
+        !worker_with_proof
             .capabilities
             .iter()
             .any(|cap| cap == "administer")
