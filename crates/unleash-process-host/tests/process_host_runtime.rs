@@ -520,8 +520,10 @@ fn t_f011_003_sigkill_daemon_during_active_pty_survives_and_reattaches_same_line
     let dir = local_test_dir("sp-dmn").unwrap();
     let runtime_dir = dir.path().join("host");
     let work_dir = dir.path().join("work");
+    let oracle_dir = dir.path().join("oracle");
     fs::create_dir_all(&work_dir).unwrap();
     ensure_private_rendezvous_dir(&runtime_dir).unwrap();
+    let oracle = ExternalEffectOracle::open(&oracle_dir).unwrap();
 
     let sync_sock_path = dir.path().join("sync.sock");
     let sync_listener = UnixListener::bind(&sync_sock_path).unwrap();
@@ -535,6 +537,7 @@ fn t_f011_003_sigkill_daemon_during_active_pty_survives_and_reattaches_same_line
 
     let mut explicit_env = BTreeMap::new();
     explicit_env.insert(ENV_ROLE.to_owned(), "pty_worker".to_owned());
+    explicit_env.insert(ENV_ORACLE_DIR.to_owned(), oracle_dir.display().to_string());
     explicit_env.insert(
         ENV_SYNC_SOCK.to_owned(),
         sync_sock_path.display().to_string(),
@@ -611,6 +614,9 @@ fn t_f011_003_sigkill_daemon_during_active_pty_survives_and_reattaches_same_line
     // Attendre que le worker PTY ait émis PTY_PRE_KILL_DATA
     let (mut pty_sock, mut pty_reader) = accept_sync_client(&sync_listener);
     assert_eq!(read_line_timeout(&mut pty_reader), "PTY_READY");
+    let initial_manifest =
+        HostManifest::load_private(&runtime_dir.join(HOST_MANIFEST_FILENAME)).unwrap();
+    let initial_child = inspect_process_identity(initial_manifest.pid.unwrap()).unwrap();
 
     // Vérifier qu'aucun secret ne figure dans argv de unleash-process-host
     let ps_out = Command::new("ps")
@@ -682,9 +688,10 @@ fn t_f011_003_sigkill_daemon_during_active_pty_survives_and_reattaches_same_line
     assert!(matches!(
         ack,
         HostResponse::HandshakeAck {
+            os_identity,
             secret_rotated: true,
             ..
-        }
+        } if os_identity == initial_child
     ));
 
     let current_channel_ack = client
@@ -762,21 +769,19 @@ fn t_f011_003_sigkill_daemon_during_active_pty_survives_and_reattaches_same_line
             if error.code == ErrorCode::StaleFence && error.reason_code == Some(ReasonCode::StaleEpoch)
     ));
 
-    // Entrée PTY + Resize + ReadLog confirment conservation pré- et post-crash
+    // L'enfant atteste l'effet de la première entrée via l'oracle externe.
     let input_resp = client
         .call(&HostRequest::SendInput {
             header: mk_header(run_uuid, gen_a, 2, 2, 14),
             secret: secret_2.to_owned(),
             input_seq: 1,
-            payload_bytes: b"PING_AFTER_REATTACH\n".to_vec(),
+            payload_bytes: b"APPLY_ORACLE_1\n".to_vec(),
             now_ms: TimestampMs::new(5000),
         })
         .unwrap();
     assert!(matches!(input_resp, HostResponse::InputReceipt { .. }));
-    assert_eq!(
-        read_line_timeout(&mut pty_reader),
-        "ECHOED:PING_AFTER_REATTACH"
-    );
+    assert_eq!(read_line_timeout(&mut pty_reader), "EFFECT_COMMITTED");
+    assert_eq!(oracle.count().unwrap(), 1);
 
     let resize_resp = client
         .call(&HostRequest::Resize {
@@ -794,11 +799,144 @@ fn t_f011_003_sigkill_daemon_during_active_pty_survives_and_reattaches_same_line
         }
     ));
 
-    // Arrêter le worker PTY vivant via StopProcess (ancrage direct + groupe) puis Shutdown
-    let stop_resp = client
-        .call(&HostRequest::Stop {
-            header: mk_header(run_uuid, gen_a, 2, 4, 16),
+    // Le relais laisse le host engager la rotation, puis ferme le canal du
+    // demandeur sans lui transmettre l'acquittement.
+    let secret_3 = "ctrl-secret-epoch-3-rotated";
+    let (mut requester, mut relay) = UnixStream::pair().unwrap();
+    requester.set_read_timeout(Some(IO_TIMEOUT * 2)).unwrap();
+    requester.set_write_timeout(Some(IO_TIMEOUT)).unwrap();
+    relay.set_read_timeout(Some(IO_TIMEOUT)).unwrap();
+    relay.set_write_timeout(Some(IO_TIMEOUT)).unwrap();
+    let rotation = HostRequest::Handshake {
+        header: mk_header(run_uuid, gen_a, 3, 1, 20),
+        current_secret: secret_2.to_owned(),
+        rotate_to_secret: Some(secret_3.to_owned()),
+        require_higher_epoch: true,
+    };
+    let host_endpoint = host_sock.as_path();
+    let committed_rotation = std::thread::scope(|scope| {
+        let forwarder = scope.spawn(move || {
+            let frame = read_frame(&mut relay).unwrap().unwrap();
+            let request: HostRequest = serde_json::from_slice(&frame).unwrap();
+            let mut host = HostClient::connect(
+                host_endpoint,
+                run_uuid,
+                gen_a,
+                DaemonEpoch::new(3),
+                Fence::new(1),
+            )
+            .unwrap();
+            host.call(&request).unwrap()
+        });
+        write_frame(&mut requester, &serde_json::to_vec(&rotation).unwrap()).unwrap();
+        assert!(read_frame(&mut requester).unwrap().is_none());
+        forwarder.join().unwrap()
+    });
+    let HostResponse::HandshakeAck {
+        os_identity: child_identity,
+        durable_log_seq: rotation_watermark,
+        last_confirmed_input_seq: 1,
+        secret_rotated: true,
+        ..
+    } = committed_rotation
+    else {
+        panic!("rotation non confirmée par le relais de test");
+    };
+    assert_eq!(child_identity, initial_child);
+
+    let mut recovered_client = HostClient::connect(
+        &host_sock,
+        run_uuid,
+        gen_a,
+        DaemonEpoch::new(3),
+        Fence::new(1),
+    )
+    .unwrap();
+    let stale_secret = recovered_client
+        .call(&HostRequest::ReadLog {
+            header: mk_header(run_uuid, gen_a, 3, 1, 21),
             secret: secret_2.to_owned(),
+            after_offset: 0,
+            max_bytes: 1024,
+            strict_cursor: false,
+        })
+        .unwrap();
+    assert!(matches!(
+        stale_secret,
+        HostResponse::Error { error } if error.code == ErrorCode::AuthenticationFailed
+    ));
+    let recovered = recovered_client
+        .call(&HostRequest::Handshake {
+            header: mk_header(run_uuid, gen_a, 3, 1, 22),
+            current_secret: secret_3.to_owned(),
+            rotate_to_secret: None,
+            require_higher_epoch: false,
+        })
+        .unwrap();
+    assert!(matches!(
+        recovered,
+        HostResponse::HandshakeAck {
+            process_run_uuid,
+            authority_generation,
+            daemon_epoch,
+            highest_fence,
+            os_identity,
+            durable_log_seq,
+            last_confirmed_input_seq: 1,
+            unknown_input_seqs,
+            secret_rotated: false,
+        } if process_run_uuid == run_uuid
+            && authority_generation == gen_a
+            && daemon_epoch == DaemonEpoch::new(3)
+            && highest_fence == Fence::new(1)
+            && os_identity == child_identity
+            && durable_log_seq >= rotation_watermark
+            && unknown_input_seqs.is_empty()
+    ));
+    assert_eq!(inspect_process_identity(host_pid).unwrap(), host_os_id);
+
+    for header in [
+        mk_header(run_uuid, gen_a, 3, 0, 23),
+        mk_header(run_uuid, gen_foreign, 9999, 1, 24),
+    ] {
+        let rejected = recovered_client
+            .call(&HostRequest::ReadLog {
+                header,
+                secret: secret_3.to_owned(),
+                after_offset: 0,
+                max_bytes: 1024,
+                strict_cursor: false,
+            })
+            .unwrap();
+        assert!(matches!(
+            rejected,
+            HostResponse::Error { error } if error.code == ErrorCode::StaleFence
+        ));
+    }
+
+    // L'écho d'une nouvelle entrée confirme que l'enfant a consommé les
+    // octets précédents. L'oracle doit toujours compter un seul effet.
+    let marker = recovered_client
+        .call(&HostRequest::SendInput {
+            header: mk_header(run_uuid, gen_a, 3, 2, 25),
+            secret: secret_3.to_owned(),
+            input_seq: 2,
+            payload_bytes: b"PING_AFTER_REATTACH\n".to_vec(),
+            now_ms: TimestampMs::new(5001),
+        })
+        .unwrap();
+    assert!(matches!(marker, HostResponse::InputReceipt { .. }));
+    assert_eq!(
+        read_line_timeout(&mut pty_reader),
+        "ECHOED:PING_AFTER_REATTACH"
+    );
+    assert_eq!(oracle.count().unwrap(), 1);
+
+    // Arrêter le worker PTY vivant via StopProcess (ancrage direct + groupe) puis Shutdown
+    let stop_resp = recovered_client
+        .call(&HostRequest::Stop {
+            header: mk_header(run_uuid, gen_a, 3, 3, 16),
+            secret: secret_3.to_owned(),
             escalate_to_sigkill: true,
             known_descendant_pids: vec![],
         })
@@ -809,19 +947,24 @@ fn t_f011_003_sigkill_daemon_during_active_pty_survives_and_reattaches_same_line
         "stop_resp inattendu : {stop_resp:?}"
     );
 
-    let logs = read_all_spool_text(&mut client, mk_header(run_uuid, gen_a, 2, 5, 17), secret_2);
+    let logs = read_all_spool_text(
+        &mut recovered_client,
+        mk_header(run_uuid, gen_a, 3, 4, 17),
+        secret_3,
+    );
     assert!(logs.contains("PTY_PRE_KILL_DATA"), "logs={logs}");
     assert!(logs.contains("PTY_POST_KILL_DATA"), "logs={logs}");
-    assert!(logs.contains("ECHO:PING_AFTER_REATTACH"), "logs={logs}");
+    assert_eq!(logs.matches("ECHO:PING_AFTER_REATTACH").count(), 1);
 
-    let sd_resp = client
+    let sd_resp = recovered_client
         .call(&HostRequest::Shutdown {
-            header: mk_header(run_uuid, gen_a, 2, 6, 18),
-            secret: secret_2.to_owned(),
+            header: mk_header(run_uuid, gen_a, 3, 5, 18),
+            secret: secret_3.to_owned(),
         })
         .unwrap();
     assert!(matches!(sd_resp, HostResponse::ShutdownAck));
     LogSpool::verify_durable_segments(runtime_dir.join("spool")).unwrap();
+    assert_eq!(oracle.count().unwrap(), 1);
 }
 
 // T-F011-005 / AC-F011-005 / REQ-TERM-005
