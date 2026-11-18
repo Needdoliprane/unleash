@@ -85,10 +85,10 @@ pub use recovery_ops::{
 };
 pub use restore::{
     CapsuleActionDelta, CapsuleBudgetDelta, CapsuleCoverage, CapsuleDispatchDelta,
-    CapsuleReceiptDelta, CapsuleTombstoneDelta, CapsuleTombstoneKind, EmptyExecutorNeutralizer,
-    ExecutorInventoryItem, ExecutorNeutralizer, MaintenanceManifestEntry,
-    MaintenanceRestoreManifest, RestoreActivationResult, RestoreBackupRequest, RestoreCapsule,
-    RestoreRequestState,
+    CapsuleReceiptDelta, CapsuleReceiptResponseState, CapsuleReceiptRetention,
+    CapsuleTombstoneDelta, CapsuleTombstoneKind, EmptyExecutorNeutralizer, ExecutorInventoryItem,
+    ExecutorNeutralizer, MaintenanceManifestEntry, MaintenanceRestoreManifest,
+    RestoreActivationResult, RestoreBackupRequest, RestoreCapsule, RestoreRequestState,
 };
 pub use store::{SnapshotProjection, UnleashStore};
 pub use unleash_domain::ReconcileOutcome;
