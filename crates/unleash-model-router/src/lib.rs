@@ -11,9 +11,13 @@ use serde::Deserialize;
 use serde_json::Value;
 use thiserror::Error;
 
+/// Bounded, explicitly restricted Anthropic Messages SSE dialect.
+pub mod anthropic;
 /// Bounded, explicitly restricted OpenAI Responses SSE dialect.
 pub mod openai;
 
+#[cfg(test)]
+mod anthropic_tests;
 #[cfg(test)]
 mod openai_tests;
 

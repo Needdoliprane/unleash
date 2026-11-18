@@ -39,7 +39,7 @@ fn terminal_and_partial_following_event_in_one_chunk_never_emit()
     let malformed = format!("{fixture}event: response.incomplete\ndata: {{");
     assert_eq!(
         stream.push(malformed.as_bytes()),
-        Err(StreamError::Interrupted)
+        Err(StreamError::InvalidEvent)
     );
     assert_eq!(stream.finish(), Err(StreamError::InvalidEvent));
     let mut stream = OpenAiStream::new(
@@ -53,6 +53,37 @@ fn terminal_and_partial_following_event_in_one_chunk_never_emit()
         Err(StreamError::InvalidEvent)
     );
     assert_eq!(stream.finish(), Err(StreamError::InvalidEvent));
+    Ok(())
+}
+
+#[test]
+fn trailing_comment_rejected_at_every_chunk_split() -> Result<(), Box<dyn std::error::Error>> {
+    let fixture = format!(
+        "{}: heartbeat\n\n",
+        include_str!("../fixtures/openai-responses-2026-11-18-function.sse")
+    );
+    for split in 0..=fixture.len() {
+        if !fixture.is_char_boundary(split) {
+            continue;
+        }
+        let mut stream = OpenAiStream::new(
+            [("weather".to_owned(), json!({"type":"object"}))]
+                .into_iter()
+                .collect(),
+        )?;
+        let (left, right) = fixture.split_at(split);
+        let first = stream.push(left.as_bytes());
+        if first.is_ok() {
+            assert_eq!(
+                stream.push(right.as_bytes()),
+                Err(StreamError::InvalidEvent),
+                "split {split}"
+            );
+        } else {
+            assert_eq!(first, Err(StreamError::InvalidEvent), "split {split}");
+        }
+        assert_eq!(stream.finish(), Err(StreamError::InvalidEvent));
+    }
     Ok(())
 }
 

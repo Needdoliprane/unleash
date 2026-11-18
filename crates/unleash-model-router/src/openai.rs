@@ -443,25 +443,30 @@ impl OpenAiStream {
     }
 
     fn push_inner(&mut self, bytes: &[u8]) -> Result<(), StreamError> {
-        if self.terminal && !bytes.is_empty() && !(self.decoder.skip_lf && bytes == b"\n") {
-            return Err(StreamError::InvalidEvent);
+        if bytes.len() > crate::MAX_CHUNK {
+            return Err(StreamError::LimitExceeded);
         }
-        for raw in self.decoder.push(bytes)? {
-            if self.terminal || self.pending.is_some() {
+        for segment in bytes.split_inclusive(|byte| *byte == b'\r' || *byte == b'\n') {
+            if self.terminal && !(self.decoder.skip_lf && segment == b"\n") {
                 return Err(StreamError::InvalidEvent);
             }
-            let value: Value =
-                serde_json::from_str(&raw.data).map_err(|_| StreamError::InvalidEvent)?;
-            if value.get("type").and_then(Value::as_str) != Some(raw.event.as_str()) {
-                return Err(StreamError::InvalidEvent);
+            for raw in self.decoder.push(segment)? {
+                if self.terminal || self.pending.is_some() {
+                    return Err(StreamError::InvalidEvent);
+                }
+                let value: Value =
+                    serde_json::from_str(&raw.data).map_err(|_| StreamError::InvalidEvent)?;
+                if value.get("type").and_then(Value::as_str) != Some(raw.event.as_str()) {
+                    return Err(StreamError::InvalidEvent);
+                }
+                let event: Event =
+                    serde_json::from_str(&raw.data).map_err(|_| StreamError::InvalidEvent)?;
+                if event.sequence() != self.next {
+                    return Err(StreamError::InvalidEvent);
+                }
+                self.next = self.next.checked_add(1).ok_or(StreamError::LimitExceeded)?;
+                self.pending = self.apply(event)?;
             }
-            let event: Event =
-                serde_json::from_str(&raw.data).map_err(|_| StreamError::InvalidEvent)?;
-            if event.sequence() != self.next {
-                return Err(StreamError::InvalidEvent);
-            }
-            self.next = self.next.checked_add(1).ok_or(StreamError::LimitExceeded)?;
-            self.pending = self.apply(event)?;
         }
         if self.pending.is_some() {
             // Do not release a proposal when the same chunk already contains
