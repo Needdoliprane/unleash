@@ -240,3 +240,46 @@ fn project_policy_requires_existing_project_in_writer_transaction() {
         .unwrap();
     assert_eq!(counts, (0, 0));
 }
+
+#[test]
+fn project_settings_require_existing_project_in_writer_transaction() {
+    let directory = local_test_dir("f018-009-orphan-settings").unwrap();
+    let store = UnleashStore::open(StoreConfig::new(directory.path())).unwrap();
+    let ids = DeterministicIdGenerator::new(0xF018_0903);
+    let project = ProjectId::from_uuid(ids.new_uuid());
+    let outcome = commit(
+        &store,
+        &ids,
+        AggregateKind::Settings,
+        ids.new_uuid(),
+        Some(project),
+        0,
+        CommandMutation::SetSettings {
+            scope_kind: SettingsScopeKind::Project,
+            scope_id: project.to_string(),
+            caller: CallerAuthority {
+                actor_id: ActorId::new("user:louis").unwrap(),
+                role: CallerRole::HumanOperator,
+            },
+            patch: SettingsPatch {
+                execution_pool: None,
+                retention_policy: None,
+                confirm_retention_shortening: false,
+                analyzer_paths: None,
+                extra_typed: None,
+            },
+        },
+    );
+    assert!(matches!(outcome, Err(StoreError::NotFound(_))));
+    let counts: (i64, i64) = store
+        .read_snapshot(|conn, _| {
+            Ok((
+                conn.query_row("SELECT COUNT(*) FROM settings", [], |row| row.get(0))?,
+                conn.query_row("SELECT COUNT(*) FROM command_receipts", [], |row| {
+                    row.get(0)
+                })?,
+            ))
+        })
+        .unwrap();
+    assert_eq!(counts, (0, 0));
+}

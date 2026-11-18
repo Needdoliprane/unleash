@@ -958,6 +958,20 @@ pub(crate) fn tx_set_settings(
         });
     }
 
+    if scope_kind == SettingsScopeKind::Project {
+        let project_id = trimmed_scope.parse::<ProjectId>()?;
+        let exists: i64 = tx
+            .query_row(
+                "SELECT COUNT(*) FROM projects WHERE project_id = ?1",
+                [project_id.to_string()],
+                |row| row.get(0),
+            )
+            .map_err(StoreError::from_rusqlite)?;
+        if exists != 1 {
+            return Err(StoreError::NotFound(format!("project {project_id}")));
+        }
+    }
+
     let current = read_settings_conn(tx, now_ms, scope_kind, trimmed_scope)?;
     if current.revision != expected_rev {
         return Err(StoreError::RevisionConflict {
