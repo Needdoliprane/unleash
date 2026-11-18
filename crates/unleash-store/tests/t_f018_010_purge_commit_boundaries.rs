@@ -229,6 +229,11 @@ fn purge_case(cutpoint: u8) {
                 .unwrap()
                 .starts_with("retention-purge:")
         );
+        let event_identity: (String, String) = store.read_snapshot(|conn, _| conn.query_row(
+            "SELECT aggregate_id, causation_receipt_id FROM events WHERE event_type = 'HistoryPurged'", [],
+            |row| Ok((row.get(0)?, row.get(1)?))).map_err(StoreError::from_rusqlite)).unwrap();
+        assert_eq!(event_identity.0, request.envelope.aggregate_id.to_string());
+        assert_eq!(event_identity.1, receipt.receipt.receipt_id.to_string());
         let payload: String = store
             .read_snapshot(|conn, _| {
                 conn.query_row(
@@ -417,4 +422,112 @@ fn automatic_retention_command_with_uncertain_clock_is_explicitly_suspended() {
         store.commit_command(request).unwrap().receipt().state,
         ReceiptState::Accepted
     );
+}
+
+struct PostUnlinkSyncFault {
+    enabled: std::sync::atomic::AtomicBool,
+    hits: std::sync::atomic::AtomicUsize,
+}
+impl unleash_store::StorageFaultInjector for PostUnlinkSyncFault {
+    fn next_fault(
+        &self,
+        target: unleash_store::FaultTarget,
+    ) -> Option<unleash_store::InjectedStorageFault> {
+        if target == unleash_store::FaultTarget::ObjectDeletionSync
+            && self.enabled.load(Ordering::SeqCst)
+        {
+            self.hits.fetch_add(1, Ordering::SeqCst);
+            Some(unleash_store::InjectedStorageFault::IoErr)
+        } else {
+            None
+        }
+    }
+}
+
+#[test]
+fn unlink_before_directory_sync_is_retried_even_when_path_is_absent() {
+    let (store, _control, ids, hash, _directory, mut config) = fixture();
+    let path = config
+        .artifacts_dir
+        .join(store.object_record(hash).unwrap().relative_path);
+    store.shutdown().unwrap();
+    let injector = Arc::new(PostUnlinkSyncFault {
+        enabled: std::sync::atomic::AtomicBool::new(true),
+        hits: std::sync::atomic::AtomicUsize::new(0),
+    });
+    config.fault_injector = injector.clone();
+    let store = UnleashStore::open(config).unwrap();
+    let request = purge_command(&store, &ids);
+    assert!(matches!(
+        store.commit_command(request.clone()),
+        Err(StoreError::StorageUnavailable(_))
+    ));
+    assert!(!path.exists());
+    assert_eq!(
+        store.object_record(hash).unwrap().state,
+        ObjectState::Deleting
+    );
+    assert!(matches!(
+        store.commit_command(request.clone()),
+        Err(StoreError::StorageUnavailable(_))
+    ));
+    assert_eq!(injector.hits.load(Ordering::SeqCst), 2);
+    assert_eq!(
+        store.object_record(hash).unwrap().state,
+        ObjectState::Deleting
+    );
+    injector.enabled.store(false, Ordering::SeqCst);
+    store.commit_command(request).unwrap();
+    assert_eq!(
+        store.object_record(hash).unwrap().state,
+        ObjectState::Tombstone
+    );
+}
+
+#[test]
+fn purge_creation_requires_initial_revision_and_global_aggregate_uniqueness() {
+    let (store, _control, ids, _hash, _directory, _config) = fixture();
+    let request = purge_command(&store, &ids);
+    let mut bad_revision = request.clone();
+    bad_revision.envelope.expected_revision = Revision::new(1);
+    assert!(matches!(
+        store.commit_command(bad_revision),
+        Err(StoreError::RevisionConflict { .. })
+    ));
+    let first = store.commit_command(request.clone()).unwrap();
+    assert_eq!(
+        first.receipt().result_ref.as_deref(),
+        Some(format!("retention-purge:{}", request.envelope.aggregate_id).as_str())
+    );
+    let mut duplicate = request;
+    duplicate.envelope.command_id = ids.new_command_id();
+    duplicate.envelope.request_id = RequestId::from_uuid(ids.new_uuid());
+    duplicate.actor_id = ActorId::new("user:other").unwrap();
+    duplicate.envelope.actor_ref = Some("user:other".to_owned());
+    let CommandMutation::PurgeHistory { request: purge } = &mut duplicate.mutation else {
+        unreachable!();
+    };
+    purge.requested_by_actor = "user:other".to_owned();
+    assert!(matches!(
+        store.commit_command(duplicate),
+        Err(StoreError::RevisionConflict { .. })
+    ));
+    let counts: (i64, i64, i64) = store
+        .read_snapshot(|conn, _| {
+            Ok((
+                conn.query_row("SELECT COUNT(*) FROM retention_purges", [], |row| {
+                    row.get(0)
+                })?,
+                conn.query_row("SELECT COUNT(*) FROM command_receipts", [], |row| {
+                    row.get(0)
+                })?,
+                conn.query_row(
+                    "SELECT COUNT(*) FROM events WHERE event_type = 'HistoryPurged'",
+                    [],
+                    |row| row.get(0),
+                )?,
+            ))
+        })
+        .unwrap();
+    assert_eq!(counts, (1, 1, 1));
 }

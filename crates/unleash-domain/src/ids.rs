@@ -128,6 +128,10 @@ define_uuid_id!(
     "Identifiant d'une action durable engagée auprès du broker."
 );
 define_uuid_id!(
+    AuthorizationEvaluationId,
+    "Identifiant durable d’une évaluation d’autorisation, conservé lors d’un retry incertain."
+);
+define_uuid_id!(
     DispatchId,
     "Identifiant d'un dispatch individuel d'une action."
 );

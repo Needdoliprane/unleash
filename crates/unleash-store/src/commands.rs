@@ -2056,7 +2056,29 @@ fn apply_command_mutation(
             target_state,
         } => tx_transition_alert(tx, now_ms, expected_rev, cmd_id, alert_id, *target_state),
         CommandMutation::PurgeHistory { request } => {
-            let rep = tx_execute_retention_purge(tx, config, now_ms, Some(receipt_id), request)?;
+            ensure_creation_rev(expected_rev, cmd_id)?;
+            let existing: i64 = tx
+                .query_row(
+                    "SELECT COUNT(*) FROM retention_purges WHERE purge_id = ?1",
+                    [envelope.aggregate_id.to_string()],
+                    |row| row.get(0),
+                )
+                .map_err(StoreError::from_rusqlite)?;
+            if existing != 0 {
+                return Err(StoreError::RevisionConflict {
+                    current_revision: Revision::new(1),
+                    expected_revision: expected_rev,
+                    command_id: Some(cmd_id),
+                });
+            }
+            let rep = tx_execute_retention_purge(
+                tx,
+                config,
+                now_ms,
+                Some(receipt_id),
+                Some(envelope.aggregate_id),
+                request,
+            )?;
             if rep.suspended_clock_uncertain {
                 return Err(StoreError::RecoveryInProgress(
                     "automatic retention suspended: clock uncertainty".to_owned(),
@@ -2086,7 +2108,7 @@ fn apply_command_mutation(
                 generated_events.push(EventAppendSpec {
                     event_type: "HistoryPurged".to_owned(),
                     aggregate_type: AggregateKind::RetentionPurge,
-                    aggregate_id: config.id_generator.new_uuid(),
+                    aggregate_id: envelope.aggregate_id,
                     aggregate_revision: Revision::new(1),
                     project_id: None,
                     correlation_id: cmd_id.as_uuid(),
