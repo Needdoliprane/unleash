@@ -2,13 +2,16 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "urn:ovpt:unleash:ipc-hello:1",
   "title": "Handshake Hello proposé",
-  "description": "Trames de négociation Hello client-serveur (HelloRequest ou HelloResponse).",
+  "description": "Trames Hello du client et réponses du daemon en ligne ou en diagnostic.",
   "oneOf": [
     {
       "$ref": "#/$defs/HelloRequest"
     },
     {
       "$ref": "#/$defs/HelloResponse"
+    },
+    {
+      "$ref": "#/$defs/DiagnosticHelloResponse"
     }
   ],
   "$defs": {
@@ -55,6 +58,31 @@
             "type": "string",
             "maxLength": 128
           }
+        }
+      }
+    },
+    "DiagnosticHelloResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "protocol_version",
+        "mode",
+        "reason_code",
+        "max_frame_bytes",
+        "capabilities"
+      ],
+      "properties": {
+        "protocol_version": { "const": "unleash.ipc.v2" },
+        "mode": { "const": "read_only_recovery" },
+        "reason_code": { "const": "STORAGE_CORRUPT" },
+        "max_frame_bytes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 8388608
+        },
+        "capabilities": {
+          "type": "array",
+          "items": { "type": "string", "maxLength": 128 }
         }
       }
     },

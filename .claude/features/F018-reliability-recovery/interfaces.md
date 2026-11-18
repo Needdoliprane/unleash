@@ -13,6 +13,8 @@ Les commandes utilisent l'envelope F001 et les permissions du broker. Les DTO so
 | `ValidateBackup` | Chemin/manifest autorisés | Couverture des objets/effets/receipts/budgets, état complete, hashes, compatibilité et erreurs ; un job interrompu n'est pas un backup validé. |
 | `RestoreBackup` | CommandEnvelope avec lignée d'origine, daemon `ready`, `degraded` ou `read_only_recovery` ; l'acceptation fait entrer ou maintient le daemon en `read_only_recovery`, mode de la procédure offline exclusive ; inventaire local complet et neutralisation, destination distincte, capsule du delta et de sa couverture | restore_id durable dans `restore_requests` de la lignée source, ou dans le manifeste privé de maintenance hors base si la base source est illisible ou non inscriptible ; nouvelle lignée/secrets/stream après import capsule/blocages, ou RestorationBlocked sans activation, persisté sans lignée cible ni capsule ; couverture externe partielle garde ses scopes gelés. |
 
+Sur la connexion diagnostique ouverte après un préflight SQLite corrompu, les deux lectures renvoient un watermark nul. `GetDaemonStatus` expose le mode `read_only_recovery` et `storage_corrupt: true`. `InspectRecovery` exige l’administration globale et renvoie `{report, inventory_coverage: "unknown"}`. Le rapport utilise le manifeste privé vérifié et garde les identités actives indisponibles. Les listes vides dans ce rapport sont lues avec la couverture inconnue de l’inventaire.
+
 ```json
 {
   "recovery_id": "recovery-demo",

@@ -13,7 +13,7 @@
     "evidence/"
   ],
   "hash_algorithm": "sha256",
-  "source_tree_digest": "8db09cccf79513bea27602aeb76793faefe0566c8fc7281728db72d8fbdb9544",
+  "source_tree_digest": "6d0f6785edd99021cf39805da4144dab25b2eaeb11e999f97e078d0b8a488aea",
   "files": [
     {
       "path": "INDEX.md",
@@ -347,8 +347,8 @@
     },
     {
       "path": "architecture/ipc-and-apis.md",
-      "sha256": "be4a0eaec2bb8a54e0e0e07f4f1ade58d251f117c5630fe6e4f7f7d3248dd6ff",
-      "bytes": 30363,
+      "sha256": "da5f63763dafe3909b22ce2c66a8c43f5e17bd91d3740a567293a2203f670a69",
+      "bytes": 31139,
       "media_type": "text/markdown"
     },
     {
@@ -1781,8 +1781,8 @@
     },
     {
       "path": "features/F018-reliability-recovery/interfaces.md",
-      "sha256": "9cbc61a1e8f27bdc16fdd9687242997956047caaddd2fc67aec715afd058828a",
-      "bytes": 8282,
+      "sha256": "5d471b6bffe1817877facf895c258721e25ce7937152cdac61606a0ff66fb039",
+      "bytes": 8778,
       "media_type": "text/markdown"
     },
     {
@@ -2069,8 +2069,8 @@
     },
     {
       "path": "schemas/ipc-hello.schema.json",
-      "sha256": "f40c131a7f5a58a0597e590e35ba2c3b359b642369febf51ec2fe5a71976395d",
-      "bytes": 2989,
+      "sha256": "a63ee5b8b43d130fa67e86aeb165b95f84688784d7be5b3d586a095a55038929",
+      "bytes": 3731,
       "media_type": "application/json"
     },
     {
