@@ -61,6 +61,7 @@ pub(crate) struct StopRequest {
 pub(crate) struct DaemonRuntimeState {
     pub(crate) rendezvous_dir: std::path::PathBuf,
     pub(crate) terminal_children: Mutex<Vec<std::process::Child>>,
+    pub(crate) terminal_host_launcher: Arc<dyn crate::terminal_host_launcher::TerminalHostLauncher>,
     pub(crate) broker_activity: Arc<crate::broker_activity::BrokerActivity>,
     pub(crate) store: Arc<UnleashStore>,
     pub(crate) authority_generation: AuthorityGeneration,
@@ -1223,6 +1224,18 @@ async fn handle_command_frame(
         }
     }
 
+    if newly_committed
+        && cmd.command_type == "SendTerminalInput"
+        && let Ok(input) = crate::terminal_service::decode_input(&cmd)
+    {
+        crate::terminal_service::start_input(
+            state,
+            session.actor_id.clone(),
+            cmd.command_id,
+            input,
+        );
+    }
+
     if newly_committed && let Some(stop_reason) = stop_reason.take() {
         state.mark_draining();
         let _ = state.stop_tx.try_send(StopRequest {
@@ -1395,6 +1408,11 @@ async fn prepare_command_request(
         "RequestBackup" => prepare_request_backup(session, cmd),
         "AcquireTerminal" => Ok(PreparedCommand {
             req: crate::terminal_service::prepare_acquisition(state, session, cmd).await?,
+            stop_reason: None,
+            stop_drain_timeout: None,
+        }),
+        "SendTerminalInput" => Ok(PreparedCommand {
+            req: crate::terminal_service::prepare_input(session, cmd)?,
             stop_reason: None,
             stop_drain_timeout: None,
         }),

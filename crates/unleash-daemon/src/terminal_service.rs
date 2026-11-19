@@ -27,6 +27,9 @@ mod metadata;
 pub(crate) use metadata::read_terminal_metadata;
 #[path = "terminal_control.rs"]
 mod control;
+#[path = "terminal_input.rs"]
+mod input;
+pub(crate) use input::{decode as decode_input, prepare as prepare_input, start as start_input};
 
 pub(crate) fn start_registered(
     state: &Arc<DaemonRuntimeState>,
@@ -639,16 +642,9 @@ fn spawn_registered_host(
         .parent()
         .ok_or("daemon executable has no directory")?
         .join("unleash-process-host");
-    if !executable.is_file() {
-        return Err("packaged process-host binary absent".into());
-    }
-    let child = std::process::Command::new(executable)
-        .args([std::ffi::OsStr::new("--bootstrap"), bootstrap.as_os_str()])
-        .env_clear()
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()?;
+    let child = state
+        .terminal_host_launcher
+        .spawn(&executable, &bootstrap)?;
     let host_identity = unleash_platform::inspect_process_identity(child.id())?;
     {
         let mut children = state

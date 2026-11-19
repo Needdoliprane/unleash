@@ -4,6 +4,7 @@
 
 pub mod terminal_acquisition_query;
 mod terminal_input_execution;
+mod terminal_input_observation;
 pub mod terminal_input_types;
 pub(crate) mod terminal_input_writer;
 

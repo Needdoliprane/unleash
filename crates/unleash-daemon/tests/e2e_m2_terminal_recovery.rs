@@ -82,6 +82,22 @@ impl FixtureDaemon {
 
 impl Drop for FixtureDaemon {
     fn drop(&mut self) {
+        // Close the owner's C5 controller pipe before contacting a host whose
+        // input gate may be waiting for that EOF. Keep private runtime files
+        // available for the authenticated host/child cleanup below.
+        if self.child.try_wait().ok().flatten().is_none() {
+            let _ = self.child.kill();
+        }
+        let deadline = Instant::now() + DEADLINE;
+        loop {
+            match self.child.try_wait() {
+                Ok(Some(_)) => break,
+                Ok(None) if Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                _ => return,
+            }
+        }
         // Only this fixture's private hosts, authenticated by their actual capability.
         // Never signal a guessed/reused PID as cleanup.
         if self.cleanup_hosts
@@ -89,16 +105,6 @@ impl Drop for FixtureDaemon {
         {
             for entry in entries.flatten() {
                 let _ = stop_fixture_host(&entry.path());
-            }
-        }
-        if self.child.try_wait().ok().flatten().is_none() {
-            let _ = self.child.kill();
-        }
-        let deadline = Instant::now() + DEADLINE;
-        while Instant::now() < deadline {
-            match self.child.try_wait() {
-                Ok(Some(_)) | Err(_) => return,
-                Ok(None) => std::thread::sleep(Duration::from_millis(10)),
             }
         }
     }

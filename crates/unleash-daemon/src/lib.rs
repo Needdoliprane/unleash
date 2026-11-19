@@ -35,6 +35,7 @@ mod provider_profile_service;
 mod provider_profile_validation_service;
 pub mod recovery;
 pub mod subscriptions;
+pub mod terminal_host_launcher;
 mod terminal_service;
 
 pub use auth::{AuthVerifierPort, AuthenticatedSession, Capability, PeerUidAuthVerifier};
