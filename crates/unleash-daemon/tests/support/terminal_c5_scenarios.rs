@@ -1,5 +1,4 @@
-//! C5 product oracles; the input scenario remains red until the writer/route
-//! seams are available. The daemon library runs in a real owned subprocess;
+//! Native receipt and C5 product oracles. The C5 daemon library runs in a real owned subprocess;
 //! authentication, SQLite, broker, native host binary and PTY remain real.
 //! No replay uses the native SendInput helper to inspect an ambiguous write.
 
@@ -444,6 +443,118 @@ fn assert_one_unknown_input(fixture: &LiveFixture, original: &CommandEnvelope) {
         journal["entries"]["1"]["entry_state"]
             .get("receipt_id")
             .is_none()
+    );
+}
+
+async fn wait_known_input(
+    fixture: &LiveFixture,
+    command: &CommandEnvelope,
+    receipt: &unleash_protocol::CommandReceipt,
+) {
+    let deadline = Instant::now() + DEADLINE;
+    loop {
+        let conn = rusqlite::Connection::open_with_flags(
+            fixture.data.path().join("unleash-authority.db"),
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .unwrap();
+        let observations: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM terminal_input_intents i \
+             JOIN actions a ON a.action_id=i.action_id \
+             JOIN action_dispatches d ON d.dispatch_id=i.dispatch_id AND d.action_id=i.action_id \
+             JOIN object_references r ON r.owner_kind='terminal_input_observation' AND r.owner_id=i.action_id AND r.source_field=i.dispatch_id AND r.object_hash=i.observation_object_hash AND r.state='live' \
+             JOIN object_records o ON o.object_hash=r.object_hash AND o.state='live' \
+             WHERE i.command_id=?1 AND i.receipt_id=?2 AND i.terminal_id=?3 \
+               AND i.state='observed' AND a.state='observed_success' AND i.renewal='renewed'",
+            rusqlite::params![command.command_id.to_string(),receipt.receipt_id.to_string(),command.aggregate_id.to_string()],
+            |row| row.get(0),
+        ).unwrap();
+        assert!(observations <= 1, "one native input observation");
+        if observations == 1 {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "actual native receipt and object must be durably committed"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
+#[tokio::test]
+async fn t_f011_005_real_daemon_commits_native_receipt_before_causal_sequence_one() {
+    // This path uses the packaged daemon and its default packaged host launcher,
+    // without the C5 daemon-library fixture or its injected launcher.
+    let mut fixture = LiveFixture::new(true).await;
+    std::fs::set_permissions(
+        fixture.project_root.path(),
+        std::fs::Permissions::from_mode(0o700),
+    )
+    .unwrap();
+    let effect = signal_listener(&fixture.project_root.path().join("e.sock"));
+    let acquired = start_c5_terminal(&mut fixture).await;
+    let before = fixture.host_manifest();
+    let request = input_command(&fixture, &acquired);
+    let accepted = fixture.client.send_command(&request).await.unwrap();
+    assert_eq!(accepted.state, ReceiptState::Accepted);
+    wait_signal(&effect, EFFECT_SIGNAL).await;
+    wait_known_input(&fixture, &request, &accepted).await;
+    let journal = read_native_journal(&before);
+    assert_eq!(journal["entries"].as_object().unwrap().len(), 1);
+    assert_eq!(
+        journal["entries"]["1"]["entry_state"]["state"],
+        "receipt_confirmed"
+    );
+    assert_eq!(
+        journal["entries"]["1"]["command_id"],
+        request.command_id.to_string()
+    );
+    assert_eq!(
+        journal["entries"]["1"]["payload_hash"],
+        unleash_domain::Sha256Digest::from_bytes(b"apply-effect\n").to_string()
+    );
+    let query = result_query(
+        &fixture,
+        acquired["command_id"].as_str().unwrap().parse().unwrap(),
+        acquired["result_ref"].as_str().unwrap(),
+        0xf011_6101,
+    );
+    let known = fixture.client.query(&query).await.unwrap();
+    assert_eq!(known.result["input_seq"], 1);
+    for field in ["terminal_id", "process_run_uuid", "lease_id", "fence"] {
+        assert_eq!(
+            known.result[field], acquired[field],
+            "same observed controller and physical generation"
+        );
+    }
+    assert!(
+        known.result["lease_expires_at"].as_i64().unwrap()
+            > acquired["lease_expires_at"].as_i64().unwrap()
+    );
+    assert!(
+        known.watermark.unwrap().sequence.as_u64()
+            >= known.result["cursor"]["sequence"].as_u64().unwrap()
+    );
+    for _ in 0..3 {
+        assert_eq!(
+            fixture.client.send_command(&request).await.unwrap(),
+            accepted
+        );
+    }
+    let after = fixture.host_manifest();
+    assert_eq!(after.last_confirmed_input_seq, 1);
+    assert_eq!(
+        read_native_journal(&after),
+        journal,
+        "command replay never contacts native input again"
+    );
+    assert_eq!(
+        std::fs::read(fixture.project_root.path().join("worker-effects")).unwrap(),
+        b"effect\n"
+    );
+    assert_eq!(
+        std::fs::read(fixture.project_root.path().join("worker-starts")).unwrap(),
+        b"started\n"
     );
 }
 
