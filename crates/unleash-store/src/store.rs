@@ -1,5 +1,6 @@
 //! Façade principale `UnleashStore` coordonnant writer unique, lecteurs, objets, sauvegardes et restauration.
 
+use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -7,7 +8,7 @@ use std::sync::atomic::Ordering;
 
 use rusqlite::{Connection, OpenFlags, OptionalExtension, Transaction, TransactionBehavior};
 use unleash_domain::{
-    AccountId, ActionId, ActorId, AuthorityGeneration, BackupId, CommandId, DaemonEpoch,
+    AccountId, ActionId, ActorId, AgentId, AuthorityGeneration, BackupId, CommandId, DaemonEpoch,
     DaemonInstanceId, LeaseId, MicrosAmount, PoolId, ProjectId, Sequence, Sha256Digest, StreamId,
     TimestampMs,
 };
@@ -2177,6 +2178,21 @@ impl UnleashStore {
         project_id: ProjectId,
     ) -> Result<SnapshotProjection<ProjectRecord>, StoreError> {
         self.project_snapshot(|conn| get_project_conn(conn, project_id))
+    }
+
+    /// Lit un agent et le watermark de la même transaction lectrice.
+    ///
+    /// # Errors
+    /// Refuse un agent invisible, une portée incohérente ou une lecture indisponible.
+    pub fn get_agent_snapshot(
+        &self,
+        agent_id: AgentId,
+        project_id: Option<ProjectId>,
+        allowed_projects: Option<&HashSet<ProjectId>>,
+    ) -> Result<SnapshotProjection<crate::AgentProjection>, StoreError> {
+        self.project_snapshot(|conn| {
+            crate::agent_projection::get_agent_conn(conn, agent_id, project_id, allowed_projects)
+        })
     }
 
     /// Lit réglages et watermark dans une seule transaction lectrice.

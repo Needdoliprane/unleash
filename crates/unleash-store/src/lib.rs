@@ -8,6 +8,7 @@
 #![warn(missing_docs)]
 
 pub mod admission;
+mod agent_projection;
 pub mod backup;
 pub mod backup_requests;
 pub mod broker_phases;
@@ -40,6 +41,7 @@ pub use admission::{
     AdmissionUrgency, ExecutionAdmissionSnapshot, ExecutionCheckpointObservation,
     ExecutionCheckpointRequestRecord, ExecutionContinuation,
 };
+pub use agent_projection::AgentProjection;
 pub use backup::{
     BackupJobState, BackupManifest, BackupObjectEntry, BackupRetentionTier, BoundedExportOutcome,
     BoundedExportRequest, ExportCancellation, PrepareBackupRequest, ValidateBackupReport,

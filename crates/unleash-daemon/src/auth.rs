@@ -287,7 +287,9 @@ pub fn authorize_query(
         "GetDaemonStatus" => Capability::QueryDaemonDiagnostic,
         "GetHealth" | "GetStateSnapshot" | "GetCommandReceipt" | "ListProjects" | "GetProject"
         | "ReadSettings" | "ReadPolicySummary" | "ReadGuardHealth" | "InspectRecovery"
-        | "GetBackupManifest" | "ReadTerminalLog" | "GetProviderProfile" => Capability::QueryState,
+        | "GetBackupManifest" | "ReadTerminalLog" | "GetProviderProfile" | "GetAgent" => {
+            Capability::QueryState
+        }
         _ => {
             return Err(IpcError::new(
                 ErrorCode::InvalidArgument,

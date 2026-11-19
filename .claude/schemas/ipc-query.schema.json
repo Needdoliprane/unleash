@@ -45,6 +45,19 @@
   },
   "allOf": [
     {
+      "if": { "properties": { "query_type": { "const": "GetAgent" } } },
+      "then": {
+        "properties": {
+          "payload": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["agent_id"],
+            "properties": { "agent_id": { "type": "string", "format": "uuid" } }
+          }
+        }
+      }
+    },
+    {
       "if": {
         "properties": { "query_type": { "const": "GetCommandReceipt" } }
       },

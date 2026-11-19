@@ -17,4 +17,6 @@
 
 La campagne distingue requested_limit pending et effective_limit pendant la condition dérivée `draining_to_limit` (requested_limit < effective_limit, admissions_frozen=1), sans nouvelle admission ; le passage à la nouvelle effective_limit et le retrait du gel sont atomiques après drainage. Les tests d'équité fixent poids et seuils avant exécution ; les résultats incluent attente par projet et progrès minimal sous arrivée continue de contrôle. Un test peut prouver la politique de scheduling sur son modèle sans prouver un délai universel fournisseur.
 
+Le sous-cas lecture de T-F003-001 vérifie l’identité et la session durable via `GetAgent` sur le socket du daemon. Il contrôle le watermark, le refus sans preuve administrative, la portée exacte, le masquage d’un parent ou créateur hors scope et le rejet d’un payload non fermé. La création authentifiée, l’assignation et le crash du worker ont leurs propres preuves.
+
 Les tests end-to-end doivent comparer le contexte envoyé et les actions observées, avec données synthétiques et prix fixes de fixture. Les intégrations réelles fournisseur sont séparées, facultatives par credentials de test mais obligatoires pour revendiquer cette compatibilité. Voir [concurrency-tests.md](../../testing/concurrency-tests.md).

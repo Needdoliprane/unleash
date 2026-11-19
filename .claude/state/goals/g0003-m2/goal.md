@@ -97,3 +97,7 @@ Le correctif `8f471c3` revalide l’horloge après la décision d’admission. L
 F003 engage désormais l’agent et sa session primaire avec le reçu dans la même transaction `CreateAgent` interne. Le même reçu et le même identifiant de session sont retrouvés après redémarrage. Une coupure C1 annule l’ensemble. Les deux tests d’identité et le test de budgets passent, y compris en rejeu indépendant. Le chemin authentifié du daemon, l’affectation et l’exécution d’un worker restent ouverts. M2 reste à 13 lots intégrés sur 16.
 
 Sur `d8a95be` en branche de tâche, la sonde F012 de connexion autorisée et son observation atomique passent chacune sur UDS réel, SQLite et un serveur TCP local. Le rejeu nominal préserve le reçu et l’unique connexion. La capacité reste engagée pendant l’adoption de la preuve et se libère au commit final. La composition sur M2, la qualification des refus, de la concurrence, de TLS et des tuples Q19 restent ouvertes.
+
+`GetAgent` restitue la session durable et les relations autorisées sur le socket du daemon, avec un watermark du même snapshot. Les tests IPC du raccord et des projections existantes passent, et les schémas sont validés. Le test utilise des enregistrements préparés par le Store. Le producteur `CreateAgent` authentifié et les workers restent à raccorder.
+
+La suite F012 à neuf cas passe huit essais. Le neuvième, perte de l’accusé d’adoption, conserve les faits et la capacité attendus mais échoue au drainage. Le correctif de réveil est en cours de rejeu sur la branche de tâche. M2 reste à 13/16.
