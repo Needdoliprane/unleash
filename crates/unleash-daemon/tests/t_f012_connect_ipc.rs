@@ -13,9 +13,7 @@ use std::net::TcpListener;
 use unleash_client::{ClientConfig, ClientError, UnleashClient};
 use unleash_daemon::{DaemonConfig, DaemonStartOutcome, UnleashDaemon};
 use unleash_domain::{CommandId, RequestId, Revision};
-use unleash_protocol::{
-    ClientKind, CommandEnvelope, CommandReceipt, ErrorCode, ProtocolVersion, ReasonCode,
-};
+use unleash_protocol::{ClientKind, CommandEnvelope, CommandReceipt, ErrorCode, ProtocolVersion};
 use unleash_testkit::local_test_dir;
 use uuid::Uuid;
 
@@ -87,7 +85,9 @@ impl ConnectFixture {
         )
         .unwrap();
         for table in [
+            "actions",
             "action_dispatches",
+            "provider_probes",
             "model_calls",
             "model_call_manifests",
             "capacity_reservations",
@@ -102,9 +102,6 @@ impl ConnectFixture {
                 .unwrap();
             assert_eq!(count, 0, "un mandat absent ne permet aucune ligne {table}");
         }
-        // A durable refusal/action may be recorded; it must never be dispatchable.
-        let active: i64 = db.query_row("SELECT COUNT(*) FROM actions WHERE state IN ('authorized','dispatching','in_flight','cancel_requested','outcome_unknown')", [], |row| row.get(0)).unwrap();
-        assert_eq!(active, 0);
     }
 }
 
@@ -154,15 +151,15 @@ async fn t_f012_013_connect_configuration_receipt_is_not_network_permission() {
     let configured = fixture.configure(&mut admin, profile).await;
     let request = connect(&admin, profile, 11, &configured);
     let response = admin.send_command(&request).await;
-    fixture.assert_no_dispatch_or_active_unit();
     fixture
         .handle
         .shutdown_graceful("connect-test")
         .await
         .unwrap();
+    fixture.assert_no_dispatch_or_active_unit();
     assert!(
-        matches!(&response, Err(ClientError::Remote(error)) if error.code == ErrorCode::CapabilityDenied && error.reason_code == Some(ReasonCode::PolicyDenied)),
-        "une commande valide sans mandat réseau doit être refusée par F017 : {response:?}"
+        matches!(&response, Err(ClientError::Remote(error)) if error.code == ErrorCode::NotFoundOrHidden),
+        "un mandat réseau absent doit rester introuvable sans inventer une politique : {response:?}"
     );
 }
 
@@ -184,12 +181,12 @@ async fn t_f012_013_connect_configuration_receipt_does_not_elevate_current_calle
     let response = limited
         .send_command(&connect(&limited, profile, 12, &configured))
         .await;
-    fixture.assert_no_dispatch_or_active_unit();
     fixture
         .handle
         .shutdown_graceful("connect-test")
         .await
         .unwrap();
+    fixture.assert_no_dispatch_or_active_unit();
     assert!(
         matches!(response, Err(ClientError::Remote(error)) if error.code == ErrorCode::CapabilityDenied)
     );
