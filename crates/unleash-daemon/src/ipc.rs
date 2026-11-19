@@ -1620,6 +1620,8 @@ struct SetPolicyPayload {
     isolation_mode: unleash_store::PolicyIsolationMode,
     policy_version: String,
     reason: String,
+    #[serde(default)]
+    provider_probe_mandate: Option<unleash_store::ProviderProbeMandateChange>,
 }
 
 #[derive(Deserialize)]
@@ -1768,21 +1770,73 @@ fn prepare_guard_mutation(
     ))
 }
 
+fn invalid_admin_command(command_id: CommandId) -> IpcError {
+    IpcError::new(
+        ErrorCode::InvalidArgument,
+        None,
+        "Commande administrative invalide ou non prise en charge",
+        RetryClass::Never,
+    )
+    .with_command_id(command_id)
+}
+
+fn prepare_policy_mutation(
+    cmd: &CommandEnvelope,
+    raw: Value,
+    caller: unleash_store::CallerAuthority,
+    generation: unleash_domain::AuthorityGeneration,
+) -> Result<(AggregateKind, CommandMutation), IpcError> {
+    let invalid = || invalid_admin_command(cmd.command_id);
+    if raw
+        .get("provider_probe_mandate")
+        .is_some_and(Value::is_null)
+    {
+        return Err(invalid());
+    }
+    let payload: SetPolicyPayload = serde_json::from_value(raw).map_err(|_| invalid())?;
+    match payload.scope_kind {
+        unleash_store::PolicyScopeKind::Global
+            if payload.scope_id == "global"
+                && cmd.project_id.is_none()
+                && cmd.aggregate_id == generation.as_uuid() => {}
+        unleash_store::PolicyScopeKind::Project
+            if cmd.project_id.is_some_and(|id| {
+                id.to_string() == payload.scope_id && id.as_uuid() == cmd.aggregate_id
+            }) => {}
+        _ => return Err(invalid()),
+    }
+    if payload.reason.len() > 1024 || payload.policy_version.len() > 128 {
+        return Err(invalid());
+    }
+    let mutation = if let Some(mandate) = payload.provider_probe_mandate {
+        CommandMutation::SetPolicyWithProviderProbeMandate {
+            scope_kind: payload.scope_kind,
+            scope_id: payload.scope_id,
+            isolation_mode: payload.isolation_mode,
+            policy_version: payload.policy_version,
+            reason: payload.reason,
+            caller,
+            mandate,
+        }
+    } else {
+        CommandMutation::SetPolicy {
+            scope_kind: payload.scope_kind,
+            scope_id: payload.scope_id,
+            isolation_mode: payload.isolation_mode,
+            policy_version: payload.policy_version,
+            reason: payload.reason,
+            caller,
+        }
+    };
+    Ok((AggregateKind::SecurityPolicy, mutation))
+}
+
 fn prepare_admin_command(
     state: &DaemonRuntimeState,
     session: &AuthenticatedSession,
     cmd: CommandEnvelope,
 ) -> Result<PreparedCommand, IpcError> {
-    let cid = cmd.command_id;
-    let invalid = || {
-        IpcError::new(
-            ErrorCode::InvalidArgument,
-            None,
-            "Commande administrative invalide ou non prise en charge",
-            RetryClass::Never,
-        )
-        .with_command_id(cid)
-    };
+    let invalid = || invalid_admin_command(cmd.command_id);
     let caller = unleash_store::CallerAuthority {
         actor_id: session.actor_id.clone(),
         role: unleash_store::CallerRole::PolicyAdmin,
@@ -1813,34 +1867,7 @@ fn prepare_admin_command(
                 },
             )
         }
-        "SetPolicy" => {
-            let payload: SetPolicyPayload = serde_json::from_value(raw).map_err(|_| invalid())?;
-            match payload.scope_kind {
-                unleash_store::PolicyScopeKind::Global
-                    if payload.scope_id == "global"
-                        && cmd.project_id.is_none()
-                        && cmd.aggregate_id == state.authority_generation.as_uuid() => {}
-                unleash_store::PolicyScopeKind::Project
-                    if cmd.project_id.is_some_and(|id| {
-                        id.to_string() == payload.scope_id && id.as_uuid() == cmd.aggregate_id
-                    }) => {}
-                _ => return Err(invalid()),
-            }
-            if payload.reason.len() > 1024 || payload.policy_version.len() > 128 {
-                return Err(invalid());
-            }
-            (
-                AggregateKind::SecurityPolicy,
-                CommandMutation::SetPolicy {
-                    scope_kind: payload.scope_kind,
-                    scope_id: payload.scope_id,
-                    isolation_mode: payload.isolation_mode,
-                    policy_version: payload.policy_version,
-                    reason: payload.reason,
-                    caller,
-                },
-            )
-        }
+        "SetPolicy" => prepare_policy_mutation(&cmd, raw, caller, state.authority_generation)?,
         "ConfigureGuard" => prepare_guard_mutation(state, &cmd, raw, caller)?,
         _ => return Err(invalid()),
     };
