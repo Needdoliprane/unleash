@@ -1073,3 +1073,81 @@ pub(crate) fn read_verified_object_bytes_conn(
     }
     Ok(bytes)
 }
+
+/// Read a bounded private JSON evidence object with the existing anchored
+/// no-follow primitive. Other object readers retain their current contract.
+pub(crate) fn read_verified_evidence_bytes_bounded(
+    conn: &rusqlite::Connection,
+    config: &StoreConfig,
+    object_hash: Sha256Digest,
+    limit: usize,
+) -> Result<Vec<u8>, StoreError> {
+    let unavailable = || {
+        StoreError::EvidenceUnavailable(
+            "native evidence object is unavailable or inadmissible".into(),
+        )
+    };
+    let record = read_object_record_conn(conn, object_hash)?;
+    let bound = u64::try_from(limit).map_err(|_| unavailable())?;
+    if record.state != ObjectState::Live
+        || record.media_type != "application/json"
+        || record.byte_length > bound
+        || record.relative_path != object_relative_path(&object_hash, record.object_generation)
+    {
+        return Err(unavailable());
+    }
+    let path = safe_artifact_path(&config.artifacts_dir, &record.relative_path)?;
+    let uid = crate::commands::read_daemon_state_conn(conn)?.owner_uid;
+    let bytes = read_evidence_file_bounded(&path, uid, bound)?;
+    if u64::try_from(bytes.len()).map_err(|_| unavailable())? != record.byte_length
+        || Sha256Digest::from_bytes(&bytes) != object_hash
+    {
+        return Err(unavailable());
+    }
+    Ok(bytes)
+}
+
+#[cfg(unix)]
+fn read_evidence_file_bounded(path: &Path, uid: u32, bound: u64) -> Result<Vec<u8>, StoreError> {
+    use std::io::Read;
+    let unavailable =
+        || StoreError::EvidenceUnavailable("native evidence file is unavailable or changed".into());
+    let mut file = crate::fs_sync::open_private_file(path, uid)?.ok_or_else(unavailable)?;
+    let before = file.metadata()?;
+    if before.len() > bound {
+        return Err(unavailable());
+    }
+    let cap = bound.checked_add(1).ok_or_else(unavailable)?;
+    let mut bytes = Vec::new();
+    (&mut file).take(cap).read_to_end(&mut bytes)?;
+    if u64::try_from(bytes.len()).map_err(|_| unavailable())? > bound {
+        return Err(unavailable());
+    }
+    let after = file.metadata()?;
+    let current = crate::fs_sync::open_private_file(path, uid)?
+        .ok_or_else(unavailable)?
+        .metadata()?;
+    if !same_evidence_file(&before, &after) || !same_evidence_file(&before, &current) {
+        return Err(unavailable());
+    }
+    Ok(bytes)
+}
+
+#[cfg(unix)]
+fn same_evidence_file(first: &fs::Metadata, second: &fs::Metadata) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    first.dev() == second.dev()
+        && first.ino() == second.ino()
+        && first.len() == second.len()
+        && first.mtime() == second.mtime()
+        && first.mtime_nsec() == second.mtime_nsec()
+        && first.ctime() == second.ctime()
+        && first.ctime_nsec() == second.ctime_nsec()
+}
+
+#[cfg(not(unix))]
+fn read_evidence_file_bounded(_path: &Path, _uid: u32, _bound: u64) -> Result<Vec<u8>, StoreError> {
+    Err(StoreError::EvidenceUnavailable(
+        "qualified private evidence reader is unavailable on this platform".into(),
+    ))
+}

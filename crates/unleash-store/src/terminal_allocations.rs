@@ -3,6 +3,9 @@
 //! n'attestent ni ce resolver ni un rattachement réel de PTY.
 
 pub mod terminal_acquisition_query;
+mod terminal_input_execution;
+pub mod terminal_input_types;
+pub(crate) mod terminal_input_writer;
 
 use crate::{CallerAuthority, FenceAssertion, StoreError};
 use serde::{Deserialize, Serialize};
@@ -1301,6 +1304,12 @@ pub(crate) fn validate_command(
     tx: &Transaction<'_>,
     req: &CommitCommandRequest,
 ) -> Result<(), StoreError> {
+    if let CommandMutation::PrepareTerminalInput { caller, request } = &req.mutation {
+        return terminal_input_writer::validate_command(req, caller, request);
+    }
+    if req.envelope.command_type == "SendTerminalInput" {
+        return Err(invalid("terminal input mutation missing"));
+    }
     if let CommandMutation::PrepareTerminalControl { caller, request } = &req.mutation {
         if req.target_aggregate != AggregateKind::TerminalControl
             || req.envelope.command_type != "AcquireTerminal"
@@ -1775,6 +1784,7 @@ pub(crate) fn validate_incarnation(
     d: &DaemonStateRow,
     action: ActionId,
 ) -> Result<(), StoreError> {
+    terminal_input_writer::validate_incarnation(tx, d, action)?;
     if let Some(record) = control_read_conn(tx, action)? {
         let c = &record.context;
         if c.authority_generation != d.authority_generation {
@@ -1901,6 +1911,7 @@ pub(crate) fn validate_intent(
     now: TimestampMs,
     intent: &BrokerIntent,
 ) -> Result<(), StoreError> {
+    terminal_input_writer::validate_intent(tx, d, now, intent)?;
     if let Some(record) = control_read_conn(tx, intent.action_id)? {
         let c = &record.context;
         validate_control_live(tx, d, now, &record)?;
@@ -1983,6 +1994,7 @@ pub(crate) fn guard_observation(
     phase: &crate::BrokerPhase,
     proof: Option<&TerminalObservationProof>,
 ) -> Result<(), StoreError> {
+    terminal_input_writer::guard_observation(tx, phase, proof)?;
     if let crate::BrokerPhase::Observation {
         action_id, receipt, ..
     } = phase
