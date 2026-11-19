@@ -101,3 +101,5 @@ Sur `d8a95be` en branche de tâche, la sonde F012 de connexion autorisée et son
 `GetAgent` restitue la session durable et les relations autorisées sur le socket du daemon, avec un watermark du même snapshot. Les tests IPC du raccord et des projections existantes passent, et les schémas sont validés. Le test utilise des enregistrements préparés par le Store. Le producteur `CreateAgent` authentifié et les workers restent à raccorder.
 
 La suite F012 à neuf cas passe huit essais. Le neuvième, perte de l’accusé d’adoption, conserve les faits et la capacité attendus mais échoue au drainage. Le correctif de réveil est en cours de rejeu sur la branche de tâche. M2 reste à 13/16.
+
+Sur la branche F012 à `aa201e3`, la suite IPC passe ses neuf cas. Le banc observe deux retours `CapacityBlocked` avant les arrêts, avec conservation du fait et de la réservation après redémarrage. Le cas de changement de politique après Autorisation engagée et les campagnes fournisseur restent ouverts. M2 reste à 13/16.
