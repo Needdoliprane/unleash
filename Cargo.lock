@@ -6008,6 +6008,7 @@ version = "0.1.0"
 dependencies = [
  "jsonschema",
  "reqwest",
+ "rustls-native-certs",
  "secrecy",
  "serde",
  "serde_json",
