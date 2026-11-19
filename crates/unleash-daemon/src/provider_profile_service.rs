@@ -24,7 +24,7 @@ fn invalid() -> StoreError {
     }
 }
 
-fn caller_for(
+pub(crate) fn caller_for(
     session: &AuthenticatedSession,
     command: &CommandEnvelope,
 ) -> Result<CallerAuthority, IpcError> {
