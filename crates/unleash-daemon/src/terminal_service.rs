@@ -1,6 +1,26 @@
 //! Authenticated terminal configuration and allocation orchestration.
 
 use crate::ipc::DaemonRuntimeState;
+use std::collections::BTreeSet;
+use std::os::unix::fs::PermissionsExt;
+use unleash_action_broker::{
+    ActionBroker, ActionIntent, ActionProvenance, ActionSubject, AuthorityLayer,
+    AuthorizationOutcome, BrokerConfig, EffectiveAuthority, EffectsClass, HostIsolationProbe,
+    IsolationMode as BrokerIsolationMode, IsolationRequirements, LocalAuthorityFallbackPolicy,
+    NormalizedResourceRef, PlatformKeyringSecretStore, ScopeKind,
+    StrictNoneAcceptedObligationChecker, SystemClockAndTimer, compute_effective_authority,
+};
+use unleash_domain::{DataLocality, Fence, LineageFence, ModelPolicy, ReconcileStrategy};
+use unleash_process_host::{
+    CONTROL_SECRET_FILENAME, EnvironmentMode, HOST_MANIFEST_FILENAME, HOST_SOCKET_FILENAME,
+    HostBootstrapSpec, HostClient, HostControlSecret, HostManifest, HostRequest, HostResponse,
+    IsolationMode as HostIsolationMode, ResourceKind, effective_environment_digest_v1,
+    explicit_environment_v1, load_control_secret, store_control_secret,
+};
+use unleash_store::{
+    CallerAuthority, CallerRole, FenceAssertion, PrepareObjectRequest,
+    PublishObjectReferenceRequest, ResolveTerminalLaunchRequest,
+};
 
 #[path = "terminal_metadata.rs"]
 mod metadata;
@@ -9,7 +29,7 @@ pub(crate) use metadata::read_terminal_metadata;
 type ObservationSlot =
     Arc<std::sync::Mutex<Option<unleash_store::terminal_allocations::TerminalLaunchObservation>>>;
 
-#[derive(serde::Deserialize)]
+#[derive(Clone, Copy, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct LogQuery {
     terminal_id: unleash_domain::TerminalId,
@@ -76,67 +96,11 @@ pub(crate) async fn read_log(
     let root = state.store.config().data_root.clone();
     let ids = state.store.config().id_generator.clone();
     let run = record.context.process_run_uuid;
-    let result = tokio::task::spawn_blocking(
-        move || -> Result<_, Box<dyn std::error::Error + Send + Sync>> {
-            use unleash_process_host::*;
-            let c = &record.context;
-            let runtime = root.join("process-hosts").join(c.host_id.to_string());
-            let manifest = HostManifest::load_private(&runtime.join(HOST_MANIFEST_FILENAME))?;
-            if manifest.allocation_context_digest != Some(record.context_digest)
-                || manifest.process_run_uuid != c.process_run_uuid
-                || manifest.host_id != c.host_id
-                || manifest.action_id != c.action_id
-            {
-                return Err("terminal manifest binding differs".into());
-            }
-            let secret = load_control_secret(&runtime.join(CONTROL_SECRET_FILENAME))?;
-            let mut client = HostClient::connect(
-                &runtime.join(HOST_SOCKET_FILENAME),
-                c.process_run_uuid,
-                c.authority_generation,
-                c.daemon_epoch,
-                c.resource_fence,
-            )?;
-            let header =
-                client.make_header(ids.new_command_id(), c.action_id, record.payload_digest());
-            let HostResponse::HandshakeAck {
-                os_identity,
-                allocation_context_digest,
-                effective_environment_digest,
-                ..
-            } = client.call(&HostRequest::Handshake {
-                header,
-                current_secret: secret.expose_secret().into(),
-                rotate_to_secret: None,
-                require_higher_epoch: false,
-            })?
-            else {
-                return Err("terminal handshake refused".into());
-            };
-            if os_identity.pid != pid
-                || allocation_context_digest != Some(record.context_digest)
-                || effective_environment_digest != manifest.effective_environment_digest
-            {
-                return Err("terminal live identity differs".into());
-            }
-            let header =
-                client.make_header(ids.new_command_id(), c.action_id, record.payload_digest());
-            let HostResponse::LogChunk { result } = client.call(&HostRequest::ReadLog {
-                header,
-                secret: secret.expose_secret().into(),
-                after_offset: raw.after_offset,
-                max_bytes: raw.max_bytes,
-                strict_cursor: true,
-            })?
-            else {
-                return Err("terminal log unavailable".into());
-            };
-            Ok(result)
-        },
-    )
-    .await
-    .map_err(|_| hidden())?
-    .map_err(|_| hidden())?;
+    let result =
+        tokio::task::spawn_blocking(move || read_host_log(&root, ids.as_ref(), &record, pid, &raw))
+            .await
+            .map_err(|_| hidden())?
+            .map_err(|_| hidden())?;
     let text = result
         .segments
         .iter()
@@ -147,6 +111,66 @@ pub(crate) async fn read_log(
         watermark: Some(cursor),
         result: serde_json::json!({"terminal_id":raw.terminal_id,"process_run_uuid":run,"pid":pid,"text":String::from_utf8_lossy(&text),"durable_log_seq":result.durable_watermark_seq,"log":result}),
     })
+}
+
+fn read_host_log(
+    root: &std::path::Path,
+    ids: &dyn unleash_domain::IdGeneratorPort,
+    record: &unleash_store::TerminalAllocationRecord,
+    pid: u32,
+    raw: &LogQuery,
+) -> Result<unleash_process_host::LogReadResult, TerminalError> {
+    let c = &record.context;
+    let runtime = root.join("process-hosts").join(c.host_id.to_string());
+    let manifest = HostManifest::load_private(&runtime.join(HOST_MANIFEST_FILENAME))?;
+    if manifest.allocation_context_digest != Some(record.context_digest)
+        || manifest.process_run_uuid != c.process_run_uuid
+        || manifest.host_id != c.host_id
+        || manifest.action_id != c.action_id
+    {
+        return Err("terminal manifest binding differs".into());
+    }
+    let secret = load_control_secret(&runtime.join(CONTROL_SECRET_FILENAME))?;
+    let mut client = HostClient::connect(
+        &runtime.join(HOST_SOCKET_FILENAME),
+        c.process_run_uuid,
+        c.authority_generation,
+        c.daemon_epoch,
+        c.resource_fence,
+    )?;
+    let header = client.make_header(ids.new_command_id(), c.action_id, record.payload_digest());
+    let HostResponse::HandshakeAck {
+        os_identity,
+        allocation_context_digest,
+        effective_environment_digest,
+        ..
+    } = client.call(&HostRequest::Handshake {
+        header,
+        current_secret: secret.expose_secret().into(),
+        rotate_to_secret: None,
+        require_higher_epoch: false,
+    })?
+    else {
+        return Err("terminal handshake refused".into());
+    };
+    if os_identity.pid != pid
+        || allocation_context_digest != Some(record.context_digest)
+        || effective_environment_digest != manifest.effective_environment_digest
+    {
+        return Err("terminal live identity differs".into());
+    }
+    let header = client.make_header(ids.new_command_id(), c.action_id, record.payload_digest());
+    let HostResponse::LogChunk { result } = client.call(&HostRequest::ReadLog {
+        header,
+        secret: secret.expose_secret().into(),
+        after_offset: raw.after_offset,
+        max_bytes: raw.max_bytes,
+        strict_cursor: true,
+    })?
+    else {
+        return Err("terminal log unavailable".into());
+    };
+    Ok(result)
 }
 
 pub(crate) fn start(state: &Arc<DaemonRuntimeState>, terminal: unleash_domain::TerminalId) {
@@ -181,9 +205,6 @@ async fn run_allocation(
     record: unleash_store::TerminalAllocationRecord,
     activity: Arc<crate::broker_activity::BrokerActivityGuard>,
 ) -> Result<(), ()> {
-    use std::collections::BTreeSet;
-    use unleash_action_broker::*;
-    use unleash_domain::{DataLocality, Fence, LineageFence, ModelPolicy, ReconcileStrategy};
     let c = &record.context;
     let unleash_store::TerminalAllocationScope::ProjectConfiguration {
         project_id,
@@ -208,6 +229,63 @@ async fn run_allocation(
     {
         return Err(());
     }
+    let AllocationAuthorization {
+        authority,
+        fence,
+        intent,
+    } = allocation_authorization(&record)?;
+    let slot: ObservationSlot = Arc::new(std::sync::Mutex::new(None));
+    let broker = allocation_broker(&state, slot.clone(), fence);
+    broker.bump_scope_revision(Some(project_id), revision);
+    let decision = match broker
+        .authorize_action(intent, &authority)
+        .await
+        .map_err(|error| {tracing::warn!(terminal_stage="authorization",code=%error.error_code(),reason=?error.reason_code());})?
+    {
+        AuthorizationOutcome::Authorized(d) => d,
+        AuthorizationOutcome::ApprovalRequired { .. } => return Err(()),
+    };
+    let action = c.action_id;
+    let executor = TerminalExecutor {
+        state: state.clone(),
+        record,
+        slot,
+        activity,
+    };
+    let secrets = PlatformKeyringSecretStore::new(Arc::new(
+        unleash_platform::UnavailableOsKeyring::new("No terminal secrets in this qualified path"),
+    ));
+    let receipt=broker
+        .execute_authorized(
+            action,
+            &decision.decision_ref,
+            fence,
+            &authority,
+            &executor,
+            &secrets,
+        )
+        .await
+        .map_err(|error| {tracing::warn!(terminal_stage="execution_or_observation",code=%error.error_code(),reason=?error.reason_code());})?;
+    if receipt.state != unleash_domain::ActionState::ObservedSuccess {
+        return Err(());
+    }
+    Ok(())
+}
+
+struct AllocationAuthorization {
+    authority: EffectiveAuthority,
+    fence: LineageFence,
+    intent: ActionIntent,
+}
+
+fn allocation_authorization(
+    record: &unleash_store::TerminalAllocationRecord,
+) -> Result<AllocationAuthorization, ()> {
+    let c = &record.context;
+    let unleash_store::TerminalAllocationScope::ProjectConfiguration {
+        project_id,
+        revision,
+    } = c.preparation.scope;
     let authority = compute_effective_authority(
         Some(project_id),
         c.policy_revision,
@@ -227,7 +305,7 @@ async fn run_allocation(
             allowed_secret_refs: Some(BTreeSet::new()),
             model_policy: ModelPolicy::Forbidden,
             data_locality: DataLocality::LocalOnly,
-            isolation_mode: IsolationMode::Standard,
+            isolation_mode: BrokerIsolationMode::Standard,
             require_action_isolation: false,
             max_scope_kind: ScopeKind::Project,
             allow_delegation: false,
@@ -256,9 +334,20 @@ async fn run_allocation(
         secret_refs: vec![],
         provenance: ActionProvenance::EngineInternal,
     };
-    let slot: ObservationSlot = Arc::new(std::sync::Mutex::new(None));
+    Ok(AllocationAuthorization {
+        authority,
+        fence,
+        intent,
+    })
+}
+
+fn allocation_broker(
+    state: &Arc<DaemonRuntimeState>,
+    slot: ObservationSlot,
+    fence: LineageFence,
+) -> ActionBroker {
     let timer = Arc::new(SystemClockAndTimer::new());
-    let broker = ActionBroker::new(
+    ActionBroker::new(
         state.store.config().clock.clone(),
         timer.clone(),
         timer,
@@ -275,46 +364,9 @@ async fn run_allocation(
             canaries_to_redact: vec![],
         },
         Arc::new(
-            crate::broker_journal::SqliteBrokerJournal::with_terminal_observation(
-                &state,
-                slot.clone(),
-            ),
+            crate::broker_journal::SqliteBrokerJournal::with_terminal_observation(state, slot),
         ),
-    );
-    broker.bump_scope_revision(Some(project_id), revision);
-    let decision = match broker
-        .authorize_action(intent, &authority)
-        .await
-        .map_err(|error| {tracing::warn!(terminal_stage="authorization",code=%error.error_code(),reason=?error.reason_code());()})?
-    {
-        AuthorizationOutcome::Authorized(d) => d,
-        AuthorizationOutcome::ApprovalRequired { .. } => return Err(()),
-    };
-    let action = c.action_id;
-    let executor = TerminalExecutor {
-        state: state.clone(),
-        record,
-        slot,
-        activity,
-    };
-    let secrets = PlatformKeyringSecretStore::new(Arc::new(
-        unleash_platform::UnavailableOsKeyring::new("No terminal secrets in this qualified path"),
-    ));
-    let receipt=broker
-        .execute_authorized(
-            action,
-            &decision.decision_ref,
-            fence,
-            &authority,
-            &executor,
-            &secrets,
-        )
-        .await
-        .map_err(|error| {tracing::warn!(terminal_stage="execution_or_observation",code=%error.error_code(),reason=?error.reason_code());()})?;
-    if receipt.state != unleash_domain::ActionState::ObservedSuccess {
-        return Err(());
-    }
-    Ok(())
+    )
 }
 
 struct TerminalExecutor {
@@ -372,19 +424,32 @@ impl unleash_action_broker::ActionExecutorPort for TerminalExecutor {
     }
 }
 
+type TerminalError = Box<dyn std::error::Error + Send + Sync>;
+
+struct HostLaunch {
+    spec: HostBootstrapSpec,
+    secret: HostControlSecret,
+    expected: unleash_domain::Sha256Digest,
+}
+
 fn spawn_and_observe(
     state: &Arc<DaemonRuntimeState>,
     record: &unleash_store::TerminalAllocationRecord,
     dispatch: unleash_domain::DispatchId,
-) -> Result<
-    unleash_store::terminal_allocations::TerminalLaunchObservation,
-    Box<dyn std::error::Error + Send + Sync>,
-> {
-    use unleash_process_host::*;
-    use unleash_store::{
-        CallerAuthority, CallerRole, FenceAssertion, PrepareObjectRequest,
-        PublishObjectReferenceRequest, ResolveTerminalLaunchRequest,
-    };
+) -> Result<unleash_store::terminal_allocations::TerminalLaunchObservation, TerminalError> {
+    let profile = resolve_launch_permit(state, record, dispatch)?;
+    let launch = prepare_host_launch(state, record, profile)?;
+    spawn_registered_host(state, &launch)?;
+    let observation = observe_spawned_host(state, record, dispatch, &launch)?;
+    publish_launch_observation(state, &observation)?;
+    Ok(observation)
+}
+
+fn resolve_launch_permit(
+    state: &Arc<DaemonRuntimeState>,
+    record: &unleash_store::TerminalAllocationRecord,
+    dispatch: unleash_domain::DispatchId,
+) -> Result<unleash_store::terminal_allocations::TerminalEnvironmentProfile, TerminalError> {
     let c = &record.context;
     let profile = state
         .store
@@ -401,7 +466,7 @@ fn spawn_and_observe(
     }
     let process = &c.preparation.process_spec;
     if std::fs::canonicalize(&process.cwd_canonical)?
-        != std::path::PathBuf::from(&process.cwd_canonical)
+        != std::path::Path::new(&process.cwd_canonical)
     {
         return Err("terminal cwd changed".into());
     }
@@ -430,6 +495,16 @@ fn spawn_and_observe(
                 fence: c.resource_fence,
             },
         })?;
+    Ok(profile)
+}
+
+fn prepare_host_launch(
+    state: &Arc<DaemonRuntimeState>,
+    record: &unleash_store::TerminalAllocationRecord,
+    profile: unleash_store::terminal_allocations::TerminalEnvironmentProfile,
+) -> Result<HostLaunch, TerminalError> {
+    let c = &record.context;
+    let process = &c.preparation.process_spec;
     let base = state.store.config().data_root.join("process-hosts");
     unleash_platform::ensure_private_rendezvous_dir(&base)?;
     let runtime = base.join(c.host_id.to_string());
@@ -467,17 +542,31 @@ fn spawn_and_observe(
             rows: process.rows,
             cols: process.cols,
         },
-        isolation_mode: IsolationMode::Standard,
+        isolation_mode: HostIsolationMode::Standard,
         strict_spec: None,
         isolation_profile_kind: None,
         control_secret_path: secret_path.clone(),
         canaries_secret_path: None,
         max_segment_bytes: 65536,
-        max_total_log_bytes: 1048576,
+        max_total_log_bytes: 1_048_576,
         max_volatile_bytes: 65536,
     };
     let bootstrap = runtime.join("bootstrap.json");
     unleash_platform::write_private_file_atomic(&bootstrap, &serde_json::to_vec(&spec)?)?;
+    Ok(HostLaunch {
+        spec,
+        secret,
+        expected,
+    })
+}
+
+fn spawn_registered_host(
+    state: &Arc<DaemonRuntimeState>,
+    launch: &HostLaunch,
+) -> Result<(), TerminalError> {
+    let spec = &launch.spec;
+    let c = spec;
+    let bootstrap = spec.runtime_dir.join("bootstrap.json");
     let executable = std::env::current_exe()?
         .parent()
         .ok_or("daemon executable has no directory")?
@@ -513,9 +602,21 @@ fn spawn_and_observe(
             },
         )?;
     }
+    Ok(())
+}
+
+fn connect_spawned_host(
+    record: &unleash_store::TerminalAllocationRecord,
+    launch: &HostLaunch,
+) -> Result<HostClient, TerminalError> {
+    let c = &record.context;
+    let process = &c.preparation.process_spec;
+    let runtime = &launch.spec.runtime_dir;
+    let spec = &launch.spec;
+    let expected = launch.expected;
     let deadline =
         std::time::Instant::now() + std::time::Duration::from_millis(process.readiness_timeout_ms);
-    let mut client = loop {
+    let client = loop {
         match HostClient::connect(
             &runtime.join(HOST_SOCKET_FILENAME),
             c.process_run_uuid,
@@ -525,7 +626,7 @@ fn spawn_and_observe(
         ) {
             Ok(client) => break client,
             Err(_) if std::time::Instant::now() < deadline => {
-                std::thread::sleep(std::time::Duration::from_millis(10))
+                std::thread::sleep(std::time::Duration::from_millis(10));
             }
             Err(error) => return Err(error.into()),
         }
@@ -541,6 +642,18 @@ fn spawn_and_observe(
     {
         return Err("host manifest does not match launch".into());
     }
+    Ok(client)
+}
+
+fn acknowledge_spawned_host(
+    state: &Arc<DaemonRuntimeState>,
+    record: &unleash_store::TerminalAllocationRecord,
+    launch: &HostLaunch,
+    client: &mut HostClient,
+) -> Result<unleash_platform::OsProcessIdentity, TerminalError> {
+    let c = &record.context;
+    let secret = &launch.secret;
+    let expected = launch.expected;
     let header = client.make_header(
         state.store.config().id_generator.new_command_id(),
         c.action_id,
@@ -566,6 +679,21 @@ fn spawn_and_observe(
     {
         return Err("host applied proof differs".into());
     }
+    Ok(os_identity)
+}
+
+fn observe_spawned_host(
+    state: &Arc<DaemonRuntimeState>,
+    record: &unleash_store::TerminalAllocationRecord,
+    dispatch: unleash_domain::DispatchId,
+    launch: &HostLaunch,
+) -> Result<unleash_store::terminal_allocations::TerminalLaunchObservation, TerminalError> {
+    let c = &record.context;
+    let runtime = &launch.spec.runtime_dir;
+    let secret = &launch.secret;
+    let expected = launch.expected;
+    let mut client = connect_spawned_host(record, launch)?;
+    let os_identity = acknowledge_spawned_host(state, record, launch, &mut client)?;
     let header = client.make_header(
         state.store.config().id_generator.new_command_id(),
         c.action_id,
@@ -609,14 +737,23 @@ fn spawn_and_observe(
         exit_signal: exit_status.and_then(|s| s.exit_signal),
         exited: exit_status.is_some(),
     };
-    let bytes = unleash_protocol::canonicalize_to_vec(&observation)?;
-    let digest = unleash_protocol::canonical_sha256(&observation)?;
+    Ok(observation)
+}
+
+fn publish_launch_observation(
+    state: &Arc<DaemonRuntimeState>,
+    observation: &unleash_store::terminal_allocations::TerminalLaunchObservation,
+) -> Result<(), TerminalError> {
+    let terminal = observation.terminal_id;
+    let dispatch = observation.dispatch_id;
+    let bytes = unleash_protocol::canonicalize_to_vec(observation)?;
+    let digest = unleash_protocol::canonical_sha256(observation)?;
     let object = state.store.prepare_object(PrepareObjectRequest {
         object_hash: digest,
         byte_length: bytes.len() as u64,
         media_type: "application/json".into(),
         owner_kind: "terminal_launch_observation".into(),
-        owner_id: c.terminal_id.to_string(),
+        owner_id: terminal.to_string(),
     })?;
     state.store.write_prepared_object_bytes(&object, &bytes)?;
     state
@@ -626,10 +763,10 @@ fn spawn_and_observe(
             object_hash: digest,
             object_generation: object.object_generation,
             owner_kind: "terminal_launch_observation".into(),
-            owner_id: c.terminal_id.to_string(),
+            owner_id: terminal.to_string(),
             source_field: dispatch.to_string(),
         })?;
-    Ok(observation)
+    Ok(())
 }
 
 #[derive(serde::Deserialize)]
@@ -720,7 +857,6 @@ pub(crate) async fn prepare_acquisition(
         let cwd=root.join(relative).canonicalize().map_err(|_|invalid())?;
         if root!=canonical_root || !cwd.starts_with(&canonical_root) || cwd!=root.join(relative) || !cwd.is_dir() {return Err(invalid());}
         let program=std::path::Path::new(&raw.program);
-        use std::os::unix::fs::PermissionsExt;
         let metadata=std::fs::metadata(program).map_err(|_|invalid())?;
         if !program.is_absolute() || !metadata.is_file() || metadata.permissions().mode()&0o111==0 || metadata.permissions().mode()&0o6000!=0 {return Err(invalid());}
         Ok(TerminalAllocationPreparation {mission_id:raw.mission_id,mission_revision:unleash_domain::Revision::new(u64::try_from(mission_revision).map_err(|_|invalid())?),scope:TerminalAllocationScope::ProjectConfiguration {project_id:project,revision:scope.revision},purpose_key:raw.purpose_key,
