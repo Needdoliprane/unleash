@@ -518,6 +518,21 @@ fn connect_intent(
     }
 }
 
+fn authorizing(
+    intent: unleash_store::BrokerIntent,
+    evaluation: u128,
+) -> unleash_store::BrokerPhaseRequest {
+    unleash_store::BrokerPhaseRequest {
+        authority_generation: intent.lineage_fence.authority_generation,
+        expected_revision: Revision::INITIAL,
+        evaluation: unleash_store::BrokerEvaluation {
+            evaluation_id: unleash_domain::AuthorizationEvaluationId::from_u128(evaluation),
+            previous_evaluation_id: None,
+        },
+        phase: unleash_store::BrokerPhase::Authorizing { intent },
+    }
+}
+
 #[test]
 fn t_f012_013_connect_without_claim_cannot_enter_generic_broker() {
     let (store, _directory, mandate, _) = fixture();
@@ -529,15 +544,7 @@ fn t_f012_013_connect_without_claim_cannot_enter_generic_broker() {
         .value
         .unwrap();
     let intent = connect_intent(&record);
-    let request = unleash_store::BrokerPhaseRequest {
-        authority_generation: intent.lineage_fence.authority_generation,
-        expected_revision: Revision::INITIAL,
-        evaluation: unleash_store::BrokerEvaluation {
-            evaluation_id: unleash_domain::AuthorizationEvaluationId::from_u128(18),
-            previous_evaluation_id: None,
-        },
-        phase: unleash_store::BrokerPhase::Authorizing { intent },
-    };
+    let request = authorizing(intent, 18);
     let before = counts(&store);
     let outcome = store.commit_broker_phase(request);
     assert!(
@@ -549,4 +556,101 @@ fn t_f012_013_connect_without_claim_cannot_enter_generic_broker() {
         before,
         "aucune intention, place ou ModelCall sans claim"
     );
+}
+
+#[test]
+fn t_f012_013_connect_evidence_missing_context_cannot_use_another_receipt() {
+    let (store, _directory, mandate, _) = fixture();
+    let wire = connect(&store, 20, mandate);
+    store.commit_command(prepare(&store, &wire)).unwrap();
+    let record = store
+        .inspect_provider_probe_connect_snapshot(ProviderProbeId::from_uuid(wire.aggregate_id))
+        .unwrap()
+        .value
+        .unwrap();
+    let configured = store
+        .resolve_provider_profile_snapshot(PROFILE, 1)
+        .unwrap()
+        .value
+        .unwrap();
+    let mut intent = connect_intent(&record);
+    // A real receipt from another operation is not a transport preparation.
+    intent.action_id = unleash_domain::ActionId::from_uuid(store.config().id_generator.new_uuid());
+    intent.cause = unleash_store::BrokerCause::CommandReceipt {
+        receipt_id: configured.receipt_id,
+    };
+    intent
+        .manifest
+        .insert("action_id".into(), json!(intent.action_id));
+    intent
+        .manifest
+        .get_mut("subject")
+        .unwrap()
+        .as_object_mut()
+        .unwrap()
+        .insert(
+            "cause_ref".into(),
+            json!(format!("receipt:{}", configured.receipt_id)),
+        );
+    intent.intent_digest = unleash_protocol::canonical_sha256(&intent.manifest).unwrap();
+    let before = counts(&store);
+    let outcome = store.commit_broker_phase(authorizing(intent, 20));
+    assert!(
+        matches!(&outcome, Err(StoreError::NotFound(_))),
+        "un reçu de configuration ne remplace pas le contexte : {outcome:?}"
+    );
+    assert_eq!(counts(&store), before);
+}
+
+#[test]
+fn t_f012_013_connect_evidence_blob_is_rechecked_before_new_commit_but_not_replay() {
+    for absent in [true, false] {
+        let (store, _directory, mandate, _) = fixture();
+        let wire = connect(&store, 21, mandate);
+        let first = prepare(&store, &wire);
+        let pending = prepare(&store, &connect(&store, 22, mandate));
+        let receipt = store
+            .commit_command(first.clone())
+            .unwrap()
+            .receipt()
+            .clone();
+        let profile = store
+            .resolve_provider_profile_snapshot(PROFILE, 1)
+            .unwrap()
+            .value
+            .unwrap();
+        let hash = profile.configuration_digest;
+        let relative: String = store
+            .read_snapshot(|db, _| {
+                db.query_row(
+                    "SELECT relative_path FROM object_records WHERE object_hash=?1",
+                    [hash.to_string()],
+                    |row| row.get(0),
+                )
+                .map_err(StoreError::from)
+            })
+            .unwrap();
+        let path = store.config().artifacts_dir.join(relative);
+        // Only this fixture's exact source object is made unavailable/corrupt.
+        if absent {
+            std::fs::remove_file(&path).unwrap();
+        } else {
+            std::fs::write(&path, b"synthetic-corrupt-configuration").unwrap();
+        }
+        let before = counts(&store);
+        let outcome = store.commit_command(pending);
+        assert!(
+            matches!(&outcome, Err(StoreError::EvidenceUnavailable(_))),
+            "commit sans blob valide, absent={absent} : {outcome:?}"
+        );
+        assert_eq!(
+            store
+                .lookup_provider_validation_command(&wire, &caller())
+                .unwrap()
+                .as_ref(),
+            Some(&receipt)
+        );
+        assert_eq!(store.commit_command(first).unwrap().receipt(), &receipt);
+        assert_eq!(counts(&store), before);
+    }
 }
