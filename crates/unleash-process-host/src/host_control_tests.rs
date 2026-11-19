@@ -41,6 +41,11 @@ impl<T> Drop for Fixture<T> {
     }
 }
 fn fixture() -> Fixture<impl std::fmt::Debug> {
+    fixture_with_observer(Some(Arc::new(FailAtC5)))
+}
+fn fixture_with_observer(
+    observer: Option<Arc<dyn HostCutpointObserver>>,
+) -> Fixture<impl std::fmt::Debug> {
     let directory = local_test_dir("host-unknown").unwrap();
     let runtime = directory.path().join("runtime");
     unleash_platform::ensure_private_rendezvous_dir(&runtime).unwrap();
@@ -92,7 +97,7 @@ fn fixture() -> Fixture<impl std::fmt::Debug> {
             &spec,
             &OsIsolationBackendProbe::new(),
             Box::new(OsProcessInspector),
-            Some(Arc::new(FailAtC5)),
+            observer,
         )
         .unwrap(),
     );
@@ -104,6 +109,73 @@ fn fixture() -> Fixture<impl std::fmt::Debug> {
         spec,
         _directory: directory,
     }
+}
+
+#[test]
+fn t_f011_control_rotation_waits_for_previously_admitted_input() {
+    let fixture = fixture_with_observer(None);
+    let spec = &fixture.spec;
+    let mut old = HostClient::connect(
+        &spec.runtime_dir.join(HOST_SOCKET_FILENAME),
+        spec.process_run_uuid,
+        spec.authority_generation,
+        spec.daemon_epoch,
+        Fence::new(2),
+    )
+    .unwrap();
+    let writer = fixture.server.shared.writer.lock().unwrap();
+    let header = old.make_header(
+        CommandId::from_u128(20),
+        ActionId::from_u128(21),
+        Sha256Digest::from_bytes(b"admitted-before-transfer\n"),
+    );
+    let input = std::thread::spawn(move || {
+        old.call(&HostRequest::SendInput {
+            header,
+            secret: SECRET.into(),
+            input_seq: 1,
+            payload_bytes: b"admitted-before-transfer\n".to_vec(),
+            now_ms: TimestampMs::new(1),
+        })
+        .unwrap()
+    });
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    while fixture.server.shared.fencing.lock().unwrap().current().fence != Fence::new(2) {
+        assert!(std::time::Instant::now() < deadline, "old input reaches the effect gate");
+        std::thread::yield_now();
+    }
+    let mut successor = HostClient::connect(
+        &spec.runtime_dir.join(HOST_SOCKET_FILENAME),
+        spec.process_run_uuid,
+        spec.authority_generation,
+        DaemonEpoch::new(2),
+        Fence::new(3),
+    )
+    .unwrap();
+    let header = successor.make_header(
+        CommandId::from_u128(22),
+        ActionId::from_u128(23),
+        Sha256Digest::from_bytes(b"transfer"),
+    );
+    let (sent, observed) = std::sync::mpsc::channel();
+    let transfer = std::thread::spawn(move || {
+        let response = successor.call(&HostRequest::Handshake {
+            header,
+            current_secret: SECRET.into(),
+            rotate_to_secret: Some("synthetic-successor-control-secret".into()),
+            require_higher_epoch: true,
+        }).unwrap();
+        sent.send(response).unwrap();
+    });
+    // The old PTY writer is deliberately still unavailable. An ACK at this
+    // point would let a superseded input write after transfer confirmation.
+    let premature = observed.recv_timeout(Duration::from_millis(150)).ok();
+    drop(writer);
+    assert!(matches!(input.join().unwrap(), HostResponse::InputReceipt { .. }));
+    let response = premature.clone().unwrap_or_else(|| observed.recv_timeout(Duration::from_secs(2)).unwrap());
+    transfer.join().unwrap();
+    assert!(matches!(response, HostResponse::HandshakeAck { secret_rotated: true, .. }));
+    assert!(premature.is_none(), "rotation ACK preceded the admitted PTY write");
 }
 fn handshake(client: &mut HostClient, id: u128, action: ActionId) -> HostResponse {
     let header = client.make_header(

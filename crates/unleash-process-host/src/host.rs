@@ -75,6 +75,9 @@ pub struct LostHostReconciliation {
 }
 
 struct ServerShared {
+    // Serializes authentication/fencing with actual PTY effects and rotation.
+    // Socket reads/writes are outside this gate and cannot pin its owner.
+    operation_gate: Mutex<()>,
     manifest_path: PathBuf,
     control_secret_path: PathBuf,
     socket_path: PathBuf,
@@ -381,6 +384,7 @@ impl ProcessHostServer {
         let listener = bind_private_unix_listener(&socket_path)?;
 
         let shared = Arc::new(ServerShared {
+            operation_gate: Mutex::new(()),
             manifest_path,
             control_secret_path: spec.control_secret_path.clone(),
             socket_path,
@@ -624,6 +628,11 @@ fn handle_connection(mut stream: UnixStream, shared: &Arc<ServerShared>) {
             }
         };
 
+        let operation = shared
+            .operation_gate
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // Recheck channel generation under the same gate as fencing and I/O.
         // Si le secret a tourné après un Handshake de récupération sur une autre connexion,
         // invalider immédiatement toute ancienne connexion ouverte avant toute opération.
         let current_auth_gen = shared.auth_generation.load(Ordering::SeqCst);
@@ -633,6 +642,7 @@ fn handle_connection(mut stream: UnixStream, shared: &Arc<ServerShared>) {
                     "canal obsolète invalidé par rotation de capacité lors d'une reprise",
                 ),
             };
+            drop(operation);
             let _ = send_response(
                 &mut stream,
                 &HostResponse::Error {
@@ -653,6 +663,7 @@ fn handle_connection(mut stream: UnixStream, shared: &Arc<ServerShared>) {
             bound_auth_gen = shared.auth_generation.load(Ordering::SeqCst);
         }
         let is_shutdown = matches!(resp, HostResponse::ShutdownAck);
+        drop(operation);
         if send_response(&mut stream, &resp).is_err() || is_shutdown {
             break;
         }
