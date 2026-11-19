@@ -218,9 +218,8 @@ pub fn authorize_command(
 
     let required = match cmd.command_type.as_str() {
         "CreateProject" | "ReviseProject" => Capability::ManageProjects,
-        "SetSettings" | "SetPolicy" | "ConfigureGuard" | "PurgeHistory" | "RequestBackup" => {
-            Capability::Administer
-        }
+        "SetSettings" | "SetPolicy" | "ConfigureGuard" | "PurgeHistory" | "RequestBackup"
+        | "SetProviderProfile" => Capability::Administer,
         "AssignMission" | "PauseMission" | "ResumeMission" | "CancelMission" => {
             Capability::ManageMissions
         }
