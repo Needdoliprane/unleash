@@ -528,12 +528,31 @@ mod input_cli_scenarios {
             let output = invoke(cli, &invalid);
             assert!(!output.status.success());
             let error: Value = serde_json::from_slice(&output.stderr).unwrap();
+            assert_eq!(input_counts(fixture), (0, 0, 0));
+            assert!(
+                !fixture
+                    .project_root
+                    .path()
+                    .join("cli-input-effects")
+                    .exists()
+            );
+            let expected = if flag == "--fence" {
+                "StaleFence"
+            } else {
+                "InvalidArgument"
+            };
             assert_eq!(
                 error.get("code"),
-                Some(&json!("ContractViolation")),
+                Some(&json!(expected)),
                 "writer refuses the mismatching {flag}: {error}"
             );
-            assert_eq!(input_counts(fixture), (0, 0, 0));
+            if flag == "--fence" {
+                assert_eq!(error.get("reason_code"), Some(&json!("STALE_EPOCH")));
+                assert_eq!(
+                    error.get("retry_class"),
+                    Some(&json!("after_reconciliation"))
+                );
+            }
         }
     }
 
