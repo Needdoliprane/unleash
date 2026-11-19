@@ -7,6 +7,9 @@ mod legacy_query_scenarios;
 
 #[path = "terminal_acquisition_time_scenarios.rs"]
 mod time_query_scenarios;
+
+#[path = "terminal_input_writer_scenarios.rs"]
+mod input_writer_scenarios;
 use unleash_domain::{ActionState, TimestampMs};
 use unleash_store::terminal_allocations::{
     RegisteredTerminalControl, ResolveTerminalControlRequest, TERMINAL_CONTROL_VERB,

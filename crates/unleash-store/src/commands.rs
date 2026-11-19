@@ -84,6 +84,8 @@ pub enum AggregateKind {
     TerminalControl,
     /// Intention de transfert, distincte de la révision effective du terminal.
     TerminalControlIntent,
+    /// Durable input intention, independent of the controller revision.
+    TerminalInputIntent,
 }
 
 impl AggregateKind {
@@ -113,6 +115,7 @@ impl AggregateKind {
             Self::TerminalAllocation => "terminal_allocation",
             Self::TerminalControl => "terminal_control",
             Self::TerminalControlIntent => "terminal_control_intent",
+            Self::TerminalInputIntent => "terminal_input_intent",
         }
     }
 }
@@ -120,6 +123,13 @@ impl AggregateKind {
 /// Mutation pure décidée par le domaine et exécutée atomiquement par [`CommitCommandRequest`].
 #[derive(Debug, Clone)]
 pub enum CommandMutation {
+    /// Accept an exact input intention without retaining its raw bytes or performing I/O.
+    PrepareTerminalInput {
+        /// Identity and role resolved by the authenticated daemon connection.
+        caller: CallerAuthority,
+        /// Exact closed payload, distinct from any observed native receipt.
+        request: crate::terminal_allocations::terminal_input_types::TerminalInputRequest,
+    },
     /// Prépare un transfert de contrôle sans contact host ni nouvelle lease held.
     PrepareTerminalControl {
         /// Autorité humaine dérivée de la session.
@@ -1148,6 +1158,7 @@ pub(crate) fn tx_commit_command(
             req.mutation,
             CommandMutation::PrepareTerminalAllocation { .. }
                 | CommandMutation::PrepareTerminalControl { .. }
+                | CommandMutation::PrepareTerminalInput { .. }
         ) {
         ReceiptState::Accepted
     } else {
@@ -1156,6 +1167,16 @@ pub(crate) fn tx_commit_command(
     let control_result = if matches!(req.mutation, CommandMutation::PrepareTerminalControl { .. }) {
         let action:String=tx.query_row("SELECT action_id FROM terminal_control_intents WHERE receipt_id=?1 AND actor_id=?2 AND command_id=?3",rusqlite::params![receipt_id.to_string(),actor_str,cmd_str],|row|row.get(0))?;
         Some(format!("terminal-control:{action}"))
+    } else {
+        None
+    };
+    let input_result = if matches!(req.mutation, CommandMutation::PrepareTerminalInput { .. }) {
+        let action: String = tx.query_row(
+            "SELECT action_id FROM terminal_input_intents WHERE receipt_id=?1 AND actor_id=?2 AND command_id=?3",
+            rusqlite::params![receipt_id.to_string(), actor_str, cmd_str],
+            |row| row.get(0),
+        )?;
+        Some(format!("terminal-input:{action}"))
     } else {
         None
     };
@@ -1196,6 +1217,7 @@ pub(crate) fn tx_commit_command(
                 }
             })
             .or(control_result)
+            .or(input_result)
             .or_else(|| req.result_ref.clone()),
     };
     let receipt_json = serde_json::to_string(&receipt)?;
@@ -1338,6 +1360,21 @@ fn apply_command_mutation(
 ) -> Result<Revision, StoreError> {
     let exp_i64 = i64::try_from(expected_rev.as_u64()).unwrap_or(0);
     match mutation {
+        CommandMutation::PrepareTerminalInput { request, .. } => {
+            crate::terminal_allocations::terminal_input_writer::prepare_tx(
+                tx,
+                config,
+                daemon,
+                now_ms,
+                crate::terminal_allocations::terminal_input_writer::InputCommand {
+                    actor_id,
+                    envelope,
+                    request,
+                    receipt_id,
+                },
+                generated_events,
+            )
+        }
         CommandMutation::PrepareTerminalControl { request, .. } => {
             crate::terminal_allocations::prepare_control_tx(
                 tx,

@@ -3,6 +3,8 @@
 //! n'attestent ni ce resolver ni un rattachement réel de PTY.
 
 pub mod terminal_acquisition_query;
+pub mod terminal_input_types;
+pub(crate) mod terminal_input_writer;
 
 use crate::{CallerAuthority, FenceAssertion, StoreError};
 use serde::{Deserialize, Serialize};
@@ -1301,6 +1303,12 @@ pub(crate) fn validate_command(
     tx: &Transaction<'_>,
     req: &CommitCommandRequest,
 ) -> Result<(), StoreError> {
+    if let CommandMutation::PrepareTerminalInput { caller, request } = &req.mutation {
+        return terminal_input_writer::validate_command(req, caller, request);
+    }
+    if req.envelope.command_type == "SendTerminalInput" {
+        return Err(invalid("terminal input mutation missing"));
+    }
     if let CommandMutation::PrepareTerminalControl { caller, request } = &req.mutation {
         if req.target_aggregate != AggregateKind::TerminalControl
             || req.envelope.command_type != "AcquireTerminal"
