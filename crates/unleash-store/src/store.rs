@@ -2122,7 +2122,7 @@ impl UnleashStore {
         })
     }
 
-    fn project_snapshot<T>(
+    pub(crate) fn project_snapshot<T>(
         &self,
         read: impl FnOnce(&Connection) -> Result<T, StoreError>,
     ) -> Result<SnapshotProjection<T>, StoreError> {

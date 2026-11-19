@@ -208,6 +208,7 @@ pub(crate) fn validate_new_command(
 ) -> Result<(), StoreError> {
     if validate_identity(request)?
         && (request.envelope.expected_revision != Revision::INITIAL
+            || request.operation_id.is_some()
             || !request.events.is_empty()
             || !request.capacity_reservations.is_empty()
             || !request.budget_reservations.is_empty()
