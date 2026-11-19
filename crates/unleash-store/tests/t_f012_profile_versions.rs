@@ -27,6 +27,142 @@ use uuid::Uuid;
 
 const PROFILE: Uuid = Uuid::from_u128(0xf012);
 
+#[test]
+fn t_f012_002_authenticated_command_lookup_needs_no_preparation() {
+    let (store, _directory) = fixture(Arc::new(NoopCutpointObserver));
+    let command = request(&store, prepare(&store, 1, None, "v1"), 17_000);
+    let caller = CallerAuthority {
+        actor_id: actor(),
+        role: CallerRole::HumanOperator,
+    };
+    assert!(
+        store
+            .lookup_provider_profile_command(&command.envelope, &caller)
+            .unwrap()
+            .is_none()
+    );
+    let first = store.commit_command(command.clone()).unwrap();
+    assert_eq!(
+        store
+            .lookup_provider_profile_command(&command.envelope, &caller)
+            .unwrap()
+            .unwrap(),
+        *first.receipt()
+    );
+    let mut changed = command.envelope.clone();
+    changed
+        .payload
+        .insert("model".to_owned(), json!("different-wire"));
+    assert!(matches!(
+        store.lookup_provider_profile_command(&changed, &caller),
+        Err(StoreError::IdempotencyConflict { .. })
+    ));
+    let mut stale = command.envelope.clone();
+    stale.authority_generation = unleash_domain::AuthorityGeneration::from_u128(1);
+    assert!(matches!(
+        store.lookup_provider_profile_command(&stale, &caller),
+        Err(StoreError::StaleAuthorityGeneration { .. })
+    ));
+    let mut denied = caller.clone();
+    denied.role = CallerRole::Agent;
+    assert!(
+        store
+            .lookup_provider_profile_command(&command.envelope, &denied)
+            .is_err()
+    );
+    let other = CallerAuthority {
+        actor_id: ActorId::new("user:other").unwrap(),
+        role: CallerRole::HumanOperator,
+    };
+    let mut another_actor = command.envelope.clone();
+    another_actor.actor_ref = Some(other.actor_id.to_string());
+    assert!(
+        store
+            .lookup_provider_profile_command(&another_actor, &other)
+            .unwrap()
+            .is_none()
+    );
+    // Explicit retention fixture: classification must retain the canonical tombstone error.
+    store.execute_in_writer_tx(WriteCriticality::Critical,move|tx,_| {tx.execute("UPDATE command_receipts SET response_state='tombstone',response_json=NULL WHERE command_id=?1",[command.envelope.command_id.to_string()])?;Ok(())}).unwrap();
+    assert!(matches!(
+        store.lookup_provider_profile_command(&another_actor, &caller),
+        Err(StoreError::InvalidArgument { .. })
+    ));
+    another_actor.actor_ref = Some(actor().to_string());
+    assert!(matches!(
+        store.lookup_provider_profile_command(&another_actor, &caller),
+        Err(StoreError::IdempotencyWindowExpired { .. })
+    ));
+}
+
+#[test]
+fn t_f012_002_retiring_one_candidate_preserves_committed_profile_and_other_attempt() {
+    let (store, _directory) = fixture(Arc::new(NoopCutpointObserver));
+    let preparation = prepare(&store, 1, None, "v1");
+    let hash = preparation.content_object_hash;
+    store
+        .commit_command(request(&store, preparation, 18_000))
+        .unwrap();
+    let original = store
+        .resolve_provider_profile_snapshot(PROFILE, 1)
+        .unwrap()
+        .value
+        .unwrap();
+    let bytes = store.read_verified_object_bytes(hash).unwrap();
+    let stage = |owner: &str| {
+        let handle = store
+            .prepare_object(PrepareObjectRequest {
+                object_hash: hash,
+                byte_length: bytes.len() as u64,
+                media_type: "application/json".to_owned(),
+                owner_kind: "provider_profile_preparation".to_owned(),
+                owner_id: owner.to_owned(),
+            })
+            .unwrap();
+        store
+            .publish_owned_object_reference(PublishObjectReferenceRequest {
+                pin_id: handle.pin_id,
+                object_hash: hash,
+                object_generation: handle.object_generation,
+                owner_kind: "provider_profile_preparation".to_owned(),
+                owner_id: owner.to_owned(),
+                source_field: "configuration".to_owned(),
+            })
+            .unwrap()
+    };
+    let first = stage("attempt-a");
+    let second = stage("attempt-b");
+    assert_eq!(
+        store
+            .retire_owned_object_reference(first.clone(), "candidate-finished")
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        store
+            .retire_owned_object_reference(first, "candidate-finished")
+            .unwrap(),
+        0
+    );
+    store.read_snapshot(|conn,_| {
+        let business:i64=conn.query_row("SELECT COUNT(*) FROM object_references WHERE object_hash=?1 AND owner_kind='provider_profile' AND state='live'",[hash.to_string()],|row|row.get(0))?;
+        let other:i64=conn.query_row("SELECT COUNT(*) FROM object_references WHERE object_hash=?1 AND owner_kind='provider_profile_preparation' AND owner_id='attempt-b' AND state='live'",[hash.to_string()],|row|row.get(0))?;
+        assert_eq!((business,other),(1,1));Ok(())
+    }).unwrap();
+    store
+        .retire_owned_object_reference(second, "candidate-finished")
+        .unwrap();
+    assert_eq!(store.read_verified_object_bytes(hash).unwrap(), bytes);
+    assert_eq!(
+        store
+            .resolve_provider_profile_snapshot(PROFILE, 1)
+            .unwrap()
+            .value
+            .unwrap(),
+        original
+    );
+}
+
 fn publish(store: &UnleashStore, value: &impl serde::Serialize) -> Sha256Digest {
     let bytes = canonicalize_to_vec(value).unwrap();
     let hash = Sha256Digest::from_bytes(&bytes);

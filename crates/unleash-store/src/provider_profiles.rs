@@ -174,20 +174,30 @@ pub(crate) fn validate_identity(request: &CommitCommandRequest) -> Result<bool, 
         }
         return Ok(false);
     };
-    require_security_admin(caller, "SetProviderProfile")?;
     if caller.actor_id != request.actor_id
-        || request
-            .envelope
-            .actor_ref
-            .as_ref()
-            .is_some_and(|actor| actor != request.actor_id.as_str())
-        || request.envelope.command_type != "SetProviderProfile"
         || request.target_aggregate != AggregateKind::ProviderProfile
-        || request.envelope.aggregate_id.is_nil()
     {
         return Err(invalid("identité de configuration profil incohérente"));
     }
+    validate_envelope_identity(&request.envelope, caller)?;
     Ok(true)
+}
+
+pub(crate) fn validate_envelope_identity(
+    envelope: &unleash_protocol::CommandEnvelope,
+    caller: &crate::CallerAuthority,
+) -> Result<(), StoreError> {
+    require_security_admin(caller, "SetProviderProfile")?;
+    if envelope.command_type != "SetProviderProfile"
+        || envelope.aggregate_id.is_nil()
+        || envelope
+            .actor_ref
+            .as_ref()
+            .is_some_and(|actor| actor != caller.actor_id.as_str())
+    {
+        return Err(invalid("identité de configuration profil incohérente"));
+    }
+    Ok(())
 }
 
 /// La préparation n'est validée qu'après absence attestée de reçu dans le writer.
@@ -212,7 +222,10 @@ pub(crate) fn validate_new_command(request: &CommitCommandRequest) -> Result<(),
                 .as_u64()
                 .checked_add(1)
                 .ok_or_else(|| invalid("version maximale atteinte"))?
-        || wire != config.payload
+        || wire
+            .with_normalized_endpoint()
+            .map_err(|_| invalid("endpoint de profil invalide"))?
+            != config.payload
         || !request.events.is_empty()
         || !request.capacity_reservations.is_empty()
         || !request.budget_reservations.is_empty()

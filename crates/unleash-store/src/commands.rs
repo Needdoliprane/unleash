@@ -793,34 +793,35 @@ impl CommandReplayRow {
 pub(crate) fn classify_command_replay(
     conn: &Connection,
     daemon: &DaemonStateRow,
-    req: &CommitCommandRequest,
+    actor: &ActorId,
+    envelope: &CommandEnvelope,
     digest: Sha256Digest,
 ) -> Result<Option<CommandReceipt>, StoreError> {
-    if req.envelope.authority_generation != daemon.authority_generation {
+    if envelope.authority_generation != daemon.authority_generation {
         return Err(StoreError::StaleAuthorityGeneration {
             expected: daemon.authority_generation,
-            actual: req.envelope.authority_generation,
-            command_id: Some(req.envelope.command_id),
+            actual: envelope.authority_generation,
+            command_id: Some(envelope.command_id),
         });
     }
     let existing = conn.query_row(
         "SELECT receipt_id,command_digest,response_state,response_json,authority_generation FROM command_receipts WHERE actor_id=?1 AND command_id=?2",
-        rusqlite::params![req.actor_id.as_str(),req.envelope.command_id.to_string()],
+        rusqlite::params![actor.as_str(),envelope.command_id.to_string()],
         CommandReplayRow::read,
     ).optional()?;
     let Some(row) = existing else {
         return Ok(None);
     };
-    let historical_profile = matches!(req.mutation, CommandMutation::SetProviderProfile { .. })
+    let historical_profile = envelope.command_type == "SetProviderProfile"
         && row.authority_generation != daemon.authority_generation.to_string();
     if historical_profile || row.digest != digest.as_prefixed_str() {
         return Err(StoreError::IdempotencyConflict {
-            command_id: req.envelope.command_id,
+            command_id: envelope.command_id,
         });
     }
     if row.state == "tombstone" {
         return Err(StoreError::IdempotencyWindowExpired {
-            command_id: req.envelope.command_id,
+            command_id: envelope.command_id,
             receipt_id: row.receipt_id.parse()?,
         });
     }
@@ -862,7 +863,9 @@ pub(crate) fn tx_commit_command(
     // Étape 2 : Rechercher `(actor_id, command_id)` dans `command_receipts`
     let actor_str = req.actor_id.as_str();
     let cmd_str = req.envelope.command_id.to_string();
-    if let Some(receipt) = classify_command_replay(tx, &daemon, req, command_digest)? {
+    if let Some(receipt) =
+        classify_command_replay(tx, &daemon, &req.actor_id, &req.envelope, command_digest)?
+    {
         return Ok(CommitOutcome::IdempotentReplay(receipt));
     }
     crate::provider_profiles::validate_new_command(req)?;

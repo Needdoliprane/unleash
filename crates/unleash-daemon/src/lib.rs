@@ -30,6 +30,7 @@ pub mod diagnostic;
 pub mod error;
 pub mod executors;
 pub mod ipc;
+mod provider_profile_service;
 pub mod recovery;
 pub mod subscriptions;
 

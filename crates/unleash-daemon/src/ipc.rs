@@ -1009,64 +1009,91 @@ async fn handle_command_frame(
         return false;
     };
 
-    let mut prepared = match prepare_command_request(state, session, cmd.clone()).await {
-        Ok(p) => p,
-        Err(ipc) => {
-            let _ = write_json_frame_timeout(stream, &ipc, RESPONSE_WRITE_TIMEOUT).await;
-            return false;
-        }
-    };
-
-    if matches!(
-        prepared.req.mutation,
-        CommandMutation::CreateMission { .. } | CommandMutation::RequestBackup { .. }
-    ) && let Err(ipc) = ensure_principal_registered(&state.store, session).await
-    {
-        let _ = write_json_frame_timeout(stream, &ipc, RESPONSE_WRITE_TIMEOUT).await;
-        return false;
-    }
-
-    let num_events = prepared.req.events.len();
-    let store_ref = Arc::clone(&state.store);
-    let req_to_commit = prepared.req;
-    let outcome =
-        match tokio::task::spawn_blocking(move || store_ref.commit_command(req_to_commit)).await {
-            Ok(Ok(o)) => o,
-            Ok(Err(err)) => {
-                let mut ipc = store_error_to_ipc_error(&err, Some(cmd.command_id));
-                if matches!(cmd.command_type.as_str(), "PurgeHistory" | "RequestBackup")
-                    && matches!(
-                        err,
-                        StoreError::StorageBusy(_)
-                            | StoreError::StorageFull(_)
-                            | StoreError::StorageUnavailable(_)
-                            | StoreError::StorageCorrupt(_)
-                            | StoreError::Io(_)
-                            | StoreError::CutpointInjected { .. }
-                    )
-                {
-                    // Le Store peut avoir committé avant une erreur de finalisation physique.
-                    // La recherche ci-dessous ne change pas la réponse en succès.
-                    publish_existing_receipt_cursor(state, session, cmd.command_id).await;
-                    if cmd.command_type == "RequestBackup" {
-                        reconcile_accepted_backup(state, session, &cmd).await;
-                    }
-                    ipc.retry_class = RetryClass::AfterReconciliation;
-                    ipc.message = String::from(
-                        "Issue de commande indéterminée ; inspecter le reçu et la récupération",
-                    );
+    let (outcome, num_events, mut stop_reason, mut stop_drain_timeout) =
+        if cmd.command_type == "SetProviderProfile" {
+            let outcome = match crate::provider_profile_service::commit(
+                Arc::clone(&state.store),
+                session.clone(),
+                cmd.clone(),
+            )
+            .await
+            {
+                Ok(outcome) => outcome,
+                Err(error) => {
+                    let _ = write_json_frame_timeout(stream, &error, RESPONSE_WRITE_TIMEOUT).await;
+                    return false;
                 }
+            };
+            (outcome, 1, None, None)
+        } else {
+            let mut prepared = match prepare_command_request(state, session, cmd.clone()).await {
+                Ok(p) => p,
+                Err(ipc) => {
+                    let _ = write_json_frame_timeout(stream, &ipc, RESPONSE_WRITE_TIMEOUT).await;
+                    return false;
+                }
+            };
+
+            if matches!(
+                prepared.req.mutation,
+                CommandMutation::CreateMission { .. } | CommandMutation::RequestBackup { .. }
+            ) && let Err(ipc) = ensure_principal_registered(&state.store, session).await
+            {
                 let _ = write_json_frame_timeout(stream, &ipc, RESPONSE_WRITE_TIMEOUT).await;
                 return false;
             }
-            Err(join_err) => {
-                let ipc = internal_ipc_error(
-                    &format!("Join error commit_command: {join_err}"),
-                    Some(cmd.command_id),
-                );
-                let _ = write_json_frame_timeout(stream, &ipc, RESPONSE_WRITE_TIMEOUT).await;
-                return false;
-            }
+
+            let num_events = prepared.req.events.len();
+            let store_ref = Arc::clone(&state.store);
+            let req_to_commit = prepared.req;
+            let outcome = match tokio::task::spawn_blocking(move || {
+                store_ref.commit_command(req_to_commit)
+            })
+            .await
+            {
+                Ok(Ok(o)) => o,
+                Ok(Err(err)) => {
+                    let mut ipc = store_error_to_ipc_error(&err, Some(cmd.command_id));
+                    if matches!(cmd.command_type.as_str(), "PurgeHistory" | "RequestBackup")
+                        && matches!(
+                            err,
+                            StoreError::StorageBusy(_)
+                                | StoreError::StorageFull(_)
+                                | StoreError::StorageUnavailable(_)
+                                | StoreError::StorageCorrupt(_)
+                                | StoreError::Io(_)
+                                | StoreError::CutpointInjected { .. }
+                        )
+                    {
+                        // Le Store peut avoir committé avant une erreur de finalisation physique.
+                        // La recherche ci-dessous ne change pas la réponse en succès.
+                        publish_existing_receipt_cursor(state, session, cmd.command_id).await;
+                        if cmd.command_type == "RequestBackup" {
+                            reconcile_accepted_backup(state, session, &cmd).await;
+                        }
+                        ipc.retry_class = RetryClass::AfterReconciliation;
+                        ipc.message = String::from(
+                            "Issue de commande indéterminée ; inspecter le reçu et la récupération",
+                        );
+                    }
+                    let _ = write_json_frame_timeout(stream, &ipc, RESPONSE_WRITE_TIMEOUT).await;
+                    return false;
+                }
+                Err(join_err) => {
+                    let ipc = internal_ipc_error(
+                        &format!("Join error commit_command: {join_err}"),
+                        Some(cmd.command_id),
+                    );
+                    let _ = write_json_frame_timeout(stream, &ipc, RESPONSE_WRITE_TIMEOUT).await;
+                    return false;
+                }
+            };
+            (
+                outcome,
+                num_events,
+                prepared.stop_reason.take(),
+                prepared.stop_drain_timeout.take(),
+            )
         };
 
     let (receipt, newly_committed) = match outcome {
@@ -1074,7 +1101,7 @@ async fn handle_command_frame(
         CommitOutcome::IdempotentReplay(r) => (r, false),
     };
 
-    if newly_committed {
+    if newly_committed || cmd.command_type == "SetProviderProfile" {
         publish_committed_events_for_command(state, &receipt, num_events).await;
     }
 
@@ -1082,11 +1109,11 @@ async fn handle_command_frame(
         crate::backup_service::start(state, unleash_domain::BackupId::from_uuid(cmd.aggregate_id));
     }
 
-    if newly_committed && let Some(stop_reason) = prepared.stop_reason.take() {
+    if newly_committed && let Some(stop_reason) = stop_reason.take() {
         state.mark_draining();
         let _ = state.stop_tx.try_send(StopRequest {
             reason: stop_reason,
-            drain_timeout_override: prepared.stop_drain_timeout.take(),
+            drain_timeout_override: stop_drain_timeout.take(),
             ack: None,
         });
     }
@@ -1211,7 +1238,7 @@ struct PreparedCommand {
     stop_drain_timeout: Option<Duration>,
 }
 
-async fn ensure_principal_registered(
+pub(crate) async fn ensure_principal_registered(
     store: &Arc<UnleashStore>,
     session: &AuthenticatedSession,
 ) -> Result<(), IpcError> {
