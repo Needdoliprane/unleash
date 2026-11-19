@@ -76,6 +76,8 @@ pub enum AggregateKind {
     BackupJob,
     /// Préparation de probe de génération (`provider_probes`).
     ProviderProbe,
+    /// Version immuable d'un profil fournisseur configuré.
+    ProviderProfile,
     /// Préparation d'allocation terminal humaine.
     TerminalAllocation,
 }
@@ -103,6 +105,7 @@ impl AggregateKind {
             Self::RetentionPurge => "retention_purge",
             Self::BackupJob => "backup_job",
             Self::ProviderProbe => "provider_probe",
+            Self::ProviderProfile => "provider_profile",
             Self::TerminalAllocation => "terminal_allocation",
         }
     }
@@ -111,6 +114,13 @@ impl AggregateKind {
 /// Mutation pure décidée par le domaine et exécutée atomiquement par [`CommitCommandRequest`].
 #[derive(Debug, Clone)]
 pub enum CommandMutation {
+    /// Enregistre une version de configuration sans qualifier le fournisseur.
+    SetProviderProfile {
+        /// Autorité humaine dérivée de la session authentifiée.
+        caller: CallerAuthority,
+        /// Configuration et provenance déjà validées côté service.
+        preparation: Box<crate::ProviderProfilePreparation>,
+    },
     /// Prépare un terminal sans action OS ni action broker préinsérée.
     PrepareTerminalAllocation {
         /// Identité égale à l'agrégat de commande.
@@ -757,6 +767,69 @@ pub(crate) fn compute_validated_command_params(
     Ok((digest, retention_days))
 }
 
+struct CommandReplayRow {
+    receipt_id: String,
+    digest: String,
+    state: String,
+    response: Option<String>,
+    authority_generation: String,
+}
+
+impl CommandReplayRow {
+    fn read(row: &rusqlite::Row<'_>) -> rusqlite::Result<Self> {
+        Ok(Self {
+            receipt_id: row.get(0)?,
+            digest: row.get(1)?,
+            state: row.get(2)?,
+            response: row.get(3)?,
+            authority_generation: row.get(4)?,
+        })
+    }
+}
+
+/// Classificateur unique de rejeu : contrôle d'autorité avant lookup et digest wire.
+/// Une clé F012 historique reste occupée et produit un conflit, jamais un miss ou
+/// un reçu réactivé. Les autres ports gardent leurs préconditions métier existantes.
+pub(crate) fn classify_command_replay(
+    conn: &Connection,
+    daemon: &DaemonStateRow,
+    req: &CommitCommandRequest,
+    digest: Sha256Digest,
+) -> Result<Option<CommandReceipt>, StoreError> {
+    if req.envelope.authority_generation != daemon.authority_generation {
+        return Err(StoreError::StaleAuthorityGeneration {
+            expected: daemon.authority_generation,
+            actual: req.envelope.authority_generation,
+            command_id: Some(req.envelope.command_id),
+        });
+    }
+    let existing = conn.query_row(
+        "SELECT receipt_id,command_digest,response_state,response_json,authority_generation FROM command_receipts WHERE actor_id=?1 AND command_id=?2",
+        rusqlite::params![req.actor_id.as_str(),req.envelope.command_id.to_string()],
+        CommandReplayRow::read,
+    ).optional()?;
+    let Some(row) = existing else {
+        return Ok(None);
+    };
+    let historical_profile = matches!(req.mutation, CommandMutation::SetProviderProfile { .. })
+        && row.authority_generation != daemon.authority_generation.to_string();
+    if historical_profile || row.digest != digest.as_prefixed_str() {
+        return Err(StoreError::IdempotencyConflict {
+            command_id: req.envelope.command_id,
+        });
+    }
+    if row.state == "tombstone" {
+        return Err(StoreError::IdempotencyWindowExpired {
+            command_id: req.envelope.command_id,
+            receipt_id: row.receipt_id.parse()?,
+        });
+    }
+    let receipt: CommandReceipt = serde_json::from_str(&row.response.ok_or_else(|| {
+        StoreError::InvariantViolation("reçu full sans response_json".to_owned())
+    })?)?;
+    Ok(Some(receipt))
+}
+
 /// Exécute l'algorithme transactionnel complet `CommitCommand` dans `BEGIN IMMEDIATE` (REQ-PERSIST-001/004).
 #[expect(
     clippy::too_many_lines,
@@ -783,40 +856,16 @@ pub(crate) fn tx_commit_command(
     }
     crate::backup_requests::validate_request_backup_envelope(req)?;
     crate::provider_probes::validate_command(tx, req)?;
+    crate::provider_profiles::validate_identity(req)?;
     crate::terminal_allocations::validate_command(tx, req)?;
 
     // Étape 2 : Rechercher `(actor_id, command_id)` dans `command_receipts`
     let actor_str = req.actor_id.as_str();
     let cmd_str = req.envelope.command_id.to_string();
-    let existing: Option<(String, String, String, Option<String>)> = tx
-        .query_row(
-            "SELECT receipt_id, command_digest, response_state, response_json
-             FROM command_receipts WHERE actor_id = ?1 AND command_id = ?2",
-            rusqlite::params![actor_str, cmd_str],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
-        )
-        .optional()
-        .map_err(StoreError::from_rusqlite)?;
-
-    if let Some((rcpt_id_str, stored_digest, resp_state, resp_json)) = existing {
-        if stored_digest != command_digest.as_prefixed_str() {
-            return Err(StoreError::IdempotencyConflict {
-                command_id: req.envelope.command_id,
-            });
-        }
-        if resp_state == "tombstone" {
-            let receipt_id = rcpt_id_str.parse::<ReceiptId>()?;
-            return Err(StoreError::IdempotencyWindowExpired {
-                command_id: req.envelope.command_id,
-                receipt_id,
-            });
-        }
-        let json_str = resp_json.ok_or_else(|| {
-            StoreError::InvariantViolation("reçu full sans response_json".to_owned())
-        })?;
-        let receipt: CommandReceipt = serde_json::from_str(&json_str)?;
+    if let Some(receipt) = classify_command_replay(tx, &daemon, req, command_digest)? {
         return Ok(CommitOutcome::IdempotentReplay(receipt));
     }
+    crate::provider_profiles::validate_new_command(req)?;
 
     // Mode `read_only_recovery` refuse les nouvelles écritures métier ordinaires tout en
     // autorisant les opérations d'urgence / réconciliation / arrêt / purge.
@@ -1045,6 +1094,7 @@ pub(crate) fn tx_commit_command(
     let effective_receipt_state = if purge_id.is_some()
         || reserved_backup.is_some()
         || prepared_probe.is_some()
+        || matches!(req.mutation, CommandMutation::SetProviderProfile { .. })
         || matches!(
             req.mutation,
             CommandMutation::PrepareTerminalAllocation { .. }
@@ -1069,6 +1119,17 @@ pub(crate) fn tx_commit_command(
             .map(|id| format!("retention-purge:{id}"))
             .or_else(|| reserved_backup.map(|id| format!("backup:{id}")))
             .or_else(|| prepared_probe.map(|id| format!("provider-probe:{id}")))
+            .or_else(|| {
+                if matches!(req.mutation, CommandMutation::SetProviderProfile { .. }) {
+                    Some(format!(
+                        "provider-profile:{}:{}",
+                        req.envelope.aggregate_id,
+                        new_rev.as_u64()
+                    ))
+                } else {
+                    None
+                }
+            })
             .or_else(|| {
                 if let CommandMutation::PrepareTerminalAllocation { terminal_id, .. } =
                     &req.mutation
@@ -1220,6 +1281,21 @@ fn apply_command_mutation(
 ) -> Result<Revision, StoreError> {
     let exp_i64 = i64::try_from(expected_rev.as_u64()).unwrap_or(0);
     match mutation {
+        CommandMutation::SetProviderProfile { preparation, .. } => {
+            crate::provider_profiles::set_tx(
+                tx,
+                config,
+                daemon,
+                now_ms,
+                crate::provider_profiles::ProfileCommand {
+                    envelope,
+                    actor_id,
+                    preparation,
+                },
+                receipt_id,
+                generated_events,
+            )
+        }
         CommandMutation::PrepareTerminalAllocation {
             terminal_id,
             preparation,

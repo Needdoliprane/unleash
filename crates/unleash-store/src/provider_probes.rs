@@ -465,6 +465,9 @@ pub(crate) fn prepare_tx(
     events: &mut Vec<EventAppendSpec>,
 ) -> Result<Revision, StoreError> {
     validate_preparation_tx(tx, daemon, preparation)?;
+    if daemon.schema_version >= 11 {
+        crate::provider_profiles::validate_probe_use(tx, preparation, project)?;
+    }
     ensure_scope_not_frozen_tx(tx, project, None, None)?;
     let prior:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM provider_probes WHERE probe_id=?1) OR EXISTS(SELECT 1 FROM command_receipts WHERE aggregate_id=?1)",[probe.to_string()],|row|row.get(0))?;
     if prior {
@@ -691,6 +694,9 @@ fn verify_frozen_inputs(
 ) -> Result<(), StoreError> {
     let context = &record.context;
     ensure_scope_not_frozen_tx(tx, context.project_id, None, None)?;
+    if read_daemon_state_conn(tx)?.schema_version >= 11 {
+        crate::provider_profiles::validate_probe_use(tx, &context.preparation, context.project_id)?;
+    }
     for subject in [context.principal_id.as_str(), context.actor_id.as_str()] {
         ensure_subject_not_blocked_tx(tx, SubjectKind::Actor, subject, context.project_id)
             .map_err(|error| match error {
