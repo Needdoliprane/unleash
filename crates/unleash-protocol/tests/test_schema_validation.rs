@@ -138,6 +138,60 @@ fn test_validate_exclusive_acquire_terminal_payloads() {
 }
 
 #[test]
+fn test_validate_terminal_input_bytes() {
+    let validator = build_validator("ipc-command.schema.json");
+    let mut command: Value = serde_json::from_str(&ipc_command_fixture()).unwrap();
+    let terminal = "00000000-0000-4000-8000-000000000020";
+    command["command_type"] = json!("SendTerminalInput");
+    command["project_id"] = json!("00000000-0000-4000-8000-000000000022");
+    command["aggregate_id"] = json!(terminal);
+    command["payload"] = json!({
+        "terminal_id": terminal,
+        "process_run_uuid": "00000000-0000-4000-8000-000000000021",
+        "lease_id": "00000000-0000-4000-8000-000000000023",
+        "fence": 1,
+        "input_seq": 1,
+        "payload_bytes": [0, 255]
+    });
+    for bytes in [json!([0]), json!([0, 255]), json!(vec![255_u8; 65_536])] {
+        command["payload"]["payload_bytes"] = bytes;
+        assert!(validator.is_valid(&command));
+    }
+    command["payload"]["payload_bytes"] = json!([0, 255]);
+
+    for (field, value) in [
+        ("payload_bytes", json!([])),
+        ("payload_bytes", json!(vec![0_u8; 65_537])),
+        ("payload_bytes", json!([256])),
+        ("payload_bytes", json!([0.5])),
+        ("payload_bytes", json!("AA==")),
+        ("fence", json!(0)),
+        ("input_seq", json!(9_007_199_254_740_992_u64)),
+        ("lease_id", json!("lease")),
+        ("actor_id", json!("fixture:forged")),
+    ] {
+        let mut invalid = command.clone();
+        invalid["payload"][field] = value;
+        assert!(!validator.is_valid(&invalid), "payload.{field}");
+    }
+
+    for field in [
+        "terminal_id",
+        "process_run_uuid",
+        "lease_id",
+        "fence",
+        "input_seq",
+        "payload_bytes",
+    ] {
+        let mut incomplete = command.clone();
+        incomplete["payload"].as_object_mut().unwrap().remove(field);
+        assert!(!validator.is_valid(&incomplete), "missing payload.{field}");
+    }
+    command["project_id"] = Value::Null;
+    assert!(!validator.is_valid(&command));
+}
+
+#[test]
 fn test_validate_terminal_runtime_settings_schema() {
     let validator = build_validator("ipc-command.schema.json");
     let mut command: Value = serde_json::from_str(&ipc_command_fixture()).unwrap();
