@@ -479,6 +479,91 @@ fn assert_completed_probe_without_model(
     }
 }
 
+struct CommittedConnectProof {
+    action_id: String,
+    dispatch_id: String,
+    request_digest: String,
+    output_digest: String,
+    started_at_ms: i64,
+    observed_at_ms: i64,
+    committed_at_ms: i64,
+    relative_path: String,
+}
+
+fn assert_committed_connect_proof(fixture: &ConnectFixture, receipt: &CommandReceipt) {
+    let db = fixture.db();
+    let proof = db
+        .query_row(
+            r"
+SELECT a.action_id,d.dispatch_id,json_extract(i.intent_json,'$.payload_digest'),
+ json_extract(e.payload_json,'$.output_digest'),d.started_at_ms,d.ended_at_ms,
+ e.recorded_at_ms,o.relative_path
+FROM actions a
+JOIN broker_intents i ON i.action_id=a.action_id
+JOIN action_dispatches d ON d.action_id=a.action_id
+JOIN broker_phase_records b ON b.action_id=a.action_id AND b.phase_key='observation:1'
+JOIN events e ON e.event_id=b.event_id AND e.event_type='ActionObserved'
+JOIN object_records o ON o.object_hash=json_extract(e.payload_json,'$.output_digest')
+ AND o.state='live'
+WHERE a.state='observed_success'
+ AND json_extract(i.intent_json,'$.cause.receipt_id')=?1
+ AND json_extract(e.payload_json,'$.dispatch_id')=d.dispatch_id
+ AND EXISTS(SELECT 1 FROM object_references r
+  JOIN provider_probes p ON p.probe_id=r.owner_id
+  WHERE r.object_hash=o.object_hash AND r.owner_kind='provider_probe' AND r.state='live'
+   AND p.command_receipt_id=?1 AND p.phase='connect')
+",
+            [receipt.receipt_id.to_string()],
+            |row| {
+                Ok(CommittedConnectProof {
+                    action_id: row.get(0)?,
+                    dispatch_id: row.get(1)?,
+                    request_digest: row.get(2)?,
+                    output_digest: row.get(3)?,
+                    started_at_ms: row.get(4)?,
+                    observed_at_ms: row.get(5)?,
+                    committed_at_ms: row.get(6)?,
+                    relative_path: row.get(7)?,
+                })
+            },
+        )
+        .unwrap();
+    assert!(proof.started_at_ms <= proof.observed_at_ms);
+    assert!(proof.observed_at_ms <= proof.committed_at_ms);
+    let relative = std::path::Path::new(&proof.relative_path);
+    assert!(
+        relative
+            .components()
+            .all(|part| matches!(part, std::path::Component::Normal(_)))
+    );
+    let bytes = std::fs::read(fixture.data.path().join("artifacts").join(relative)).unwrap();
+    let document: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(
+        unleash_protocol::canonicalize_to_vec(&document).unwrap(),
+        bytes
+    );
+    assert_eq!(
+        unleash_protocol::canonical_sha256(&document)
+            .unwrap()
+            .to_string(),
+        proof.output_digest
+    );
+    assert_eq!(
+        document,
+        json!({
+            "schema_version":1,
+            "action_id":proof.action_id,
+            "dispatch_id":proof.dispatch_id,
+            "request_digest":proof.request_digest,
+            "peer":fixture.endpoint.local_addr().unwrap().to_string(),
+            "certificate_validation":"not_tls",
+            "revocation_checked":false,
+            "http_application_bytes_sent":0,
+            "observed_at_ms":proof.observed_at_ms,
+        })
+    );
+}
+
 #[tokio::test]
 async fn t_f012_013_connect_active_mandate_uses_durable_dispatch_once() {
     let pause = DispatchPause::new();
@@ -540,6 +625,7 @@ async fn t_f012_013_connect_active_mandate_uses_durable_dispatch_once() {
         .await
         .unwrap();
     assert_completed_probe_without_model(&fixture, &request, &receipt);
+    assert_committed_connect_proof(&fixture, &receipt);
 }
 
 #[tokio::test]
