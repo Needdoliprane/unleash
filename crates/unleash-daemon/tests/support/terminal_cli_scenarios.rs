@@ -11,12 +11,18 @@ struct TerminalCli<'a> {
 }
 
 impl TerminalCli<'_> {
-    fn invoke(&self, args: &[&str]) -> std::process::Output {
-        Command::new(self.binary)
+    fn command(&self, args: &[&str]) -> Command {
+        let mut command = Command::new(self.binary);
+        command
             .arg("--socket")
             .arg(&self.socket)
             .args(["--json", "--timeout-ms", "5000"])
-            .args(args)
+            .args(args);
+        command
+    }
+
+    fn invoke(&self, args: &[&str]) -> std::process::Output {
+        self.command(args)
             .output()
             .expect("run the prebuilt CLI against the owned fixture socket")
     }
@@ -424,9 +430,12 @@ mod input_cli_scenarios {
             "--terminal-id",
             &cli.terminal,
             "--process-run-uuid",
-            observed["process_run_uuid"].as_str().unwrap(),
+            observed
+                .get("process_run_uuid")
+                .and_then(Value::as_str)
+                .unwrap(),
             "--lease-id",
-            observed["lease_id"].as_str().unwrap(),
+            observed.get("lease_id").and_then(Value::as_str).unwrap(),
             "--authority-generation",
             &cli.authority,
             "--command-id",
@@ -443,8 +452,9 @@ mod input_cli_scenarios {
         ] {
             args.push(flag.into());
             args.push(
-                observed[field]
-                    .as_u64()
+                observed
+                    .get(field)
+                    .and_then(Value::as_u64)
                     .unwrap()
                     .checked_add(increment)
                     .unwrap()
@@ -461,11 +471,42 @@ mod input_cli_scenarios {
             .unwrap()
             .checked_add(1)
             .unwrap();
-        *args.get_mut(index).unwrap() = value.to_owned();
+        value.clone_into(args.get_mut(index).unwrap());
     }
 
     fn invoke(cli: &TerminalCli<'_>, args: &[String]) -> std::process::Output {
         cli.invoke(&args.iter().map(String::as_str).collect::<Vec<_>>())
+    }
+
+    fn invoke_stdin(cli: &TerminalCli<'_>, args: &[String]) -> std::process::Output {
+        let mut child = cli
+            .command(&args.iter().map(String::as_str).collect::<Vec<_>>())
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut pipe = child.stdin.take().unwrap();
+        pipe.write_all(INPUT).unwrap();
+        drop(pipe); // EOF completes the bounded binary read before waiting.
+        child.wait_with_output().unwrap()
+    }
+
+    fn assert_exact_replays(cli: &TerminalCli<'_>, args: &[String], receipt: &Value) {
+        for replay_index in 0..3 {
+            let replay = if replay_index == 1 {
+                let mut stdin_args = args.to_vec();
+                replace(&mut stdin_args, "--file", "-");
+                invoke_stdin(cli, &stdin_args)
+            } else {
+                invoke(cli, args)
+            };
+            assert!(replay.status.success());
+            assert_eq!(
+                &serde_json::from_slice::<Value>(&replay.stdout).unwrap(),
+                receipt
+            );
+        }
     }
 
     fn input_counts(fixture: &LiveFixture) -> (i64, i64, i64) {
@@ -488,7 +529,11 @@ mod input_cli_scenarios {
             assert!(!output.status.success());
             let error: Value = serde_json::from_slice(&output.stderr).unwrap();
             assert!(
-                error["error"].as_str().unwrap().contains("1..=65536"),
+                error
+                    .get("error")
+                    .and_then(Value::as_str)
+                    .unwrap()
+                    .contains("1..=65536"),
                 "bounded local refusal: {error}"
             );
             assert!(
@@ -589,33 +634,35 @@ mod input_cli_scenarios {
         // serializes native writes and invalidates all old epoch/fence headers.
         fixture.restart_daemon_only().await;
         let command = Uuid::from_u128(0xf011_4804).to_string();
-        let revision = known["control_revision"].as_u64().unwrap().to_string();
+        let revision = known
+            .get("control_revision")
+            .and_then(Value::as_u64)
+            .unwrap();
+        let process_run = known
+            .get("process_run_uuid")
+            .and_then(Value::as_str)
+            .unwrap();
         let accepted = cli.acquire(
             "registered",
             &command,
             &[
                 "--process-run-uuid",
-                known["process_run_uuid"].as_str().unwrap(),
+                process_run,
                 "--control-revision",
-                &revision,
+                &revision.to_string(),
             ],
         );
-        wait_for_control(
-            fixture,
-            &cli.terminal,
-            known["control_revision"]
-                .as_u64()
-                .unwrap()
-                .checked_add(1)
-                .unwrap(),
-        )
-        .await;
+        wait_for_control(fixture, &cli.terminal, revision.checked_add(1).unwrap()).await;
         let transferred = cli.observe(&command, &accepted);
         assert_eq!(
-            transferred["input_seq"], 1,
+            transferred.get("input_seq"),
+            Some(&json!(1)),
             "fresh native summary after fencing the old controller"
         );
-        assert_eq!(transferred["process_run_uuid"], known["process_run_uuid"]);
+        assert_eq!(
+            transferred.get("process_run_uuid"),
+            Some(&json!(process_run))
+        );
         let after = fixture.host_manifest();
         assert_eq!(after.host_id, before.host_id);
         assert_eq!(after.pid, before.pid);
@@ -691,14 +738,7 @@ mod input_cli_scenarios {
         let known = cli.observe(&command, &accepted);
         assert_eq!(known.get("input_seq"), Some(&json!(1)));
         assert_eq!(known.get("lease_id"), observed.get("lease_id"));
-        for _ in 0..3 {
-            let replay = invoke(&cli, &args);
-            assert!(replay.status.success());
-            assert_eq!(
-                serde_json::from_slice::<Value>(&replay.stdout).unwrap(),
-                receipt
-            );
-        }
+        assert_exact_replays(&cli, &args, &receipt);
         fence_old_controller(&mut fixture, &cli, &known).await;
         let replay = invoke(&cli, &args);
         assert!(
@@ -730,8 +770,10 @@ mod input_cli_scenarios {
             .unwrap();
         starts.write_all(b"started\n").unwrap();
         starts.sync_all().unwrap();
-        println!("live-terminal-ready");
-        std::io::stdout().flush().unwrap();
+        let mut output = std::io::stdout().lock();
+        writeln!(output, "live-terminal-ready").unwrap();
+        output.flush().unwrap();
+        drop(output);
         let stdin = std::io::stdin();
         let mut reader = stdin.lock();
         let mut bytes = Vec::new();
