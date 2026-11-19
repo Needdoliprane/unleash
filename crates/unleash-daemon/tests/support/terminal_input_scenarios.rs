@@ -3,6 +3,9 @@
 //! committed ledger and host, not from the proposed result projection.
 use super::*;
 
+#[path = "terminal_c5_scenarios.rs"]
+mod c5_scenarios;
+
 fn ledger_result(
     fixture: &LiveFixture,
     command: unleash_domain::CommandId,

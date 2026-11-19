@@ -619,16 +619,9 @@ fn spawn_registered_host(
         .parent()
         .ok_or("daemon executable has no directory")?
         .join("unleash-process-host");
-    if !executable.is_file() {
-        return Err("packaged process-host binary absent".into());
-    }
-    let child = std::process::Command::new(executable)
-        .args([std::ffi::OsStr::new("--bootstrap"), bootstrap.as_os_str()])
-        .env_clear()
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()?;
+    let child = state
+        .terminal_host_launcher
+        .spawn(&executable, &bootstrap)?;
     let host_identity = unleash_platform::inspect_process_identity(child.id())?;
     {
         let mut children = state

@@ -16,6 +16,7 @@ use unleash_store::{
 use crate::auth::{AuthVerifierPort, PeerUidAuthVerifier};
 use crate::executors::{ExecutorDrainPort, RendezvousExecutorController};
 use crate::recovery::RecoveryGate;
+use crate::terminal_host_launcher::{PackagedTerminalHostLauncher, TerminalHostLauncher};
 
 /// Action déclenchée juste après le commit durable d'une commande et avant l'envoi de la réponse IPC.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -87,6 +88,9 @@ pub struct DaemonConfig {
     pub store_overrides: StoreOverrides,
     /// Contrôleur des exécuteurs persistants et du drainage.
     pub executor_controller: Arc<dyn ExecutorDrainPort>,
+    /// Trusted Rust launch port, invoked only after the durable effect permit.
+    /// It has no IPC or environment-controlled selection path.
+    pub terminal_host_launcher: Arc<dyn TerminalHostLauncher>,
     /// Vérificateur d'authentification des pairs.
     pub auth_verifier: Arc<dyn AuthVerifierPort>,
     /// Barrière optionnelle de test pour observer le mode `recovering`.
@@ -124,6 +128,7 @@ impl Default for DaemonConfig {
             attach_if_running: false,
             store_overrides: StoreOverrides::default(),
             executor_controller: Arc::new(RendezvousExecutorController),
+            terminal_host_launcher: Arc::new(PackagedTerminalHostLauncher),
             auth_verifier: Arc::new(PeerUidAuthVerifier),
             recovery_gate: None,
             post_commit_hook: None,

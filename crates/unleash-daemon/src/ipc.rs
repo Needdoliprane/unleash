@@ -61,6 +61,7 @@ pub(crate) struct StopRequest {
 pub(crate) struct DaemonRuntimeState {
     pub(crate) rendezvous_dir: std::path::PathBuf,
     pub(crate) terminal_children: Mutex<Vec<std::process::Child>>,
+    pub(crate) terminal_host_launcher: Arc<dyn crate::terminal_host_launcher::TerminalHostLauncher>,
     pub(crate) broker_activity: Arc<crate::broker_activity::BrokerActivity>,
     pub(crate) store: Arc<UnleashStore>,
     pub(crate) authority_generation: AuthorityGeneration,
