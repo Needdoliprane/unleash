@@ -9,7 +9,7 @@ use crate::config::{CutpointObserver, StoreCutpoint};
 use crate::error::StoreError;
 
 /// Version courante maximale du schéma gérée par cette version de `unleash-store`.
-pub const CURRENT_SCHEMA_VERSION: i64 = 10;
+pub const CURRENT_SCHEMA_VERSION: i64 = 11;
 
 /// État persisté d'une migration dans `schema_migrations`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -119,7 +119,49 @@ const MIGRATIONS: &[MigrationDef] = &[
         name: "v010_terminal_allocation_preparation",
         sql: V010_SQL,
     },
+    MigrationDef {
+        version: 11,
+        name: "v011_immutable_configured_provider_profiles",
+        sql: V011_SQL,
+    },
 ];
+
+const V011_SQL: &str = r"
+ALTER TABLE provider_profiles ADD COLUMN profile_id TEXT;
+ALTER TABLE provider_profiles ADD COLUMN profile_version INTEGER CHECK(profile_version IS NULL OR profile_version>=1);
+ALTER TABLE provider_profiles ADD COLUMN config_object_hash TEXT REFERENCES object_records(object_hash);
+ALTER TABLE provider_profiles ADD COLUMN config_digest TEXT;
+ALTER TABLE provider_profiles ADD COLUMN config_json TEXT;
+ALTER TABLE provider_profiles ADD COLUMN preparation_digest TEXT;
+ALTER TABLE provider_profiles ADD COLUMN scope_kind TEXT CHECK(scope_kind IS NULL OR scope_kind IN ('user','project'));
+ALTER TABLE provider_profiles ADD COLUMN scope_owner_key TEXT;
+ALTER TABLE provider_profiles ADD COLUMN principal_id TEXT REFERENCES principals(principal_id);
+ALTER TABLE provider_profiles ADD COLUMN actor_id TEXT;
+ALTER TABLE provider_profiles ADD COLUMN receipt_id TEXT REFERENCES command_receipts(receipt_id) DEFERRABLE INITIALLY DEFERRED;
+ALTER TABLE provider_profiles ADD COLUMN catalog_id TEXT;
+ALTER TABLE provider_profiles ADD COLUMN catalog_version TEXT;
+CREATE UNIQUE INDEX configured_provider_profile_version ON provider_profiles(profile_id,profile_version) WHERE profile_id IS NOT NULL;
+CREATE UNIQUE INDEX configured_provider_profile_receipt ON provider_profiles(receipt_id) WHERE receipt_id IS NOT NULL;
+CREATE TRIGGER configured_provider_profile_complete BEFORE INSERT ON provider_profiles
+WHEN NOT((NEW.profile_id IS NULL AND NEW.profile_version IS NULL AND NEW.config_object_hash IS NULL AND NEW.config_digest IS NULL AND NEW.config_json IS NULL AND NEW.preparation_digest IS NULL AND NEW.scope_kind IS NULL AND NEW.scope_owner_key IS NULL AND NEW.principal_id IS NULL AND NEW.actor_id IS NULL AND NEW.receipt_id IS NULL AND NEW.catalog_id IS NULL AND NEW.catalog_version IS NULL)
+ OR (NEW.profile_id IS NOT NULL AND NEW.profile_version IS NOT NULL AND NEW.config_object_hash IS NOT NULL AND NEW.config_digest IS NOT NULL AND NEW.config_json IS NOT NULL AND NEW.preparation_digest IS NOT NULL AND NEW.scope_kind IS NOT NULL AND NEW.scope_owner_key IS NOT NULL AND length(NEW.scope_owner_key)>0 AND NEW.principal_id IS NOT NULL AND NEW.actor_id IS NOT NULL AND NEW.receipt_id IS NOT NULL AND ((NEW.catalog_id IS NULL AND NEW.catalog_version IS NULL) OR (NEW.catalog_id IS NOT NULL AND NEW.catalog_version IS NOT NULL)) AND (NEW.scope_kind!='user' OR NEW.scope_owner_key='default')))
+BEGIN SELECT RAISE(ABORT,'configured provider profile metadata incomplete'); END;
+CREATE TRIGGER configured_provider_profile_sequence BEFORE INSERT ON provider_profiles
+WHEN NEW.profile_id IS NOT NULL AND (NEW.profile_version!=(SELECT COALESCE(MAX(profile_version),0)+1 FROM provider_profiles WHERE profile_id=NEW.profile_id)
+ OR EXISTS(SELECT 1 FROM provider_profiles WHERE profile_id=NEW.profile_id AND (scope_kind!=NEW.scope_kind OR scope_owner_key!=NEW.scope_owner_key)))
+BEGIN SELECT RAISE(ABORT,'configured provider profile version or scope invalid'); END;
+CREATE TRIGGER configured_provider_profile_immutable BEFORE UPDATE ON provider_profiles
+WHEN OLD.profile_id IS NOT NULL OR NEW.profile_id IS NOT NULL OR NEW.profile_version IS NOT NULL OR NEW.config_object_hash IS NOT NULL OR NEW.config_digest IS NOT NULL OR NEW.config_json IS NOT NULL OR NEW.preparation_digest IS NOT NULL OR NEW.scope_kind IS NOT NULL OR NEW.scope_owner_key IS NOT NULL OR NEW.principal_id IS NOT NULL OR NEW.actor_id IS NOT NULL OR NEW.receipt_id IS NOT NULL OR NEW.catalog_id IS NOT NULL OR NEW.catalog_version IS NOT NULL
+BEGIN SELECT RAISE(ABORT,'configured provider profile immutable; legacy cannot be promoted'); END;
+CREATE TRIGGER configured_provider_profile_no_delete BEFORE DELETE ON provider_profiles WHEN OLD.profile_id IS NOT NULL
+BEGIN SELECT RAISE(ABORT,'configured provider profile immutable'); END;
+CREATE TRIGGER configured_provider_catalog_immutable BEFORE UPDATE ON model_catalog_snapshots
+WHEN EXISTS(SELECT 1 FROM provider_profiles WHERE catalog_id=OLD.catalog_id AND catalog_version=OLD.catalog_version)
+BEGIN SELECT RAISE(ABORT,'configured provider catalog immutable'); END;
+CREATE TRIGGER configured_provider_catalog_no_delete BEFORE DELETE ON model_catalog_snapshots
+WHEN EXISTS(SELECT 1 FROM provider_profiles WHERE catalog_id=OLD.catalog_id AND catalog_version=OLD.catalog_version)
+BEGIN SELECT RAISE(ABORT,'configured provider catalog referenced'); END;
+";
 
 const V010_SQL: &str = r"
 CREATE TABLE terminal_allocations (

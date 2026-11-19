@@ -24,6 +24,7 @@ pub mod objects;
 pub mod policies_secrets;
 pub mod projects_settings;
 pub mod provider_probes;
+pub mod provider_profiles;
 pub mod qualification;
 pub mod recovery_ops;
 pub mod restore;
@@ -92,6 +93,11 @@ pub use projects_settings::{
 pub use provider_probes::{
     ModelContextRef, ModelOrigin, PROVIDER_PROBE_VERB, PreparedProviderProbe,
     ProbeGenerationLimits, ProbeProfileSnapshot, ProviderProbeContext, ProviderProbePreparation,
+};
+pub use provider_profiles::{
+    ConfiguredProviderProfile, ProviderCatalogBinding, ProviderCatalogSource,
+    ProviderProfileConfiguration, ProviderProfilePreparation, ProviderProfileQualification,
+    ProviderSecretBinding,
 };
 pub use qualification::{
     APPROVED_BACKPORT_VERSIONS, EffectivePragmaProfile, MIN_QUALIFIED_SQLITE_VERSION,
