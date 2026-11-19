@@ -1,5 +1,6 @@
 //! Correlation of historical facts with immutable original writer records.
 use rusqlite::{Connection, OptionalExtension, params};
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use unleash_domain::{
     ActionId, ActionOrigin, ActionState, ActorId, DispatchId, Fence, TimestampMs,
@@ -7,14 +8,14 @@ use unleash_domain::{
 use unleash_protocol::{LineageStatus, ReceiptState, canonical_sha256};
 
 use super::super::{
-    TerminalControlRecord, TerminalControlState, TerminalIdentityBackend, control_read_conn,
-    read_conn,
+    TerminalAllocationRecord, TerminalControlRecord, TerminalControlState, TerminalIdentityBackend,
+    TerminalLaunchObservation, control_read_conn, read_conn,
 };
 use super::{HistoricalTransferAck, TerminalControlHistoryProof};
 use crate::commands::read_daemon_state_conn;
 use crate::{
     BrokerActionSnapshot, BrokerAuthorizationDecision, BrokerCause, BrokerEvaluation, BrokerIntent,
-    StoreError,
+    BrokerPhase, StoreConfig, StoreError,
 };
 
 pub(super) struct Source {
@@ -44,23 +45,33 @@ fn hidden() -> StoreError {
 
 pub(super) fn source(
     conn: &Connection,
+    config: &StoreConfig,
     actor: &ActorId,
     action: ActionId,
     dispatch: DispatchId,
 ) -> Result<Source, StoreError> {
-    let owner: Option<String> = conn
+    let owner: Option<(String, String)> = conn
         .query_row(
-            "SELECT actor_id FROM terminal_control_intents WHERE action_id=?1",
+            "SELECT actor_id,principal_id FROM terminal_control_intents WHERE action_id=?1",
             [action.to_string()],
-            |row| row.get(0),
+            |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .optional()?;
-    if owner.as_deref() != Some(actor.as_str()) {
+    let current_principal = match super::super::principal(conn, actor) {
+        Ok(principal) => principal,
+        Err(StoreError::InvalidArgument { .. } | StoreError::NotFound(_)) => return Err(hidden()),
+        Err(error) => return Err(error),
+    };
+    if owner
+        .as_ref()
+        .map(|(actor, principal)| (actor.as_str(), principal.as_str()))
+        != Some((actor.as_str(), current_principal.as_str()))
+    {
         return Err(hidden());
     }
     let record = control_read_conn(conn, action)?.ok_or_else(hidden)?;
     let c = &record.context;
-    if c.actor_id != *actor {
+    if c.actor_id != *actor || c.principal_id != current_principal {
         return Err(hidden());
     }
     if c.schema_version != 1 {
@@ -100,7 +111,7 @@ pub(super) fn source(
         ));
     }
     validate_receipt(conn, &record)?;
-    let environment_digest = validate_allocation(conn, &record)?;
+    let environment_digest = validate_allocation(conn, config, &record)?;
     validate_control_coordinates(conn, &record)?;
     let encoded: String = conn.query_row(
         "SELECT intent_json FROM broker_intents WHERE action_id=?1",
@@ -148,6 +159,7 @@ fn validate_receipt(conn: &Connection, record: &TerminalControlRecord) -> Result
 
 fn validate_allocation(
     conn: &Connection,
+    config: &StoreConfig,
     record: &TerminalControlRecord,
 ) -> Result<unleash_domain::Sha256Digest, StoreError> {
     let c = &record.context;
@@ -178,7 +190,106 @@ fn validate_allocation(
     if !verified {
         return Err(identity_error());
     }
-    Ok(a.preparation.process_spec.environment.digest)
+    observed_environment(conn, config, record, &allocation)
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SealedLaunchPhase {
+    schema_version: u32,
+    evaluation: BrokerEvaluation,
+    phase: BrokerPhase,
+}
+
+fn observed_environment(
+    conn: &Connection,
+    config: &StoreConfig,
+    record: &TerminalControlRecord,
+    allocation: &TerminalAllocationRecord,
+) -> Result<unleash_domain::Sha256Digest, StoreError> {
+    let c = &record.context;
+    let a = &allocation.context;
+    let dispatch = allocation
+        .dispatch_id
+        .ok_or_else(|| unavailable("qualified launch dispatch is unavailable"))?;
+    let epoch =
+        i64::try_from(a.daemon_epoch.as_u64()).map_err(|_| invalid("launch epoch out of range"))?;
+    let row:Option<(String,String,i64)>=conn.query_row("SELECT p.phase_json,p.phase_digest,m.started_at_ms FROM broker_phase_records p JOIN broker_dispatches d ON d.action_id=p.action_id AND d.evaluation_id=p.evaluation_id JOIN action_dispatches m ON m.dispatch_id=d.dispatch_id AND m.action_id=p.action_id WHERE p.action_id=?1 AND p.phase_key LIKE 'observation:%' AND d.dispatch_id=?2 AND d.authority_generation=?3 AND d.daemon_epoch=?4 ORDER BY p.action_revision DESC LIMIT 1",params![c.initial_action_id.to_string(),dispatch.to_string(),c.authority_generation.to_string(),epoch],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional()?;
+    let (encoded, digest, started) =
+        row.ok_or_else(|| unavailable("qualified native launch observation is unavailable"))?;
+    let phase: SealedLaunchPhase = serde_json::from_str(&encoded)
+        .map_err(|_| unavailable("qualified launch phase is invalid"))?;
+    if phase.schema_version != 1 || canonical_sha256(&phase)?.to_string() != digest {
+        return Err(unavailable("qualified launch phase integrity differs"));
+    }
+    let BrokerPhase::Observation {
+        action_id, receipt, ..
+    } = phase.phase
+    else {
+        return Err(unavailable("qualified launch has no observation receipt"));
+    };
+    if action_id != c.initial_action_id
+        || receipt.action_id != c.initial_action_id
+        || receipt.dispatch_id != dispatch
+        || receipt.evaluation_id != phase.evaluation.evaluation_id
+        || receipt.state != ActionState::ObservedSuccess
+    {
+        return Err(unavailable("qualified launch observation receipt differs"));
+    }
+    let hash = receipt
+        .output_digest
+        .ok_or_else(|| unavailable("qualified launch proof hash is absent"))?;
+    let published:bool=conn.query_row("SELECT EXISTS(SELECT 1 FROM object_references WHERE owner_kind='terminal_launch_observation' AND owner_id=?1 AND source_field=?2 AND object_hash=?3 AND state='live')",params![c.terminal_id.to_string(),dispatch.to_string(),hash.to_string()],|r|r.get(0))?;
+    if !published {
+        return Err(unavailable(
+            "qualified launch proof reference is unavailable",
+        ));
+    }
+    let bytes =
+        crate::objects::read_verified_evidence_bytes_bounded(conn, config, hash, 2 * 1024 * 1024)?;
+    let native: TerminalLaunchObservation = serde_json::from_slice(&bytes)
+        .map_err(|_| unavailable("qualified launch proof is invalid"))?;
+    validate_launch_proof(record, allocation, dispatch, &native, hash)?;
+    if native.observed_at_ms.as_i64() < started || native.observed_at_ms > receipt.observed_at_ms {
+        return Err(unavailable(
+            "qualified launch capture is outside its causal bounds",
+        ));
+    }
+    Ok(native.effective_environment_digest)
+}
+
+fn validate_launch_proof(
+    record: &TerminalControlRecord,
+    allocation: &TerminalAllocationRecord,
+    dispatch: DispatchId,
+    native: &TerminalLaunchObservation,
+    hash: unleash_domain::Sha256Digest,
+) -> Result<(), StoreError> {
+    let c = &record.context;
+    let i = &c.expected_os_identity;
+    let backend = match i.backend {
+        TerminalIdentityBackend::MacosProcPidinfo => "macos_proc_pidinfo",
+        TerminalIdentityBackend::LinuxProcfs => "linux_procfs",
+    };
+    if canonical_sha256(native)? != hash
+        || native.action_id != c.initial_action_id
+        || native.dispatch_id != dispatch
+        || native.context_digest != allocation.context_digest
+        || native.host_id != c.host_id
+        || native.terminal_id != c.terminal_id
+        || native.process_run_uuid != c.process_run_uuid
+        || native.pid != i.pid
+        || native.pgid != i.pgid
+        || native.owner_uid != i.owner_uid
+        || native.boot_identity != i.boot_identity
+        || native.start_identity != i.start_identity
+        || native.identity_backend != backend
+    {
+        return Err(unavailable(
+            "qualified launch proof does not bind this physical generation",
+        ));
+    }
+    Ok(())
 }
 
 fn validate_intent(

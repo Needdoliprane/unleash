@@ -1,7 +1,7 @@
 //! Append-only historical evidence, separate from the execution state machine.
 use std::sync::atomic::Ordering;
 
-use rusqlite::{Connection, Transaction, params};
+use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
 use unleash_domain::{
     ActionId, ActorId, DaemonEpoch, DispatchId, Sequence, Sha256Digest, TimestampMs,
@@ -33,6 +33,7 @@ struct HistoryPayload {
     context_digest: Sha256Digest,
     proof_hash: Sha256Digest,
     object_generation: i64,
+    producer_pin_id: String,
     native_ack_digest: Sha256Digest,
     inspected_by_epoch: DaemonEpoch,
     inspected_by: ActorId,
@@ -42,6 +43,7 @@ struct HistoryPayload {
 struct Sealed {
     fact: TerminalControlHistoryFact,
     proof: TerminalControlHistoryProof,
+    producer_pin_id: String,
 }
 
 struct WriteContext<'a> {
@@ -57,20 +59,14 @@ pub(super) fn seal(
 ) -> Result<TerminalControlHistoryCommit, StoreError> {
     let config = store.config().clone();
     let committed = store.execute_in_writer_tx(WriteCriticality::Critical, move |tx, now| {
+        crate::policies_secrets::require_reconciler(&request.caller, "ReconcileProcess")?;
         let source = validation::source(
             tx,
+            &config,
             &request.caller.actor_id,
             request.source_action_id,
             request.dispatch_id,
         )?;
-        crate::policies_secrets::require_reconciler(&request.caller, "ReconcileProcess")?;
-        if super::super::principal(tx, &request.caller.actor_id)?
-            != source.record.context.principal_id
-        {
-            return Err(StoreError::NotFound(
-                "historical terminal control is not visible".into(),
-            ));
-        }
         if request.context_digest != source.record.context_digest {
             return Err(invalid("historical context request differs"));
         }
@@ -115,6 +111,7 @@ pub(super) fn seal(
         // lineage or actor change. Re-read those bindings after proof I/O/barrier.
         validation::source(
             tx,
+            &config,
             &request.caller.actor_id,
             request.source_action_id,
             request.dispatch_id,
@@ -181,14 +178,7 @@ fn replay(
     let now = context.now;
     let source = context.source;
     if request.prepared_proof.object_hash == sealed.fact.observation_object_hash {
-        let record = read_object_record_conn(tx, request.prepared_proof.object_hash)?;
-        if record.object_generation != request.prepared_proof.object_generation
-            || record.relative_path != request.prepared_proof.relative_path
-        {
-            return Err(invalid(
-                "historical proof handle differs from the sealed object",
-            ));
-        }
+        same_object_pin(tx, context, request, publication, &sealed.producer_pin_id)?;
     } else {
         let bytes = read_prepared_evidence_bytes_bounded(
             tx,
@@ -218,6 +208,76 @@ fn replay(
     })
 }
 
+fn same_object_pin(
+    tx: &Transaction<'_>,
+    context: &WriteContext<'_>,
+    request: &SealTerminalControlHistoryRequest,
+    publication: &PublishObjectReferenceRequest,
+    original_pin: &str,
+) -> Result<(), StoreError> {
+    let record = read_object_record_conn(tx, request.prepared_proof.object_hash)?;
+    if record.object_generation != request.prepared_proof.object_generation
+        || record.relative_path != request.prepared_proof.relative_path
+    {
+        return Err(invalid(
+            "historical proof handle differs from the sealed object",
+        ));
+    }
+    if publication.pin_id == original_pin {
+        let pin:Option<ReplayPin>=tx.query_row("SELECT object_hash,object_generation,owner_kind,owner_id,authority_generation,pin_kind,state FROM object_pins WHERE pin_id=?1",[original_pin],ReplayPin::read).optional()?;
+        if let Some(pin) = pin {
+            if pin.hash != publication.object_hash.to_string()
+                || pin.generation != publication.object_generation
+                || pin.owner_kind != "action"
+                || pin.owner_id != request.source_action_id.to_string()
+                || pin.authority != context.daemon.authority_generation.to_string()
+                || pin.kind != "preparation"
+                || pin.state != "released"
+            {
+                return Err(unavailable(
+                    "original historical producer handle is not consumed and exact",
+                ));
+            }
+        }
+        // A consumed preparation can be collected. Its original identity is
+        // still sealed in the event; the live proof was verified above.
+    } else {
+        read_prepared_evidence_bytes_bounded(
+            tx,
+            context.config,
+            &request.prepared_proof,
+            publication,
+            context.daemon.authority_generation,
+            MAX_PROOF_BYTES,
+        )?;
+        tx_release_pin(tx, context.now, &publication.pin_id)?;
+    }
+    Ok(())
+}
+
+struct ReplayPin {
+    hash: String,
+    generation: i64,
+    owner_kind: String,
+    owner_id: String,
+    authority: String,
+    kind: String,
+    state: String,
+}
+impl ReplayPin {
+    fn read(row: &rusqlite::Row<'_>) -> rusqlite::Result<Self> {
+        Ok(Self {
+            hash: row.get(0)?,
+            generation: row.get(1)?,
+            owner_kind: row.get(2)?,
+            owner_id: row.get(3)?,
+            authority: row.get(4)?,
+            kind: row.get(5)?,
+            state: row.get(6)?,
+        })
+    }
+}
+
 pub(super) fn inspect(
     store: &UnleashStore,
     actor: &ActorId,
@@ -225,7 +285,7 @@ pub(super) fn inspect(
     dispatch: DispatchId,
 ) -> Result<SnapshotProjection<Option<TerminalControlHistoryFact>>, StoreError> {
     store.read_snapshot(|conn, _| {
-        let source = validation::source(conn, actor, action, dispatch)?;
+        let source = validation::source(conn, store.config(), actor, action, dispatch)?;
         let daemon = read_daemon_state_conn(conn)?;
         let value = read_sealed(conn, store.config(), &daemon, &source)?.map(|sealed| sealed.fact);
         let high: i64 = conn.query_row(
@@ -274,7 +334,11 @@ fn read_sealed(
         ));
     }
     let fact = fact(source, &proof, &payload, row.cursor(daemon)?);
-    Ok(Some(Sealed { fact, proof }))
+    Ok(Some(Sealed {
+        fact,
+        proof,
+        producer_pin_id: payload.producer_pin_id,
+    }))
 }
 
 struct HistoryEvent {
@@ -324,6 +388,7 @@ impl HistoryEvent {
         let payload: HistoryPayload = serde_json::from_str(&self.encoded)
             .map_err(|_| unavailable("historical event payload is invalid"))?;
         if payload.schema_version != 1
+            || payload.producer_pin_id.is_empty()
             || canonical_sha256(&payload)?.to_string() != self.digest
             || payload.dispatch_id
                 != source
@@ -392,6 +457,7 @@ fn append_fact(
         context_digest: source.record.context_digest,
         proof_hash: publication.object_hash,
         object_generation: publication.object_generation,
+        producer_pin_id: publication.pin_id.clone(),
         native_ack_digest: canonical_sha256(&proof.ack)?,
         inspected_by_epoch: daemon.daemon_epoch,
         inspected_by: c.actor_id.clone(),
