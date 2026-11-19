@@ -38,6 +38,7 @@
 #![warn(missing_docs)]
 
 pub mod anchor;
+mod control_transfer;
 pub mod error;
 pub mod fencing;
 pub mod host;
@@ -52,6 +53,7 @@ pub use anchor::{
     OwnedChildHandle, ProcessInspector, SigchldQualification, StopObservation,
     configure_setsid_pre_exec, ensure_sigchld_qualified, inspect_sigchld_disposition,
 };
+pub use control_transfer::{ControlTransferAck, ControlTransferRequest, ControlTransferResponse};
 pub use error::ProcessHostError;
 pub use fencing::{FencingGate, HostCommandHeader};
 pub use host::{

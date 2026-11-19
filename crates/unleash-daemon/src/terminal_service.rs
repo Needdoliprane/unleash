@@ -25,6 +25,16 @@ use unleash_store::{
 #[path = "terminal_metadata.rs"]
 mod metadata;
 pub(crate) use metadata::read_terminal_metadata;
+#[path = "terminal_control.rs"]
+mod control;
+
+pub(crate) fn start_registered(
+    state: &Arc<DaemonRuntimeState>,
+    actor: unleash_domain::ActorId,
+    command: unleash_domain::CommandId,
+) {
+    control::start(state, actor, command);
+}
 
 type ObservationSlot =
     Arc<std::sync::Mutex<Option<unleash_store::terminal_allocations::TerminalLaunchObservation>>>;
@@ -58,19 +68,27 @@ pub(crate) async fn read_log(
     let store = state.store.clone();
     let actor = session.actor_id.clone();
     let project = query.project_id;
-    let inspected=tokio::task::spawn_blocking(move|| {
-        let snapshot=store.inspect_terminal_allocation_snapshot(raw.terminal_id)?;
-        let record=snapshot.value.ok_or_else(||unleash_store::StoreError::NotFound("terminal missing".into()))?;
-        let unleash_store::TerminalAllocationScope::ProjectConfiguration {project_id,..}=record.context.preparation.scope;
-        if record.context.actor_id!=actor || project!=Some(project_id) {return Err(unleash_store::StoreError::InvalidArgument {reason:None,message:"terminal scope differs".into()});}
-        let observed=store.read_snapshot(|conn,_| {
-            use rusqlite::OptionalExtension;
-            conn.query_row("SELECT p.pid FROM processes p JOIN terminal_sessions s ON s.process_id=p.process_id JOIN actions a ON a.action_id=p.action_id WHERE s.terminal_id=?1 AND p.process_run_uuid=?2 AND p.action_id=?3 AND a.state='observed_success'",rusqlite::params![raw.terminal_id.to_string(),record.context.process_run_uuid.to_string(),record.context.action_id.to_string()],|r|r.get::<_,u32>(0)).optional().map_err(unleash_store::StoreError::from)
-        })?;
-        Ok::<_,unleash_store::StoreError>((record,observed,snapshot.cursor))
-    }).await.map_err(|_|hidden())?.map_err(|_|hidden())?;
+    let inspected = tokio::task::spawn_blocking(move || {
+        let snapshot = store.inspect_terminal_allocation_snapshot(raw.terminal_id)?;
+        let record = snapshot
+            .value
+            .ok_or_else(|| unleash_store::StoreError::NotFound("terminal missing".into()))?;
+        let unleash_store::TerminalAllocationScope::ProjectConfiguration { project_id, .. } =
+            record.context.preparation.scope;
+        if record.context.actor_id != actor || project != Some(project_id) {
+            return Err(unleash_store::StoreError::InvalidArgument {
+                reason: None,
+                message: "terminal scope differs".into(),
+            });
+        }
+        let observed = store.read_snapshot(|conn, _| read_log_binding(conn, &record))?;
+        Ok::<_, unleash_store::StoreError>((record, observed, snapshot.cursor))
+    })
+    .await
+    .map_err(|_| hidden())?
+    .map_err(|_| hidden())?;
     let (record, pid, cursor) = inspected;
-    let Some(pid) = pid else {
+    let Some(binding) = pid else {
         if record.action_state == Some(unleash_domain::ActionState::OutcomeUnknown) {
             return Err(IpcError::new(
                 ErrorCode::OutcomeUnknown,
@@ -86,21 +104,23 @@ pub(crate) async fn read_log(
             RetryClass::AfterRefresh,
         ));
     };
+    let pid = binding.pid;
     // A read does not acquire/renew a lease or write input. Output is released
     // only after the broker observation and actual process identity committed.
     if record.context.authority_generation != state.authority_generation
-        || record.context.daemon_epoch != state.daemon_epoch
+        || binding.epoch != state.daemon_epoch
     {
         return Err(hidden());
     }
     let root = state.store.config().data_root.clone();
     let ids = state.store.config().id_generator.clone();
     let run = record.context.process_run_uuid;
-    let result =
-        tokio::task::spawn_blocking(move || read_host_log(&root, ids.as_ref(), &record, pid, &raw))
-            .await
-            .map_err(|_| hidden())?
-            .map_err(|_| hidden())?;
+    let result = tokio::task::spawn_blocking(move || {
+        read_host_log(&root, ids.as_ref(), &record, &binding, &raw)
+    })
+    .await
+    .map_err(|_| hidden())?
+    .map_err(|_| hidden())?;
     let text = result
         .segments
         .iter()
@@ -113,11 +133,39 @@ pub(crate) async fn read_log(
     })
 }
 
+struct LogReadBinding {
+    pid: u32,
+    epoch: unleash_domain::DaemonEpoch,
+    fence: unleash_domain::Fence,
+}
+
+fn sql_u64(row: &rusqlite::Row<'_>, index: usize) -> rusqlite::Result<u64> {
+    let value: i64 = row.get(index)?;
+    u64::try_from(value).map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(
+            index,
+            rusqlite::types::Type::Integer,
+            Box::new(error),
+        )
+    })
+}
+
+fn read_log_binding(
+    conn: &rusqlite::Connection,
+    record: &unleash_store::TerminalAllocationRecord,
+) -> Result<Option<LogReadBinding>, unleash_store::StoreError> {
+    use rusqlite::OptionalExtension;
+    let c = &record.context;
+    let invalid =
+        || unleash_store::StoreError::InvariantViolation("terminal epoch or fence invalid".into());
+    conn.query_row("SELECT p.pid,l.daemon_epoch,l.fence FROM processes p JOIN terminal_sessions s ON s.process_id=p.process_id JOIN actions a ON a.action_id=p.action_id JOIN resource_leases l ON l.lease_id=s.lease_id JOIN daemon_state d ON d.singleton=1 JOIN principals owner ON owner.principal_id=l.owner_id AND owner.principal_kind='user' AND owner.state='active' WHERE s.terminal_id=?1 AND p.process_run_uuid=?2 AND p.action_id=?3 AND a.state='observed_success' AND p.authority_generation=d.authority_generation AND l.authority_generation=d.authority_generation AND l.boot_identity=d.boot_identity AND l.resource_kind='terminal' AND l.owner_type='principal' AND l.owner_id=?4 AND l.daemon_epoch=d.daemon_epoch AND ((l.lease_id=?5 AND l.fence=?6 AND l.daemon_epoch=?7) OR EXISTS(SELECT 1 FROM terminal_control_intents control JOIN actions transfer ON transfer.action_id=control.action_id WHERE control.terminal_id=s.terminal_id AND control.next_lease_id=l.lease_id AND control.authority_generation=d.authority_generation AND control.daemon_epoch=l.daemon_epoch AND control.next_fence=l.fence AND control.state='observed' AND control.observation_object_hash IS NOT NULL AND transfer.state='observed_success' AND json_extract(control.context_json,'$.initial_context_digest')=?8))",rusqlite::params![c.terminal_id.to_string(),c.process_run_uuid.to_string(),c.action_id.to_string(),c.principal_id.as_str(),c.lease_id.to_string(),i64::try_from(c.resource_fence.as_u64()).map_err(|_|invalid())?,i64::try_from(c.daemon_epoch.as_u64()).map_err(|_|invalid())?,record.context_digest.to_string()],|row|Ok(LogReadBinding {pid:row.get(0)?,epoch:unleash_domain::DaemonEpoch::new(sql_u64(row,1)?),fence:unleash_domain::Fence::new(sql_u64(row,2)?)})).optional().map_err(unleash_store::StoreError::from)
+}
+
 fn read_host_log(
     root: &std::path::Path,
     ids: &dyn unleash_domain::IdGeneratorPort,
     record: &unleash_store::TerminalAllocationRecord,
-    pid: u32,
+    binding: &LogReadBinding,
     raw: &LogQuery,
 ) -> Result<unleash_process_host::LogReadResult, TerminalError> {
     let c = &record.context;
@@ -135,8 +183,8 @@ fn read_host_log(
         &runtime.join(HOST_SOCKET_FILENAME),
         c.process_run_uuid,
         c.authority_generation,
-        c.daemon_epoch,
-        c.resource_fence,
+        binding.epoch,
+        binding.fence,
     )?;
     let header = client.make_header(ids.new_command_id(), c.action_id, record.payload_digest());
     let HostResponse::HandshakeAck {
@@ -153,7 +201,7 @@ fn read_host_log(
     else {
         return Err("terminal handshake refused".into());
     };
-    if os_identity.pid != pid
+    if os_identity.pid != binding.pid
         || allocation_context_digest != Some(record.context_digest)
         || effective_environment_digest != manifest.effective_environment_digest
     {
@@ -828,6 +876,12 @@ pub(crate) async fn prepare_acquisition(
         return Err(bad());
     }
     let project = command.project_id.ok_or_else(bad)?;
+    if ["terminal_id", "process_run_uuid", "control_mode"]
+        .iter()
+        .any(|key| command.payload.contains_key(*key))
+    {
+        return prepare_registered_acquisition(session, command);
+    }
     let terminal = unleash_domain::TerminalId::from_uuid(command.aggregate_id);
     let store = state.store.clone();
     let actor = session.actor_id.clone();
@@ -837,7 +891,7 @@ pub(crate) async fn prepare_acquisition(
         if store.inspect_command_receipt(&actor,envelope.command_id).is_ok() {
             return store.inspect_terminal_allocation_snapshot(terminal)?.value.map(|r|r.context.preparation).ok_or_else(invalid);
         }
-        let raw:NewTerminalPayload=serde_json::from_value(serde_json::Value::Object(envelope.payload.clone()))?;
+        let raw:NewTerminalPayload=serde_json::from_value(serde_json::Value::Object(envelope.payload.clone())).map_err(|_|invalid())?;
         if raw.invocation_id.is_some() || raw.worktree_id.is_some() || raw.reuse_policy!="reuse_compatible"
             || raw.scope_id!=project.to_string() || raw.readiness.kind!="process_started"
             || raw.arguments.len()>128 || raw.arguments.iter().map(String::len).sum::<usize>()>65536
@@ -884,6 +938,49 @@ pub(crate) async fn prepare_acquisition(
         budget_reservations: vec![],
     })
 }
+
+fn prepare_registered_acquisition(
+    session: &crate::auth::AuthenticatedSession,
+    command: CommandEnvelope,
+) -> Result<unleash_store::CommitCommandRequest, IpcError> {
+    use unleash_store::CommandMutation;
+    let bad = || {
+        IpcError::new(
+            ErrorCode::InvalidArgument,
+            None,
+            "Terminal request or configured scope is inadmissible",
+            RetryClass::Never,
+        )
+        .with_command_id(command.command_id)
+    };
+    let request: unleash_store::terminal_allocations::RegisteredTerminalControl =
+        serde_json::from_value(serde_json::Value::Object(command.payload.clone()))
+            .map_err(|_| bad())?;
+    if request.terminal_id.as_uuid() != command.aggregate_id {
+        return Err(bad());
+    }
+    Ok(unleash_store::CommitCommandRequest {
+        actor_id: session.actor_id.clone(),
+        envelope: command,
+        target_aggregate: unleash_store::AggregateKind::TerminalControl,
+        operation_id: None,
+        receipt_state: unleash_protocol::ReceiptState::Accepted,
+        result_ref: None,
+        retention_days_override: None,
+        fence_assertion: None,
+        mutation: CommandMutation::PrepareTerminalControl {
+            caller: CallerAuthority {
+                actor_id: session.actor_id.clone(),
+                role: CallerRole::PolicyAdmin,
+            },
+            request,
+        },
+        events: vec![],
+        capacity_reservations: vec![],
+        budget_reservations: vec![],
+    })
+}
+
 use std::sync::Arc;
 use unleash_protocol::{CommandEnvelope, ErrorCode, IpcError, RetryClass};
 use unleash_store::terminal_allocations::{PreparedTerminalEnvironment, TerminalRuntimeSettings};

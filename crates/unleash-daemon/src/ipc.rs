@@ -1074,6 +1074,7 @@ async fn handle_command_frame(
                 CommandMutation::CreateMission { .. }
                     | CommandMutation::RequestBackup { .. }
                     | CommandMutation::PrepareTerminalAllocation { .. }
+                    | CommandMutation::PrepareTerminalControl { .. }
             ) && let Err(ipc) = ensure_principal_registered(&state.store, session).await
             {
                 let _ = write_json_frame_timeout(stream, &ipc, RESPONSE_WRITE_TIMEOUT).await;
@@ -1146,10 +1147,20 @@ async fn handle_command_frame(
         crate::backup_service::start(state, unleash_domain::BackupId::from_uuid(cmd.aggregate_id));
     }
     if cmd.command_type == "AcquireTerminal" {
-        crate::terminal_service::start(
-            state,
-            unleash_domain::TerminalId::from_uuid(cmd.aggregate_id),
-        );
+        if cmd.payload.contains_key("terminal_id") {
+            if newly_committed {
+                crate::terminal_service::start_registered(
+                    state,
+                    session.actor_id.clone(),
+                    cmd.command_id,
+                );
+            }
+        } else {
+            crate::terminal_service::start(
+                state,
+                unleash_domain::TerminalId::from_uuid(cmd.aggregate_id),
+            );
+        }
     }
 
     if newly_committed && let Some(stop_reason) = stop_reason.take() {

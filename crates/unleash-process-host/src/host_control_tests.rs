@@ -106,6 +106,25 @@ fn fixture_with_observer(
     }
 }
 
+fn wait_for_transfer_contention(
+    shared: &ServerShared,
+    observed: &std::sync::mpsc::Receiver<HostResponse>,
+) -> Option<HostResponse> {
+    // The writer remains unavailable until the transfer actually reaches its gate.
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    while shared.operation_contentions.load(Ordering::SeqCst) == 0 {
+        if let Ok(response) = observed.try_recv() {
+            return Some(response);
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "transfer reaches server operation gate"
+        );
+        std::thread::yield_now();
+    }
+    observed.recv_timeout(Duration::from_millis(150)).ok()
+}
+
 #[test]
 fn t_f011_control_rotation_waits_for_previously_admitted_input() {
     let fixture = fixture_with_observer(None);
@@ -176,9 +195,7 @@ fn t_f011_control_rotation_waits_for_previously_admitted_input() {
             .unwrap();
         sent.send(response).unwrap();
     });
-    // The old PTY writer is deliberately still unavailable. An ACK at this
-    // point would let a superseded input write after transfer confirmation.
-    let premature = observed.recv_timeout(Duration::from_millis(150)).ok();
+    let premature = wait_for_transfer_contention(&fixture.server.shared, &observed);
     drop(writer);
     assert!(matches!(
         input.join().unwrap(),
@@ -198,6 +215,135 @@ fn t_f011_control_rotation_waits_for_previously_admitted_input() {
     assert!(
         premature.is_none(),
         "rotation ACK preceded the admitted PTY write"
+    );
+}
+
+#[test]
+fn t_f011_control_correlated_lost_ack_replays_without_rotation_or_spawn() {
+    use crate::{ControlTransferRequest, ControlTransferResponse};
+    let fixture = fixture_with_observer(None);
+    let spec = &fixture.spec;
+    let mut first = HostClient::connect(
+        &spec.runtime_dir.join(HOST_SOCKET_FILENAME),
+        spec.process_run_uuid,
+        spec.authority_generation,
+        DaemonEpoch::new(2),
+        Fence::new(2),
+    )
+    .unwrap();
+    let request = ControlTransferRequest {
+        header: first.make_header(
+            CommandId::from_u128(30),
+            ActionId::from_u128(31),
+            Sha256Digest::from_bytes(b"accepted-control-context"),
+        ),
+        dispatch_id: unleash_domain::DispatchId::from_u128(32),
+        initial_context_digest: spec.allocation_context_digest.unwrap(),
+        current_secret: SECRET.into(),
+        next_secret: "synthetic-correlated-successor-secret".into(),
+    };
+    let original = fixture.server.shared.anchor.expected_identity();
+    // Write the real request, then abandon the connection without reading its
+    // ACK. The next client must inspect/replay this same transfer identity.
+    let bytes = serde_json::to_vec(
+        &crate::control_transfer::TransferEnvelope::TransferControlV1(request.clone()),
+    )
+    .unwrap();
+    write_frame(&mut first.stream, &bytes).unwrap();
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    while fixture.server.shared.auth_generation.load(Ordering::SeqCst) == 1 {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "correlated transfer must reach rotation"
+        );
+        std::thread::yield_now();
+    }
+    drop(first);
+    let mut retry = HostClient::connect(
+        &spec.runtime_dir.join(HOST_SOCKET_FILENAME),
+        spec.process_run_uuid,
+        spec.authority_generation,
+        DaemonEpoch::new(2),
+        Fence::new(2),
+    )
+    .unwrap();
+    let mut replay = request.clone();
+    replay.current_secret = request.next_secret.clone();
+    let ControlTransferResponse::Ack { ack } = retry.transfer_control(&replay).unwrap() else {
+        panic!("same committed transfer must return its correlated facts");
+    };
+    assert_eq!(ack.header, request.header);
+    assert_eq!(ack.dispatch_id, request.dispatch_id);
+    assert_eq!(ack.os_identity, original);
+    assert_eq!(
+        fixture.server.shared.auth_generation.load(Ordering::SeqCst),
+        2
+    );
+    let ControlTransferResponse::Ack { ack: again } = retry.transfer_control(&replay).unwrap()
+    else {
+        panic!("exact ACK replay must remain stable");
+    };
+    assert_eq!(again, ack);
+    assert_correlated_transfer_refusals(spec, &request);
+    assert_eq!(
+        fixture.server.shared.auth_generation.load(Ordering::SeqCst),
+        2
+    );
+    let manifest =
+        HostManifest::load_private(&spec.runtime_dir.join(HOST_MANIFEST_FILENAME)).unwrap();
+    assert_eq!(manifest.pid, Some(original.pid));
+    assert_eq!(manifest.process_run_uuid, spec.process_run_uuid);
+    assert_eq!(manifest.daemon_epoch, DaemonEpoch::new(2));
+    assert_eq!(manifest.highest_fence, Fence::new(2));
+    let debug = format!("{request:?}");
+    assert!(!debug.contains(SECRET) && !debug.contains(&request.next_secret));
+}
+
+fn assert_correlated_transfer_refusals(
+    spec: &HostBootstrapSpec,
+    original: &crate::ControlTransferRequest,
+) {
+    use crate::ControlTransferResponse;
+    let mut current = HostClient::connect(
+        &spec.runtime_dir.join(HOST_SOCKET_FILENAME),
+        spec.process_run_uuid,
+        spec.authority_generation,
+        DaemonEpoch::new(2),
+        Fence::new(3),
+    )
+    .unwrap();
+    let mut same_epoch = original.clone();
+    same_epoch.header = current.make_header(
+        CommandId::from_u128(33),
+        ActionId::from_u128(34),
+        Sha256Digest::from_bytes(b"different-accepted-control-context"),
+    );
+    same_epoch.dispatch_id = unleash_domain::DispatchId::from_u128(35);
+    same_epoch.current_secret = original.next_secret.clone();
+    same_epoch.next_secret = "synthetic-third-control-capability".into();
+    let ControlTransferResponse::Refused { error } = current.transfer_control(&same_epoch).unwrap()
+    else {
+        panic!("a different action/fence cannot reuse the same daemon epoch");
+    };
+    assert_eq!(
+        error.reason_code,
+        Some(unleash_protocol::ReasonCode::StaleEpoch)
+    );
+    let mut stale = HostClient::connect(
+        &spec.runtime_dir.join(HOST_SOCKET_FILENAME),
+        spec.process_run_uuid,
+        spec.authority_generation,
+        DaemonEpoch::new(2),
+        Fence::new(2),
+    )
+    .unwrap();
+    let ControlTransferResponse::Refused { error } = stale.transfer_control(original).unwrap()
+    else {
+        panic!("the former capability cannot inspect or repeat a transfer");
+    };
+    assert_eq!(
+        error.code,
+        unleash_protocol::ErrorCode::AuthenticationFailed
     );
 }
 fn handshake(client: &mut HostClient, id: u128, action: ActionId) -> HostResponse {

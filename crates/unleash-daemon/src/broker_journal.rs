@@ -19,17 +19,17 @@ use unleash_store::{
     UnleashStore,
 };
 
+type TerminalLaunchObservationSlot =
+    std::sync::Mutex<Option<unleash_store::terminal_allocations::TerminalLaunchObservation>>;
+type TerminalControlObservationSlot =
+    std::sync::Mutex<Option<unleash_store::terminal_allocations::TerminalControlObservation>>;
+
 /// Broker journal backed by a durable Store port.
 pub(crate) struct SqliteBrokerJournal {
     store: Arc<UnleashStore>,
     runtime: Option<Weak<DaemonRuntimeState>>,
-    terminal_observation: Option<
-        Arc<
-            std::sync::Mutex<
-                Option<unleash_store::terminal_allocations::TerminalLaunchObservation>,
-            >,
-        >,
-    >,
+    terminal_observation: Option<Arc<TerminalLaunchObservationSlot>>,
+    terminal_control_observation: Option<Arc<TerminalControlObservationSlot>>,
 }
 
 impl SqliteBrokerJournal {
@@ -40,6 +40,7 @@ impl SqliteBrokerJournal {
             store: Arc::clone(&runtime.store),
             runtime: Some(Arc::downgrade(runtime)),
             terminal_observation: None,
+            terminal_control_observation: None,
         }
     }
 
@@ -49,19 +50,25 @@ impl SqliteBrokerJournal {
             store,
             runtime: None,
             terminal_observation: None,
+            terminal_control_observation: None,
         }
     }
 
     pub(crate) fn with_terminal_observation(
         runtime: &Arc<DaemonRuntimeState>,
-        slot: Arc<
-            std::sync::Mutex<
-                Option<unleash_store::terminal_allocations::TerminalLaunchObservation>,
-            >,
-        >,
+        slot: Arc<TerminalLaunchObservationSlot>,
     ) -> Self {
         let mut journal = Self::new(runtime);
         journal.terminal_observation = Some(slot);
+        journal
+    }
+
+    pub(crate) fn with_terminal_control_observation(
+        runtime: &Arc<DaemonRuntimeState>,
+        slot: Arc<TerminalControlObservationSlot>,
+    ) -> Self {
+        let mut journal = Self::new(runtime);
+        journal.terminal_control_observation = Some(slot);
         journal
     }
 }
@@ -299,13 +306,59 @@ fn project(
     ))
 }
 
+fn commit_journal_phase(
+    store: &UnleashStore,
+    request: BrokerPhaseRequest,
+    terminal_slot: Option<&TerminalLaunchObservationSlot>,
+    control_slot: Option<&TerminalControlObservationSlot>,
+) -> Result<unleash_store::BrokerPhaseCommit, BrokerJournalError> {
+    let phase_name = match &request.phase {
+        BrokerPhase::Authorizing { .. } => "authorizing",
+        BrokerPhase::Authorization { .. } => "authorization",
+        BrokerPhase::Dispatch { .. } => "dispatch",
+        BrokerPhase::Observation { .. } => "observation",
+    };
+    let successful_observation = matches!(
+        &request.phase,
+        BrokerPhase::Observation { receipt, .. }
+            if receipt.state == unleash_domain::ActionState::ObservedSuccess
+    );
+    let (terminal_observation, control_observation) = if successful_observation {
+        // Keep the exact proof after precommit errors or a lost ACK.
+        // Re-appending the observation never invokes the executor.
+        let terminal = terminal_slot.and_then(|slot| slot.lock().ok()?.clone());
+        let control = control_slot.and_then(|slot| slot.lock().ok()?.clone());
+        (terminal, control)
+    } else {
+        (None, None)
+    };
+    let committed = if let Some(observation) = control_observation {
+        store.commit_terminal_control_observation(observation, request)
+    } else if let Some(observation) = terminal_observation {
+        store.commit_terminal_launch_observation(observation, request)
+    } else {
+        store.commit_broker_phase(request)
+    };
+    committed.map_err(|error| {
+        tracing::warn!(
+            broker_phase = phase_name,
+            code = %error.error_code(),
+            reason = ?error.reason_code(),
+            "Broker durable phase refused"
+        );
+        BrokerJournalError
+    })
+}
+
 impl BrokerJournalPort for SqliteBrokerJournal {
     fn append<'a>(
         &'a self,
         entry: &'a BrokerJournalEntry,
     ) -> BoxFuture<'a, Result<(), BrokerJournalError>> {
         Box::pin(async move {
-            let (evaluation, intent, phase) = if self.terminal_observation.is_some() {
+            let (evaluation, intent, phase) = if self.terminal_observation.is_some()
+                || self.terminal_control_observation.is_some()
+            {
                 project_terminal(entry)?
             } else {
                 project(entry)?
@@ -313,6 +366,7 @@ impl BrokerJournalPort for SqliteBrokerJournal {
             let store = Arc::clone(&self.store);
             let runtime = self.runtime.clone();
             let terminal_slot = self.terminal_observation.clone();
+            let control_slot = self.terminal_control_observation.clone();
             let activity = match &runtime {
                 Some(runtime) => Some(Arc::new(
                     runtime
@@ -344,17 +398,12 @@ impl BrokerJournalPort for SqliteBrokerJournal {
                         evaluation,
                         phase,
                     };
-                    let phase_name=match &request.phase {BrokerPhase::Authorizing {..}=>"authorizing",BrokerPhase::Authorization {..}=>"authorization",BrokerPhase::Dispatch {..}=>"dispatch",BrokerPhase::Observation {..}=>"observation"};
-                    let terminal_observation=if matches!(&request.phase,BrokerPhase::Observation {receipt,..} if receipt.state==unleash_domain::ActionState::ObservedSuccess) {
-                        // Keep the exact proof after precommit errors or a lost ACK.
-                        // Re-appending this observation never invokes the executor.
-                        terminal_slot.as_ref().and_then(|slot|slot.lock().ok()?.clone())
-                    } else {None};
-                    let commit=if let Some(observation)=terminal_observation {
-                        store.commit_terminal_launch_observation(observation,request)
-                    } else {
-                        store.commit_broker_phase(request)
-                    }.map_err(|error|{tracing::warn!(broker_phase=phase_name,code=%error.error_code(),reason=?error.reason_code(),"Broker durable phase refused");BrokerJournalError})?;
+                    let commit = commit_journal_phase(
+                        &store,
+                        request,
+                        terminal_slot.as_deref(),
+                        control_slot.as_deref(),
+                    )?;
                     Ok::<_, BrokerJournalError>((commit, dispatch, intent.action_id))
                 })
                 .await;
@@ -423,7 +472,8 @@ fn project_terminal(
         cause: ObservationCause::Execution,
         ..
     } = entry
-        && intent.verb == unleash_store::TERMINAL_ALLOCATION_VERB
+        && (intent.verb == unleash_store::TERMINAL_ALLOCATION_VERB
+            || intent.verb == unleash_store::terminal_allocations::TERMINAL_CONTROL_VERB)
         && matches!(
             &intent.resource_refs[..],
             [unleash_action_broker::NormalizedResourceRef::Terminal(_)]
