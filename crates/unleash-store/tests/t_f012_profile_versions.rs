@@ -1156,20 +1156,19 @@ fn t_f012_002_v011_interrupted_migration_is_atomic_and_legacy_cannot_be_promoted
         .unwrap();
     store.shutdown().unwrap();
     let mut next = StoreConfig::new(directory.path());
-    next.cutpoints = Arc::new(FailOnce {
+    next.max_supported_schema_version = 11;
+    let mut interrupted = next.clone();
+    interrupted.cutpoints = Arc::new(FailOnce {
         point: StoreCutpoint::C11MigrationInProgress,
         armed: AtomicBool::new(true),
     });
-    assert!(UnleashStore::open_with_migration_backup(next, Some(backup.backup_id)).is_err());
+    assert!(UnleashStore::open_with_migration_backup(interrupted, Some(backup.backup_id)).is_err());
     let historical = UnleashStore::open(old).unwrap();
     assert_eq!(historical.daemon_state().unwrap().schema_version, 10);
     historical.read_snapshot(|conn,_| {assert!(conn.prepare("SELECT profile_id FROM provider_profiles").is_err());let count:i64=conn.query_row("SELECT COUNT(*) FROM provider_profiles WHERE profile_version_ref='legacy' AND created_at_ms=17",[],|r|r.get(0))?;assert_eq!(count,1);Ok(())}).unwrap();
     historical.shutdown().unwrap();
-    let current = UnleashStore::open_with_migration_backup(
-        StoreConfig::new(directory.path()),
-        Some(backup.backup_id),
-    )
-    .unwrap();
+    let current = UnleashStore::open_with_migration_backup(next, Some(backup.backup_id)).unwrap();
+    assert_eq!(current.daemon_state().unwrap().schema_version, 11);
     current.execute_in_writer_tx(WriteCriticality::Critical,|tx,_| {assert!(tx.execute("UPDATE provider_profiles SET profile_id=?1 WHERE profile_version_ref='legacy'",[PROFILE.to_string()]).is_err());assert!(tx.execute("INSERT INTO provider_profiles(profile_version_ref,provider_id,locality,pricing_version,source_kind,created_at_ms,profile_id) VALUES('partial','provider','local_only','none_local','user_declared',0,?1)",[PROFILE.to_string()]).is_err());Ok(())}).unwrap();
 }
 
@@ -1218,11 +1217,9 @@ fn t_f012_002_v011_preserves_legacy_profile_and_probe_links() {
         })
         .unwrap();
     store.shutdown().unwrap();
-    let store = UnleashStore::open_with_migration_backup(
-        StoreConfig::new(directory.path()),
-        Some(backup.backup_id),
-    )
-    .unwrap();
+    let mut next = StoreConfig::new(directory.path());
+    next.max_supported_schema_version = 11;
+    let store = UnleashStore::open_with_migration_backup(next, Some(backup.backup_id)).unwrap();
     assert_eq!(store.daemon_state().unwrap().schema_version, 11);
     assert_eq!(
         store
