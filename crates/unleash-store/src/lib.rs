@@ -28,6 +28,7 @@ pub mod qualification;
 pub mod recovery_ops;
 pub mod restore;
 pub mod store;
+pub mod terminal_allocations;
 pub mod writer;
 
 pub use admission::{
@@ -110,6 +111,12 @@ pub use restore::{
     RestoreActivationResult, RestoreBackupRequest, RestoreCapsule, RestoreRequestState,
 };
 pub use store::{SnapshotProjection, StoreOpenFailure, StoreOpenStage, UnleashStore};
+pub use terminal_allocations::{
+    NormalizedTerminalProcessSpec, ResolveTerminalLaunchRequest, ResolvedTerminalLaunch,
+    TERMINAL_ALLOCATION_VERB, TerminalAllocationContext, TerminalAllocationPreparation,
+    TerminalAllocationRecord, TerminalAllocationScope, TerminalAllocationState,
+    TerminalAuxiliaryPools, TerminalEnvironmentRef,
+};
 pub use unleash_domain::ReconcileOutcome;
 pub use writer::{HeldReaderSession, ReaderContext, ReaderControl, WalTelemetry};
 
