@@ -80,8 +80,7 @@ async fn wait_for_rotation(client: &mut UnleashClient, project: ProjectId, termi
     }
 }
 
-#[tokio::test]
-async fn t_f011_008_real_daemon_exposes_expired_log_cursor_to_authorized_reader() {
+async fn rotated_fixture() -> (LiveFixture, Uuid, u64) {
     let mut fixture = LiveFixture::new(true).await;
     let mut request = fixture.allocation(0xf011_4801);
     request.payload.insert(
@@ -100,6 +99,13 @@ async fn t_f011_008_real_daemon_exposes_expired_log_cursor_to_authorized_reader(
         ReceiptState::Accepted
     );
     let oldest = wait_for_rotation(&mut fixture.client, project, terminal).await;
+    (fixture, terminal, oldest)
+}
+
+#[tokio::test]
+async fn t_f011_008_real_daemon_exposes_expired_log_cursor_to_authorized_reader() {
+    let (mut fixture, terminal, oldest) = rotated_fixture().await;
+    let project = fixture.project;
     let other_project = ProjectId::from_u128(0xf011_4fff);
     assert!(matches!(
         read_log_at(&mut fixture.client, other_project, terminal, 0).await,
@@ -122,6 +128,69 @@ async fn t_f011_008_real_daemon_exposes_expired_log_cursor_to_authorized_reader(
         resumed
             .result
             .pointer("/log/segments/0/start_offset")
+            .and_then(Value::as_u64),
+        Some(oldest)
+    );
+}
+
+#[tokio::test]
+#[ignore = "fournir UNLEASH_TEST_CLI_BIN et le process-host construits depuis le même arbre"]
+async fn t_f011_008_cli_preserves_structured_cursor_expiration_and_scope_refusal() {
+    let binary = PathBuf::from(
+        std::env::var_os("UNLEASH_TEST_CLI_BIN").expect("explicit absolute path to the real CLI"),
+    );
+    assert!(binary.is_absolute() && binary.is_file());
+    let (fixture, terminal, oldest) = rotated_fixture().await;
+    let socket = fixture.rendezvous.path().join("daemon.sock");
+    let read = |project: ProjectId, offset: u64| {
+        Command::new(&binary)
+            .arg("--socket")
+            .arg(&socket)
+            .args([
+                "--json",
+                "--timeout-ms",
+                "5000",
+                "process",
+                "log",
+                "--project-id",
+            ])
+            .arg(project.to_string())
+            .arg("--terminal-id")
+            .arg(terminal.to_string())
+            .arg("--after-offset")
+            .arg(offset.to_string())
+            .args(["--max-bytes", "16"])
+            .output()
+            .expect("read with the real CLI over the owned socket")
+    };
+    let expired = read(fixture.project, 0);
+    assert!(!expired.status.success());
+    assert!(expired.stdout.is_empty());
+    let error: Value = serde_json::from_slice(&expired.stderr).unwrap();
+    assert!(error.get("error").and_then(Value::as_str).is_some());
+    assert_eq!(error.get("code"), Some(&json!(ErrorCode::ResyncRequired)));
+    assert_eq!(
+        error.get("reason_code"),
+        Some(&json!(ReasonCode::CursorExpired))
+    );
+    assert_eq!(
+        error.get("retry_class"),
+        Some(&json!(RetryClass::AfterRefresh))
+    );
+    assert!(error.get("details_ref").is_none());
+    let denied = read(ProjectId::from_u128(0xf011_4fff), 0);
+    assert!(!denied.status.success());
+    let hidden: Value = serde_json::from_slice(&denied.stderr).unwrap();
+    assert_eq!(
+        hidden.get("code"),
+        Some(&json!(ErrorCode::NotFoundOrHidden))
+    );
+    assert_eq!(hidden.get("reason_code"), Some(&Value::Null));
+    let resumed = read(fixture.project, oldest);
+    assert!(resumed.status.success());
+    let page: Value = serde_json::from_slice(&resumed.stdout).unwrap();
+    assert_eq!(
+        page.pointer("/result/log/segments/0/start_offset")
             .and_then(Value::as_u64),
         Some(oldest)
     );
