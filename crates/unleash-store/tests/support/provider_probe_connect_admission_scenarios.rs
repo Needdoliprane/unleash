@@ -6,6 +6,7 @@
     reason = "The exact ownership/admission variant is the oracle"
 )]
 
+use super::mixed_admission_fixture as mixed;
 use super::{
     PRINCIPAL, PROFILE, caller, change, command, configure, connect, connect_intent, counts,
     envelope, policy, prepare,
@@ -511,23 +512,22 @@ fn t_f012_013_admission_destination_is_exact_not_just_any_loopback() {
 #[test]
 fn t_f012_013_admission_global_five_and_sixth_waits_without_a_hidden_place() {
     let (store, _directory, mandate, pool) = fixture(Arc::new(NoopCutpointObserver));
-    for id in 310..315 {
-        let ready = ready(&store, mandate, id);
-        authorizing(&store, &ready);
-        observe_eligibility(&store, &ready, pool);
-        assert!(matches!(
-            admit(&store, &ready, pool),
-            Ok(AdmissionOutcome::Admitted(_))
-        ));
-    }
-    let sixth = ready(&store, mandate, 315);
-    authorizing(&store, &sixth);
-    observe_eligibility(&store, &sixth, pool);
+    let object = seed_four_other_units(&store, pool);
+    let model_baseline = counts(&store);
+    assert_generation_fixture_model_parents(&store);
+    let connect = ready(&store, mandate, 315);
+    authorizing(&store, &connect);
+    observe_eligibility(&store, &connect, pool);
+    assert!(matches!(
+        admit(&store, &connect, pool),
+        Ok(AdmissionOutcome::Admitted(_))
+    ));
+    mixed::observe(&store, object);
     let before = counts(&store);
     let leases = lease_rows(&store);
-    let fairness = store.execution_admission_snapshot(pool).unwrap().fairness;
+    let snapshot = store.execution_admission_snapshot(pool).unwrap();
     assert!(matches!(
-        admit(&store, &sixth, pool),
+        store.commit_execution_admission(pool, snapshot.token, |_| Ok(mixed_proposal(8))),
         Err(StoreError::CapacityBlocked(_))
     ));
     assert_eq!(
@@ -546,10 +546,74 @@ fn t_f012_013_admission_global_five_and_sixth_waits_without_a_hidden_place() {
     assert_eq!(lease_rows(&store), leases);
     assert_eq!(
         store.execution_admission_snapshot(pool).unwrap().fairness,
-        fairness
+        snapshot.fairness
     );
     assert_eq!(held_capacity(&store), 5);
-    assert_no_model(&store);
+    assert_eq!(counts(&store).get(4..6), model_baseline.get(4..6));
+    assert_generation_fixture_model_parents(&store);
+    let calls: i64 = store
+        .read_snapshot(|db, _| {
+            Ok(db.query_row(
+                "SELECT COUNT(*) FROM model_calls WHERE provider_probe_id=?1",
+                [connect.record.context.probe_id.to_string()],
+                |row| row.get(0),
+            )?)
+        })
+        .unwrap();
+    let manifests:i64=store.read_snapshot(|db,_| Ok(db.query_row(
+        "SELECT COUNT(*) FROM model_call_manifests m JOIN model_calls c ON c.model_call_id=m.model_call_id WHERE c.provider_probe_id=?1",
+        [connect.record.context.probe_id.to_string()],|row|row.get(0))?)).unwrap();
+    assert_eq!(
+        (calls, manifests),
+        (0, 0),
+        "connect does not acquire model parents from the mixed fixture"
+    );
+}
+
+fn mixed_proposal(id: u128) -> AdmissionDecision {
+    AdmissionDecision::Admit {
+        unit: mixed::unit(id),
+        deficit_deltas: BTreeMap::from([(
+            Some(unleash_domain::ProjectId::from_uuid(mixed::PROJECT)),
+            0,
+        )]),
+        consecutive_controls: 0,
+        budgets: vec![],
+    }
+}
+
+fn seed_four_other_units(store: &UnleashStore, pool: PoolId) -> Sha256Digest {
+    // Reuse the existing explicit F003 synthetic executor, never an OS/model
+    // producer. Only the two invocations and two replay workers are admitted.
+    let object = mixed::seed(store, false);
+    assert_eq!(pool, mixed::POOL);
+    for id in 1..=4 {
+        mixed::observe(store, object);
+        let snapshot = store.execution_admission_snapshot(pool).unwrap();
+        let AdmissionOutcome::Admitted(commit) = store
+            .commit_execution_admission(pool, snapshot.token, move |_| Ok(mixed_proposal(id)))
+            .unwrap()
+        else {
+            panic!("the fixture's actual V008 unit must be admitted");
+        };
+        assert_eq!(commit.unit, mixed::unit(id));
+    }
+    let owners:i64=store.read_snapshot(|db,_| Ok(db.query_row(
+        "SELECT COUNT(*) FROM capacity_reservations r JOIN execution_reservation_owners o ON o.reservation_id=r.reservation_id WHERE r.state='held' AND ((r.owner_type='agent_invocation' AND r.owner_id=o.invocation_id AND o.attempt_id IS NOT NULL AND o.replay_worker_id IS NULL AND o.provider_probe_id IS NULL) OR (r.owner_type='replay_worker' AND r.owner_id=o.replay_worker_id AND o.invocation_id IS NULL AND o.attempt_id IS NULL AND o.provider_probe_id IS NULL))",[],|row|row.get(0))?)).unwrap();
+    assert_eq!(owners, 4);
+    object
+}
+
+fn assert_generation_fixture_model_parents(store: &UnleashStore) {
+    // seed() also prepares two queued generation probes; their preexisting
+    // request manifests remain a stable baseline, never attributed to connect.
+    for id in [5, 6] {
+        let probe = ProviderProbeId::from_u128(id);
+        let parents:(i64,i64)=store.read_snapshot(|db,_| Ok(db.query_row(
+            "SELECT (SELECT COUNT(*) FROM model_calls WHERE provider_probe_id=?1), (SELECT COUNT(*) FROM model_call_manifests m JOIN model_calls c ON c.model_call_id=m.model_call_id WHERE c.provider_probe_id=?1)",
+            [probe.to_string()],|row|Ok((row.get(0)?,row.get(1)?)))?)).unwrap();
+        assert_eq!(parents, (1, 1));
+    }
 }
 
 fn authorize(store: &UnleashStore, ready: &ReadyProbe) -> BrokerAuthorizationDecision {
