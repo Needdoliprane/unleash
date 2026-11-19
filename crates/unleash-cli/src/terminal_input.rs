@@ -137,6 +137,32 @@ mod tests {
     use super::*;
 
     #[test]
+    fn nil_project_is_forwarded_to_writer() {
+        let args = TerminalInputArgs {
+            project_id: uuid::Uuid::nil(),
+            terminal_id: uuid::Uuid::from_u128(1),
+            process_run_uuid: uuid::Uuid::from_u128(2),
+            lease_id: uuid::Uuid::from_u128(3),
+            fence: 1,
+            input_seq: 1,
+            control_revision: 0,
+            file: std::path::PathBuf::new(),
+            command_id: None,
+            authority_generation: None,
+        };
+        let command = envelope(
+            &args,
+            AuthorityGeneration::from_uuid(uuid::Uuid::from_u128(4)),
+            vec![0, 255],
+        );
+        assert_eq!(
+            command.map(|value| value.project_id).map_err(|_| ()),
+            Ok(Some(ProjectId::from_uuid(uuid::Uuid::nil()))),
+            "a provided UUID project is resolved by the writer, including nil"
+        );
+    }
+
+    #[test]
     fn binary_reader_preserves_arbitrary_bytes_and_stops_at_limit_plus_one() {
         for bytes in [vec![0, 255, 0, 10], vec![0x80; 65_536]] {
             assert_eq!(
