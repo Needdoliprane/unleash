@@ -299,7 +299,7 @@ mod renewal_scenarios {
         let revision = fixture
             .snapshot()
             .await
-            .pointer("/daemon_state/revision")
+            .pointer("/daemon/revision")
             .and_then(Value::as_u64)
             .unwrap();
         let stop = CommandEnvelope {
@@ -336,6 +336,18 @@ mod renewal_scenarios {
             snapshot(fixture, receipt),
             *committed,
             "no deferred replay task may extend or publish after the immediate checks"
+        );
+        assert_single_launch_without_input(fixture);
+    }
+
+    fn assert_single_launch_without_input(fixture: &LiveFixture) {
+        assert_eq!(
+            std::fs::read(fixture.project_root.path().join("worker-starts")).unwrap(),
+            b"started\n"
+        );
+        assert!(
+            !fixture.project_root.path().join("worker-effects").exists(),
+            "renewal never sends input, including after draining deferred tasks"
         );
     }
 
@@ -448,14 +460,7 @@ mod renewal_scenarios {
         assert!(fixture.daemon.child.try_wait().unwrap().is_none());
         same_native(&before_native, &fixture.host_manifest());
         assert_preserved_output(fixture, &original_log).await;
-        assert_eq!(
-            std::fs::read(fixture.project_root.path().join("worker-starts")).unwrap(),
-            b"started\n"
-        );
-        assert!(
-            !fixture.project_root.path().join("worker-effects").exists(),
-            "renewal never sends input"
-        );
+        assert_single_launch_without_input(fixture);
         stop_and_check_quiescent_replay(fixture, &accepted, &committed).await;
     }
 }

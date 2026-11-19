@@ -100,6 +100,7 @@ pub(super) async fn wait_before_commit(
 #[tokio::test]
 async fn t_f011_renewal_deadline_waits_for_exact_native_observation_commit() {
     let barrier_root = local_test_dir("renewal-precommit-barrier").unwrap();
+    std::fs::set_permissions(barrier_root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
     let barrier = barrier_root.path().join("barrier.sock");
     let listener = unleash_platform::bind_private_unix_listener(&barrier).unwrap();
     listener.set_nonblocking(true).unwrap();
