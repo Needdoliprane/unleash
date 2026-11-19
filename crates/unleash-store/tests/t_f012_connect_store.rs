@@ -402,7 +402,8 @@ fn t_f012_013_connect_c1_rolls_back_receipt_context_and_outbox() {
 #[test]
 fn t_f012_013_connect_rechecks_mandate_at_commit_but_replays_original_receipt() {
     let (store, _directory, mandate, _) = fixture();
-    let first = prepare(&store, &connect(&store, 13, mandate));
+    let wire = connect(&store, 13, mandate);
+    let first = prepare(&store, &wire);
     let pending = prepare(&store, &connect(&store, 14, mandate));
     let receipt = store
         .commit_command(first.clone())
@@ -425,6 +426,33 @@ fn t_f012_013_connect_rechecks_mandate_at_commit_but_replays_original_receipt() 
         Err(StoreError::NotFound(_))
     ));
     assert_eq!(store.commit_command(first).unwrap().receipt(), &receipt);
+    // A reconnect has only the original wire, not an old in-memory preparation.
+    // The authenticated generic TestProviderProfile lookup precedes resolution.
+    assert!(matches!(
+        store.prepare_provider_probe_connect(&wire, &caller()),
+        Err(StoreError::NotFound(_))
+    ));
+    assert_eq!(
+        store
+            .lookup_provider_validation_command(&wire, &caller())
+            .unwrap()
+            .as_ref(),
+        Some(&receipt)
+    );
+    assert_eq!(counts(&store), before);
+}
+
+#[test]
+fn t_f012_013_connect_preparation_cannot_invent_an_operation() {
+    let (store, _directory, mandate, _) = fixture();
+    let mut request = prepare(&store, &connect(&store, 19, mandate));
+    request.operation_id = Some(unleash_domain::OperationId::from_u128(19));
+    let before = counts(&store);
+    let outcome = store.commit_command(request);
+    assert!(
+        matches!(&outcome, Err(StoreError::InvalidArgument { .. })),
+        "aucune opération n'a été créée : {outcome:?}"
+    );
     assert_eq!(counts(&store), before);
 }
 
