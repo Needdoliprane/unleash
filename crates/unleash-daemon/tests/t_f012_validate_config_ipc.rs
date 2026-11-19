@@ -303,6 +303,9 @@ fn envelope(
     kind: &str,
     payload: Value,
 ) -> CommandEnvelope {
+    let Value::Object(payload) = payload else {
+        panic!("payload objet attendu");
+    };
     CommandEnvelope {
         protocol_version: ProtocolVersion,
         request_id: RequestId::from_u128(id),
@@ -313,7 +316,7 @@ fn envelope(
         aggregate_id: aggregate,
         expected_revision: Revision::INITIAL,
         command_type: kind.to_owned(),
-        payload: payload.as_object().unwrap().clone(),
+        payload,
     }
 }
 
