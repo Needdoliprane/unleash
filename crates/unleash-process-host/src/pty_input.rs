@@ -49,6 +49,9 @@ impl HostCutpointObserver for NoopHostCutpointObserver {
 /// Nom du journal durable d'entrées PTY (`0600`).
 pub const INPUT_JOURNAL_FILENAME: &str = "input-journal.json";
 
+/// Maximum bytes for one input, independent of the private protocol frame size.
+pub const MAX_PTY_INPUT_BYTES: usize = 65_536;
+
 /// État durable d'une entrée numérotée soumise au PTY.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
@@ -232,6 +235,11 @@ impl PtyInputTracker {
         payload: &[u8],
         now_ms: TimestampMs,
     ) -> Result<PtyInputReceipt, ProcessHostError> {
+        if payload.is_empty() || payload.len() > MAX_PTY_INPUT_BYTES {
+            return Err(ProcessHostError::InvalidArgument {
+                reason: String::from("input payload must contain 1 through 65536 bytes"),
+            });
+        }
         if input_seq == 0 {
             return Err(ProcessHostError::InvalidArgument {
                 reason: String::from("input_seq doit être >= 1"),

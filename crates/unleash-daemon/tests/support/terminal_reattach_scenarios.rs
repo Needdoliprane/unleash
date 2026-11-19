@@ -5,6 +5,9 @@ use std::io::Write;
 #[path = "terminal_input_scenarios.rs"]
 mod input_scenarios;
 
+#[path = "terminal_cli_scenarios.rs"]
+mod cli_scenarios;
+
 struct LiveFixture {
     daemon: FixtureDaemon,
     client: UnleashClient,
