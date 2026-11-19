@@ -227,3 +227,31 @@ pub enum TerminalInputRenewal {
     /// Current scope, subject or policy no longer permits a new control grant.
     AuthorityBlocked,
 }
+
+/// One-use internal resolution after the exact broker Dispatch ACK. An error
+/// never permits host I/O or an automatic retry with another dispatch identity.
+#[derive(Debug, Clone)]
+pub struct ResolveTerminalInputRequest {
+    /// Original input action, distinct from process launch or control transfer.
+    pub action_id: ActionId,
+    /// Exact marker already durably committed by the broker.
+    pub dispatch_id: DispatchId,
+    /// Accepted authority lineage.
+    pub authority_generation: AuthorityGeneration,
+    /// Input-intention revision, independently of the control revision.
+    pub expected_revision: Revision,
+    /// Accepted digest-only context.
+    pub context_digest: Sha256Digest,
+    /// Authenticated daemon caller, never decoded from the public payload.
+    pub caller: crate::CallerAuthority,
+}
+
+/// A newly consumed permit. This is neither a native receipt nor reusable
+/// authority: the executor must still validate the actual host before writing.
+#[derive(Debug, Clone)]
+pub struct ResolvedTerminalInput {
+    /// Exact consumed intention and durable dispatch.
+    pub input: TerminalInputRecord,
+    /// Physical identity already observed and recorded for this process.
+    pub expected_os_identity: super::TerminalProcessIdentity,
+}

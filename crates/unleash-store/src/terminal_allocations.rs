@@ -3,6 +3,7 @@
 //! n'attestent ni ce resolver ni un rattachement réel de PTY.
 
 pub mod terminal_acquisition_query;
+mod terminal_input_execution;
 pub mod terminal_input_types;
 pub(crate) mod terminal_input_writer;
 

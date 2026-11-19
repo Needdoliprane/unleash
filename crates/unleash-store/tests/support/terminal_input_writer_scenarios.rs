@@ -1,6 +1,9 @@
 //! T-F011-005 writer only. The observed allocation is the existing SQLite
 //! fixture with synthetic OS facts; no native write is performed here.
 use super::*;
+
+#[path = "terminal_input_resolution_scenarios.rs"]
+mod resolution_scenarios;
 use unleash_domain::{CommandId, LeaseId};
 use unleash_store::terminal_allocations::terminal_input_types::{
     TERMINAL_INPUT_VERB, TerminalInputRecord, TerminalInputRequest, TerminalInputState,
