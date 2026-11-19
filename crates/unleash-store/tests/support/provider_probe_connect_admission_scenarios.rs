@@ -6,6 +6,9 @@
     reason = "The exact ownership/admission variant is the oracle"
 )]
 
+#[path = "provider_probe_connect_completion_scenarios.rs"]
+mod completion_scenarios;
+
 use super::mixed_admission_fixture as mixed;
 use super::{
     PRINCIPAL, PROFILE, caller, change, command, configure, connect, connect_intent, counts,
