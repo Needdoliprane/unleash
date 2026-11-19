@@ -491,8 +491,25 @@ impl SetProviderProfilePayload {
     pub fn endpoint_destination(
         &self,
     ) -> Result<ProviderEndpointDestination, ProviderProfilePayloadError> {
-        // TDD: no inferred destination is returned until the parser is qualified.
-        Err(ProviderProfilePayloadError::InvalidReference)
+        let normalized = self.with_normalized_endpoint()?;
+        let endpoint = Url::parse(normalized.endpoint())
+            .map_err(|_| ProviderProfilePayloadError::InvalidReference)?;
+        let host = match endpoint.host() {
+            Some(url::Host::Domain(host)) => host.to_owned(),
+            Some(url::Host::Ipv4(address)) => address.to_string(),
+            Some(url::Host::Ipv6(address)) => address.to_string(),
+            None => return Err(ProviderProfilePayloadError::InvalidReference),
+        };
+        let port = endpoint
+            .port_or_known_default()
+            .filter(|port| *port != 0)
+            .ok_or(ProviderProfilePayloadError::InvalidReference)?;
+        Ok(ProviderEndpointDestination {
+            normalized_endpoint: endpoint.to_string(),
+            scheme: endpoint.scheme().to_owned(),
+            host,
+            port,
+        })
     }
 
     /// Produit une copie dont seul l'endpoint est normalisé suivant `Url`.
