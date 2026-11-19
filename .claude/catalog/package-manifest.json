@@ -13,7 +13,7 @@
     "evidence/"
   ],
   "hash_algorithm": "sha256",
-  "source_tree_digest": "f00215f6e373b6548e521e4697c053eceb30f9a2da6bf9ced148c24ad4fecc45",
+  "source_tree_digest": "4acf69e45efecaaec2cdbf8b07252f903f2e53decb8eb759e86334411e5a01d4",
   "files": [
     {
       "path": "INDEX.md",
@@ -347,8 +347,8 @@
     },
     {
       "path": "architecture/ipc-and-apis.md",
-      "sha256": "da5f63763dafe3909b22ce2c66a8c43f5e17bd91d3740a567293a2203f670a69",
-      "bytes": 31139,
+      "sha256": "92d1eb9ff65b9b19acb304cc595885c5678b4dc940f128c45c383da7b2ba7e95",
+      "bytes": 31348,
       "media_type": "text/markdown"
     },
     {
@@ -1487,8 +1487,8 @@
     },
     {
       "path": "features/F011-terminal-pool/interfaces.md",
-      "sha256": "def808da63477e90c1e893b1486f65482a133e4570fef7692f594607fb19129b",
-      "bytes": 7733,
+      "sha256": "875471126f659a596854a099523b7b6e22383e4160ccc0e4f0d55e8e7f0a3b9f",
+      "bytes": 9425,
       "media_type": "text/markdown"
     },
     {
@@ -2057,8 +2057,8 @@
     },
     {
       "path": "schemas/ipc-command.schema.json",
-      "sha256": "f83b01a657ff90ad1932328585b54affe1532f57201c50d812be6fb20b09063e",
-      "bytes": 12575,
+      "sha256": "9f3ab20381270945386c2af02dbb17af90ebfcc7451f4c19a07b51b7256d4692",
+      "bytes": 15520,
       "media_type": "application/json"
     },
     {
