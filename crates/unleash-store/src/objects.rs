@@ -1082,17 +1082,55 @@ pub(crate) fn read_verified_evidence_bytes_bounded(
     object_hash: Sha256Digest,
     limit: usize,
 ) -> Result<Vec<u8>, StoreError> {
+    let record = read_object_record_conn(conn, object_hash)?;
+    if record.state != ObjectState::Live {
+        return Err(StoreError::EvidenceUnavailable(
+            "native evidence object is not live".into(),
+        ));
+    }
+    read_evidence_record_bounded(conn, config, &record, limit)
+}
+
+/// Read a physically prepared proof before its reference is published. Only
+/// the exact active producer pin permits this path; ordinary readers stay live-only.
+pub(crate) fn read_prepared_evidence_bytes_bounded(
+    conn: &rusqlite::Connection,
+    config: &StoreConfig,
+    prepared: &PreparedObjectHandle,
+    request: &PublishObjectReferenceRequest,
+    authority: AuthorityGeneration,
+    limit: usize,
+) -> Result<Vec<u8>, StoreError> {
+    let owned:bool=conn.query_row("SELECT EXISTS(SELECT 1 FROM object_pins WHERE pin_id=?1 AND pin_kind='preparation' AND object_hash=?2 AND object_generation=?3 AND owner_kind=?4 AND owner_id=?5 AND authority_generation=?6 AND state IN ('held','reconciling'))",rusqlite::params![request.pin_id,request.object_hash.to_string(),request.object_generation,request.owner_kind,request.owner_id,authority.to_string()],|row|row.get(0))?;
+    let record = read_object_record_conn(conn, request.object_hash)?;
+    if !owned
+        || record.object_generation != request.object_generation
+        || record.relative_path != prepared.relative_path
+        || !matches!(record.state, ObjectState::Prepared | ObjectState::Live)
+    {
+        return Err(StoreError::EvidenceUnavailable(
+            "prepared native evidence has no exact current producer pin".into(),
+        ));
+    }
+    read_evidence_record_bounded(conn, config, &record, limit)
+}
+
+fn read_evidence_record_bounded(
+    conn: &rusqlite::Connection,
+    config: &StoreConfig,
+    record: &ObjectRecordView,
+    limit: usize,
+) -> Result<Vec<u8>, StoreError> {
     let unavailable = || {
         StoreError::EvidenceUnavailable(
             "native evidence object is unavailable or inadmissible".into(),
         )
     };
-    let record = read_object_record_conn(conn, object_hash)?;
     let bound = u64::try_from(limit).map_err(|_| unavailable())?;
-    if record.state != ObjectState::Live
-        || record.media_type != "application/json"
+    if record.media_type != "application/json"
         || record.byte_length > bound
-        || record.relative_path != object_relative_path(&object_hash, record.object_generation)
+        || record.relative_path
+            != object_relative_path(&record.object_hash, record.object_generation)
     {
         return Err(unavailable());
     }
@@ -1100,7 +1138,7 @@ pub(crate) fn read_verified_evidence_bytes_bounded(
     let uid = crate::commands::read_daemon_state_conn(conn)?.owner_uid;
     let bytes = read_evidence_file_bounded(&path, uid, bound)?;
     if u64::try_from(bytes.len()).map_err(|_| unavailable())? != record.byte_length
-        || Sha256Digest::from_bytes(&bytes) != object_hash
+        || Sha256Digest::from_bytes(&bytes) != record.object_hash
     {
         return Err(unavailable());
     }

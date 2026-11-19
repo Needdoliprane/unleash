@@ -3,6 +3,7 @@
 //! n'attestent ni ce resolver ni un rattachement réel de PTY.
 
 pub mod terminal_acquisition_query;
+pub mod terminal_control_history;
 mod terminal_input_execution;
 mod terminal_input_observation;
 pub mod terminal_input_types;

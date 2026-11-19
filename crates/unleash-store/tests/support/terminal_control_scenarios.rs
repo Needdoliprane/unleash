@@ -16,6 +16,9 @@ mod renewal_time_scenarios;
 
 #[path = "terminal_control_history_scenarios.rs"]
 mod history_scenarios;
+
+#[path = "terminal_control_history_adoption_scenarios.rs"]
+mod history_adoption_scenarios;
 use unleash_domain::{ActionState, TimestampMs};
 use unleash_store::terminal_allocations::{
     RegisteredTerminalControl, ResolveTerminalControlRequest, TERMINAL_CONTROL_VERB,
