@@ -15,6 +15,7 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use unleash_client::{ClientConfig, ClientError, EventStreamReader, UnleashClient};
+use unleash_daemon::{DaemonConfig, DaemonStartOutcome, UnleashDaemon};
 use unleash_domain::Revision;
 use unleash_protocol::{
     ClientKind, CommandEnvelope, CommandReceipt, ErrorCode, ReceiptState, SubscribeEventsRequest,
@@ -487,7 +488,7 @@ async fn t_f012_013_connect_adoption_ack_loss_keeps_alias_capacity_unknown() {
         StoreCutpoint::C2AfterProviderProbeConnectFactAdoption,
         Cutpoint::C2,
     );
-    let (fixture, mut first_client) =
+    let (mut fixture, mut first_client) =
         ConnectFixture::start_with_cutpoints(Some(after_adoption.clone())).await;
     let mut adoption_guard = after_adoption.guard();
     let (first, first_mandate, second, second_mandate) =
@@ -569,4 +570,105 @@ async fn t_f012_013_connect_adoption_ack_loss_keeps_alias_capacity_unknown() {
         first_request.aggregate_id,
         second_request.aggregate_id,
     );
+    drop(first_client);
+    drop(second_client);
+    assert_unknown_after_restart(
+        &mut fixture,
+        [
+            (&first_request, &first_receipt),
+            (&second_request, &second_receipt),
+        ],
+        &second,
+        &second_mandate,
+    )
+    .await;
+}
+
+async fn assert_unknown_after_restart(
+    fixture: &mut ConnectFixture,
+    requests: [(&CommandEnvelope, &CommandReceipt); 2],
+    target: &Target,
+    mandate: &CommandReceipt,
+) {
+    let [
+        (first_request, first_receipt),
+        (second_request, second_receipt),
+    ] = requests;
+    let epoch = fixture.handle.daemon_epoch();
+    let mut restarted = restart_after_unknown(fixture).await;
+    assert!(fixture.handle.daemon_epoch().as_u64() > epoch.as_u64());
+    assert_eq!(
+        restarted.send_command(&first_request).await.unwrap(),
+        *first_receipt
+    );
+    assert_eq!(
+        restarted.send_command(&second_request).await.unwrap(),
+        *second_receipt
+    );
+    assert_eq!(
+        action_state(&fixture, first_request.aggregate_id).as_deref(),
+        Some("outcome_unknown")
+    );
+    assert_eq!(
+        permanent_fact_count(&fixture, first_request.aggregate_id),
+        1
+    );
+    assert_alias_retained(
+        &fixture,
+        first_request.aggregate_id,
+        second_request.aggregate_id,
+    );
+    let mut recovery_events = subscribe(&restarted, &second_receipt).await;
+    let fresh_request = request_for(&restarted, target, 229, mandate);
+    let fresh_receipt = restarted.send_command(&fresh_request).await.unwrap();
+    assert_eq!(fresh_receipt.state, ReceiptState::Accepted);
+    wait_state(
+        &fixture,
+        fresh_request.aggregate_id,
+        "authorizing",
+        &mut recovery_events,
+    )
+    .await;
+    assert_alias_retained(
+        &fixture,
+        first_request.aggregate_id,
+        fresh_request.aggregate_id,
+    );
+    drop(recovery_events);
+    fixture
+        .handle
+        .shutdown_graceful("connect-alias-restarted")
+        .await
+        .unwrap();
+    assert_alias_retained(
+        &fixture,
+        first_request.aggregate_id,
+        second_request.aggregate_id,
+    );
+    assert_alias_retained(
+        &fixture,
+        first_request.aggregate_id,
+        fresh_request.aggregate_id,
+    );
+}
+
+async fn restart_after_unknown(fixture: &mut ConnectFixture) -> UnleashClient {
+    let DaemonStartOutcome::Started(handle) = UnleashDaemon::start(DaemonConfig {
+        data_root: Some(fixture.data.path().to_path_buf()),
+        rendezvous_dir: Some(fixture._rendezvous.path().to_path_buf()),
+        ..DaemonConfig::default()
+    })
+    .await
+    .unwrap() else {
+        panic!("real restarted daemon required");
+    };
+    fixture.handle = handle;
+    fixture.handle.wait_ready().await.unwrap();
+    UnleashClient::connect(ClientConfig::new(
+        fixture.handle.socket_path().to_path_buf(),
+        ClientKind::Cli,
+        "connect-alias-restarted",
+    ))
+    .await
+    .unwrap()
 }
