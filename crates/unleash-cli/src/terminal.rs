@@ -11,9 +11,18 @@ use uuid::Uuid;
 use crate::configuration::{ConfigurationArgs, ConfigurationTarget};
 use crate::{CliError, next_uuid, query_simple};
 
+#[path = "terminal_input.rs"]
+mod input;
+
 /// Commandes de `unleash process`.
 #[derive(Debug, Subcommand)]
 pub enum ProcessCommand {
+    /// Envoie une seule entrée binaire sous un contrôle déjà observé, sans réessai implicite.
+    Input {
+        /// Identités de contrôle et fichier binaire explicites.
+        #[command(flatten)]
+        input: TerminalInputArgs,
+    },
     /// Lit une page de sortie du terminal à partir d'un offset en octets.
     Log {
         /// Projet propriétaire du terminal.
@@ -43,6 +52,41 @@ pub enum ProcessCommand {
         #[command(subcommand)]
         target: AcquireTerminalTarget,
     },
+}
+
+/// Entrée binaire explicite ; le daemon reste l'autorité du bail et de l'effet.
+#[derive(Debug, Args)]
+pub struct TerminalInputArgs {
+    /// Projet du résultat d'acquisition observé.
+    #[arg(long)]
+    project_id: Uuid,
+    /// Terminal du résultat d'acquisition observé.
+    #[arg(long)]
+    terminal_id: Uuid,
+    /// Génération physique du processus observé.
+    #[arg(long)]
+    process_run_uuid: Uuid,
+    /// Bail courant du titulaire, obtenu par la lecture causale de l'acquisition.
+    #[arg(long)]
+    lease_id: Uuid,
+    /// Fence courant, sans acquisition ni renouvellement implicite.
+    #[arg(long, value_parser = clap::value_parser!(u64).range(1..=9_007_199_254_740_991))]
+    fence: u64,
+    /// Prochaine séquence explicite, après la dernière entrée native confirmée.
+    #[arg(long, value_parser = clap::value_parser!(u64).range(1..=9_007_199_254_740_991))]
+    input_seq: u64,
+    /// Révision courante du contrôle, initialement zéro.
+    #[arg(long, value_parser = clap::value_parser!(u64).range(..=9_007_199_254_740_991))]
+    control_revision: u64,
+    /// Fichier binaire de 1 à 65 536 octets, ou - pour stdin non interactif.
+    #[arg(long)]
+    file: std::path::PathBuf,
+    /// Identité originale pour un envoi/rejeu demandé explicitement.
+    #[arg(long, requires = "authority_generation")]
+    command_id: Option<Uuid>,
+    /// Lignée originale, obligatoire avec --command-id lors d'une reprise.
+    #[arg(long, requires = "command_id")]
+    authority_generation: Option<Uuid>,
 }
 
 /// Cible d'une acquisition de terminal.
@@ -227,6 +271,7 @@ pub(super) async fn run_process_command(
     action: &ProcessCommand,
 ) -> Result<Value, CliError> {
     match action {
+        ProcessCommand::Input { input } => input::send(client, input).await,
         ProcessCommand::Log {
             project_id,
             terminal_id,
