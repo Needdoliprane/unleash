@@ -313,7 +313,7 @@ impl BrokerJournalPort for ConnectJournal {
             }
             result
                 .map_err(|_| {tracing::warn!(phase=phase_name,stage="phase_writer_task","Connect journal refused");BrokerJournalError})?
-                .map_err(|error| {tracing::warn!(phase=phase_name,stage="phase_writer",code=%error.error_code(),reason=?error.reason_code(),refusal=closed_refusal(&error),"Connect journal refused");BrokerJournalError})?;
+                .map_err(|error| {tracing::warn!(phase=phase_name,stage="phase_writer",probe_id=%self.claim.context().probe_id,code=%error.error_code(),reason=?error.reason_code(),refusal=closed_refusal(&error),"Connect journal refused");BrokerJournalError})?;
             if authorizing {
                 self.await_admission(&state).await.map_err(|error| {
                     tracing::warn!(stage = "v008_gate", "Connect journal refused");

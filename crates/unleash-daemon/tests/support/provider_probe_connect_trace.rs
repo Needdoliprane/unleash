@@ -10,6 +10,7 @@ use uuid::Uuid;
 #[derive(Default)]
 struct CapacityWaits {
     probes: Mutex<BTreeSet<Uuid>>,
+    dispatch_refusals: Mutex<BTreeSet<Uuid>>,
     changed: tokio::sync::Notify,
 }
 
@@ -19,13 +20,26 @@ fn capacity_waits() -> &'static CapacityWaits {
 }
 
 pub(super) async fn wait_for_capacity_blocked(probe: Uuid) {
+    wait_for_probe(probe, false).await;
+}
+
+pub(super) async fn wait_for_dispatch_refusal(probe: Uuid) {
+    wait_for_probe(probe, true).await;
+}
+
+async fn wait_for_probe(probe: Uuid, dispatch_refusal: bool) {
     let waits = capacity_waits();
     tokio::time::timeout(Duration::from_secs(3), async {
         loop {
             let notified = waits.changed.notified();
             tokio::pin!(notified);
             notified.as_mut().enable();
-            if waits.probes.lock().unwrap().contains(&probe) {
+            let observed = if dispatch_refusal {
+                &waits.dispatch_refusals
+            } else {
+                &waits.probes
+            };
+            if observed.lock().unwrap().contains(&probe) {
                 return;
             }
             notified.await;
@@ -39,6 +53,8 @@ pub(super) async fn wait_for_capacity_blocked(probe: Uuid) {
 struct Fields {
     log: String,
     capacity_blocked: bool,
+    dispatch: bool,
+    phase_writer: bool,
     probe: Option<Uuid>,
 }
 
@@ -46,6 +62,12 @@ impl tracing::field::Visit for Fields {
     fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
         if field.name() == "stage" && value == "v008_capacity_blocked" {
             self.capacity_blocked = true;
+        }
+        if field.name() == "stage" && value == "phase_writer" {
+            self.phase_writer = true;
+        }
+        if field.name() == "phase" && value == "dispatch" {
+            self.dispatch = true;
         }
         self.record_debug(field, &value);
     }
@@ -79,6 +101,14 @@ impl tracing::Subscriber for ConnectTrace {
         {
             let waits = capacity_waits();
             waits.probes.lock().unwrap().insert(probe);
+            waits.changed.notify_waiters();
+        }
+        if fields.dispatch
+            && fields.phase_writer
+            && let Some(probe) = fields.probe
+        {
+            let waits = capacity_waits();
+            waits.dispatch_refusals.lock().unwrap().insert(probe);
             waits.changed.notify_waiters();
         }
         eprintln!("connect_trace{}", fields.log);

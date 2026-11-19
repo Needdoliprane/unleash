@@ -190,6 +190,8 @@ pub enum StoreCutpoint {
     C3AfterBrokerIntentCommit,
     /// Claim connect engagée, avant de remettre le token frais au service (`C3`).
     C3AfterProviderProbeConnectClaimCommit,
+    /// Autorisation connect engagée, avant acquittement et dispatch (`C3`).
+    C3AfterProviderProbeConnectAuthorizationCommit,
     /// Transport fermé par son producteur natif, avant adoption du fait (`C1`).
     C1BeforeProviderProbeConnectFactAdoption,
     /// Fait natif adopté durablement, avant acquittement de sa publication (`C2`).

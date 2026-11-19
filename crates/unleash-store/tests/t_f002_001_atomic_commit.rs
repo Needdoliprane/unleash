@@ -44,7 +44,8 @@ impl CutpointObserver for CutpointAdapter {
             StoreCutpoint::C2AfterCommandCommit
             | StoreCutpoint::C2AfterProviderProbeConnectFactAdoption => Cutpoint::C2,
             StoreCutpoint::C3AfterBrokerIntentCommit
-            | StoreCutpoint::C3AfterProviderProbeConnectClaimCommit => Cutpoint::C3,
+            | StoreCutpoint::C3AfterProviderProbeConnectClaimCommit
+            | StoreCutpoint::C3AfterProviderProbeConnectAuthorizationCommit => Cutpoint::C3,
             StoreCutpoint::C4AfterBrokerDispatchCommit => Cutpoint::C4,
             StoreCutpoint::C10aAfterPrepPin => Cutpoint::C10a,
             StoreCutpoint::C10bBeforeDeletingReserve => Cutpoint::C10b,

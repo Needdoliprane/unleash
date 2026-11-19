@@ -1219,6 +1219,9 @@ impl UnleashStore {
             crate::BrokerPhase::Authorizing { .. } => {
                 Some(crate::StoreCutpoint::C3AfterBrokerIntentCommit)
             }
+            crate::BrokerPhase::Authorization { .. } => {
+                Some(crate::StoreCutpoint::C3AfterProviderProbeConnectAuthorizationCommit)
+            }
             crate::BrokerPhase::Dispatch { .. } => {
                 Some(crate::StoreCutpoint::C4AfterBrokerDispatchCommit)
             }

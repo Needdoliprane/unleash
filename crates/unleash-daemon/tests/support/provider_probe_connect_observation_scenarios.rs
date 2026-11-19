@@ -1,6 +1,9 @@
 //! Native loopback fixtures, with targeted pauses in the real writer path.
 //! No observation, receipt or reservation is injected into `SQLite` by this bank.
 
+#[path = "provider_probe_connect_policy_scenarios.rs"]
+mod policy_scenarios;
+
 use super::{
     ConnectFixture, DispatchGuard, assert_committed_connect_proof,
     assert_completed_probe_without_model, assert_connect_observation,
