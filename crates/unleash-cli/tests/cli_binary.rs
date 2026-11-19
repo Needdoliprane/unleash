@@ -38,6 +38,9 @@ fn cli_binary_help_lists_tui_and_non_tty_tui_refuses_raw_mode() {
     );
     let err_json: Value =
         serde_json::from_slice(&tui.stderr).expect("sortie JSON structurée attendue sur stderr");
+    assert!(err_json.get("code").is_none());
+    assert!(err_json.get("reason_code").is_none());
+    assert!(err_json.get("retry_class").is_none());
     let err_msg = err_json
         .get("error")
         .and_then(Value::as_str)
