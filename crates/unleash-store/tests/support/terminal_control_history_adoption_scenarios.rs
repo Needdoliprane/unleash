@@ -1,6 +1,9 @@
 //! Store contract fixtures only: the ACK shape and identities below are
 //! synthetic. The real host's four ACK-inspection tests remain separate;
 //! these tests do not claim an OS rotation or a daemon reconciliation.
+#[path = "terminal_control_history_qualifier_regressions.rs"]
+mod qualifier_regressions;
+
 use super::*;
 use unleash_domain::HostId;
 use unleash_store::terminal_allocations::terminal_control_history::{

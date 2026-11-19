@@ -11,6 +11,11 @@ use unleash_protocol::EventCursor;
 use super::{TerminalControlObservation, TerminalProcessIdentity};
 use crate::{CallerAuthority, PreparedObjectHandle, SnapshotProjection, StoreError, UnleashStore};
 
+#[path = "terminal_control_history_validation.rs"]
+mod validation;
+#[path = "terminal_control_history_writer.rs"]
+mod writer;
+
 /// Append-only observation event; it is never a broker success phase.
 pub const TERMINAL_CONTROL_HISTORY_EVENT: &str = "TerminalControlHistoricalAttested";
 
@@ -146,33 +151,25 @@ impl UnleashStore {
     /// current control, leases, TTLs, reservations or broker phases.
     ///
     /// # Errors
-    /// This initial seam is closed until its qualified writer is implemented.
+    /// Refuses foreign, malformed, unbound, missing or tombstoned evidence.
     pub fn seal_terminal_control_history(
         &self,
-        _request: SealTerminalControlHistoryRequest,
+        request: SealTerminalControlHistoryRequest,
     ) -> Result<TerminalControlHistoryCommit, StoreError> {
-        self.read_snapshot(|_, _| {
-            Err(StoreError::EvidenceUnavailable(
-                "historical terminal control writer is not qualified".into(),
-            ))
-        })
+        writer::seal(self, request)
     }
 
     /// Read an already sealed fact under its exact source owner's ACL. This
     /// read never contacts a host or infers control from the old receipt.
     ///
     /// # Errors
-    /// This initial seam is closed until its qualified reader is implemented.
+    /// Refuses foreign, malformed, missing or tombstoned evidence.
     pub fn inspect_terminal_control_history(
         &self,
-        _actor: &ActorId,
-        _source_action_id: ActionId,
-        _dispatch_id: DispatchId,
+        actor: &ActorId,
+        source_action_id: ActionId,
+        dispatch_id: DispatchId,
     ) -> Result<SnapshotProjection<Option<TerminalControlHistoryFact>>, StoreError> {
-        self.read_snapshot(|_, _| {
-            Err(StoreError::EvidenceUnavailable(
-                "historical terminal control reader is not qualified".into(),
-            ))
-        })
+        writer::inspect(self, actor, source_action_id, dispatch_id)
     }
 }
