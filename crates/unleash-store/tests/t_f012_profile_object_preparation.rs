@@ -1,8 +1,4 @@
 //! F012 : deux producteurs gardent chacun leur pin exact sur les mêmes octets.
-#![expect(
-    clippy::unwrap_used,
-    reason = "Fixtures locales sans données utilisateur"
-)]
 use unleash_domain::Sha256Digest;
 use unleash_store::{
     PrepareObjectRequest, PublishObjectReferenceRequest, StoreConfig, UnleashStore,
