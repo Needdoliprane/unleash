@@ -9,7 +9,7 @@ use crate::config::{CutpointObserver, StoreCutpoint};
 use crate::error::StoreError;
 
 /// Version courante maximale du schéma gérée par cette version de `unleash-store`.
-pub const CURRENT_SCHEMA_VERSION: i64 = 13;
+pub const CURRENT_SCHEMA_VERSION: i64 = 14;
 
 /// État persisté d'une migration dans `schema_migrations`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -134,7 +134,88 @@ const MIGRATIONS: &[MigrationDef] = &[
         name: "v013_policy_provider_probe_mandates",
         sql: V013_SQL,
     },
+    MigrationDef {
+        version: 14,
+        name: "v014_terminal_input_intentions",
+        sql: V014_SQL,
+    },
 ];
+
+const V014_SQL: &str = r"
+CREATE TABLE terminal_input_intents (
+ action_id TEXT PRIMARY KEY,
+ terminal_id TEXT NOT NULL REFERENCES terminal_sessions(terminal_id),
+ receipt_id TEXT NOT NULL UNIQUE REFERENCES command_receipts(receipt_id) DEFERRABLE INITIALLY DEFERRED,
+ command_id TEXT NOT NULL,
+ actor_id TEXT NOT NULL,
+ principal_id TEXT NOT NULL REFERENCES principals(principal_id),
+ authority_generation TEXT NOT NULL,
+ daemon_epoch INTEGER NOT NULL CHECK(daemon_epoch>=0),
+ lease_id TEXT NOT NULL REFERENCES resource_leases(lease_id),
+ resource_fence INTEGER NOT NULL CHECK(resource_fence BETWEEN 1 AND 9007199254740991),
+ input_seq INTEGER NOT NULL CHECK(input_seq BETWEEN 1 AND 9007199254740991),
+ payload_digest TEXT NOT NULL,
+ payload_byte_length INTEGER NOT NULL CHECK(payload_byte_length BETWEEN 1 AND 65536),
+ context_digest TEXT NOT NULL,
+ context_json TEXT NOT NULL CHECK(json_valid(context_json)),
+ state TEXT NOT NULL CHECK(state IN ('prepared','write_resolved','observed','outcome_unknown','not_dispatched','disposed')),
+ revision INTEGER NOT NULL CHECK(revision>=1),
+ dispatch_id TEXT UNIQUE REFERENCES action_dispatches(dispatch_id),
+ observation_object_hash TEXT REFERENCES object_records(object_hash),
+ renewal TEXT CHECK(renewal IS NULL OR renewal IN ('renewed','lease_expired','controller_changed','authority_changed','clock_uncertain','authority_blocked')),
+ renewed_lease_expires_at INTEGER,
+ disposition_evaluation_id TEXT,
+ CHECK(COALESCE(json_extract(context_json,'$.schema_version')=1
+  AND json_extract(context_json,'$.action_id')=action_id
+  AND json_extract(context_json,'$.initial_action_id')!=action_id
+  AND json_extract(context_json,'$.terminal_id')=terminal_id
+  AND json_extract(context_json,'$.receipt_id')=receipt_id
+  AND json_extract(context_json,'$.command_id')=command_id
+  AND json_extract(context_json,'$.actor_id')=actor_id
+  AND json_extract(context_json,'$.principal_id')=principal_id
+  AND json_extract(context_json,'$.authority_generation')=authority_generation
+  AND json_extract(context_json,'$.daemon_epoch')=daemon_epoch
+  AND json_extract(context_json,'$.lease_id')=lease_id
+  AND json_extract(context_json,'$.resource_fence')=resource_fence
+  AND json_extract(context_json,'$.input_seq')=input_seq
+  AND json_extract(context_json,'$.payload_digest')=payload_digest
+  AND json_extract(context_json,'$.payload_byte_length')=payload_byte_length,0)),
+ CHECK(json_type(context_json,'$.payload_bytes') IS NULL),
+ CHECK((state='prepared' AND dispatch_id IS NULL AND observation_object_hash IS NULL AND disposition_evaluation_id IS NULL)
+  OR(state IN ('write_resolved','outcome_unknown') AND dispatch_id IS NOT NULL AND observation_object_hash IS NULL AND disposition_evaluation_id IS NULL)
+  OR(state='observed' AND dispatch_id IS NOT NULL AND observation_object_hash IS NOT NULL AND renewal IS NOT NULL AND disposition_evaluation_id IS NULL)
+  OR(state='not_dispatched' AND dispatch_id IS NULL AND observation_object_hash IS NULL AND disposition_evaluation_id IS NOT NULL)
+  OR(state='disposed' AND observation_object_hash IS NOT NULL)),
+ CHECK((state='observed' AND renewal IS NOT NULL) OR (state!='observed' AND renewal IS NULL AND renewed_lease_expires_at IS NULL)),
+ CHECK((renewal IS 'renewed' AND renewed_lease_expires_at IS NOT NULL) OR (renewal IS NOT 'renewed' AND renewed_lease_expires_at IS NULL))
+) STRICT;
+CREATE UNIQUE INDEX terminal_input_one_pending ON terminal_input_intents(terminal_id)
+ WHERE state IN ('prepared','write_resolved','outcome_unknown');
+CREATE UNIQUE INDEX terminal_input_sequence_reserved ON terminal_input_intents(terminal_id,input_seq)
+ WHERE state!='not_dispatched';
+CREATE TRIGGER terminal_input_initial BEFORE INSERT ON terminal_input_intents
+ WHEN NEW.state!='prepared' OR NEW.revision!=1
+ BEGIN SELECT RAISE(ABORT,'terminal input must start prepared'); END;
+CREATE TRIGGER terminal_input_immutable BEFORE UPDATE ON terminal_input_intents
+ WHEN NEW.action_id IS NOT OLD.action_id OR NEW.terminal_id IS NOT OLD.terminal_id
+ OR NEW.receipt_id IS NOT OLD.receipt_id OR NEW.command_id IS NOT OLD.command_id
+ OR NEW.actor_id IS NOT OLD.actor_id OR NEW.principal_id IS NOT OLD.principal_id
+ OR NEW.authority_generation IS NOT OLD.authority_generation OR NEW.daemon_epoch IS NOT OLD.daemon_epoch
+ OR NEW.lease_id IS NOT OLD.lease_id OR NEW.resource_fence IS NOT OLD.resource_fence
+ OR NEW.input_seq IS NOT OLD.input_seq OR NEW.payload_digest IS NOT OLD.payload_digest
+ OR NEW.payload_byte_length IS NOT OLD.payload_byte_length
+ OR NEW.context_digest IS NOT OLD.context_digest OR NEW.context_json IS NOT OLD.context_json
+ BEGIN SELECT RAISE(ABORT,'terminal input intention immutable'); END;
+CREATE TRIGGER terminal_input_transition BEFORE UPDATE ON terminal_input_intents
+ WHEN NOT(NEW.revision=OLD.revision+1 AND (
+  (OLD.state='prepared' AND NEW.state='write_resolved' AND NEW.dispatch_id IS NOT NULL)
+  OR(OLD.state='prepared' AND NEW.state='not_dispatched' AND NEW.dispatch_id IS NULL)
+  OR(OLD.state='write_resolved' AND NEW.state IN ('observed','outcome_unknown') AND NEW.dispatch_id IS OLD.dispatch_id)
+  OR(OLD.state='outcome_unknown' AND NEW.state IN ('observed','disposed') AND NEW.dispatch_id IS OLD.dispatch_id)))
+ BEGIN SELECT RAISE(ABORT,'terminal input transition invalid'); END;
+CREATE TRIGGER terminal_input_durable BEFORE DELETE ON terminal_input_intents
+ BEGIN SELECT RAISE(ABORT,'terminal input intention durable'); END;
+";
 
 const V013_SQL: &str = r"
 CREATE TABLE provider_probe_mandates (

@@ -1186,6 +1186,7 @@ mod tests {
             .unwrap();
         store.shutdown().unwrap();
         let mut interrupted = StoreConfig::new(directory.path());
+        interrupted.max_supported_schema_version = 13;
         interrupted.cutpoints = Arc::new(MigrationFailure(AtomicBool::new(true)));
         assert!(
             UnleashStore::open_with_migration_backup(interrupted, Some(backup.backup_id)).is_err()
@@ -1212,11 +1213,10 @@ mod tests {
             before
         );
         historical.shutdown().unwrap();
-        let current = UnleashStore::open_with_migration_backup(
-            StoreConfig::new(directory.path()),
-            Some(backup.backup_id),
-        )
-        .unwrap();
+        let mut target = StoreConfig::new(directory.path());
+        target.max_supported_schema_version = 13;
+        let current =
+            UnleashStore::open_with_migration_backup(target, Some(backup.backup_id)).unwrap();
         assert_eq!(current.daemon_state().unwrap().schema_version, 13);
         assert_eq!(
             current

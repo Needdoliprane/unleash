@@ -8,6 +8,9 @@ mod input_scenarios;
 #[path = "terminal_cli_scenarios.rs"]
 mod cli_scenarios;
 
+#[path = "terminal_log_rotation_scenarios.rs"]
+mod log_rotation_scenarios;
+
 struct LiveFixture {
     daemon: FixtureDaemon,
     client: UnleashClient,
@@ -26,7 +29,7 @@ impl Drop for LiveFixture {
     }
 }
 impl LiveFixture {
-    async fn new(configured: bool) -> Self {
+    async fn empty() -> Self {
         let data = local_test_dir("f011-live-data").unwrap();
         let rendezvous = local_test_dir("f011-live-rdv").unwrap();
         let project_root = local_test_dir("f011-live-root").unwrap();
@@ -44,7 +47,7 @@ impl LiveFixture {
         let authority = client.hello().authority_generation;
         let project = ProjectId::from_u128(0xf011_4001);
         let mission = Uuid::from_u128(0xf011_4002);
-        let mut fixture = Self {
+        Self {
             daemon,
             client,
             data,
@@ -53,7 +56,12 @@ impl LiveFixture {
             project,
             mission,
             authority,
-        };
+        }
+    }
+
+    async fn new(configured: bool) -> Self {
+        let mut fixture = Self::empty().await;
+        let (authority, project, mission) = (fixture.authority, fixture.project, fixture.mission);
         let root = fixture.project_root.path().canonicalize().unwrap();
         for request in [
             command(

@@ -1108,6 +1108,9 @@ fn launch_observation_with_input_state_fixture(
 #[path = "support/terminal_control_scenarios.rs"]
 mod control_scenarios;
 
+#[path = "support/terminal_input_migration_scenarios.rs"]
+mod input_migration_scenarios;
+
 #[test]
 fn t_f011_003_capture_precedes_receipt_and_observation_commit_replays_without_new_rows() {
     for point in [

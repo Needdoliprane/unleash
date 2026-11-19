@@ -8,11 +8,35 @@ use unleash_domain::{AuthorityGeneration, CommandId, ProjectId, RequestId, Revis
 use unleash_protocol::{CommandEnvelope, ProtocolVersion};
 use uuid::Uuid;
 
-use crate::{CliError, next_uuid};
+use crate::configuration::{ConfigurationArgs, ConfigurationTarget};
+use crate::{CliError, next_uuid, query_simple};
 
 /// Commandes de `unleash process`.
 #[derive(Debug, Subcommand)]
 pub enum ProcessCommand {
+    /// Lit une page de sortie du terminal à partir d'un offset en octets.
+    Log {
+        /// Projet propriétaire du terminal.
+        #[arg(long)]
+        project_id: Uuid,
+        /// Identifiant du terminal renvoyé par l'acquisition.
+        #[arg(long)]
+        terminal_id: Uuid,
+        /// Reprendre à l'offset de fin du dernier segment lu.
+        #[arg(long, default_value_t = 0)]
+        after_offset: u64,
+        /// Nombre maximal d'octets à lire, entre 1 et 65 536.
+        #[arg(long, default_value_t = 65_536)]
+        max_bytes: u32,
+    },
+    /// Lit le profil terminal et la révision des réglages utilisateur.
+    Settings,
+    /// Enregistre la configuration complète des profils, limites et baux du terminal.
+    Configure {
+        /// Fichier JSON `terminal_runtime` et révision des réglages utilisateur.
+        #[command(flatten)]
+        configuration: ConfigurationArgs,
+    },
     /// Demande une acquisition et affiche son reçu.
     Acquire {
         /// Allocation ou contrôle d'un terminal enregistré.
@@ -202,13 +226,51 @@ pub(super) async fn run_process_command(
     client: &mut UnleashClient,
     action: &ProcessCommand,
 ) -> Result<Value, CliError> {
-    let ProcessCommand::Acquire { target } = action;
+    match action {
+        ProcessCommand::Log {
+            project_id,
+            terminal_id,
+            after_offset,
+            max_bytes,
+        } => {
+            let payload = Map::from_iter([
+                ("terminal_id".to_owned(), json!(terminal_id)),
+                ("after_offset".to_owned(), json!(after_offset)),
+                ("max_bytes".to_owned(), json!(max_bytes)),
+            ]);
+            let response = query_simple(
+                client,
+                "ReadTerminalLog",
+                Some(ProjectId::from_uuid(*project_id)),
+                payload,
+            )
+            .await?;
+            Ok(json!({"watermark": response.watermark, "result": response.result}))
+        }
+        ProcessCommand::Settings => crate::configuration::read_terminal_settings(client).await,
+        ProcessCommand::Configure { configuration } => {
+            configuration
+                .apply(client, ConfigurationTarget::TerminalRuntime)
+                .await
+        }
+        ProcessCommand::Acquire { target } => acquire(client, target).await,
+    }
+}
+
+async fn acquire(
+    client: &mut UnleashClient,
+    target: &AcquireTerminalTarget,
+) -> Result<Value, CliError> {
     let (project_id, envelope) = target.envelope(client.hello().authority_generation)?;
     let receipt = client
         .send_command(&envelope)
         .await
         .map_err(|source| match source {
-            ClientError::Remote(_) => CliError::Client(source),
+            ClientError::Remote(ref error)
+                if error.code != unleash_protocol::ErrorCode::OutcomeUnknown =>
+            {
+                CliError::Client(source)
+            }
             source => CliError::TerminalReceiptMissing {
                 terminal_id: envelope.aggregate_id,
                 project_id,

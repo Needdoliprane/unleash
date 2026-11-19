@@ -33,8 +33,10 @@ use unleash_protocol::{
 };
 use uuid::Uuid;
 
+pub mod configuration;
 pub mod terminal;
 
+use configuration::{ConfigurationArgs, ConfigurationTarget};
 use terminal::ProcessCommand;
 
 static UUID_COUNTER: AtomicU64 = AtomicU64::new(1);
@@ -80,6 +82,21 @@ pub enum CliError {
         /// Lignée épinglée avant l'envoi.
         authority_generation: AuthorityGeneration,
         /// Erreur de transport ou refus du daemon.
+        source: Box<ClientError>,
+    },
+
+    /// Mutation de configuration dont le reçu n'a pas été obtenu.
+    #[error(
+        "Reçu de configuration indisponible pour l’agrégat {aggregate_id}, commande {command_id}, lignée {authority_generation}. {source}"
+    )]
+    ConfigurationReceiptMissing {
+        /// Agrégat visé.
+        aggregate_id: Uuid,
+        /// Identifiant à utiliser pour inspecter le reçu.
+        command_id: CommandId,
+        /// Lignée épinglée avant l'envoi.
+        authority_generation: AuthorityGeneration,
+        /// Erreur du client ou issue inconnue retournée par le daemon.
         source: Box<ClientError>,
     },
 
@@ -240,6 +257,14 @@ pub enum ProjectCommand {
         /// Identifiant d'idempotence optionnel.
         #[arg(long)]
         command_id: Option<Uuid>,
+    },
+    /// Remplace la définition du projet par le contenu complet d'un fichier JSON.
+    Revise {
+        /// Identifiant du projet.
+        project_id: Uuid,
+        /// Fichier et révision de la définition à engager.
+        #[command(flatten)]
+        configuration: ConfigurationArgs,
     },
 }
 
@@ -527,6 +552,14 @@ async fn run_project_command(
             )
             .await?;
             Ok(json!({"watermark": resp.watermark, "result": resp.result}))
+        }
+        ProjectCommand::Revise {
+            project_id,
+            configuration,
+        } => {
+            configuration
+                .apply(client, ConfigurationTarget::Project(*project_id))
+                .await
         }
         ProjectCommand::Create {
             name,
