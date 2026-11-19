@@ -1,8 +1,10 @@
 //! Préparation F012 d'un contexte de transport, distinct du contexte modèle V009.
-//! Le writer commun doit encore raccorder la migration et CommitCommand.
 //! Aucun état d'action, effet réseau ou réserve n'est créé par la résolution.
 
-use crate::{CallerAuthority, SnapshotProjection, StoreError, UnleashStore};
+use crate::commands::read_daemon_state_conn;
+use crate::policies_secrets::read_policy_summary_conn;
+use crate::{CallerAuthority, SnapshotProjection, StoreError, UnleashStore, WriteCriticality};
+use rusqlite::{Connection, OptionalExtension, Transaction, params};
 
 /// Additive transport context; deliberately separate from V009 model contexts.
 pub(crate) const SCHEMA_SQL: &str = r"
@@ -149,6 +151,10 @@ impl std::fmt::Debug for ProviderProbeConnectContext {
 #[derive(Clone, PartialEq, Eq)]
 pub struct ProviderProbeConnectPreparation {
     pub(crate) profile: crate::ConfiguredProviderProfile,
+    pub(crate) wire: unleash_protocol::TestProviderProfilePayload,
+    pub(crate) grant: crate::provider_probe_mandates::ResolvedConnectGrant,
+    pub(crate) authority_generation: AuthorityGeneration,
+    pub(crate) daemon_epoch: DaemonEpoch,
     pub(crate) principal_id: ActorId,
     pub(crate) scope_revision: Revision,
     pub(crate) policy_revision: Revision,
@@ -215,20 +221,251 @@ pub(crate) fn validate_new_command(
     Ok(())
 }
 
-pub(crate) fn commit_tx(
-    _tx: &rusqlite::Transaction<'_>,
-    _config: &crate::StoreConfig,
-    _daemon: &crate::DaemonStateRow,
-    _now: TimestampMs,
-    _command: ConnectCommand<'_>,
-    _receipt: ReceiptId,
-    _events: &mut Vec<crate::EventAppendSpec>,
-) -> Result<Revision, StoreError> {
-    Err(pending())
+fn invalid(message: &'static str) -> StoreError {
+    StoreError::InvalidArgument {
+        reason: None,
+        message: message.to_owned(),
+    }
 }
 
-fn pending() -> StoreError {
-    StoreError::EvidenceUnavailable("préparation connect non raccordée".to_owned())
+fn hidden() -> StoreError {
+    StoreError::NotFound("Mandat d'effet fournisseur introuvable".to_owned())
+}
+
+fn integer(value: u64) -> Result<i64, StoreError> {
+    i64::try_from(value).map_err(|_| invalid("borne connect hors plage SQLite"))
+}
+
+fn scope_revision(
+    tx: &Transaction<'_>,
+    project: Option<ProjectId>,
+) -> Result<Revision, StoreError> {
+    let revision: i64 = if let Some(project) = project {
+        tx.query_row(
+            "SELECT revision FROM projects WHERE project_id=?1 AND state='active'",
+            [project.to_string()],
+            |row| row.get(0),
+        )
+        .optional()?
+        .ok_or_else(hidden)?
+    } else {
+        tx.query_row("SELECT COALESCE((SELECT revision FROM settings WHERE scope_kind='user' AND scope_id='default'),0)", [], |row| row.get(0))?
+    };
+    Ok(Revision::new(u64::try_from(revision).map_err(|_| {
+        invalid("révision de scope connect invalide")
+    })?))
+}
+
+fn policy(
+    tx: &Transaction<'_>,
+    project: Option<ProjectId>,
+) -> Result<(Revision, Sha256Digest), StoreError> {
+    let summary = read_policy_summary_conn(tx, project)?;
+    let revision = summary
+        .global_policy
+        .as_ref()
+        .map_or(0, |p| p.revision.as_u64())
+        .max(
+            summary
+                .project_policy
+                .as_ref()
+                .map_or(0, |p| p.revision.as_u64()),
+        );
+    let digest = unleash_protocol::canonical_sha256(
+        &serde_json::json!({"schema_version":1,"global_policy":summary.global_policy,"project_policy":summary.project_policy,"guard_config":summary.guard_config}),
+    )?;
+    Ok((Revision::new(revision), digest))
+}
+
+fn prepare_tx(
+    tx: &Transaction<'_>,
+    daemon: &crate::DaemonStateRow,
+    now: TimestampMs,
+    envelope: &CommandEnvelope,
+    caller: &CallerAuthority,
+) -> Result<ProviderProbeConnectPreparation, StoreError> {
+    crate::provider_profile_validation::validate_envelope_identity(envelope, caller)?;
+    if envelope.authority_generation != daemon.authority_generation {
+        return Err(StoreError::StaleAuthorityGeneration {
+            expected: daemon.authority_generation,
+            actual: envelope.authority_generation,
+            command_id: Some(envelope.command_id),
+        });
+    }
+    if daemon.mode != unleash_domain::DaemonMode::Ready {
+        return Err(StoreError::RecoveryInProgress(
+            "préparation connect exige daemon ready".to_owned(),
+        ));
+    }
+    if envelope.expected_revision != Revision::INITIAL {
+        return Err(invalid("connect exige un nouvel agrégat"));
+    }
+    let wire: unleash_protocol::TestProviderProfilePayload =
+        serde_json::from_value(serde_json::Value::Object(envelope.payload.clone()))
+            .map_err(|_| invalid("payload connect invalide"))?;
+    if wire.phase() != ProviderTestPhase::Connect {
+        return Err(invalid("phase connect exacte attendue"));
+    }
+    let profile_id: uuid::Uuid = wire.profile_id().parse().map_err(|_| hidden())?;
+    if profile_id.is_nil() || profile_id.to_string() != wire.profile_id() {
+        return Err(hidden());
+    }
+    let profile = crate::provider_profiles::resolve(tx, profile_id, wire.profile_version())?
+        .ok_or_else(hidden)?;
+    let grant = crate::provider_probe_mandates::resolve_connect_grant(
+        tx, daemon, now, envelope, caller, &wire, &profile,
+    )?;
+    let scope_revision = scope_revision(tx, envelope.project_id)?;
+    let (policy_revision, policy_digest) = policy(tx, envelope.project_id)?;
+    Ok(ProviderProbeConnectPreparation {
+        profile,
+        wire,
+        principal_id: grant.principal_id.clone(),
+        grant,
+        authority_generation: daemon.authority_generation,
+        daemon_epoch: daemon.daemon_epoch,
+        scope_revision,
+        policy_revision,
+        policy_digest,
+        command_digest: unleash_protocol::compute_command_digest_v2(envelope)?,
+        prepared_at_ms: now,
+    })
+}
+
+fn validate_preparation(
+    tx: &Transaction<'_>,
+    daemon: &crate::DaemonStateRow,
+    now: TimestampMs,
+    command: &ConnectCommand<'_>,
+) -> Result<TimestampMs, StoreError> {
+    let current = prepare_tx(tx, daemon, now, command.envelope, command.caller)?;
+    let mut original = command.preparation.clone();
+    original.prepared_at_ms = now;
+    if current != original || command.preparation.prepared_at_ms > now {
+        return Err(invalid("préparation connect périmée ou divergente"));
+    }
+    let expiry = command
+        .preparation
+        .prepared_at_ms
+        .as_i64()
+        .checked_add(integer(current.wire.limits().timeout_ms())?)
+        .ok_or_else(|| invalid("échéance connect hors plage"))?
+        .min(current.grant.expires_at_ms.as_i64());
+    if expiry <= now.as_i64() {
+        return Err(hidden());
+    }
+    Ok(TimestampMs::new(expiry))
+}
+
+fn transport_digest(
+    preparation: &ProviderProbeConnectPreparation,
+) -> Result<Sha256Digest, StoreError> {
+    // This is the closed loopback component's request identity, not a claim that
+    // a configured name is loopback or that a model runs there. Its executor
+    // still rejects every target outside that constraint before any socket.
+    unleash_protocol::canonical_sha256(&serde_json::json!({
+        "schema":"unleash.provider_connect.v1",
+        "endpoint":preparation.profile.configuration.payload.endpoint(),
+        "profile_id":preparation.profile.configuration.profile_id,
+        "profile_version":preparation.profile.configuration.profile_version,
+        "profile_digest":preparation.profile.configuration_digest,
+        "destination_scope":"loopback_only", "timeout_ms":preparation.wire.limits().timeout_ms(),
+        "http_application_bytes":0,"tls_validation":"offline_system_roots_chain_name","revocation":"unavailable",
+    })).map_err(StoreError::from)
+}
+
+fn context(
+    config: &crate::StoreConfig,
+    command: &ConnectCommand<'_>,
+    receipt: ReceiptId,
+    deadline: TimestampMs,
+) -> Result<ProviderProbeConnectContext, StoreError> {
+    let preparation = command.preparation;
+    let profile = &preparation.profile;
+    Ok(ProviderProbeConnectContext {
+        schema_version: 1,
+        probe_id: ProviderProbeId::from_uuid(command.envelope.aggregate_id),
+        receipt_id: receipt,
+        actor_id: command.caller.actor_id.clone(),
+        principal_id: preparation.principal_id.clone(),
+        project_id: command.envelope.project_id,
+        authority_generation: preparation.authority_generation,
+        daemon_epoch: preparation.daemon_epoch,
+        action_id: ActionId::from_uuid(config.id_generator.new_uuid()),
+        mandate_ref: preparation.grant.mandate_ref,
+        mandate_digest: preparation.grant.mandate_digest,
+        phase: ProviderTestPhase::Connect,
+        profile_id: profile.configuration.profile_id,
+        profile_version: profile.configuration.profile_version,
+        profile_version_ref: profile.profile_version_ref.clone(),
+        configuration_digest: profile.configuration_digest,
+        destination: profile.configuration.payload.endpoint().to_owned(),
+        scope_revision: preparation.scope_revision,
+        policy_revision: preparation.policy_revision,
+        policy_digest: preparation.policy_digest,
+        command_digest: preparation.command_digest,
+        request_digest: transport_digest(preparation)?,
+        locality: preparation.wire.locality(),
+        capability_set: preparation.wire.capability_set().to_vec(),
+        limits: preparation.wire.limits().clone(),
+        deadline,
+    })
+}
+
+pub(crate) fn commit_tx(
+    tx: &Transaction<'_>,
+    config: &crate::StoreConfig,
+    daemon: &crate::DaemonStateRow,
+    now: TimestampMs,
+    command: ConnectCommand<'_>,
+    receipt: ReceiptId,
+    events: &mut Vec<crate::EventAppendSpec>,
+) -> Result<Revision, StoreError> {
+    let deadline = validate_preparation(tx, daemon, now, &command)?;
+    let occupied: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM provider_probes WHERE probe_id=?1) OR EXISTS(SELECT 1 FROM command_receipts WHERE aggregate_id=?1)", [command.envelope.aggregate_id.to_string()], |row| row.get(0))?;
+    if occupied {
+        return Err(StoreError::RevisionConflict {
+            current_revision: Revision::new(1),
+            expected_revision: Revision::INITIAL,
+            command_id: Some(command.envelope.command_id),
+        });
+    }
+    let context = context(config, &command, receipt, deadline)?;
+    let digest = unleash_protocol::canonical_sha256(&context)?;
+    tx.pragma_update(None, "defer_foreign_keys", "ON")?;
+    tx.execute("INSERT INTO provider_probes(probe_id,command_receipt_id,principal_id,source_run_id,profile_version_ref,context_hash,phase,state,wait_reason,admission_class,authority_generation,daemon_epoch,fence,revision,queued_at_ms) VALUES(?1,?2,?3,NULL,?4,?5,'connect','queued',NULL,'work',?6,?7,0,1,?8)", params![context.probe_id.to_string(),receipt.to_string(),context.principal_id.as_str(),context.profile_version_ref,digest.to_string(),context.authority_generation.to_string(),integer(context.daemon_epoch.as_u64())?,now.as_i64()])?;
+    tx.execute("INSERT INTO provider_probe_transport_contexts(probe_id,receipt_id,actor_id,principal_id,project_id,profile_version_ref,authority_generation,daemon_epoch,action_id,mandate_ref,phase,context_digest,context_json,created_at_ms) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,'connect',?11,?12,?13)", params![context.probe_id.to_string(),receipt.to_string(),context.actor_id.as_str(),context.principal_id.as_str(),context.project_id.map(|id|id.to_string()),context.profile_version_ref,context.authority_generation.to_string(),integer(context.daemon_epoch.as_u64())?,context.action_id.to_string(),context.mandate_ref.to_string(),digest.to_string(),serde_json::to_string(&context)?,now.as_i64()])?;
+    events.push(crate::EventAppendSpec {
+        event_type:"ProviderProbePrepared".to_owned(), aggregate_type:crate::AggregateKind::ProviderProbe,
+        aggregate_id:context.probe_id.as_uuid(), aggregate_revision:Revision::new(1), project_id:context.project_id,
+        correlation_id:command.envelope.command_id.as_uuid(), causation_kind:unleash_protocol::EventCausationKind::Command,
+        causation_id:None, payload:serde_json::json!({"probe_id":context.probe_id,"action_id":context.action_id,"phase":"connect","context_digest":digest,"mandate_ref":context.mandate_ref}).as_object().cloned().ok_or_else(|| invalid("événement connect invalide"))?,
+        sensitivity:unleash_protocol::Sensitivity::Restricted, outbox_destinations:vec!["clients".to_owned(),"harness".to_owned()],
+    });
+    Ok(Revision::new(1))
+}
+
+fn read_context(
+    conn: &Connection,
+    probe: ProviderProbeId,
+) -> Result<Option<ProviderProbeConnectRecord>, StoreError> {
+    let row: Option<(String,String)> = conn.query_row("SELECT context_json,context_digest FROM provider_probe_transport_contexts WHERE probe_id=?1", [probe.to_string()], |row| Ok((row.get(0)?,row.get(1)?))).optional()?;
+    row.map(|(json, digest)| {
+        let context: ProviderProbeConnectContext = serde_json::from_str(&json)?;
+        let digest: Sha256Digest = digest.parse()?;
+        if context.probe_id != probe
+            || context.schema_version != 1
+            || context.phase != ProviderTestPhase::Connect
+            || unleash_protocol::canonical_sha256(&context)? != digest
+        {
+            return Err(invalid("contexte connect durable incohérent"));
+        }
+        Ok(ProviderProbeConnectRecord {
+            context,
+            context_digest: digest,
+        })
+    })
+    .transpose()
 }
 
 impl UnleashStore {
@@ -237,11 +474,21 @@ impl UnleashStore {
     /// Refuse autorité, scope, version, phase ou mandat incompatibles.
     pub fn prepare_provider_probe_connect(
         &self,
-        _envelope: &CommandEnvelope,
-        _caller: &CallerAuthority,
+        envelope: &CommandEnvelope,
+        caller: &CallerAuthority,
     ) -> Result<ProviderProbeConnectPreparation, StoreError> {
-        // TDD : le premier oracle comportemental doit constater ce refus fermé.
-        Err(pending())
+        let envelope = envelope.clone();
+        let caller = caller.clone();
+        let preparation = self.execute_in_writer_tx(WriteCriticality::Normal, move |tx, now| {
+            let daemon = read_daemon_state_conn(tx)?;
+            prepare_tx(tx, &daemon, now, &envelope, &caller)
+        })?;
+        crate::provider_profiles::verify_configuration_objects(
+            self,
+            &preparation.profile.configuration,
+            preparation.profile.configuration_digest,
+        )?;
+        Ok(preparation)
     }
 
     /// Lit un contexte exact et son watermark, sans lui donner autorité après reprise.
@@ -249,8 +496,8 @@ impl UnleashStore {
     /// Refuse un document ou digest durable incohérent.
     pub fn inspect_provider_probe_connect_snapshot(
         &self,
-        _probe: ProviderProbeId,
+        probe: ProviderProbeId,
     ) -> Result<SnapshotProjection<Option<ProviderProbeConnectRecord>>, StoreError> {
-        Err(pending())
+        self.project_snapshot(|conn| read_context(conn, probe))
     }
 }

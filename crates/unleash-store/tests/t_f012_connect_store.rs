@@ -92,8 +92,12 @@ fn command(
 }
 
 fn configure(store: &UnleashStore) {
+    configure_profile(store, PROFILE, 1);
+}
+
+fn configure_profile(store: &UnleashStore, profile: Uuid, command_id: u128) {
     let configuration = ProviderProfileConfiguration {
-        schema_version:1, profile_id:PROFILE, profile_version:1, project_id:None,
+        schema_version:1, profile_id:profile, profile_version:1, project_id:None,
         payload:serde_json::from_value(json!({"provider_kind":"lmstudio","dialect":{"kind":"openai_chat_completions","version":1},"endpoint":"http://127.0.0.1:1234/v1","model":"synthetic-connect-store","locality":"local_only","server_management":"user_managed","auth":{"kind":"none"},"limits":{"max_inflight":1,"connect_timeout_ms":2000,"queue_timeout_ms":1000,"load_timeout_ms":180000,"first_token_timeout_ms":60000,"generation_timeout_ms":60000},"declared_capabilities":["text"],"pricing":{"kind":"none_local"}})).unwrap(),
         secret_binding:None, catalog_binding:None,
     };
@@ -105,7 +109,7 @@ fn configure(store: &UnleashStore) {
             byte_length: u64::try_from(bytes.len()).unwrap(),
             media_type: "application/json".into(),
             owner_kind: "connect_store_fixture".into(),
-            owner_id: PROFILE.to_string(),
+            owner_id: profile.to_string(),
         })
         .unwrap();
     store
@@ -117,14 +121,14 @@ fn configure(store: &UnleashStore) {
             object_hash: hash,
             object_generation: prepared.object_generation,
             owner_kind: "connect_store_fixture".into(),
-            owner_id: PROFILE.to_string(),
+            owner_id: profile.to_string(),
             source_field: "configuration".into(),
         })
         .unwrap();
     let wire = envelope(
         store,
-        1,
-        PROFILE,
+        command_id,
+        profile,
         "SetProviderProfile",
         serde_json::to_value(&configuration.payload).unwrap(),
     );
@@ -311,12 +315,23 @@ fn t_f012_013_connect_receipt_context_and_replay_have_no_effect() {
 #[test]
 fn t_f012_013_connect_mandate_owner_profile_and_phase_are_exact() {
     let (store, _directory, mandate, _) = fixture();
+    let other_profile = Uuid::from_u128(0xf012_c502);
+    configure_profile(&store, other_profile, 4);
+    let mut inventory = change(&store);
+    if let ProviderProbeMandateChange::Issue(permission) = &mut inventory {
+        permission.phase = ProviderTestPhase::Inventory;
+    }
+    let inventory_receipt = store
+        .commit_command(policy(&store, 5, 1, inventory))
+        .unwrap()
+        .receipt()
+        .receipt_id;
     let wire = connect(&store, 11, mandate);
     let before = counts(&store);
     let mut foreign = wire.clone();
     foreign
         .payload
-        .insert("profile_id".into(), json!(Uuid::from_u128(99)));
+        .insert("profile_id".into(), json!(other_profile));
     assert!(matches!(
         store.prepare_provider_probe_connect(&foreign, &caller()),
         Err(StoreError::NotFound(_))
@@ -328,6 +343,14 @@ fn t_f012_013_connect_mandate_owner_profile_and_phase_are_exact() {
             .prepare_provider_probe_connect(&phase, &caller())
             .is_err()
     );
+    let mut wrong_grant = wire.clone();
+    wrong_grant
+        .payload
+        .insert("mandate_ref".into(), json!(inventory_receipt));
+    assert!(matches!(
+        store.prepare_provider_probe_connect(&wrong_grant, &caller()),
+        Err(StoreError::NotFound(_))
+    ));
     let other = CallerAuthority {
         actor_id: ActorId::new("user:connect-other").unwrap(),
         role: CallerRole::HumanOperator,
@@ -425,4 +448,77 @@ fn t_f012_013_connect_other_command_cannot_reuse_probe_or_old_lineage() {
         Err(StoreError::StaleAuthorityGeneration { .. })
     ));
     assert_eq!(counts(&store), before);
+}
+
+fn connect_intent(
+    record: &unleash_store::ProviderProbeConnectRecord,
+) -> unleash_store::BrokerIntent {
+    let c = &record.context;
+    let fence = unleash_domain::LineageFence::new(
+        c.authority_generation,
+        c.daemon_epoch,
+        unleash_domain::Fence::ZERO,
+    );
+    let manifest = json!({
+        "action_id":c.action_id,
+        "subject":{"kind":"control_plane","principal_id":c.principal_id,"cause_ref":format!("receipt:{}",c.receipt_id),"invocation_id":null,"attempt_id":null,"replay_worker_id":null,"agent_id":null,"mission_id":null,"role_version":null},
+        "project_id":c.project_id,"verb":"model.provider.connect",
+        "resource_refs":[{"kind":"network_endpoint","host":"127.0.0.1","port":1234,"is_private_or_loopback":true}],
+        "payload_digest":c.request_digest,"reconcile_strategy":"observe_then_decide","effects_class":"network_egress",
+        "scope_revision":c.scope_revision,"policy_revision":c.policy_revision,"lineage_fence":fence,"action_deadline":c.deadline,
+        "isolation_requirements":{"mode":"standard","require_process_confinement":false,"required_capabilities":[]},
+        "secret_refs":[],"provenance":{"origin":"engine_internal"},
+    }).as_object().unwrap().clone();
+    unleash_store::BrokerIntent {
+        action_id: c.action_id,
+        origin: unleash_domain::ActionOrigin::ControlPlane {
+            control_principal_id: c.principal_id.clone(),
+        },
+        principal_id: c.principal_id.clone(),
+        cause: unleash_store::BrokerCause::CommandReceipt {
+            receipt_id: c.receipt_id,
+        },
+        project_id: c.project_id,
+        payload_digest: c.request_digest,
+        scope_revision: c.scope_revision,
+        policy_revision: c.policy_revision,
+        lineage_fence: fence,
+        action_deadline: c.deadline,
+        reconcile_strategy: unleash_domain::ReconcileStrategy::ObserveThenDecide,
+        intent_digest: unleash_protocol::canonical_sha256(&manifest).unwrap(),
+        manifest,
+    }
+}
+
+#[test]
+fn t_f012_013_connect_without_claim_cannot_enter_generic_broker() {
+    let (store, _directory, mandate, _) = fixture();
+    let wire = connect(&store, 18, mandate);
+    store.commit_command(prepare(&store, &wire)).unwrap();
+    let record = store
+        .inspect_provider_probe_connect_snapshot(ProviderProbeId::from_uuid(wire.aggregate_id))
+        .unwrap()
+        .value
+        .unwrap();
+    let intent = connect_intent(&record);
+    let request = unleash_store::BrokerPhaseRequest {
+        authority_generation: intent.lineage_fence.authority_generation,
+        expected_revision: Revision::INITIAL,
+        evaluation: unleash_store::BrokerEvaluation {
+            evaluation_id: unleash_domain::AuthorizationEvaluationId::from_u128(18),
+            previous_evaluation_id: None,
+        },
+        phase: unleash_store::BrokerPhase::Authorizing { intent },
+    };
+    let before = counts(&store);
+    let outcome = store.commit_broker_phase(request);
+    assert!(
+        matches!(&outcome, Err(StoreError::EvidenceUnavailable(_))),
+        "un contexte reserved ne prouve pas une claim d'exécution : {outcome:?}"
+    );
+    assert_eq!(
+        counts(&store),
+        before,
+        "aucune intention, place ou ModelCall sans claim"
+    );
 }
