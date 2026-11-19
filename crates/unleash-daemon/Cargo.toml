@@ -20,6 +20,7 @@ unleash-domain.workspace = true
 unleash-protocol.workspace = true
 unleash-platform.workspace = true
 unleash-store.workspace = true
+unleash-model-router.workspace = true
 unleash-scheduler.workspace = true
 unleash-browser.workspace = true
 unleash-action-broker.workspace = true
