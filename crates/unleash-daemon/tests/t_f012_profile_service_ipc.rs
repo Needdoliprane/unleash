@@ -353,6 +353,52 @@ fn seed_authority_binding(
     reference
 }
 
+fn assert_stored_binding_and_euro_prices(
+    root: &Path,
+    profile: Uuid,
+    project: unleash_domain::ProjectId,
+) {
+    let db = rusqlite::Connection::open_with_flags(
+        root.join("unleash-authority.db"),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .unwrap();
+    let content: String = db
+        .query_row(
+            "SELECT config_json FROM provider_profiles WHERE profile_id=?1",
+            [profile.to_string()],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let object: Value = serde_json::from_str(&content).unwrap();
+    assert_eq!(
+        object.pointer("/payload/pricing/entry/currency").unwrap(),
+        "EUR"
+    );
+    assert!(
+        object
+            .pointer("/payload/pricing/entry/input_micros_per_million")
+            .unwrap()
+            .is_null()
+    );
+    assert_eq!(
+        object
+            .pointer("/secret_binding/reference/target_id")
+            .unwrap(),
+        &json!(profile)
+    );
+    assert_eq!(
+        object
+            .pointer("/secret_binding/reference/scope_id")
+            .unwrap(),
+        &json!(project)
+    );
+    assert_eq!(
+        object.pointer("/secret_binding/revision").unwrap(),
+        &json!(1)
+    );
+}
+
 #[tokio::test]
 async fn t_f012_013_ipc_scope_f017_binding_and_euro_unknown_prices_are_exact() {
     use std::os::unix::fs::PermissionsExt;
@@ -418,45 +464,7 @@ async fn t_f012_013_ipc_scope_f017_binding_and_euro_unknown_prices_are_exact() {
     let first = client.send_command(&request).await.unwrap();
     let before = counts(data.path());
     assert_eq!(before, (1, 1, 0, 0));
-    let db = rusqlite::Connection::open_with_flags(
-        data.path().join("unleash-authority.db"),
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-    )
-    .unwrap();
-    let content: String = db
-        .query_row(
-            "SELECT config_json FROM provider_profiles WHERE profile_id=?1",
-            [profile.to_string()],
-            |r| r.get(0),
-        )
-        .unwrap();
-    let object: Value = serde_json::from_str(&content).unwrap();
-    assert_eq!(
-        object.pointer("/payload/pricing/entry/currency").unwrap(),
-        "EUR"
-    );
-    assert!(
-        object
-            .pointer("/payload/pricing/entry/input_micros_per_million")
-            .unwrap()
-            .is_null()
-    );
-    assert_eq!(
-        object
-            .pointer("/secret_binding/reference/target_id")
-            .unwrap(),
-        &json!(profile)
-    );
-    assert_eq!(
-        object
-            .pointer("/secret_binding/reference/scope_id")
-            .unwrap(),
-        &json!(project)
-    );
-    assert_eq!(
-        object.pointer("/secret_binding/revision").unwrap(),
-        &json!(1)
-    );
+    assert_stored_binding_and_euro_prices(data.path(), profile, project);
     assert_eq!(client.send_command(&request).await.unwrap(), first);
     let mut wrong = request.clone();
     wrong.command_id = CommandId::from_u128(712);
