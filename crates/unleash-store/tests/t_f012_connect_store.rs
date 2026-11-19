@@ -1,0 +1,407 @@
+//! T-F012-013 : préparation réseau authentifiée, sans effet OS/fournisseur.
+//! Les profils et mandats de ce banc passent par le vrai CommitCommand.
+#![expect(clippy::unwrap_used, reason = "Fixtures SQLite locales et assertions")]
+
+use serde_json::{Value, json};
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
+use unleash_domain::{
+    ActorId, CommandId, DataLocality, MicrosAmount, ProviderProbeId, ReceiptId, RequestId,
+    Revision, Sha256Digest, TimestampMs,
+};
+use unleash_protocol::{
+    CommandEnvelope, ProtocolVersion, ProviderTestLimits, ProviderTestPhase, ReceiptState,
+    canonicalize_to_vec,
+};
+use unleash_store::{
+    AggregateKind, CallerAuthority, CallerRole, CommandMutation, CommitCommandRequest,
+    CutpointObserver, PolicyIsolationMode, PolicyScopeKind, PrepareObjectRequest,
+    ProviderProbeMandateChange, ProviderProbeMandateIssue, ProviderProfileConfiguration,
+    ProviderProfilePreparation, PublishObjectReferenceRequest, StoreConfig, StoreCutpoint,
+    StoreError, UnleashStore,
+};
+use unleash_testkit::local_test_dir;
+use uuid::Uuid;
+
+const PROFILE: Uuid = Uuid::from_u128(0xf012_c501);
+const PRINCIPAL: &str = "connect-store-principal";
+
+struct FailBeforeCommit(AtomicBool);
+
+impl CutpointObserver for FailBeforeCommit {
+    fn hit(&self, point: StoreCutpoint) -> Result<(), StoreError> {
+        if point == StoreCutpoint::C1BeforeCommandCommit && self.0.swap(false, Ordering::SeqCst) {
+            return Err(StoreError::CutpointInjected {
+                cutpoint: "C1".into(),
+                message: "synthetic connect rollback".into(),
+            });
+        }
+        Ok(())
+    }
+}
+
+fn caller() -> CallerAuthority {
+    CallerAuthority {
+        actor_id: ActorId::new("user:connect-store").unwrap(),
+        role: CallerRole::HumanOperator,
+    }
+}
+
+fn envelope(
+    store: &UnleashStore,
+    id: u128,
+    aggregate: Uuid,
+    kind: &str,
+    payload: Value,
+) -> CommandEnvelope {
+    CommandEnvelope {
+        protocol_version: ProtocolVersion,
+        request_id: RequestId::from_u128(id),
+        command_id: CommandId::from_u128(id),
+        authority_generation: store.active_authority_generation().unwrap(),
+        actor_ref: Some(caller().actor_id.to_string()),
+        project_id: None,
+        aggregate_id: aggregate,
+        expected_revision: Revision::INITIAL,
+        command_type: kind.into(),
+        payload: payload.as_object().unwrap().clone(),
+    }
+}
+
+fn command(
+    envelope: CommandEnvelope,
+    target: AggregateKind,
+    mutation: CommandMutation,
+) -> CommitCommandRequest {
+    CommitCommandRequest {
+        actor_id: caller().actor_id,
+        envelope,
+        target_aggregate: target,
+        operation_id: None,
+        receipt_state: ReceiptState::Accepted,
+        result_ref: None,
+        retention_days_override: None,
+        fence_assertion: None,
+        mutation,
+        events: vec![],
+        capacity_reservations: vec![],
+        budget_reservations: vec![],
+    }
+}
+
+fn configure(store: &UnleashStore) {
+    let configuration = ProviderProfileConfiguration {
+        schema_version:1, profile_id:PROFILE, profile_version:1, project_id:None,
+        payload:serde_json::from_value(json!({"provider_kind":"lmstudio","dialect":{"kind":"openai_chat_completions","version":1},"endpoint":"http://127.0.0.1:1234/v1","model":"synthetic-connect-store","locality":"local_only","server_management":"user_managed","auth":{"kind":"none"},"limits":{"max_inflight":1,"connect_timeout_ms":2000,"queue_timeout_ms":1000,"load_timeout_ms":180000,"first_token_timeout_ms":60000,"generation_timeout_ms":60000},"declared_capabilities":["text"],"pricing":{"kind":"none_local"}})).unwrap(),
+        secret_binding:None, catalog_binding:None,
+    };
+    let bytes = canonicalize_to_vec(&configuration).unwrap();
+    let hash = Sha256Digest::from_bytes(&bytes);
+    let prepared = store
+        .prepare_object(PrepareObjectRequest {
+            object_hash: hash,
+            byte_length: u64::try_from(bytes.len()).unwrap(),
+            media_type: "application/json".into(),
+            owner_kind: "connect_store_fixture".into(),
+            owner_id: PROFILE.to_string(),
+        })
+        .unwrap();
+    store
+        .write_prepared_object_bytes(&prepared, &bytes)
+        .unwrap();
+    store
+        .publish_owned_object_reference(PublishObjectReferenceRequest {
+            pin_id: prepared.pin_id,
+            object_hash: hash,
+            object_generation: prepared.object_generation,
+            owner_kind: "connect_store_fixture".into(),
+            owner_id: PROFILE.to_string(),
+            source_field: "configuration".into(),
+        })
+        .unwrap();
+    let wire = envelope(
+        store,
+        1,
+        PROFILE,
+        "SetProviderProfile",
+        serde_json::to_value(&configuration.payload).unwrap(),
+    );
+    store
+        .commit_command(command(
+            wire,
+            AggregateKind::ProviderProfile,
+            CommandMutation::SetProviderProfile {
+                caller: caller(),
+                preparation: Box::new(ProviderProfilePreparation {
+                    configuration,
+                    content_object_hash: hash,
+                }),
+            },
+        ))
+        .unwrap();
+}
+
+fn change(store: &UnleashStore) -> ProviderProbeMandateChange {
+    ProviderProbeMandateChange::Issue(ProviderProbeMandateIssue {
+        principal_id: ActorId::new(PRINCIPAL).unwrap(),
+        profile_id: PROFILE,
+        profile_version: 1,
+        phase: ProviderTestPhase::Connect,
+        locality: DataLocality::LocalOnly,
+        capability_set: vec![],
+        limits: ProviderTestLimits::new(1000, 0, 0, MicrosAmount::ZERO),
+        expires_at_ms: TimestampMs::new(store.config().clock.now_ms().as_i64() + 60_000),
+    })
+}
+
+fn policy(
+    store: &UnleashStore,
+    id: u128,
+    revision: u64,
+    change: ProviderProbeMandateChange,
+) -> CommitCommandRequest {
+    let mut wire = envelope(
+        store,
+        id,
+        store.active_authority_generation().unwrap().as_uuid(),
+        "SetPolicy",
+        json!({"scope_kind":"global","scope_id":"global","isolation_mode":"standard","policy_version":"connect-fixture-v1","reason":"synthetic connect permission","provider_probe_mandate":change}),
+    );
+    wire.expected_revision = Revision::new(revision);
+    command(
+        wire,
+        AggregateKind::SecurityPolicy,
+        CommandMutation::SetPolicyWithProviderProbeMandate {
+            scope_kind: PolicyScopeKind::Global,
+            scope_id: "global".into(),
+            isolation_mode: PolicyIsolationMode::Standard,
+            policy_version: "connect-fixture-v1".into(),
+            reason: "synthetic connect permission".into(),
+            caller: caller(),
+            mandate: change,
+        },
+    )
+}
+
+fn fixture() -> (
+    UnleashStore,
+    impl std::fmt::Debug,
+    ReceiptId,
+    Arc<FailBeforeCommit>,
+) {
+    let directory = local_test_dir("f012-connect-store").unwrap();
+    let failure = Arc::new(FailBeforeCommit(AtomicBool::new(false)));
+    let mut config = StoreConfig::new(directory.path());
+    config.cutpoints = failure.clone();
+    let store = UnleashStore::open(config).unwrap();
+    store
+        .register_principal(PRINCIPAL, "user", caller().actor_id.as_str())
+        .unwrap();
+    store
+        .register_principal("connect-other", "user", "user:connect-other")
+        .unwrap();
+    configure(&store);
+    let receipt = store
+        .commit_command(policy(&store, 2, 0, change(&store)))
+        .unwrap()
+        .receipt()
+        .receipt_id;
+    (store, directory, receipt, failure)
+}
+
+fn connect(store: &UnleashStore, id: u128, mandate: ReceiptId) -> CommandEnvelope {
+    envelope(
+        store,
+        id,
+        Uuid::from_u128(id),
+        "TestProviderProfile",
+        json!({"profile_id":PROFILE,"profile_version":1,"phase":"connect","capability_set":[],"limits":{"timeout_ms":1000,"max_calls":0,"max_output_tokens":0,"max_cost_usd_micros":0},"locality":"local_only","mandate_ref":mandate}),
+    )
+}
+
+fn prepare(store: &UnleashStore, wire: &CommandEnvelope) -> CommitCommandRequest {
+    let preparation = store
+        .prepare_provider_probe_connect(wire, &caller())
+        .unwrap();
+    command(
+        wire.clone(),
+        AggregateKind::ProviderProbe,
+        CommandMutation::PrepareProviderProbeConnect {
+            caller: caller(),
+            preparation: Box::new(preparation),
+        },
+    )
+}
+
+fn counts(store: &UnleashStore) -> Vec<i64> {
+    store
+        .read_snapshot(|db, _| {
+            [
+                "command_receipts",
+                "provider_probes",
+                "provider_probe_transport_contexts",
+                "actions",
+                "model_calls",
+                "model_call_manifests",
+                "capacity_reservations",
+                "budget_reservations",
+                "events",
+                "outbox",
+            ]
+            .iter()
+            .map(|table| {
+                db.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                    row.get(0)
+                })
+                .map_err(StoreError::from)
+            })
+            .collect()
+        })
+        .unwrap()
+}
+
+#[test]
+fn t_f012_013_connect_receipt_context_and_replay_have_no_effect() {
+    let (store, _directory, mandate, _) = fixture();
+    let wire = connect(&store, 10, mandate);
+    let before = counts(&store);
+    let request = prepare(&store, &wire);
+    assert_eq!(
+        counts(&store),
+        before,
+        "résoudre n'est pas préparer une intention"
+    );
+    let committed = store.commit_command(request.clone()).unwrap();
+    let record = store
+        .inspect_provider_probe_connect_snapshot(ProviderProbeId::from_uuid(wire.aggregate_id))
+        .unwrap()
+        .value
+        .unwrap();
+    assert_eq!(committed.receipt().state, ReceiptState::Accepted);
+    assert_eq!(record.context.receipt_id, committed.receipt().receipt_id);
+    assert_eq!(record.context.mandate_ref, mandate);
+    assert_eq!(record.context.actor_id, caller().actor_id);
+    assert_eq!(record.context.principal_id.as_str(), PRINCIPAL);
+    assert_eq!(record.context.destination, "http://127.0.0.1:1234/v1");
+    let after = counts(&store);
+    assert_eq!(
+        &after[3..8],
+        &[0, 0, 0, 0, 0],
+        "aucune action, ModelCall ou réservation avant Authorizing/admission"
+    );
+    assert_eq!(
+        store.commit_command(request.clone()).unwrap().receipt(),
+        committed.receipt()
+    );
+    assert_eq!(counts(&store), after);
+    let mut divergent = request;
+    divergent
+        .envelope
+        .payload
+        .insert("capability_set".into(), json!(["text"]));
+    assert!(matches!(
+        store.commit_command(divergent),
+        Err(StoreError::IdempotencyConflict { .. })
+    ));
+    assert_eq!(counts(&store), after);
+}
+
+#[test]
+fn t_f012_013_connect_mandate_owner_profile_and_phase_are_exact() {
+    let (store, _directory, mandate, _) = fixture();
+    let wire = connect(&store, 11, mandate);
+    let before = counts(&store);
+    let mut foreign = wire.clone();
+    foreign
+        .payload
+        .insert("profile_id".into(), json!(Uuid::from_u128(99)));
+    assert!(matches!(
+        store.prepare_provider_probe_connect(&foreign, &caller()),
+        Err(StoreError::NotFound(_))
+    ));
+    let mut phase = wire.clone();
+    phase.payload.insert("phase".into(), json!("inventory"));
+    assert!(
+        store
+            .prepare_provider_probe_connect(&phase, &caller())
+            .is_err()
+    );
+    let other = CallerAuthority {
+        actor_id: ActorId::new("user:connect-other").unwrap(),
+        role: CallerRole::HumanOperator,
+    };
+    let mut other_wire = wire;
+    other_wire.actor_ref = Some(other.actor_id.to_string());
+    assert!(matches!(
+        store.prepare_provider_probe_connect(&other_wire, &other),
+        Err(StoreError::NotFound(_))
+    ));
+    assert_eq!(counts(&store), before);
+}
+
+#[test]
+fn t_f012_013_connect_c1_rolls_back_receipt_context_and_outbox() {
+    let (store, _directory, mandate, failure) = fixture();
+    let request = prepare(&store, &connect(&store, 12, mandate));
+    let before = counts(&store);
+    failure.0.store(true, Ordering::SeqCst);
+    assert!(matches!(
+        store.commit_command(request.clone()),
+        Err(StoreError::CutpointInjected { .. })
+    ));
+    assert_eq!(counts(&store), before);
+    store.commit_command(request).unwrap();
+}
+
+#[test]
+fn t_f012_013_connect_rechecks_mandate_at_commit_but_replays_original_receipt() {
+    let (store, _directory, mandate, _) = fixture();
+    let first = prepare(&store, &connect(&store, 13, mandate));
+    let pending = prepare(&store, &connect(&store, 14, mandate));
+    let receipt = store
+        .commit_command(first.clone())
+        .unwrap()
+        .receipt()
+        .clone();
+    store
+        .commit_command(policy(
+            &store,
+            3,
+            1,
+            ProviderProbeMandateChange::Revoke {
+                mandate_ref: mandate,
+            },
+        ))
+        .unwrap();
+    let before = counts(&store);
+    assert!(matches!(
+        store.commit_command(pending),
+        Err(StoreError::NotFound(_))
+    ));
+    assert_eq!(store.commit_command(first).unwrap().receipt(), &receipt);
+    assert_eq!(counts(&store), before);
+}
+
+#[test]
+fn t_f012_013_connect_other_command_cannot_reuse_probe_or_old_lineage() {
+    let (store, _directory, mandate, _) = fixture();
+    let wire = connect(&store, 15, mandate);
+    store.commit_command(prepare(&store, &wire)).unwrap();
+    let mut second = wire.clone();
+    second.command_id = CommandId::from_u128(16);
+    second.request_id = RequestId::from_u128(16);
+    let before = counts(&store);
+    assert!(matches!(
+        store.commit_command(prepare(&store, &second)),
+        Err(StoreError::RevisionConflict { .. })
+    ));
+    let mut old = wire;
+    old.authority_generation = unleash_domain::AuthorityGeneration::from_u128(1);
+    assert!(matches!(
+        store.prepare_provider_probe_connect(&old, &caller()),
+        Err(StoreError::StaleAuthorityGeneration { .. })
+    ));
+    assert_eq!(counts(&store), before);
+}
