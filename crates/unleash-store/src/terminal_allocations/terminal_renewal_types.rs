@@ -166,7 +166,7 @@ pub struct ResolveTerminalRenewalRequest {
 }
 
 /// Exact durable kind of a registered acquisition; never inferred by a client.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub enum RegisteredTerminalIntent {
     /// Successor-incarnation transfer with a higher fence.
     Transfer(super::TerminalControlRecord),
