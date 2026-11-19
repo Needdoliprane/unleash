@@ -11,20 +11,31 @@ struct TerminalCli<'a> {
 }
 
 impl TerminalCli<'_> {
-    fn run(&self, args: &[&str]) -> Value {
-        let output = Command::new(self.binary)
+    fn invoke(&self, args: &[&str]) -> std::process::Output {
+        Command::new(self.binary)
             .arg("--socket")
             .arg(&self.socket)
             .args(["--json", "--timeout-ms", "5000"])
             .args(args)
             .output()
-            .expect("run the prebuilt CLI against the owned fixture socket");
+            .expect("run the prebuilt CLI against the owned fixture socket")
+    }
+
+    fn run(&self, args: &[&str]) -> Value {
+        let output = self.invoke(args);
         assert!(
             output.status.success(),
             "CLI refusal: {}",
             String::from_utf8_lossy(&output.stderr)
         );
         serde_json::from_slice(&output.stdout).expect("structured CLI response")
+    }
+
+    fn assert_refused(&self, args: &[&str], reason: &str) {
+        let output = self.invoke(args);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(!output.status.success(), "expected refusal for {reason}");
+        assert!(stderr.contains(reason), "unexpected CLI refusal: {stderr}");
     }
 
     fn acquire(&self, variant: &str, command_id: &str, target: &[&str]) -> Value {
@@ -81,6 +92,137 @@ impl TerminalCli<'_> {
     }
 }
 
+fn configure_project(cli: &TerminalCli<'_>, fixture: &LiveFixture) {
+    let created = cli.run(&[
+        "project",
+        "create",
+        "--project-id",
+        &cli.project,
+        "--name",
+        "Terminal CLI",
+    ]);
+    assert_eq!(created.get("new_revision"), Some(&json!(1)));
+    let root = fixture.project_root.path().canonicalize().unwrap();
+    let file = root.join("project.json");
+    let mut definition = json!({
+        "name": "Terminal CLI",
+        "description": "Projet provisionné par le binaire CLI",
+        "weight": 2,
+        "primary_root_path": root,
+        "sources": [{"kind": "directory", "path_or_uri": root, "label": "source", "read_only": false}],
+        "repositories": [{"repo_id": "project-repo", "root_path": root, "default_branch": "dev"}],
+        "settings_json": {}
+    });
+    std::fs::write(&file, definition.to_string()).unwrap();
+    let command = Uuid::from_u128(0xf011_4704).to_string();
+    let revise = [
+        "project",
+        "revise",
+        &cli.project,
+        "--expected-revision",
+        "1",
+        "--file",
+        file.to_str().unwrap(),
+        "--command-id",
+        &command,
+        "--authority-generation",
+        &cli.authority,
+    ];
+    let applied = cli.run(&revise);
+    assert_eq!(applied.pointer("/receipt/new_revision"), Some(&json!(2)));
+    assert_eq!(cli.run(&revise), applied);
+    let recorded = cli.run(&["project", "show", &cli.project]);
+    assert_eq!(recorded.pointer("/result/revision"), Some(&json!(2)));
+    assert_eq!(
+        recorded.pointer("/result/primary_root_path"),
+        Some(&json!(root))
+    );
+    assert_eq!(
+        recorded.pointer("/result/sources/0/label"),
+        Some(&json!("source"))
+    );
+    assert_eq!(
+        recorded.pointer("/result/repositories/0/default_branch"),
+        Some(&json!("dev"))
+    );
+    let malformed = [
+        "project",
+        "revise",
+        &cli.project,
+        "--expected-revision",
+        "2",
+        "--file",
+        file.to_str().unwrap(),
+    ];
+    let mut missing_branch = definition.clone();
+    missing_branch
+        .pointer_mut("/repositories/0")
+        .and_then(Value::as_object_mut)
+        .unwrap()
+        .remove("default_branch");
+    std::fs::write(&file, missing_branch.to_string()).unwrap();
+    cli.assert_refused(&malformed, "default_branch");
+    definition
+        .as_object_mut()
+        .unwrap()
+        .remove("primary_root_path");
+    std::fs::write(&file, definition.to_string()).unwrap();
+    cli.assert_refused(&malformed, "primary_root_path");
+    std::fs::write(
+        &file,
+        r#"{"primary_root_path":null,"primary_root_path":null}"#,
+    )
+    .unwrap();
+    cli.assert_refused(&malformed, "clés dupliquées");
+    assert_eq!(
+        cli.run(&["project", "show", &cli.project]).get("result"),
+        recorded.get("result")
+    );
+}
+
+fn configure_terminal_and_mission(cli: &TerminalCli<'_>, fixture: &LiveFixture) {
+    let settings = cli.run(&["process", "settings"]);
+    assert_eq!(settings.pointer("/result/revision"), Some(&json!(0)));
+    assert_eq!(
+        settings.pointer("/result/terminal_runtime"),
+        Some(&Value::Null)
+    );
+    let file = fixture.project_root.path().join("terminal-runtime.json");
+    let runtime = terminal_configuration();
+    std::fs::write(&file, runtime.to_string()).unwrap();
+    let command = Uuid::from_u128(0xf011_4705).to_string();
+    let mut configure = [
+        "process",
+        "configure",
+        "--expected-revision",
+        "0",
+        "--file",
+        file.to_str().unwrap(),
+        "--command-id",
+        &command,
+        "--authority-generation",
+        &cli.authority,
+    ];
+    let applied = cli.run(&configure);
+    assert_eq!(applied.pointer("/receipt/new_revision"), Some(&json!(1)));
+    assert_eq!(cli.run(&configure), applied);
+    let different_command = Uuid::from_u128(0xf011_4706).to_string();
+    configure[7] = &different_command;
+    cli.assert_refused(&configure, "RevisionConflict");
+    let recorded = cli.run(&["process", "settings"]);
+    assert_eq!(recorded.pointer("/result/revision"), Some(&json!(1)));
+    assert_eq!(recorded.pointer("/result/terminal_runtime"), Some(&runtime));
+    let assigned = cli.run(&[
+        "mission",
+        "assign",
+        "--project-id",
+        &cli.project,
+        "--mission-id",
+        &fixture.mission.to_string(),
+    ]);
+    assert_eq!(assigned.get("state"), Some(&json!("accepted")));
+}
+
 async fn wait_for_control(fixture: &mut LiveFixture, terminal: &str, revision: u64) {
     let deadline = Instant::now() + DEADLINE;
     let terminal = json!(terminal);
@@ -111,7 +253,7 @@ async fn t_f011_cli_acquires_observes_and_replays_the_same_terminal() {
         std::env::var_os("UNLEASH_TEST_CLI_BIN").expect("explicit absolute path to the real CLI"),
     );
     assert!(binary.is_absolute() && binary.is_file());
-    let mut fixture = LiveFixture::new(true).await;
+    let mut fixture = LiveFixture::empty().await;
     let cli = TerminalCli {
         binary: &binary,
         socket: fixture.rendezvous.path().join("daemon.sock"),
@@ -119,6 +261,8 @@ async fn t_f011_cli_acquires_observes_and_replays_the_same_terminal() {
         authority: fixture.authority.to_string(),
         terminal: Uuid::from_u128(0xf011_4701).to_string(),
     };
+    configure_project(&cli, &fixture);
+    configure_terminal_and_mission(&cli, &fixture);
     let allocation_command = Uuid::from_u128(0xf011_4702).to_string();
     let program = std::env::current_exe().unwrap();
     let mission = fixture.mission.to_string();

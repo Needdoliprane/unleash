@@ -8,11 +8,20 @@ use unleash_domain::{AuthorityGeneration, CommandId, ProjectId, RequestId, Revis
 use unleash_protocol::{CommandEnvelope, ProtocolVersion};
 use uuid::Uuid;
 
+use crate::configuration::{ConfigurationArgs, ConfigurationTarget};
 use crate::{CliError, next_uuid};
 
 /// Commandes de `unleash process`.
 #[derive(Debug, Subcommand)]
 pub enum ProcessCommand {
+    /// Lit le profil terminal et la révision des réglages utilisateur.
+    Settings,
+    /// Enregistre la configuration complète des profils, limites et baux du terminal.
+    Configure {
+        /// Fichier JSON `terminal_runtime` et révision des réglages utilisateur.
+        #[command(flatten)]
+        configuration: ConfigurationArgs,
+    },
     /// Demande une acquisition et affiche son reçu.
     Acquire {
         /// Allocation ou contrôle d'un terminal enregistré.
@@ -202,13 +211,31 @@ pub(super) async fn run_process_command(
     client: &mut UnleashClient,
     action: &ProcessCommand,
 ) -> Result<Value, CliError> {
-    let ProcessCommand::Acquire { target } = action;
+    match action {
+        ProcessCommand::Settings => crate::configuration::read_terminal_settings(client).await,
+        ProcessCommand::Configure { configuration } => {
+            configuration
+                .apply(client, ConfigurationTarget::TerminalRuntime)
+                .await
+        }
+        ProcessCommand::Acquire { target } => acquire(client, target).await,
+    }
+}
+
+async fn acquire(
+    client: &mut UnleashClient,
+    target: &AcquireTerminalTarget,
+) -> Result<Value, CliError> {
     let (project_id, envelope) = target.envelope(client.hello().authority_generation)?;
     let receipt = client
         .send_command(&envelope)
         .await
         .map_err(|source| match source {
-            ClientError::Remote(_) => CliError::Client(source),
+            ClientError::Remote(ref error)
+                if error.code != unleash_protocol::ErrorCode::OutcomeUnknown =>
+            {
+                CliError::Client(source)
+            }
             source => CliError::TerminalReceiptMissing {
                 terminal_id: envelope.aggregate_id,
                 project_id,

@@ -42,6 +42,17 @@ async fn main() -> ExitCode {
                         "command_id": command_id,
                         "authority_generation": authority_generation,
                     }),
+                    CliError::ConfigurationReceiptMissing {
+                        aggregate_id,
+                        command_id,
+                        authority_generation,
+                        ..
+                    } => json!({
+                        "error": err.to_string(),
+                        "aggregate_id": aggregate_id,
+                        "command_id": command_id,
+                        "authority_generation": authority_generation,
+                    }),
                     _ => json!({ "error": err.to_string() }),
                 };
                 let _ = writeln!(err_out, "{payload}");
