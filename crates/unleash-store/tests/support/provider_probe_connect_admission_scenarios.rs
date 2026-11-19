@@ -89,6 +89,14 @@ fn fixture_with_clock(
     observer: Arc<dyn CutpointObserver>,
     clock: Option<Arc<ManualClock>>,
 ) -> (UnleashStore, impl std::fmt::Debug, ReceiptId, PoolId) {
+    fixture_with_options(observer, clock, None)
+}
+
+fn fixture_with_options(
+    observer: Arc<dyn CutpointObserver>,
+    clock: Option<Arc<ManualClock>>,
+    endpoint: Option<String>,
+) -> (UnleashStore, impl std::fmt::Debug, ReceiptId, PoolId) {
     let directory = local_test_dir("f012-connect-admission").unwrap();
     let mut config = StoreConfig::new(directory.path());
     config.cutpoints = observer;
@@ -111,6 +119,12 @@ fn fixture_with_clock(
         .configuration;
     configuration.profile_version = 2;
     let mut payload = serde_json::to_value(&configuration.payload).unwrap();
+    if let Some(endpoint) = endpoint {
+        payload
+            .as_object_mut()
+            .unwrap()
+            .insert("endpoint".into(), json!(endpoint));
+    }
     let limits = payload.get_mut("limits").unwrap().as_object_mut().unwrap();
     limits.insert("max_inflight".into(), json!(6));
     limits.insert("connect_timeout_ms".into(), json!(30_000));
@@ -162,8 +176,20 @@ struct ReadyProbe {
 }
 
 fn ready(store: &UnleashStore, mandate: ReceiptId, id: u128) -> ReadyProbe {
+    ready_for_profile(store, mandate, id, PROFILE, 2)
+}
+
+fn ready_for_profile(
+    store: &UnleashStore,
+    mandate: ReceiptId,
+    id: u128,
+    profile: uuid::Uuid,
+    version: u64,
+) -> ReadyProbe {
     let mut wire = connect(store, id, mandate);
-    wire.payload.insert("profile_version".into(), json!(2));
+    wire.payload.insert("profile_id".into(), json!(profile));
+    wire.payload
+        .insert("profile_version".into(), json!(version));
     wire.payload.get_mut("limits").unwrap()["timeout_ms"] = json!(30_000);
     let receipt = store
         .commit_command(prepare(store, &wire))
@@ -191,7 +217,24 @@ fn ready(store: &UnleashStore, mandate: ReceiptId, id: u128) -> ReadyProbe {
     else {
         panic!("fresh fixture owner required");
     };
-    let intent = connect_intent(&record);
+    let mut intent = connect_intent(&record);
+    let destination = store
+        .resolve_provider_profile_snapshot(profile, version)
+        .unwrap()
+        .value
+        .unwrap()
+        .configuration
+        .payload
+        .endpoint_destination()
+        .unwrap();
+    intent.manifest.insert(
+        "resource_refs".into(),
+        json!([{
+            "kind":"network_endpoint", "host":destination.host(), "port":destination.port(),
+            "is_private_or_loopback":destination.is_loopback_literal(),
+        }]),
+    );
+    intent.intent_digest = canonical_sha256(&intent.manifest).unwrap();
     let evaluation = BrokerEvaluation {
         evaluation_id: AuthorizationEvaluationId::from_uuid(store.config().id_generator.new_uuid()),
         previous_evaluation_id: None,
@@ -699,5 +742,92 @@ fn t_f012_013_admission_context_expiry_is_rechecked_after_decide() {
     assert_eq!(after.source_revision, snapshot.source_revision);
     assert_eq!(after.fairness, snapshot.fairness);
     assert!(after.active.is_empty());
+    assert_no_model(&store);
+}
+
+fn configure_second_profile(store: &UnleashStore, profile: uuid::Uuid) -> ReceiptId {
+    let mut configuration = store
+        .resolve_provider_profile_snapshot(PROFILE, 2)
+        .unwrap()
+        .value
+        .unwrap()
+        .configuration;
+    configuration.profile_id = profile;
+    configuration.profile_version = 1;
+    let hash = publish(store, &configuration);
+    let wire = envelope(
+        store,
+        350,
+        profile,
+        "SetProviderProfile",
+        serde_json::to_value(&configuration.payload).unwrap(),
+    );
+    store
+        .commit_command(command(
+            wire,
+            AggregateKind::ProviderProfile,
+            CommandMutation::SetProviderProfile {
+                caller: caller(),
+                preparation: Box::new(ProviderProfilePreparation {
+                    configuration,
+                    content_object_hash: hash,
+                }),
+            },
+        ))
+        .unwrap();
+    let mut permission = change(store);
+    if let ProviderProbeMandateChange::Issue(permission) = &mut permission {
+        permission.profile_id = profile;
+        permission.profile_version = 1;
+        permission.limits = ProviderTestLimits::new(30_000, 0, 0, MicrosAmount::ZERO);
+    }
+    store
+        .commit_command(policy(store, 351, 1, permission))
+        .unwrap()
+        .receipt()
+        .receipt_id
+}
+
+#[test]
+fn t_f012_013_admission_unresolved_server_capacity_is_shared_across_profiles() {
+    let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let endpoint = format!("http://{}/v1", listener.local_addr().unwrap());
+    let (store, _directory, mandate_a, pool) =
+        fixture_with_options(Arc::new(NoopCutpointObserver), None, Some(endpoint.clone()));
+    let profile_b = uuid::Uuid::from_u128(0xf012_c502);
+    let mandate_b = configure_second_profile(&store, profile_b);
+    let first = ready(&store, mandate_a, 352);
+    let second = ready_for_profile(&store, mandate_b, 353, profile_b, 1);
+    assert_eq!(first.record.context.destination, endpoint);
+    assert_eq!(second.record.context.destination, endpoint);
+    assert_ne!(
+        first.record.context.profile_id,
+        second.record.context.profile_id
+    );
+    authorizing(&store, &first);
+    authorizing(&store, &second);
+    observe_eligibility(&store, &first, pool);
+    assert!(matches!(
+        admit(&store, &first, pool),
+        Ok(AdmissionOutcome::Admitted(_))
+    ));
+    observe_eligibility(&store, &second, pool);
+    let before = counts(&store);
+    let leases = lease_rows(&store);
+    let snapshot = store.execution_admission_snapshot(pool).unwrap();
+    let result = admit(&store, &second, pool);
+    assert!(
+        matches!(result, Err(StoreError::CapacityBlocked(_))),
+        "an unresolved server has one conservative slot across profiles: {result:?}"
+    );
+    assert_eq!(counts(&store), before);
+    assert_eq!(lease_rows(&store), leases);
+    assert_eq!(held_capacity(&store), 1);
+    let after = store.execution_admission_snapshot(pool).unwrap();
+    assert_eq!(after.active.len(), 1);
+    assert_eq!(after.source_revision, snapshot.source_revision);
+    assert_eq!(after.fairness, snapshot.fairness);
+    assert!(matches!(listener.accept(),Err(error) if error.kind()==std::io::ErrorKind::WouldBlock));
     assert_no_model(&store);
 }
