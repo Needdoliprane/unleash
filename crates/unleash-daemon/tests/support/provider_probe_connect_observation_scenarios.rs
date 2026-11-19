@@ -385,13 +385,13 @@ where
 
 #[tokio::test]
 async fn t_f012_013_connect_alias_profiles_serialize_native_effects() {
-    let before_finish = ObservationPause::new(
-        StoreCutpoint::C1BeforeProviderProbeConnectObservationCommit,
-        Cutpoint::C1,
+    let after_adoption = ObservationPause::new(
+        StoreCutpoint::C2AfterProviderProbeConnectFactAdoption,
+        Cutpoint::C2,
     );
     let (fixture, mut first_client) =
-        ConnectFixture::start_with_cutpoints(Some(before_finish.clone())).await;
-    let mut finish_guard = before_finish.guard();
+        ConnectFixture::start_with_cutpoints(Some(after_adoption.clone())).await;
+    let mut adoption_guard = after_adoption.guard();
     let (first, first_mandate, second, second_mandate) =
         alias_targets(&fixture, &mut first_client).await;
     let mut second_client = peer_client(&fixture).await;
@@ -401,13 +401,13 @@ async fn t_f012_013_connect_alias_profiles_serialize_native_effects() {
     let first_capture = capture_authorized_connect(&fixture);
     let (first_receipt, second_receipt) = {
         let mut first_pending = Box::pin(first_client.send_command(&first_request));
-        let early = wait_for_observation_hook(&fixture, &before_finish, &mut first_pending).await;
+        let early = wait_for_observation_hook(&fixture, &after_adoption, &mut first_pending).await;
         assert!(first_capture.await.unwrap().is_empty());
         assert_eq!(
             permanent_fact_count(&fixture, first_request.aggregate_id),
             1
         );
-        assert_retained_before_finish(&fixture, first_request.aggregate_id);
+        assert_retained_after_adoption(&fixture, first_request.aggregate_id);
         let mut second_pending = Box::pin(second_client.send_command(&second_request));
         let second_receipt = accepted_while_paused(&mut second_pending).await;
         assert_alias_retained(
@@ -417,8 +417,8 @@ async fn t_f012_013_connect_alias_profiles_serialize_native_effects() {
         );
         let second_capture = capture_authorized_connect(&fixture);
         // This point is one-shot: the same observer must not pause the second
-        // legitimate completion after the first reservation is actually released.
-        finish_guard.release();
+        // legitimate publication after the first reservation is actually released.
+        adoption_guard.release();
         let first_receipt = match early {
             Some(receipt) => receipt,
             None => first_pending.await.unwrap(),
