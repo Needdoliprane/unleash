@@ -171,6 +171,10 @@ fn read_result(
             "terminal assertions exceed the exact wire integer domain",
         ));
     }
+    // Authenticate the exact result and live controller first. A dispatched
+    // input belongs to the physical run, including after control rotates;
+    // consulting this projection cannot dispose or retry that uncertain write.
+    super::terminal_input_writer::guard_causal_assertions(conn, &binding.allocation)?;
     let (proof, cursor) = observation(conn, config, &binding, &daemon)?;
     if !proof.unknown_input_seqs.is_empty() || proof.last_confirmed_input_seq != session.input_seq {
         return Err(stale("terminal native input state requires reconciliation"));

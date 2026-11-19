@@ -458,6 +458,89 @@ pub(crate) fn validate_live_context(
     )
 }
 
+pub(crate) fn guard_observation(
+    tx: &Transaction<'_>,
+    phase: &crate::BrokerPhase,
+    proof: Option<&super::TerminalObservationProof>,
+) -> Result<(), StoreError> {
+    let crate::BrokerPhase::Observation {
+        action_id, receipt, ..
+    } = phase
+    else {
+        return Ok(());
+    };
+    let Some(record) = read_input_conn(tx, *action_id)? else {
+        return Ok(());
+    };
+    if receipt.action_id != record.context.action_id
+        || record.broker_dispatch_id != Some(receipt.dispatch_id)
+        || record
+            .dispatch_id
+            .is_some_and(|id| id != receipt.dispatch_id)
+    {
+        return Err(invalid("terminal input observation dispatch differs"));
+    }
+    if receipt.state == unleash_domain::ActionState::OutcomeUnknown {
+        match record.state {
+            TerminalInputState::WriteResolved => {
+                let changed = tx.execute(
+                    "UPDATE terminal_input_intents SET state='outcome_unknown',revision=revision+1 WHERE action_id=?1 AND state='write_resolved' AND revision=?2 AND dispatch_id=?3",
+                    params![action_id.to_string(),integer(record.revision.as_u64())?,receipt.dispatch_id.to_string()],
+                )?;
+                if changed != 1 {
+                    return Err(invalid("terminal input unknown projection CAS lost"));
+                }
+            }
+            // C1 can roll back resolution after the dispatch is already durable.
+            // Preserve the absent permit; the broker marker still quarantines it.
+            TerminalInputState::Prepared | TerminalInputState::OutcomeUnknown => {}
+            _ => {
+                return Err(invalid(
+                    "terminal input unknown observation has no pending intention",
+                ));
+            }
+        }
+    } else if !proof
+        .is_some_and(|proof| canonical_sha256(phase).is_ok_and(|hash| hash == proof.phase_digest))
+    {
+        return Err(invalid(
+            "terminal input native observation producer not qualified",
+        ));
+    }
+    Ok(())
+}
+
+pub(crate) fn guard_causal_assertions(
+    conn: &Connection,
+    allocation: &super::TerminalAllocationRecord,
+) -> Result<(), StoreError> {
+    if read_daemon_state_conn(conn)?.schema_version < 14 {
+        return Ok(());
+    }
+    let c = &allocation.context;
+    let pending: Option<String> = conn.query_row(
+        "SELECT action_id FROM terminal_input_intents WHERE terminal_id=?1 AND authority_generation=?2 AND json_extract(context_json,'$.process_run_uuid')=?3 AND json_extract(context_json,'$.initial_context_digest')=?4 AND state IN ('prepared','write_resolved','outcome_unknown')",
+        params![c.terminal_id.to_string(),c.authority_generation.to_string(),c.process_run_uuid.to_string(),allocation.context_digest.to_string()],
+        |row| row.get(0),
+    ).optional()?;
+    if let Some(action) = pending {
+        let record = read_input_conn(conn, action.parse()?)?
+            .ok_or_else(|| invalid("terminal pending input disappeared in snapshot"))?;
+        if record.state != TerminalInputState::Prepared
+            || record.dispatch_id.is_some()
+            || record.broker_dispatch_id.is_some()
+        {
+            return Err(StoreError::ActionOutcomeUnknown {
+                action_id: record.context.action_id,
+                detail:
+                    "terminal input requires conclusive native observation or qualified disposition"
+                        .into(),
+            });
+        }
+    }
+    Ok(())
+}
+
 impl UnleashStore {
     /// Inspect this actor's input intention with its broker marker in one snapshot.
     /// This returns historical facts and cannot grant a native write permit.

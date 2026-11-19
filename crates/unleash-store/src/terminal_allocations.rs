@@ -1994,6 +1994,7 @@ pub(crate) fn guard_observation(
     phase: &crate::BrokerPhase,
     proof: Option<&TerminalObservationProof>,
 ) -> Result<(), StoreError> {
+    terminal_input_writer::guard_observation(tx, phase, proof)?;
     if let crate::BrokerPhase::Observation {
         action_id, receipt, ..
     } = phase
