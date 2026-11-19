@@ -7,6 +7,10 @@ mod terminal_input_execution;
 mod terminal_input_observation;
 pub mod terminal_input_types;
 pub(crate) mod terminal_input_writer;
+pub(crate) mod terminal_renewal;
+mod terminal_renewal_observation;
+mod terminal_renewal_recovery;
+pub mod terminal_renewal_types;
 
 use crate::{CallerAuthority, FenceAssertion, StoreError};
 use serde::{Deserialize, Serialize};
@@ -424,6 +428,7 @@ impl crate::UnleashStore {
                 if tx.execute("UPDATE capacity_reservations SET state='held',daemon_epoch=?2 WHERE reservation_id=?1 AND state IN ('held','reconciling') AND authority_generation=?3",params![id.to_string(),integer(c.daemon_epoch.as_u64())?,c.authority_generation.to_string()])?!=1 {return Err(invalid("terminal retained hold disappeared"));}
             }
             if tx.execute("UPDATE terminal_control_intents SET state='observed',revision=revision+1,observation_object_hash=?2 WHERE action_id=?1 AND state IN ('handshake_resolved','outcome_unknown') AND revision=?3 AND dispatch_id=?4",params![c.action_id.to_string(),digest.to_string(),integer(record.revision.as_u64())?,observation.dispatch_id.to_string()])?!=1 {return Err(invalid("terminal observation CAS lost"));}
+            terminal_renewal_recovery::dispose_linked_transfer_tx(tx,&record,&observation)?;
             let proof=TerminalObservationProof {phase_digest:canonical_sha256(&phase.phase)?};
             crate::broker_writer::commit_terminal_observation_tx(tx,&config,now,&phase,&proof)
         })?;
@@ -687,6 +692,7 @@ pub(crate) fn prepare_control_tx(
     receipt: ReceiptId,
     command: unleash_domain::CommandId,
     actor: &ActorId,
+    caller: &CallerAuthority,
     project: Option<ProjectId>,
     expected: Revision,
     events: &mut Vec<EventAppendSpec>,
@@ -782,6 +788,7 @@ pub(crate) fn prepare_control_tx(
         expected_os_identity: identity,
     };
     let digest = canonical_sha256(&context)?;
+    terminal_renewal_recovery::link_transfer_tx(tx, d, now, &context, caller, events)?;
     tx.execute("INSERT INTO terminal_control_intents(action_id,terminal_id,receipt_id,command_id,actor_id,principal_id,authority_generation,daemon_epoch,context_digest,context_json,previous_lease_id,next_lease_id,next_fence,state,revision) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,'prepared',1)",params![context.action_id.to_string(),context.terminal_id.to_string(),receipt.to_string(),command.to_string(),actor.as_str(),context.principal_id.as_str(),d.authority_generation.to_string(),integer(d.daemon_epoch.as_u64())?,digest.to_string(),serde_json::to_string(&context)?,previous.lease_id.to_string(),context.next_lease_id.to_string(),integer(next_fence.as_u64())?])?;
     events.push(EventAppendSpec {event_type:"TerminalControlPrepared".into(),aggregate_type:AggregateKind::TerminalControlIntent,aggregate_id:context.action_id.as_uuid(),aggregate_revision:Revision::new(1),project_id:Some(project_id),correlation_id:request.terminal_id.as_uuid(),causation_kind:EventCausationKind::Command,causation_id:None,payload:json!({"terminal_id":request.terminal_id,"process_run_uuid":request.process_run_uuid,"control_revision":revision,"state":"preparing","reused":true}).as_object().cloned().ok_or_else(||invalid("terminal control event invalid"))?,sensitivity:Sensitivity::Project,outbox_destinations:vec!["clients".into(),"harness".into()]});
     Ok(revision)
@@ -1912,6 +1919,9 @@ pub(crate) fn validate_intent(
     now: TimestampMs,
     intent: &BrokerIntent,
 ) -> Result<(), StoreError> {
+    if terminal_renewal::validate_intent(tx, d, now, intent)? {
+        return Ok(());
+    }
     terminal_input_writer::validate_intent(tx, d, now, intent)?;
     if let Some(record) = control_read_conn(tx, intent.action_id)? {
         let c = &record.context;
@@ -1995,6 +2005,7 @@ pub(crate) fn guard_observation(
     phase: &crate::BrokerPhase,
     proof: Option<&TerminalObservationProof>,
 ) -> Result<(), StoreError> {
+    terminal_renewal_observation::guard_observation(tx, phase, proof)?;
     terminal_input_writer::guard_observation(tx, phase, proof)?;
     if let crate::BrokerPhase::Observation {
         action_id, receipt, ..

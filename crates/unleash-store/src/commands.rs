@@ -1165,7 +1165,24 @@ pub(crate) fn tx_commit_command(
         req.receipt_state
     };
     let control_result = if matches!(req.mutation, CommandMutation::PrepareTerminalControl { .. }) {
-        let action:String=tx.query_row("SELECT action_id FROM terminal_control_intents WHERE receipt_id=?1 AND actor_id=?2 AND command_id=?3",rusqlite::params![receipt_id.to_string(),actor_str,cmd_str],|row|row.get(0))?;
+        let sql = if daemon.schema_version >= 16 {
+            "SELECT action_id FROM terminal_control_intents WHERE receipt_id=?1 AND actor_id=?2 AND command_id=?3 UNION ALL SELECT action_id FROM terminal_renewal_intents WHERE receipt_id=?1 AND actor_id=?2 AND command_id=?3"
+        } else {
+            "SELECT action_id FROM terminal_control_intents WHERE receipt_id=?1 AND actor_id=?2 AND command_id=?3"
+        };
+        let mut query = tx.prepare(sql)?;
+        let actions = query
+            .query_map(
+                rusqlite::params![receipt_id.to_string(), actor_str, cmd_str],
+                |row| row.get::<_, String>(0),
+            )?
+            .collect::<Result<Vec<_>, _>>()?;
+        let [action] = actions.as_slice() else {
+            return Err(StoreError::InvalidArgument {
+                reason: None,
+                message: "registered acquisition must have one exact intention".into(),
+            });
+        };
         Some(format!("terminal-control:{action}"))
     } else {
         None
@@ -1375,18 +1392,21 @@ fn apply_command_mutation(
                 generated_events,
             )
         }
-        CommandMutation::PrepareTerminalControl { request, .. } => {
-            crate::terminal_allocations::prepare_control_tx(
+        CommandMutation::PrepareTerminalControl { request, caller } => {
+            crate::terminal_allocations::terminal_renewal::prepare_registered_tx(
                 tx,
                 config,
                 daemon,
                 now_ms,
-                request,
-                receipt_id,
-                cmd_id,
-                actor_id,
-                envelope.project_id,
-                expected_rev,
+                &crate::terminal_allocations::terminal_renewal::RegisteredCommand {
+                    request,
+                    receipt: receipt_id,
+                    command: cmd_id,
+                    actor: actor_id,
+                    caller,
+                    project: envelope.project_id,
+                    expected: expected_rev,
+                },
                 generated_events,
             )
         }

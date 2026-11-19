@@ -21,6 +21,10 @@ use unleash_testkit::{DeterministicIdGenerator, ManualClock, local_test_dir};
 
 const PROJECT: ProjectId = ProjectId::from_u128(11);
 const MISSION: MissionId = MissionId::from_u128(12);
+
+#[path = "support/terminal_renewal_migration.rs"]
+mod renewal_migration;
+
 fn fixture(
     observer: Arc<dyn CutpointObserver>,
 ) -> (
