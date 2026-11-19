@@ -94,7 +94,7 @@ cargo run --locked -p unleash-cli -- --json process log \
   --project-id "$PROJECT_ID" --terminal-id "$TERMINAL_ID" --max-bytes 4096
 ```
 
-Pour lire la page suivante, passer l’`end_offset` du dernier segment dans `--after-offset`. La réponse distingue les segments durables et volatils. Le daemon peut refuser une lecture dont l’offset a expiré.
+Pour lire la page suivante, passer l’`end_offset` du dernier segment dans `--after-offset`. La réponse distingue les segments durables et volatils. Si la rétention a supprimé l’offset demandé, le daemon renvoie `ResyncRequired` avec la raison `CURSOR_EXPIRED`.
 
 Pour rejouer une révision ou une configuration, conserver le fichier, la révision, le `--command-id` et l’`--authority-generation` d’origine. La saisie interactive reste en développement.
 

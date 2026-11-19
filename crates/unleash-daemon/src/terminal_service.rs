@@ -115,12 +115,21 @@ pub(crate) async fn read_log(
     let root = state.store.config().data_root.clone();
     let ids = state.store.config().id_generator.clone();
     let run = record.context.process_run_uuid;
-    let result = tokio::task::spawn_blocking(move || {
+    let outcome = tokio::task::spawn_blocking(move || {
         read_host_log(&root, ids.as_ref(), &record, &binding, &raw)
     })
     .await
     .map_err(|_| hidden())?
     .map_err(|_| hidden())?;
+    let result = match outcome {
+        HostLogRead::Page(result) => result,
+        HostLogRead::CursorExpired => {
+            return Err(IpcError::from_reason(
+                ReasonCode::CursorExpired,
+                "Le curseur de lecture du terminal a expiré",
+            ));
+        }
+    };
     let text = result
         .segments
         .iter()
@@ -161,13 +170,18 @@ fn read_log_binding(
     conn.query_row("SELECT p.pid,l.daemon_epoch,l.fence FROM processes p JOIN terminal_sessions s ON s.process_id=p.process_id JOIN actions a ON a.action_id=p.action_id JOIN resource_leases l ON l.lease_id=s.lease_id JOIN daemon_state d ON d.singleton=1 JOIN principals owner ON owner.principal_id=l.owner_id AND owner.principal_kind='user' AND owner.state='active' WHERE s.terminal_id=?1 AND p.process_run_uuid=?2 AND p.action_id=?3 AND a.state='observed_success' AND p.authority_generation=d.authority_generation AND l.authority_generation=d.authority_generation AND l.boot_identity=d.boot_identity AND l.resource_kind='terminal' AND l.owner_type='principal' AND l.owner_id=?4 AND l.daemon_epoch=d.daemon_epoch AND ((l.lease_id=?5 AND l.fence=?6 AND l.daemon_epoch=?7) OR EXISTS(SELECT 1 FROM terminal_control_intents control JOIN actions transfer ON transfer.action_id=control.action_id WHERE control.terminal_id=s.terminal_id AND control.next_lease_id=l.lease_id AND control.authority_generation=d.authority_generation AND control.daemon_epoch=l.daemon_epoch AND control.next_fence=l.fence AND control.state='observed' AND control.observation_object_hash IS NOT NULL AND transfer.state='observed_success' AND json_extract(control.context_json,'$.initial_context_digest')=?8))",rusqlite::params![c.terminal_id.to_string(),c.process_run_uuid.to_string(),c.action_id.to_string(),c.principal_id.as_str(),c.lease_id.to_string(),i64::try_from(c.resource_fence.as_u64()).map_err(|_|invalid())?,i64::try_from(c.daemon_epoch.as_u64()).map_err(|_|invalid())?,record.context_digest.to_string()],|row|Ok(LogReadBinding {pid:row.get(0)?,epoch:unleash_domain::DaemonEpoch::new(sql_u64(row,1)?),fence:unleash_domain::Fence::new(sql_u64(row,2)?)})).optional().map_err(unleash_store::StoreError::from)
 }
 
+enum HostLogRead {
+    Page(unleash_process_host::LogReadResult),
+    CursorExpired,
+}
+
 fn read_host_log(
     root: &std::path::Path,
     ids: &dyn unleash_domain::IdGeneratorPort,
     record: &unleash_store::TerminalAllocationRecord,
     binding: &LogReadBinding,
     raw: &LogQuery,
-) -> Result<unleash_process_host::LogReadResult, TerminalError> {
+) -> Result<HostLogRead, TerminalError> {
     let c = &record.context;
     let runtime = root.join("process-hosts").join(c.host_id.to_string());
     let manifest = HostManifest::load_private(&runtime.join(HOST_MANIFEST_FILENAME))?;
@@ -208,17 +222,23 @@ fn read_host_log(
         return Err("terminal live identity differs".into());
     }
     let header = client.make_header(ids.new_command_id(), c.action_id, record.payload_digest());
-    let HostResponse::LogChunk { result } = client.call(&HostRequest::ReadLog {
+    match client.call(&HostRequest::ReadLog {
         header,
         secret: secret.expose_secret().into(),
         after_offset: raw.after_offset,
         max_bytes: raw.max_bytes,
         strict_cursor: true,
-    })?
-    else {
-        return Err("terminal log unavailable".into());
-    };
-    Ok(result)
+    })? {
+        HostResponse::LogChunk { result } => Ok(HostLogRead::Page(result)),
+        HostResponse::Error { error }
+            if error.code == ErrorCode::ResyncRequired
+                && error.reason_code == Some(ReasonCode::CursorExpired)
+                && error.retry_class == RetryClass::AfterRefresh =>
+        {
+            Ok(HostLogRead::CursorExpired)
+        }
+        _ => Err("terminal log unavailable".into()),
+    }
 }
 
 pub(crate) fn start(state: &Arc<DaemonRuntimeState>, terminal: unleash_domain::TerminalId) {
@@ -995,7 +1015,7 @@ fn prepare_registered_acquisition(
 }
 
 use std::sync::Arc;
-use unleash_protocol::{CommandEnvelope, ErrorCode, IpcError, RetryClass};
+use unleash_protocol::{CommandEnvelope, ErrorCode, IpcError, ReasonCode, RetryClass};
 use unleash_store::terminal_allocations::{PreparedTerminalEnvironment, TerminalRuntimeSettings};
 
 fn invalid(command: &CommandEnvelope) -> IpcError {
