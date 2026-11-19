@@ -771,6 +771,123 @@ mod tests {
             .unwrap()
     }
 
+    fn policy_request(store: &UnleashStore, id: u128) -> CommitCommandRequest {
+        let daemon = store.daemon_state().unwrap();
+        let permission = change(TimestampMs::new(
+            store.config().clock.now_ms().as_i64() + 60_000,
+        ));
+        CommitCommandRequest {
+            actor_id: actor(),
+            envelope: wire(&daemon, id, &permission),
+            target_aggregate: AggregateKind::SecurityPolicy,
+            operation_id: None,
+            receipt_state: ReceiptState::Accepted,
+            result_ref: None,
+            retention_days_override: None,
+            fence_assertion: None,
+            mutation: CommandMutation::SetPolicyWithProviderProbeMandate {
+                scope_kind: PolicyScopeKind::Global,
+                scope_id: "global".to_owned(),
+                isolation_mode: crate::PolicyIsolationMode::Standard,
+                policy_version: "fixture-v1".to_owned(),
+                reason: "synthetic writer context".to_owned(),
+                caller: CallerAuthority {
+                    actor_id: actor(),
+                    role: CallerRole::HumanOperator,
+                },
+                mandate: permission,
+            },
+            events: vec![],
+            capacity_reservations: vec![],
+            budget_reservations: vec![],
+        }
+    }
+
+    fn commit_counts(store: &UnleashStore) -> (i64, i64, i64, i64) {
+        store
+            .read_snapshot(|conn, _| {
+                Ok((
+                    conn.query_row("SELECT COUNT(*) FROM events", [], |row| row.get(0))?,
+                    conn.query_row("SELECT COUNT(*) FROM command_receipts", [], |row| {
+                        row.get(0)
+                    })?,
+                    conn.query_row("SELECT COUNT(*) FROM provider_probe_mandates", [], |row| {
+                        row.get(0)
+                    })?,
+                    conn.query_row("SELECT COUNT(*) FROM outbox", [], |row| row.get(0))?,
+                ))
+            })
+            .unwrap()
+    }
+
+    #[test]
+    fn t_f012_013_commit_command_emits_once_and_classic_policy_preserves_the_grant() {
+        let (store, _directory) = fixture();
+        let request = policy_request(&store, 200);
+        let receipt = store
+            .commit_command(request.clone())
+            .unwrap()
+            .receipt()
+            .clone();
+        let snapshot = store.read_policy_summary_snapshot(None).unwrap();
+        assert_eq!(snapshot.cursor, receipt.event_cursor);
+        assert_eq!(snapshot.value.provider_probe_mandates.len(), 1);
+        let original = snapshot.value.provider_probe_mandates[0].clone();
+        assert_eq!(
+            original.mandate_ref, receipt.receipt_id,
+            "identité du vrai reçu engagé"
+        );
+        assert_eq!(original.status, ProviderProbeMandateStatus::Active);
+        let before = commit_counts(&store);
+        let replay = store.commit_command(request.clone()).unwrap();
+        assert_eq!(replay.receipt(), &receipt);
+        assert!(matches!(replay, crate::CommitOutcome::IdempotentReplay(_)));
+        assert_eq!(
+            commit_counts(&store),
+            before,
+            "aucun reçu, événement, mandat ou outbox au rejeu"
+        );
+        let reference = receipt.receipt_id;
+        store.read_snapshot(move|conn,_| {
+            let delivered:i64=conn.query_row("SELECT COUNT(*) FROM command_receipts c JOIN events e ON e.sequence=c.last_event_seq JOIN outbox o ON o.event_id=e.event_id WHERE c.receipt_id=?1 AND o.destination='clients'",[reference.to_string()],|row|row.get(0))?;
+            assert_eq!(delivered,1,"notification engagée dans le même journal/outbox");
+            Ok(())
+        }).unwrap();
+        let mut classic = request;
+        classic.envelope.command_id = CommandId::from_u128(201);
+        classic.envelope.request_id = RequestId::from_u128(201);
+        classic.envelope.expected_revision = receipt.new_revision;
+        classic.envelope.payload.remove("provider_probe_mandate");
+        classic
+            .envelope
+            .payload
+            .insert("isolation_mode".to_owned(), json!("strict"));
+        classic.mutation = CommandMutation::SetPolicy {
+            scope_kind: PolicyScopeKind::Global,
+            scope_id: "global".to_owned(),
+            isolation_mode: crate::PolicyIsolationMode::Strict,
+            policy_version: "fixture-v1".to_owned(),
+            reason: "synthetic writer context".to_owned(),
+            caller: CallerAuthority {
+                actor_id: actor(),
+                role: CallerRole::HumanOperator,
+            },
+        };
+        let updated = store.commit_command(classic).unwrap().receipt().clone();
+        let after = store.read_policy_summary_snapshot(None).unwrap();
+        assert_eq!(after.cursor, updated.event_cursor);
+        assert_eq!(updated.new_revision, Revision::new(2));
+        assert_eq!(
+            after.value.effective_isolation_mode,
+            crate::PolicyIsolationMode::Strict
+        );
+        assert_eq!(after.value.provider_probe_mandates, vec![original]);
+        let counters = commit_counts(&store);
+        assert_eq!(counters.0, before.0 + 1);
+        assert_eq!(counters.1, before.1 + 1);
+        assert_eq!(counters.2, 1);
+    }
+
     #[test]
     fn t_f012_013_mandate_and_late_receipt_commit_atomically_without_effect() {
         let (store, _directory) = fixture();
