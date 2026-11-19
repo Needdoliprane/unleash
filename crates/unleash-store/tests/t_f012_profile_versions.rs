@@ -922,6 +922,89 @@ fn t_f012_002_failed_object_preflight_rechecks_a_concurrently_committed_receipt(
 }
 
 #[test]
+fn t_f012_002_restore_preserves_historical_command_key_without_reactivating_receipt() {
+    let source_directory = local_test_dir("f012-profile-source-lineage").unwrap();
+    let source_config = StoreConfig::new(source_directory.path());
+    let source = UnleashStore::open(source_config.clone()).unwrap();
+    source
+        .register_principal("profile-user", "user", "user:profile")
+        .unwrap();
+    // The configured version is newer than the backup. Restore retains its receipt,
+    // not a fabricated reconstruction of that configuration/object in the snapshot.
+    let backup_dir = source_directory.path().join("before-profile");
+    source
+        .prepare_backup(PrepareBackupRequest {
+            destination_dir: backup_dir.clone(),
+            retention_tier: BackupRetentionTier::Manual,
+            coverage: "db_and_objects".to_owned(),
+        })
+        .unwrap();
+    let command = request(
+        &source,
+        prepare(&source, 1, None, "post-snapshot-profile"),
+        16_000,
+    );
+    let first = source.commit_command(command.clone()).unwrap();
+    let active_before = counts(&source);
+    assert_eq!(
+        source.commit_command(command.clone()).unwrap().receipt(),
+        first.receipt()
+    );
+    assert_eq!(counts(&source), active_before);
+    let source_authority = source.active_authority_generation().unwrap();
+    let target_directory = local_test_dir("f012-profile-restored-lineage").unwrap();
+    let target_config = StoreConfig::new(target_directory.path());
+    UnleashStore::restore_backup(
+        unleash_store::RestoreBackupRequest {
+            backup_dir,
+            target_data_root: target_directory.path().to_path_buf(),
+            command_id: CommandId::from_u128(16_001),
+            actor_id: actor().to_string(),
+            command_digest: unleash_protocol::canonical_sha256(&"explicit synthetic restore")
+                .unwrap(),
+            source_authority_generation: source_authority,
+            source_db_unreadable: false,
+            source_db_path: Some(source_config.db_path.clone()),
+            source_artifacts_dir: Some(source_config.artifacts_dir.clone()),
+            neutralizer: Arc::new(unleash_store::EmptyExecutorNeutralizer),
+        },
+        target_config.clone(),
+    )
+    .unwrap();
+    source.shutdown().unwrap();
+    let restored = UnleashStore::open(target_config).unwrap();
+    assert_ne!(
+        restored.active_authority_generation().unwrap(),
+        source_authority
+    );
+    restored.read_snapshot(|conn,_| {
+        let (generation,json):(String,String)=conn.query_row("SELECT authority_generation,response_json FROM command_receipts WHERE actor_id=?1 AND command_id=?2",rusqlite::params![actor().as_str(),command.envelope.command_id.to_string()],|row|Ok((row.get(0)?,row.get(1)?)))?;
+        assert_eq!(generation,source_authority.to_string());
+        assert_eq!(serde_json::from_str::<unleash_protocol::CommandReceipt>(&json).unwrap(),*first.receipt());
+        Ok(())
+    }).unwrap();
+    let before = counts(&restored);
+    assert_eq!(before.0, 0);
+    assert!(matches!(
+        restored.commit_command(command.clone()),
+        Err(StoreError::StaleAuthorityGeneration { .. })
+    ));
+    let mut active_wire = command;
+    active_wire.envelope.authority_generation = restored.active_authority_generation().unwrap();
+    active_wire.envelope.request_id = RequestId::from_u128(16_002);
+    let historical_error = restored.commit_command(active_wire).unwrap_err();
+    assert!(
+        matches!(historical_error, StoreError::IdempotencyConflict { .. }),
+        "active lineage must classify the occupied historical PK before reading its missing object: {historical_error:?}"
+    );
+    assert_eq!(counts(&restored), before);
+    assert_eq!(
+        restored.daemon_state().unwrap().mode,
+        unleash_domain::DaemonMode::ReadOnlyRecovery
+    );
+}
+
+#[test]
 fn t_f012_002_v011_interrupted_migration_is_atomic_and_legacy_cannot_be_promoted() {
     let directory = local_test_dir("f012-profile-v011-rollback").unwrap();
     let mut old = StoreConfig::new(directory.path());

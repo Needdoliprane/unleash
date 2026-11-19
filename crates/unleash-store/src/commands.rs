@@ -767,9 +767,29 @@ pub(crate) fn compute_validated_command_params(
     Ok((digest, retention_days))
 }
 
+struct CommandReplayRow {
+    receipt_id: String,
+    digest: String,
+    state: String,
+    response: Option<String>,
+    authority_generation: String,
+}
+
+impl CommandReplayRow {
+    fn read(row: &rusqlite::Row<'_>) -> rusqlite::Result<Self> {
+        Ok(Self {
+            receipt_id: row.get(0)?,
+            digest: row.get(1)?,
+            state: row.get(2)?,
+            response: row.get(3)?,
+            authority_generation: row.get(4)?,
+        })
+    }
+}
+
 /// Classificateur unique de rejeu : contrôle d'autorité avant lookup et digest wire.
-/// F012 exclut explicitement les reçus d'une autre lignée ; les autres ports gardent
-/// leur lookup historique et leurs préconditions métier existantes.
+/// Une clé F012 historique reste occupée et produit un conflit, jamais un miss ou
+/// un reçu réactivé. Les autres ports gardent leurs préconditions métier existantes.
 pub(crate) fn classify_command_replay(
     conn: &Connection,
     daemon: &DaemonStateRow,
@@ -783,28 +803,28 @@ pub(crate) fn classify_command_replay(
             command_id: Some(req.envelope.command_id),
         });
     }
-    let generation = matches!(req.mutation, CommandMutation::SetProviderProfile { .. })
-        .then(|| daemon.authority_generation.to_string());
-    let existing: Option<(String,String,String,Option<String>)> = conn.query_row(
-        "SELECT receipt_id,command_digest,response_state,response_json FROM command_receipts WHERE actor_id=?1 AND command_id=?2 AND (?3 IS NULL OR authority_generation=?3)",
-        rusqlite::params![req.actor_id.as_str(),req.envelope.command_id.to_string(),generation],
-        |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?)),
+    let existing = conn.query_row(
+        "SELECT receipt_id,command_digest,response_state,response_json,authority_generation FROM command_receipts WHERE actor_id=?1 AND command_id=?2",
+        rusqlite::params![req.actor_id.as_str(),req.envelope.command_id.to_string()],
+        CommandReplayRow::read,
     ).optional()?;
-    let Some((receipt_id, stored_digest, state, json)) = existing else {
+    let Some(row) = existing else {
         return Ok(None);
     };
-    if stored_digest != digest.as_prefixed_str() {
+    let historical_profile = matches!(req.mutation, CommandMutation::SetProviderProfile { .. })
+        && row.authority_generation != daemon.authority_generation.to_string();
+    if historical_profile || row.digest != digest.as_prefixed_str() {
         return Err(StoreError::IdempotencyConflict {
             command_id: req.envelope.command_id,
         });
     }
-    if state == "tombstone" {
+    if row.state == "tombstone" {
         return Err(StoreError::IdempotencyWindowExpired {
             command_id: req.envelope.command_id,
-            receipt_id: receipt_id.parse()?,
+            receipt_id: row.receipt_id.parse()?,
         });
     }
-    let receipt: CommandReceipt = serde_json::from_str(&json.ok_or_else(|| {
+    let receipt: CommandReceipt = serde_json::from_str(&row.response.ok_or_else(|| {
         StoreError::InvariantViolation("reçu full sans response_json".to_owned())
     })?)?;
     Ok(Some(receipt))
