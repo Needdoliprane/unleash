@@ -504,9 +504,27 @@ mod input_cli_scenarios {
         fixture: &LiveFixture,
         args: &[String],
     ) {
-        for flag in ["--fence", "--input-seq"] {
+        for (flag, identity) in [("--fence", 0xf011_48f1), ("--input-seq", 0xf011_48f2)] {
             let mut invalid = args.to_vec();
-            replace(&mut invalid, flag, "2");
+            let current = args
+                .iter()
+                .position(|item| item == flag)
+                .unwrap()
+                .checked_add(1)
+                .unwrap();
+            let different = args
+                .get(current)
+                .unwrap()
+                .parse::<u64>()
+                .unwrap()
+                .checked_add(1)
+                .unwrap();
+            replace(&mut invalid, flag, &different.to_string());
+            replace(
+                &mut invalid,
+                "--command-id",
+                &Uuid::from_u128(identity).to_string(),
+            );
             let output = invoke(cli, &invalid);
             assert!(!output.status.success());
             let error: Value = serde_json::from_slice(&output.stderr).unwrap();
@@ -543,6 +561,46 @@ mod input_cli_scenarios {
             );
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
+    }
+
+    async fn fence_old_controller(fixture: &mut LiveFixture, cli: &TerminalCli<'_>, known: &Value) {
+        let before = fixture.host_manifest();
+        // Kill only the owned daemon after the explicit replays. Its old socket
+        // can no longer schedule a later input. The existing transfer gate
+        // serializes native writes and invalidates all old epoch/fence headers.
+        fixture.restart_daemon_only().await;
+        let command = Uuid::from_u128(0xf011_4804).to_string();
+        let revision = known["control_revision"].as_u64().unwrap().to_string();
+        let accepted = cli.acquire(
+            "registered",
+            &command,
+            &[
+                "--process-run-uuid",
+                known["process_run_uuid"].as_str().unwrap(),
+                "--control-revision",
+                &revision,
+            ],
+        );
+        wait_for_control(
+            fixture,
+            &cli.terminal,
+            known["control_revision"]
+                .as_u64()
+                .unwrap()
+                .checked_add(1)
+                .unwrap(),
+        )
+        .await;
+        let transferred = cli.observe(&command, &accepted);
+        assert_eq!(
+            transferred["input_seq"], 1,
+            "fresh native summary after fencing the old controller"
+        );
+        assert_eq!(transferred["process_run_uuid"], known["process_run_uuid"]);
+        let after = fixture.host_manifest();
+        assert_eq!(after.host_id, before.host_id);
+        assert_eq!(after.pid, before.pid);
+        assert!(after.highest_fence > before.highest_fence);
     }
 
     #[tokio::test]
@@ -622,6 +680,16 @@ mod input_cli_scenarios {
                 receipt
             );
         }
+        fence_old_controller(&mut fixture, &cli, &known).await;
+        let replay = invoke(&cli, &args);
+        assert!(
+            replay.status.success(),
+            "the old exact command remains an inspection, not a new permission"
+        );
+        assert_eq!(
+            serde_json::from_slice::<Value>(&replay.stdout).unwrap(),
+            receipt
+        );
         assert_eq!(input_counts(&fixture), (1, 1, 1));
         assert_eq!(
             std::fs::read(fixture.project_root.path().join("cli-input-effects")).unwrap(),
