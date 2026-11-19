@@ -8,7 +8,7 @@ use std::time::Duration;
 use unleash_action_broker::{
     BoxFuture, BrokerJournalEntry, BrokerJournalError, BrokerJournalPort, ObservationCause,
 };
-use unleash_domain::{ActionState, PoolId, Revision};
+use unleash_domain::{ActionState, Revision};
 use unleash_store::{
     AdmissionOutcome, AdmissionUnit, AdoptedProviderConnectObservation, BrokerPhaseRequest,
     CommitProviderConnectObservation, ExecutionContinuation, ProviderProbeConnectClaim, StoreError,
@@ -71,7 +71,7 @@ impl ConnectJournal {
                         return Ok(None);
                     }
                     observe_eligibility(&store, &claim)?;
-                    let pool = PoolId::from_u128(1);
+                    let pool = store.global_execution_pool_id()?;
                     let snapshot = store.execution_admission_snapshot(pool)?;
                     let mut inputs = ExecutionSchedulingInputs::default();
                     // Connect reserves no monetary amount or model call. Other
@@ -163,7 +163,7 @@ fn observe_eligibility(
         "provider_probe_connect_eligibility",
         "eligibility",
     )?;
-    let snapshot = store.execution_admission_snapshot(PoolId::from_u128(1))?;
+    let snapshot = store.execution_admission_snapshot(store.global_execution_pool_id()?)?;
     let candidate = snapshot
         .queued
         .iter()
