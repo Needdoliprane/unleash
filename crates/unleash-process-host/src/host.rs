@@ -105,6 +105,11 @@ struct ControlTransferAttempt {
     ack: Option<crate::ControlTransferAck>,
 }
 
+enum ControlTransferOutcome {
+    Rotated(crate::ControlTransferAck),
+    Inspected(crate::ControlTransferAck),
+}
+
 /// Instance active d'un `unleash-process-host` prêt à servir les requêtes du daemon.
 pub struct ProcessHostServer {
     shared: Arc<ServerShared>,
@@ -635,23 +640,9 @@ fn handle_connection(mut stream: UnixStream, shared: &Arc<ServerShared>) {
         if let Ok(crate::control_transfer::TransferEnvelope::TransferControlV1(request)) =
             serde_json::from_slice(&frame)
         {
-            let response = {
-                let _operation = lock_operation(shared);
-                let response = match process_control_transfer(&request, shared) {
-                    Ok(ack) => crate::ControlTransferResponse::Ack { ack: Box::new(ack) },
-                    Err(error) => crate::ControlTransferResponse::Refused {
-                        error: error.to_ipc_error(Some(request.header.command_id)),
-                    },
-                };
-                if matches!(response, crate::ControlTransferResponse::Ack { .. }) {
-                    bound_auth_gen = shared.auth_generation.load(Ordering::SeqCst);
-                }
-                response
-            };
-            let Ok(payload) = serde_json::to_vec(&response) else {
-                break;
-            };
-            if write_frame(&mut stream, &payload).is_err() {
+            if respond_to_control_transfer(&mut stream, &request, shared, &mut bound_auth_gen)
+                .is_err()
+            {
                 break;
             }
             continue;
@@ -713,6 +704,46 @@ fn handle_connection(mut stream: UnixStream, shared: &Arc<ServerShared>) {
     }
 }
 
+fn respond_to_control_transfer(
+    stream: &mut UnixStream,
+    request: &crate::ControlTransferRequest,
+    shared: &ServerShared,
+    bound_auth_gen: &mut u64,
+) -> Result<(), ProcessHostError> {
+    let (response, rotated) = {
+        let _operation = lock_operation(shared);
+        let (response, rotated) = match process_control_transfer(request, shared) {
+            Ok(ControlTransferOutcome::Rotated(ack)) => (
+                crate::ControlTransferResponse::Ack { ack: Box::new(ack) },
+                true,
+            ),
+            Ok(ControlTransferOutcome::Inspected(ack)) => (
+                crate::ControlTransferResponse::Ack { ack: Box::new(ack) },
+                false,
+            ),
+            Err(error) => (
+                crate::ControlTransferResponse::Refused {
+                    error: error.to_ipc_error(Some(request.header.command_id)),
+                },
+                false,
+            ),
+        };
+        if matches!(response, crate::ControlTransferResponse::Ack { .. }) {
+            *bound_auth_gen = shared.auth_generation.load(Ordering::SeqCst);
+        }
+        (response, rotated)
+    };
+    // Waiting on a fixture barrier never retains the native operation gate.
+    if rotated {
+        shared
+            .cutpoints
+            .hit(HostInputCutpoint::TransferAppliedBeforeAck)?;
+    }
+    let payload = serde_json::to_vec(&response)?;
+    write_frame(stream, &payload)?;
+    Ok(())
+}
+
 fn lock_operation(shared: &ServerShared) -> std::sync::MutexGuard<'_, ()> {
     match shared.operation_gate.try_lock() {
         Ok(guard) => guard,
@@ -772,7 +803,7 @@ fn validate_new_transfer(
 fn process_control_transfer(
     request: &crate::ControlTransferRequest,
     shared: &ServerShared,
-) -> Result<crate::ControlTransferAck, ProcessHostError> {
+) -> Result<ControlTransferOutcome, ProcessHostError> {
     verify_secret(shared, &request.current_secret)?;
     {
         let previous = shared
@@ -787,11 +818,13 @@ fn process_control_transfer(
                 // After an ACK is lost only the currently active capability
                 // can inspect the same transfer; no second rotation occurs.
                 verify_secret(shared, &request.next_secret)?;
-                return previous.ack.clone().ok_or_else(|| {
-                    ProcessHostError::LaunchOutcomeUnknown {
+                return previous
+                    .ack
+                    .clone()
+                    .map(ControlTransferOutcome::Inspected)
+                    .ok_or_else(|| ProcessHostError::LaunchOutcomeUnknown {
                         reason: "control transfer requires inspection; no repeat permit".into(),
-                    }
-                });
+                    });
             }
             if previous.ack.is_none() {
                 return Err(ProcessHostError::LaunchOutcomeUnknown {
@@ -852,7 +885,7 @@ fn process_control_transfer(
     {
         attempt.ack = Some(ack.clone());
     }
-    Ok(ack)
+    Ok(ControlTransferOutcome::Rotated(ack))
 }
 
 fn send_response(stream: &mut UnixStream, resp: &HostResponse) -> Result<(), ProcessHostError> {
@@ -1399,7 +1432,7 @@ pub struct StdioBarrierCutpointObserver {
 }
 
 impl StdioBarrierCutpointObserver {
-    /// Selects historical C3/C4/C5 or `HandshakeAppliedBeforeAck` for an
+    /// Selects C3/C4/C5, `HandshakeAppliedBeforeAck` or `TransferAppliedBeforeAck` for an
     /// exclusively owned native crash fixture. Normal launch clears this variable.
     #[must_use]
     pub fn from_env() -> Option<Self> {
@@ -1420,6 +1453,10 @@ impl StdioBarrierCutpointObserver {
             "HandshakeAppliedBeforeAck" => Some(Self {
                 target: HostInputCutpoint::HandshakeAppliedBeforeAck,
                 label: "HandshakeAppliedBeforeAck",
+            }),
+            "TransferAppliedBeforeAck" => Some(Self {
+                target: HostInputCutpoint::TransferAppliedBeforeAck,
+                label: "TransferAppliedBeforeAck",
             }),
             _ => None,
         }

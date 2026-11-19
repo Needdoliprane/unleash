@@ -28,6 +28,9 @@ pub enum HostInputCutpoint {
     /// Handshake state and manifest are published, before sending its ACK.
     /// The operation gate has been released; EOF closes this response only.
     HandshakeAppliedBeforeAck,
+    /// A fresh control rotation and its exact cached ACK are published, before
+    /// sending the ACK. Cached inspection does not hit this cutpoint.
+    TransferAppliedBeforeAck,
 }
 
 /// Observateur injectable des points de coupure d'entrée PTY (sans dépendance testkit en production).
@@ -430,7 +433,8 @@ mod tests {
                 HostInputCutpoint::C4AfterDispatchedBeforePtyWrite => Cutpoint::C4,
                 HostInputCutpoint::C5AfterPtyWriteBeforeReceipt => Cutpoint::C5,
                 // Input tests keep their existing C3/C4/C5 counters and scope.
-                HostInputCutpoint::HandshakeAppliedBeforeAck => return Ok(()),
+                HostInputCutpoint::HandshakeAppliedBeforeAck
+                | HostInputCutpoint::TransferAppliedBeforeAck => return Ok(()),
             };
             self.0
                 .hit(mapped)

@@ -7,6 +7,9 @@ use unleash_domain::{
 };
 use unleash_testkit::local_test_dir;
 
+#[path = "host_transfer_ack_tests.rs"]
+mod transfer_ack_tests;
+
 const SECRET: &str = "synthetic-control-regression-secret";
 struct FailAtC5;
 impl HostCutpointObserver for FailAtC5 {
