@@ -491,6 +491,14 @@ async fn dispatch_query(
         "GetStateSnapshot" => query_state_snapshot(state, session, query).await,
         "GetCommandReceipt" => query_command_receipt(state, session, query).await,
         "GetBackupManifest" => query_backup_manifest(state, session, query).await,
+        "GetProviderProfile" => {
+            crate::provider_profile_validation_service::query(
+                Arc::clone(&state.store),
+                session.clone(),
+                query,
+            )
+            .await
+        }
         "ListProjects" | "GetProject" | "ReadSettings" | "ReadPolicySummary"
         | "ReadGuardHealth" | "InspectRecovery" => query_m1_projection(state, session, query).await,
         other => Err(IpcError::new(
@@ -974,6 +982,13 @@ fn validate_command_mode(mode: DaemonMode, cmd: &CommandEnvelope) -> Result<(), 
 }
 
 /// Retourne `true` si le hook `PostCommitAction::DropConnection` demande de couper la connexion sans réponse.
+fn is_provider_profile_command(command: &CommandEnvelope) -> bool {
+    matches!(
+        command.command_type.as_str(),
+        "SetProviderProfile" | "TestProviderProfile"
+    )
+}
+
 #[expect(
     clippy::too_many_lines,
     reason = "Admission, commit, réconciliation et réponse IPC ordonnés"
@@ -1010,14 +1025,23 @@ async fn handle_command_frame(
     };
 
     let (outcome, num_events, mut stop_reason, mut stop_drain_timeout) =
-        if cmd.command_type == "SetProviderProfile" {
-            let outcome = match crate::provider_profile_service::commit(
-                Arc::clone(&state.store),
-                session.clone(),
-                cmd.clone(),
-            )
-            .await
-            {
+        if is_provider_profile_command(&cmd) {
+            let committed = if cmd.command_type == "SetProviderProfile" {
+                crate::provider_profile_service::commit(
+                    Arc::clone(&state.store),
+                    session.clone(),
+                    cmd.clone(),
+                )
+                .await
+            } else {
+                crate::provider_profile_validation_service::commit(
+                    Arc::clone(&state.store),
+                    session.clone(),
+                    cmd.clone(),
+                )
+                .await
+            };
+            let outcome = match committed {
                 Ok(outcome) => outcome,
                 Err(error) => {
                     let _ = write_json_frame_timeout(stream, &error, RESPONSE_WRITE_TIMEOUT).await;
@@ -1101,7 +1125,7 @@ async fn handle_command_frame(
         CommitOutcome::IdempotentReplay(r) => (r, false),
     };
 
-    if newly_committed || cmd.command_type == "SetProviderProfile" {
+    if newly_committed || is_provider_profile_command(&cmd) {
         publish_committed_events_for_command(state, &receipt, num_events).await;
     }
 

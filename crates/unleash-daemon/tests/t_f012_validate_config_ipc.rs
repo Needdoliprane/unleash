@@ -30,7 +30,7 @@ impl unleash_store::MonotonicClockPort for StoreMonotonic {
 }
 
 struct Fixture {
-    _rendezvous: tempfile::TempDir,
+    rendezvous: tempfile::TempDir,
     data: tempfile::TempDir,
     handle: unleash_daemon::DaemonHandle,
     clock: Arc<ManualClock>,
@@ -75,7 +75,7 @@ impl Fixture {
         let client = Self::connect(&handle, true).await;
         (
             Self {
-                _rendezvous: rendezvous,
+                rendezvous,
                 data,
                 handle,
                 clock,
@@ -161,6 +161,38 @@ impl Fixture {
             .unwrap()
     }
 
+    fn assert_inspection_pins_released(&self) {
+        let held: i64 = self.db().query_row("SELECT COUNT(*) FROM object_pins WHERE owner_kind='provider_probe_inspection' AND state IN ('held','reconciling')", [], |row| row.get(0)).unwrap();
+        assert_eq!(held, 0);
+    }
+
+    fn assert_kept_proof(&self, probe: Uuid, receipt: &CommandReceipt) -> String {
+        let db = self.db();
+        let referenced: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM provider_probes p JOIN object_records o ON o.object_hash=p.context_hash JOIN object_references r ON r.object_hash=o.object_hash WHERE p.probe_id=?1 AND o.state='live' AND o.keep_by_policy=1 AND r.owner_kind='provider_probe' AND r.owner_id=p.probe_id AND r.source_field='validate_config' AND r.state='live')", [probe.to_string()], |row| row.get(0)).unwrap();
+        assert!(
+            referenced,
+            "prémisse : la preuve du dernier probe est conservée et référencée"
+        );
+        let response: String = db
+            .query_row(
+                "SELECT response_state FROM command_receipts WHERE receipt_id=?1",
+                [receipt.receipt_id.to_string()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            response, "tombstone",
+            "le reçu est purgé séparément de sa preuve"
+        );
+        let (hash, relative): (String, String) = db.query_row("SELECT p.context_hash,o.relative_path FROM provider_probes p JOIN object_records o ON o.object_hash=p.context_hash WHERE p.probe_id=?1", [probe.to_string()], |row| Ok((row.get(0)?, row.get(1)?))).unwrap();
+        let bytes = std::fs::read(self.data.path().join("artifacts").join(&relative)).unwrap();
+        assert_eq!(
+            unleash_domain::Sha256Digest::from_bytes(&bytes).to_string(),
+            hash
+        );
+        relative
+    }
+
     async fn configure(
         &self,
         client: &mut UnleashClient,
@@ -175,6 +207,92 @@ impl Fixture {
         command.expected_revision = Revision::new(revision);
         command.project_id = project;
         client.send_command(&command).await.unwrap()
+    }
+
+    async fn restart_after_fixture_consumer_ack(&mut self) -> UnleashClient {
+        self.handle
+            .shutdown_graceful("validate-retention-fixture")
+            .await
+            .unwrap();
+        let root = self.data.path().to_path_buf();
+        let clock = self.clock.clone();
+        tokio::task::spawn_blocking(move || {
+            let mut config = unleash_store::StoreConfig::new(root);
+            config.clock = clock.clone();
+            config.monotonic_clock = Arc::new(StoreMonotonic(clock));
+            let store = unleash_store::UnleashStore::open(config).unwrap();
+            // Fixture retention premise: both proofs remain available while
+            // their notification payloads expire. Product policy is unchanged.
+            let hashes: Vec<String> = store
+                .read_snapshot(|conn, _| {
+                    let mut statement = conn.prepare(
+                        "SELECT context_hash FROM provider_probes WHERE phase='validate_config'",
+                    )?;
+                    let hashes = statement
+                        .query_map([], |row| row.get(0))?
+                        .collect::<Result<Vec<_>, _>>()?;
+                    Ok(hashes)
+                })
+                .unwrap();
+            assert_eq!(
+                hashes.len(),
+                2,
+                "seules les deux preuves de ce banc sont retenues"
+            );
+            for hash in hashes {
+                store
+                    .tag_object_retention(
+                        hash.parse().unwrap(),
+                        unleash_store::RetentionClass::General,
+                        true,
+                        None,
+                    )
+                    .unwrap();
+            }
+            let keeps: i64 = store
+                .read_snapshot(|conn, _| {
+                    Ok(conn.query_row(
+                        "SELECT COUNT(*) FROM object_records WHERE keep_by_policy=1",
+                        [],
+                        |row| row.get(0),
+                    )?)
+                })
+                .unwrap();
+            assert_eq!(keeps, 2, "aucun autre objet ne reçoit ce keep de fixture");
+            // Explicit synthetic consumer: the prior daemon/writer is stopped.
+            // Every leased envelope is read before its fixture acknowledgement.
+            loop {
+                let batch = store.lease_outbox_batch("clients", 32).unwrap();
+                if batch.is_empty() {
+                    break;
+                }
+                for item in batch {
+                    assert!(serde_json::to_value(&item.envelope).unwrap().is_object());
+                    store
+                        .ack_outbox_delivery(item.event_id, &item.destination)
+                        .unwrap();
+                }
+            }
+            store.shutdown().unwrap();
+        })
+        .await
+        .unwrap();
+        let DaemonStartOutcome::Started(handle) = UnleashDaemon::start(DaemonConfig {
+            data_root: Some(self.data.path().to_path_buf()),
+            rendezvous_dir: Some(self.rendezvous.path().to_path_buf()),
+            store_overrides: StoreOverrides {
+                clock: Some(self.clock.clone()),
+                monotonic_clock: Some(Arc::new(StoreMonotonic(self.clock.clone()))),
+                ..StoreOverrides::default()
+            },
+            ..DaemonConfig::default()
+        })
+        .await
+        .unwrap() else {
+            panic!("daemon attendu");
+        };
+        self.handle = handle;
+        Self::connect(&self.handle, true).await
     }
 }
 
@@ -329,6 +447,29 @@ fn assert_observation_facts(
     assert!(document.get("session_id").is_none());
 }
 
+async fn assert_local_receipts_are_not_effect_mandates(
+    client: &mut UnleashClient,
+    profile: Uuid,
+    configured: &CommandReceipt,
+    validated: &CommandReceipt,
+) {
+    let mut id = 0xf012_8e00;
+    for source in [configured, validated] {
+        for phase in ["connect", "inventory", "generation_probe"] {
+            let mut request = validation(client, profile, 1, id, source);
+            id += 1;
+            request.payload.insert("phase".to_owned(), json!(phase));
+            if phase == "generation_probe" {
+                request.payload.insert("limits".to_owned(), json!({"timeout_ms":1_000,"max_calls":1,"max_output_tokens":1,"max_cost_usd_micros":0}));
+            }
+            assert!(
+                client.send_command(&request).await.is_err(),
+                "un reçu causal local ne doit pas autoriser {phase}"
+            );
+        }
+    }
+}
+
 #[tokio::test]
 async fn t_f012_013_validate_config_commits_local_observation_and_exact_version_read() {
     let (fixture, mut client) = Fixture::start().await;
@@ -385,6 +526,9 @@ async fn t_f012_013_validate_config_commits_local_observation_and_exact_version_
         .unwrap();
     assert_eq!(newer.result.get("profile_version"), Some(&json!(2)));
     assert_eq!(newer.result.get("observations"), Some(&json!([])));
+    assert_local_receipts_are_not_effect_mandates(&mut client, profile, &configured, &receipt)
+        .await;
+    fixture.assert_no_provider_effect();
     assert_eq!(fixture.validation_counts(), (1, 1, 1));
     fixture
         .handle
@@ -598,7 +742,81 @@ async fn t_f012_013_validate_config_purged_response_never_recreates_an_observati
     assert!(
         matches!(client.send_command(&request).await, Err(ClientError::Remote(error)) if error.code == ErrorCode::ContractViolation && error.reason_code == Some(ReasonCode::IdempotencyWindowExpired))
     );
+    fixture.clock.advance(Duration::from_secs(400 * 86_400));
+    let purge = envelope(
+        &client,
+        Uuid::from_u128(6004),
+        6004,
+        "PurgeHistory",
+        json!({"scope_kind":"user","scope_id":"default","reason":"synthetic-expired-local-proof"}),
+    );
+    client.send_command(&purge).await.unwrap();
+    let object_state: String = fixture.db().query_row("SELECT o.state FROM provider_probes p JOIN object_records o ON o.object_hash=p.context_hash WHERE p.probe_id=?1", [request.aggregate_id.to_string()], |row| row.get(0)).unwrap();
+    assert_eq!(
+        object_state, "tombstone",
+        "la politique normale peut purger la preuve expirée"
+    );
+    assert!(
+        matches!(client.query(&profile_query(profile, 1, None)).await, Err(ClientError::Remote(error)) if error.reason_code == Some(ReasonCode::EvidenceUnavailable))
+    );
     assert_eq!(fixture.validation_counts(), before);
+    fixture.assert_no_provider_effect();
+    fixture
+        .handle
+        .shutdown_graceful("validate-config-test")
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn t_f012_013_validate_config_latest_proof_survives_event_retention_or_fails_explicitly() {
+    let (mut fixture, mut client) = Fixture::start().await;
+    let profile = Uuid::from_u128(0xf012_7000);
+    let source = fixture.configure(&mut client, profile, 7001, 0, None).await;
+    let first = validation(&client, profile, 1, 7002, &source);
+    client.send_command(&first).await.unwrap();
+    let latest = validation(&client, profile, 1, 7003, &source);
+    let receipt = client.send_command(&latest).await.unwrap();
+    fixture.clock.advance(Duration::from_secs(400 * 86_400));
+    client = fixture.restart_after_fixture_consumer_ack().await;
+    let purge = envelope(
+        &client,
+        Uuid::from_u128(7004),
+        7004,
+        "PurgeHistory",
+        json!({"scope_kind":"user","scope_id":"default","reason":"synthetic-observation-retention"}),
+    );
+    client.send_command(&purge).await.unwrap();
+    let state: String = fixture
+        .db()
+        .query_row(
+            "SELECT payload_state FROM events WHERE sequence=?1",
+            [i64::try_from(receipt.event_cursor.sequence.as_u64()).unwrap()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        state, "tombstone",
+        "le vrai événement doit être purgé pour cet oracle"
+    );
+    let relative = fixture.assert_kept_proof(latest.aggregate_id, &receipt);
+    let read = client
+        .query(&profile_query(profile, 1, None))
+        .await
+        .unwrap();
+    let observations = read.result.get("observations").unwrap().as_array().unwrap();
+    assert_eq!(observations.len(), 1);
+    assert_eq!(
+        observations.first().unwrap().get("probe_id"),
+        Some(&json!(latest.aggregate_id))
+    );
+    fixture.assert_inspection_pins_released();
+    std::fs::remove_file(fixture.data.path().join("artifacts").join(relative)).unwrap();
+    assert!(
+        matches!(client.query(&profile_query(profile, 1, None)).await, Err(ClientError::Remote(error)) if error.reason_code == Some(ReasonCode::EvidenceUnavailable))
+    );
+    fixture.assert_inspection_pins_released();
+    assert_eq!(fixture.validation_counts(), (2, 2, 2));
     fixture.assert_no_provider_effect();
     fixture
         .handle

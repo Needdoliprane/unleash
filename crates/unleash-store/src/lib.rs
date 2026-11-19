@@ -23,6 +23,7 @@ pub mod migrations;
 pub mod objects;
 pub mod policies_secrets;
 pub mod projects_settings;
+mod provider_profile_validation;
 pub mod provider_probes;
 pub mod provider_profiles;
 pub mod qualification;
@@ -89,6 +90,10 @@ pub use projects_settings::{
     AnalyzerPathConfig, ExecutionPoolSettings, ProjectRecord, ProjectRepositorySpec,
     ProjectSourceSpec, RETENTION_SHORTENING_NOTICE_MS, RetentionClass, RetentionPolicySettings,
     RetentionShorteningNotice, SettingsPatch, SettingsRecord, SettingsScopeKind,
+};
+pub use provider_profile_validation::{
+    LocalProviderValidation, LocalValidationStatus, ProviderProfileView,
+    ProviderValidationPreparation, ProviderValidationSummary,
 };
 pub use provider_probes::{
     ModelContextRef, ModelOrigin, PROVIDER_PROBE_VERB, PreparedProviderProbe,
