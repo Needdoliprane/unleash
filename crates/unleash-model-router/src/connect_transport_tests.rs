@@ -7,6 +7,7 @@ use crate::connect_transport::{
 };
 use crate::transport::{BrokerDispatch, ProfileRef};
 use crate::transport_tests::TlsFixture;
+use secrecy::SecretString;
 use std::{
     collections::BTreeSet,
     error::Error,
@@ -26,11 +27,12 @@ use unleash_action_broker::{
     ActionBroker, ActionIntent, ActionProvenance, ActionSubject, AuthorityLayer,
     AuthorizationDecision, AuthorizationOutcome, BoxFuture, BrokerConfig, BrokerJournalEntry,
     BrokerJournalError, BrokerJournalPort, EffectiveAuthority, EffectsClass, IsolationMode,
-    IsolationRequirements, LocalAuthorityFallbackPolicy, ScopeKind, compute_effective_authority,
+    IsolationRequirements, LocalAuthorityFallbackPolicy, ScopeKind, SecretStore,
+    compute_effective_authority,
 };
 use unleash_domain::{
     ActionId, ActionState, ActorId, AuthorityGeneration, DaemonEpoch, DataLocality, Fence,
-    LineageFence, ModelPolicy, ReconcileStrategy, Revision, Sha256Digest, TimestampMs,
+    LineageFence, ModelPolicy, ReconcileStrategy, Revision, SecretRef, Sha256Digest, TimestampMs,
 };
 use unleash_testkit::{
     BrokerExecutionSpy, DeterministicIdGenerator, ManualClock, ManualClockTimer,
@@ -282,6 +284,57 @@ fn serve(
             extra_connection,
         })
     })
+}
+
+#[tokio::test]
+async fn t_f012_013_connect_rejects_secret_ref_before_broker_resolution() -> TestResult {
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let port = listener.local_addr()?.port();
+    let broker = ConnectHarness::new();
+    let secret = SecretRef::new("synthetic-connect-credential-ref")?;
+    broker.secrets.store(
+        &secret,
+        SecretString::from("synthetic-connect-not-a-live-secret".to_owned()),
+    )?;
+    let mut authority = authority();
+    authority
+        .allowed_secret_refs
+        .insert(secret.as_opaque_str().to_owned());
+    let request = request("http", "127.0.0.1", port, 1000)?;
+    let mut action = intent(&request, &broker, &authority)?;
+    action.secret_refs.push(secret);
+    let decision = authorize(&broker, action.clone(), &authority).await?;
+    let resolver = Resolver::pinned(port);
+    let result = execute_fixture(
+        request,
+        broker.dispatch(&action, &decision, &authority),
+        FixtureOptions {
+            resolver: resolver.clone(),
+            ca_der: None,
+        },
+    )
+    .await;
+    assert_eq!(
+        (
+            broker.secrets.resolution_attempts(),
+            broker.secrets.successful_resolutions()
+        ),
+        (0, 0),
+        "connect ne doit jamais entrer dans le coffre, même pour une ref autorisée et résoluble"
+    );
+    assert!(matches!(result, Err(ConnectError::InvalidRequest)));
+    assert_eq!(broker.dispatches.load(Ordering::SeqCst), 0);
+    assert_eq!(resolver.calls.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        broker.broker.action_state(action.action_id),
+        Some(ActionState::Authorized)
+    );
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), listener.accept())
+            .await
+            .is_err()
+    );
+    Ok(())
 }
 
 #[tokio::test]
