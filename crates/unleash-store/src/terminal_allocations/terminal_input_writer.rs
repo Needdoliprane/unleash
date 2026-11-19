@@ -89,7 +89,7 @@ pub(crate) fn prepare_tx(
     config: &StoreConfig,
     daemon: &DaemonStateRow,
     now: TimestampMs,
-    command: InputCommand<'_>,
+    command: &InputCommand<'_>,
     events: &mut Vec<EventAppendSpec>,
 ) -> Result<Revision, StoreError> {
     if daemon.schema_version < 14
@@ -118,6 +118,101 @@ pub(crate) fn prepare_tx(
     {
         return Err(invalid("terminal input lineage, actor or scope differs"));
     }
+    let (revision, expires) =
+        validate_input_controller(tx, daemon, now, command, &allocation, &principal)?;
+    let runtime = control_runtime(tx, now, &allocation)?;
+    let (scope_revision, mission_revision): (i64, i64) = tx.query_row(
+        "SELECT p.revision,m.revision FROM projects p JOIN missions m ON m.project_id=p.project_id WHERE p.project_id=?1 AND m.mission_id=?2",
+        params![project_id.to_string(), original.preparation.mission_id.to_string()], |row| Ok((row.get(0)?,row.get(1)?)),
+    )?;
+    let scope_revision = Revision::new(
+        u64::try_from(scope_revision)
+            .map_err(|_| invalid("terminal input project revision invalid"))?,
+    );
+    let mission_revision = Revision::new(
+        u64::try_from(mission_revision)
+            .map_err(|_| invalid("terminal input mission revision invalid"))?,
+    );
+    let mut scoped = original.preparation.clone();
+    scoped.scope = super::TerminalAllocationScope::ProjectConfiguration {
+        project_id,
+        revision: scope_revision,
+    };
+    scoped.mission_revision = mission_revision;
+    scoped.lease_ttl_ms = runtime.lease_ttl_ms;
+    validate_preparation(tx, now, &scoped, command.actor_id, &principal)?;
+    control_identity(tx, daemon, &allocation)?;
+    control_holds(tx, daemon, &allocation)?;
+    let (policy_revision, security_policy_digest) = policy(tx, project_id)?;
+    verify_native_input_state(tx, config, command, &allocation, revision)?;
+    let context = TerminalInputContext {
+        schema_version: 1,
+        action_id: ActionId::from_uuid(config.id_generator.new_uuid()),
+        command_id: command.envelope.command_id,
+        receipt_id: command.receipt_id,
+        actor_id: command.actor_id.clone(),
+        principal_id: principal,
+        authority_generation: daemon.authority_generation,
+        daemon_epoch: daemon.daemon_epoch,
+        daemon_boot_identity: daemon.boot_identity.clone(),
+        project_id,
+        scope_revision,
+        mission_id: original.preparation.mission_id,
+        mission_revision,
+        policy_revision,
+        security_policy_digest,
+        runtime_settings_digest: canonical_sha256(&runtime)?,
+        terminal_id: input.terminal_id,
+        process_id: original.process_id,
+        host_id: original.host_id,
+        process_run_uuid: original.process_run_uuid,
+        initial_action_id: original.action_id,
+        initial_context_digest: allocation.context_digest,
+        control_revision: revision,
+        lease_id: input.lease_id,
+        resource_fence: input.fence,
+        previous_lease_expires_at: expires,
+        proposed_lease_expires_at: TimestampMs::new(
+            now.as_i64()
+                .checked_add(runtime.lease_ttl_ms)
+                .ok_or_else(|| invalid("terminal input renewal deadline overflow"))?,
+        ),
+        input_seq: input.input_seq,
+        payload_digest: Sha256Digest::from_raw_bytes(Sha256::digest(&input.payload_bytes).into()),
+        payload_byte_length: u64::try_from(input.payload_bytes.len())
+            .map_err(|_| invalid("terminal input length invalid"))?,
+    };
+    insert_intent(tx, &context)?;
+    events.push(prepared_event(&context)?);
+    Ok(revision)
+}
+
+fn prepared_event(context: &TerminalInputContext) -> Result<EventAppendSpec, StoreError> {
+    Ok(EventAppendSpec {
+        event_type: "TerminalInputPrepared".into(),
+        aggregate_type: AggregateKind::TerminalInputIntent,
+        aggregate_id: context.action_id.as_uuid(),
+        aggregate_revision: Revision::new(1),
+        project_id: Some(context.project_id),
+        correlation_id: context.terminal_id.as_uuid(),
+        causation_kind: EventCausationKind::Command,
+        causation_id: None,
+        payload: json!({"terminal_id":context.terminal_id,"action_id":context.action_id,"input_seq":context.input_seq,"payload_digest":context.payload_digest,"payload_byte_length":context.payload_byte_length,"state":"prepared"}).as_object().cloned().ok_or_else(|| invalid("terminal input event invalid"))?,
+        sensitivity: Sensitivity::Project,
+        outbox_destinations: vec!["clients".into(),"harness".into()],
+    })
+}
+
+fn validate_input_controller(
+    tx: &Transaction<'_>,
+    daemon: &DaemonStateRow,
+    now: TimestampMs,
+    command: &InputCommand<'_>,
+    allocation: &super::TerminalAllocationRecord,
+    principal: &ActorId,
+) -> Result<(Revision, TimestampMs), StoreError> {
+    let input = command.request;
+    let original = &allocation.context;
     let (lease_id, revision, sequence): (String, i64, i64) = tx.query_row(
         "SELECT lease_id,control_revision,input_seq FROM terminal_sessions WHERE terminal_id=?1 AND process_id=?2 AND state IN ('ready','busy','detached')",
         params![input.terminal_id.to_string(), original.process_id.to_string()],
@@ -184,83 +279,7 @@ pub(crate) fn prepare_tx(
             "terminal input controller lineage or deadline differs",
         ));
     }
-    let runtime = control_runtime(tx, now, &allocation)?;
-    let (scope_revision, mission_revision): (i64, i64) = tx.query_row(
-        "SELECT p.revision,m.revision FROM projects p JOIN missions m ON m.project_id=p.project_id WHERE p.project_id=?1 AND m.mission_id=?2",
-        params![project_id.to_string(), original.preparation.mission_id.to_string()], |row| Ok((row.get(0)?,row.get(1)?)),
-    )?;
-    let scope_revision = Revision::new(
-        u64::try_from(scope_revision)
-            .map_err(|_| invalid("terminal input project revision invalid"))?,
-    );
-    let mission_revision = Revision::new(
-        u64::try_from(mission_revision)
-            .map_err(|_| invalid("terminal input mission revision invalid"))?,
-    );
-    let mut scoped = original.preparation.clone();
-    scoped.scope = super::TerminalAllocationScope::ProjectConfiguration {
-        project_id,
-        revision: scope_revision,
-    };
-    scoped.mission_revision = mission_revision;
-    scoped.lease_ttl_ms = runtime.lease_ttl_ms;
-    validate_preparation(tx, now, &scoped, command.actor_id, &principal)?;
-    control_identity(tx, daemon, &allocation)?;
-    control_holds(tx, daemon, &allocation)?;
-    let (policy_revision, security_policy_digest) = policy(tx, project_id)?;
-    verify_native_input_state(tx, config, &command, &allocation, revision)?;
-    let context = TerminalInputContext {
-        schema_version: 1,
-        action_id: ActionId::from_uuid(config.id_generator.new_uuid()),
-        command_id: command.envelope.command_id,
-        receipt_id: command.receipt_id,
-        actor_id: command.actor_id.clone(),
-        principal_id: principal,
-        authority_generation: daemon.authority_generation,
-        daemon_epoch: daemon.daemon_epoch,
-        daemon_boot_identity: daemon.boot_identity.clone(),
-        project_id,
-        scope_revision,
-        mission_id: original.preparation.mission_id,
-        mission_revision,
-        policy_revision,
-        security_policy_digest,
-        runtime_settings_digest: canonical_sha256(&runtime)?,
-        terminal_id: input.terminal_id,
-        process_id: original.process_id,
-        host_id: original.host_id,
-        process_run_uuid: original.process_run_uuid,
-        initial_action_id: original.action_id,
-        initial_context_digest: allocation.context_digest,
-        control_revision: revision,
-        lease_id: input.lease_id,
-        resource_fence: input.fence,
-        previous_lease_expires_at: TimestampMs::new(expires),
-        proposed_lease_expires_at: TimestampMs::new(
-            now.as_i64()
-                .checked_add(runtime.lease_ttl_ms)
-                .ok_or_else(|| invalid("terminal input renewal deadline overflow"))?,
-        ),
-        input_seq: input.input_seq,
-        payload_digest: Sha256Digest::from_raw_bytes(Sha256::digest(&input.payload_bytes).into()),
-        payload_byte_length: u64::try_from(input.payload_bytes.len())
-            .map_err(|_| invalid("terminal input length invalid"))?,
-    };
-    insert_intent(tx, &context)?;
-    events.push(EventAppendSpec {
-        event_type: "TerminalInputPrepared".into(),
-        aggregate_type: AggregateKind::TerminalInputIntent,
-        aggregate_id: context.action_id.as_uuid(),
-        aggregate_revision: Revision::new(1),
-        project_id: Some(project_id),
-        correlation_id: input.terminal_id.as_uuid(),
-        causation_kind: EventCausationKind::Command,
-        causation_id: None,
-        payload: json!({"terminal_id":input.terminal_id,"action_id":context.action_id,"input_seq":input.input_seq,"payload_digest":context.payload_digest,"payload_byte_length":context.payload_byte_length,"state":"prepared"}).as_object().cloned().ok_or_else(|| invalid("terminal input event invalid"))?,
-        sensitivity: Sensitivity::Project,
-        outbox_destinations: vec!["clients".into(),"harness".into()],
-    });
-    Ok(revision)
+    Ok((revision, TimestampMs::new(expires)))
 }
 
 fn verify_native_input_state(

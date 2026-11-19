@@ -1366,7 +1366,7 @@ fn apply_command_mutation(
                 config,
                 daemon,
                 now_ms,
-                crate::terminal_allocations::terminal_input_writer::InputCommand {
+                &crate::terminal_allocations::terminal_input_writer::InputCommand {
                     actor_id,
                     envelope,
                     request,

@@ -1,4 +1,4 @@
-//! Consume an input dispatch exactly once before private host I/O. SQLite never
+//! Consume an input dispatch exactly once before private host I/O. `SQLite` never
 //! owns the raw bytes, a host capability or a PTY writer.
 
 use super::terminal_input_types::{
