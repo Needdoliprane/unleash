@@ -392,3 +392,42 @@ fn t_f011_003_same_epoch_transfer_refused_before_intent_preserves_current_contro
     }).unwrap();
     assert!(!store.config().data_root.join("process-hosts").exists());
 }
+
+#[test]
+fn t_f011_005_acquisition_result_does_not_cross_actor_ownership() {
+    // ACL unit oracle only: this fixture's OS observation is synthetic. It does
+    // not claim a second real peer UID or forge a daemon session/admission.
+    let (store, _clock, _fault, allocation, _directory) = observed(false);
+    let alice = &allocation.context.actor_id;
+    let bob = ActorId::new("uid:fixture-bob").unwrap();
+    let command = unleash_domain::CommandId::from_u128(TERMINAL + 1000);
+    let ReceiptInspectionOutcome::Full(original) =
+        store.inspect_command_receipt(alice, command).unwrap()
+    else {
+        unreachable!()
+    };
+    let reference = original.receipt.result_ref.unwrap();
+    assert!(matches!(
+        store.inspect_command_receipt(&bob, command),
+        Err(StoreError::NotFound(_))
+    ));
+    let before = counts(&store);
+    assert!(
+        store
+            .inspect_terminal_acquisition_result(alice, command, &reference, PROJECT)
+            .is_ok(),
+        "same-actor fixture is genuinely eligible before checking denial"
+    );
+    assert!(
+        matches!(
+            store.inspect_terminal_acquisition_result(&bob, command, &reference, PROJECT),
+            Err(StoreError::NotFound(_))
+        ),
+        "even the exact known reference cannot bypass actor ownership"
+    );
+    assert_eq!(
+        counts(&store),
+        before,
+        "result lookup is not a lease renewal or effect"
+    );
+}

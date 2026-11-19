@@ -2,6 +2,9 @@
 use super::*;
 use std::io::Write;
 
+#[path = "terminal_input_scenarios.rs"]
+mod input_scenarios;
+
 struct LiveFixture {
     daemon: FixtureDaemon,
     client: UnleashClient,
