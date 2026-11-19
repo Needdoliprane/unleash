@@ -1,7 +1,10 @@
 //! Authenticated entry preparation for the active `connect` phase.
 //!
-//! This module is not routed until the Store resolver/claim and the admission
-//! continuation are connected. A decoded request is not an effect permission.
+//! Only the original, acknowledged claim can start this one-attempt transport.
+
+mod admission;
+mod observation;
+mod runtime;
 
 use std::fmt;
 use std::sync::Arc;
@@ -158,4 +161,57 @@ pub(crate) async fn replay_after_preparation_failure(
         preparation_error,
         Some(request.command.command_id),
     ))
+}
+
+/// Prepare a real receipt, then detach one CAS-owned orchestration.
+pub(crate) async fn commit(
+    state: &Arc<crate::ipc::DaemonRuntimeState>,
+    session: AuthenticatedSession,
+    command: CommandEnvelope,
+) -> Result<CommitOutcome, IpcError> {
+    let command_id = command.command_id;
+    let caller = crate::provider_profile_service::caller_for(&session, &command)?;
+    let outcome = match begin(Arc::clone(&state.store), &session, command.clone()).await? {
+        ConnectEntry::Replay(receipt) => CommitOutcome::IdempotentReplay(receipt),
+        ConnectEntry::RequiresResolution(request) => {
+            crate::ipc::ensure_principal_registered(&state.store, &session).await?;
+            let store = Arc::clone(&state.store);
+            let prepared = request.command.clone();
+            let authority = request.caller.clone();
+            // begin's parsed phase and canonical mandate are part of the same wire.
+            if request.request.mandate_ref() != request.mandate_ref.to_string() {
+                return Err(unavailable(command_id));
+            }
+            let result = tokio::task::spawn_blocking(move || {
+                let preparation = store.prepare_provider_probe_connect(&prepared, &authority)?;
+                store.commit_command(unleash_store::CommitCommandRequest {
+                    actor_id: authority.actor_id.clone(),
+                    envelope: prepared.clone(),
+                    target_aggregate: unleash_store::AggregateKind::ProviderProbe,
+                    operation_id: None,
+                    receipt_state: unleash_protocol::ReceiptState::Accepted,
+                    result_ref: Some(format!("provider-probe:{}", prepared.aggregate_id)),
+                    retention_days_override: None,
+                    fence_assertion: None,
+                    mutation: unleash_store::CommandMutation::PrepareProviderProbeConnect {
+                        caller: authority,
+                        preparation: Box::new(preparation),
+                    },
+                    events: vec![],
+                    capacity_reservations: vec![],
+                    budget_reservations: vec![],
+                })
+            })
+            .await
+            .map_err(|_| unavailable(command_id))?;
+            match result {
+                Ok(outcome) => outcome,
+                Err(error) => {
+                    replay_after_preparation_failure(&state.store, &request, &error).await?
+                }
+            }
+        }
+    };
+    runtime::start(state, command, caller, outcome.receipt().receipt_id);
+    Ok(outcome)
 }

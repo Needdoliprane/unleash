@@ -69,6 +69,8 @@ pub struct LocalProviderValidation {
 pub enum LocalValidationStatus {
     /// Les contrôles locaux ont réellement réussi.
     Validated,
+    /// The bounded native TCP/TLS connect completed; no model capability is qualified.
+    Connected,
 }
 
 /// Objet local publié avant la mutation, sans reçu préalloué.
@@ -411,6 +413,7 @@ pub(crate) fn commit_tx(
 pub(crate) struct ProfileProjection {
     profile: ConfiguredProviderProfile,
     latest: Option<LatestValidation>,
+    connect: Option<crate::provider_probe_connect_observation::ConnectProjection>,
 }
 
 struct LatestValidation {
@@ -447,7 +450,19 @@ pub(crate) fn read_projection(
             committed_at_ms: row.get(6)?, command_type: row.get(7)?,
         }),
     ).optional()?;
-    Ok(Some(ProfileProjection { profile, latest }))
+    let connect = if crate::commands::read_daemon_state_conn(conn)?.schema_version >= 15 {
+        crate::provider_probe_connect_observation::read_projection(
+            conn,
+            &profile.profile_version_ref,
+        )?
+    } else {
+        None
+    };
+    Ok(Some(ProfileProjection {
+        profile,
+        latest,
+        connect,
+    }))
 }
 
 fn validate_projected_observation(
@@ -491,7 +506,11 @@ pub(crate) fn finish_view(
     store: &crate::UnleashStore,
     projection: ProfileProjection,
 ) -> Result<ProviderProfileView, StoreError> {
-    let ProfileProjection { profile, latest } = projection;
+    let ProfileProjection {
+        profile,
+        latest,
+        connect,
+    } = projection;
     let mut observations = Vec::new();
     if let Some(latest) = latest {
         let observed = read_observation(store, &latest)?;
@@ -503,6 +522,10 @@ pub(crate) fn finish_view(
             observed_at_ms: observed.observed_at_ms,
             status: observed.status,
         });
+    }
+    if let Some(connect) = connect {
+        observations
+            .push(crate::provider_probe_connect_observation::finish_projection(store, &connect)?);
     }
     Ok(ProviderProfileView {
         profile_id: profile.configuration.profile_id,

@@ -157,15 +157,60 @@ pub struct ProviderProbeConnectClaim {
     claim: ProviderProbeConnectClaimRecord,
     // Kept from the authenticated call, never reconstructed from a projection.
     request: Box<ClaimProviderProbeConnectRequest>,
+    destination: unleash_protocol::provider_profile::ProviderEndpointDestination,
 }
 
 /// Private writer capability copied only from the original opaque fresh token.
 pub(crate) struct ConnectPhasePermission {
     record: ProviderProbeConnectRecord,
     request: ClaimProviderProbeConnectRequest,
+    destination: unleash_protocol::provider_profile::ProviderEndpointDestination,
+}
+
+impl ConnectPhasePermission {
+    pub(crate) fn destination(
+        &self,
+    ) -> &unleash_protocol::provider_profile::ProviderEndpointDestination {
+        &self.destination
+    }
+}
+
+pub(crate) fn validate_live_permission(
+    tx: &Transaction<'_>,
+    daemon: &crate::DaemonStateRow,
+    now: TimestampMs,
+    permission: &ConnectPhasePermission,
+) -> Result<ProviderProbeConnectRecord, StoreError> {
+    let record = claim_identity(tx, daemon, &permission.request)?;
+    if record != permission.record || record.claim.is_none() {
+        return Err(StoreError::StaleFence {
+            message: "claim connect différente du propriétaire frais".to_owned(),
+        });
+    }
+    validate_live_context(tx, daemon, now, &permission.request, &record)?;
+    Ok(record)
+}
+
+pub(crate) enum ConnectPhaseAccess<'a> {
+    Live(&'a ConnectPhasePermission),
+    Observation(&'a ConnectPhasePermission),
 }
 
 impl ProviderProbeConnectClaim {
+    /// Frozen configured destination validated when this original claim was issued.
+    #[must_use]
+    pub const fn destination(
+        &self,
+    ) -> &unleash_protocol::provider_profile::ProviderEndpointDestination {
+        &self.destination
+    }
+    pub(crate) fn permission(&self) -> ConnectPhasePermission {
+        ConnectPhasePermission {
+            record: self.record.clone(),
+            request: (*self.request).clone(),
+            destination: self.destination.clone(),
+        }
+    }
     /// Contexte immuable autorisé pour cet unique propriétaire.
     #[must_use]
     pub const fn context(&self) -> &ProviderProbeConnectContext {
@@ -186,6 +231,63 @@ impl ProviderProbeConnectClaim {
     pub const fn claim_revision(&self) -> Revision {
         self.claim.revision
     }
+}
+
+/// Validates attribution for a fact after I/O, without granting a new effect.
+/// A current policy change cannot rewrite the original native producer's context.
+pub(crate) fn fact_context(
+    tx: &Connection,
+    daemon: &crate::DaemonStateRow,
+    permission: &ConnectPhasePermission,
+) -> Result<ProviderProbeConnectRecord, StoreError> {
+    let original = &permission.record;
+    let request = &permission.request;
+    crate::provider_profile_validation::validate_envelope_identity(
+        &request.envelope,
+        &request.caller,
+    )?;
+    let context = &original.context;
+    if request.envelope.authority_generation != daemon.authority_generation
+        || context.authority_generation != daemon.authority_generation
+    {
+        return Err(StoreError::StaleAuthorityGeneration {
+            expected: daemon.authority_generation,
+            actual: context.authority_generation,
+            command_id: Some(request.envelope.command_id),
+        });
+    }
+    if context.daemon_epoch != daemon.daemon_epoch
+        || request.control_fence
+            != unleash_domain::LineageFence::new(
+                daemon.authority_generation,
+                daemon.daemon_epoch,
+                unleash_domain::Fence::ZERO,
+            )
+    {
+        return Err(StoreError::StaleFence {
+            message: "fait connect d'une autre incarnation".to_owned(),
+        });
+    }
+    let current = read_context(tx, context.probe_id)?.ok_or_else(hidden)?;
+    if &current != original
+        || current.claim.is_none()
+        || request.receipt_id != context.receipt_id
+        || request.context_digest != current.context_digest
+        || request.caller.actor_id != context.actor_id
+        || unleash_protocol::compute_command_digest_v2(&request.envelope)? != context.command_digest
+    {
+        return Err(StoreError::StaleFence {
+            message: "fait connect sans sa claim originale".to_owned(),
+        });
+    }
+    let attributed:bool=tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM command_receipts r JOIN principals p ON p.principal_id=?1 WHERE r.actor_id=?2 AND r.command_id=?3 AND r.receipt_id=?4 AND r.command_type='TestProviderProfile' AND r.aggregate_id=?5 AND r.authority_generation=?6 AND r.command_digest=?7 AND r.state IN ('accepted','completed') AND p.actor_id=r.actor_id)",
+        params![context.principal_id.as_str(),context.actor_id.as_str(),request.envelope.command_id.to_string(),context.receipt_id.to_string(),context.probe_id.to_string(),context.authority_generation.to_string(),context.command_digest.to_string()],|row|row.get(0),
+    )?;
+    if !attributed {
+        return Err(hidden());
+    }
+    Ok(current)
 }
 
 /// Seul `FreshClaim` permet au service de commencer l'orchestration broker.
@@ -320,33 +422,46 @@ pub(crate) fn guard_phase_access(
     daemon: &crate::DaemonStateRow,
     now: TimestampMs,
     phase: &crate::BrokerPhase,
-    permission: Option<&ConnectPhasePermission>,
+    access: Option<ConnectPhaseAccess<'_>>,
 ) -> Result<bool, StoreError> {
     let record = for_action(tx, phase.action_id())?;
     let is_connect = matches!(phase, crate::BrokerPhase::Authorizing { intent }
         if intent.manifest.get("verb") == Some(&serde_json::json!("model.provider.connect")));
     let Some(record) = record else {
-        return if is_connect || permission.is_some() {
+        return if is_connect || access.is_some() {
             Err(hidden())
         } else {
             Ok(false)
         };
     };
-    let permission = permission.ok_or_else(|| {
+    let access = access.ok_or_else(|| {
         StoreError::EvidenceUnavailable(
             "connect exige le token frais original, même pour un rejeu".to_owned(),
         )
     })?;
-    let current = claim_identity(tx, daemon, &permission.request)?;
+    let (permission, observation) = match access {
+        ConnectPhaseAccess::Live(permission) => (permission, false),
+        ConnectPhaseAccess::Observation(permission) => (permission, true),
+    };
+    if observation != matches!(phase, crate::BrokerPhase::Observation { .. }) {
+        return Err(StoreError::EvidenceUnavailable(
+            "accès connect incompatible avec la phase".to_owned(),
+        ));
+    }
+    let current = if observation {
+        fact_context(tx, daemon, permission)?
+    } else {
+        claim_identity(tx, daemon, &permission.request)?
+    };
     if current != record || record != permission.record || record.claim.is_none() {
         return Err(StoreError::StaleFence {
             message: "claim connect différente du propriétaire frais".to_owned(),
         });
     }
     if matches!(phase, crate::BrokerPhase::Observation { .. }) {
-        return Err(StoreError::EvidenceUnavailable(
-            "observation connect exige le port de preuve de transport".to_owned(),
-        ));
+        // This permits only reaching the specialized proof verifier after the
+        // shared exact replay lookup; it never qualifies a native fact itself.
+        return Ok(true);
     }
     let fresh = validate_live_context(tx, daemon, now, &permission.request, &record)?;
     if let crate::BrokerPhase::Authorizing { intent } = phase {
@@ -366,6 +481,27 @@ fn validate_bound_intent(
     profile: &crate::ConfiguredProviderProfile,
     intent: &crate::BrokerIntent,
 ) -> Result<(), StoreError> {
+    let destination = profile
+        .configuration
+        .payload
+        .endpoint_destination()
+        .map_err(|_| invalid("destination connect invalide"))?;
+    validate_bound_destination(context, &destination, intent)
+}
+
+pub(crate) fn validate_fact_intent(
+    permission: &ConnectPhasePermission,
+    intent: &crate::BrokerIntent,
+) -> Result<(), StoreError> {
+    crate::broker_writer::validate_manifest(intent)?;
+    validate_bound_destination(&permission.record.context, &permission.destination, intent)
+}
+
+fn validate_bound_destination(
+    context: &ProviderProbeConnectContext,
+    destination: &unleash_protocol::provider_profile::ProviderEndpointDestination,
+    intent: &crate::BrokerIntent,
+) -> Result<(), StoreError> {
     use unleash_domain::{ActionOrigin, Fence, LineageFence, ReconcileStrategy};
     if intent.lineage_fence
         != LineageFence::new(
@@ -378,11 +514,6 @@ fn validate_bound_intent(
             message: "fence de contrôle connect différente du contexte".to_owned(),
         });
     }
-    let destination = profile
-        .configuration
-        .payload
-        .endpoint_destination()
-        .map_err(|_| invalid("destination connect invalide"))?;
     let resources = serde_json::json!([{"kind":"network_endpoint","host":destination.host(),
         "port":destination.port(),"is_private_or_loopback":destination.is_loopback_literal()}]);
     if intent.action_id != context.action_id
@@ -955,8 +1086,8 @@ fn validate_fresh_claim(
     now: TimestampMs,
     request: &ClaimProviderProbeConnectRequest,
     record: &ProviderProbeConnectRecord,
-) -> Result<(), StoreError> {
-    validate_live_context(tx, daemon, now, request, record)?;
+) -> Result<unleash_protocol::provider_profile::ProviderEndpointDestination, StoreError> {
+    let fresh = validate_live_context(tx, daemon, now, request, record)?;
     let c = &record.context;
     let queued: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM provider_probes WHERE probe_id=?1 AND state='queued' AND phase='connect' AND revision=1 AND fence=0 AND principal_id=?2 AND authority_generation=?3 AND daemon_epoch=?4) AND NOT EXISTS(SELECT 1 FROM actions WHERE action_id=?5)", params![c.probe_id.to_string(),c.principal_id.as_str(),c.authority_generation.to_string(),integer(c.daemon_epoch.as_u64())?,c.action_id.to_string()], |row|row.get(0))?;
     if !queued {
@@ -964,7 +1095,12 @@ fn validate_fresh_claim(
             "probe connect non disponible pour sa première claim",
         ));
     }
-    Ok(())
+    fresh
+        .profile
+        .configuration
+        .payload
+        .endpoint_destination()
+        .map_err(|_| invalid("destination de claim invalide"))
 }
 
 fn claim_tx(
@@ -980,7 +1116,7 @@ fn claim_tx(
         // including if a prior acknowledgement was lost or the mandate expired.
         return Ok(ProviderProbeConnectClaimOutcome::AlreadyClaimed(record));
     }
-    validate_fresh_claim(tx, &daemon, now, request, &record)?;
+    let destination = validate_fresh_claim(tx, &daemon, now, request, &record)?;
     let claim_id = config.id_generator.new_uuid();
     if claim_id.is_nil() {
         return Err(invalid("identité de claim nulle"));
@@ -1004,6 +1140,7 @@ fn claim_tx(
             record,
             claim,
             request: Box::new(request.clone()),
+            destination,
         },
     ))
 }
@@ -1018,10 +1155,7 @@ impl UnleashStore {
         claim: &ProviderProbeConnectClaim,
         request: crate::BrokerPhaseRequest,
     ) -> Result<crate::BrokerPhaseCommit, StoreError> {
-        let permission = ConnectPhasePermission {
-            record: claim.record.clone(),
-            request: (*claim.request).clone(),
-        };
+        let permission = claim.permission();
         let cutpoint = match &request.phase {
             crate::BrokerPhase::Authorizing { .. } => {
                 Some(crate::StoreCutpoint::C3AfterBrokerIntentCommit)

@@ -229,6 +229,15 @@ fn assert_released_after_finish(fixture: &ConnectFixture, probe: Uuid) {
         finished, 1,
         "the final writer transaction completes the exact execution"
     );
+    let causal:(i64,i64)=fixture.db().query_row(
+        "SELECT COUNT(DISTINCT e.event_id),COUNT(DISTINCT disposition.evidence_id) FROM provider_probe_transport_contexts c JOIN broker_phase_records b ON b.action_id=c.action_id AND b.phase_key='observation:1' JOIN events e ON e.event_id=b.event_id AND e.event_type='ActionObserved' JOIN evidence disposition ON disposition.action_id=c.action_id AND disposition.snapshot_ref LIKE 'provider-connect-disposition:v1:%:'||e.event_id AND disposition.object_hash=json_extract(e.payload_json,'$.output_digest') AND disposition.availability='available' WHERE c.probe_id=?1 AND json_extract(e.payload_json,'$.state')='observed_success'",
+        [probe.to_string()],|row|Ok((row.get(0)?,row.get(1)?)),
+    ).unwrap();
+    assert_eq!(
+        causal,
+        (1, 1),
+        "one exact ActionObserved and one attached execution disposition after replay"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -1,231 +1,120 @@
-//! Pending Authorizing -> V008 admission -> Guard journal assembly.
-//! The only reservation authority is the existing Store writer and scheduler.
-//! Eligibility production, active-claim reads and the SQL dispatch hook are
-//! required integration dependencies; no permissive implementation exists here.
+//! The original claim gates durable broker phases and the existing V008 scheduler.
 
-use std::sync::{Arc, Weak};
-use std::time::Duration;
-
-use crate::broker_journal::SqliteBrokerJournal;
 use crate::execution_scheduler::{ExecutionSchedulingInputs, schedule_execution};
 use crate::executors::BrokerActivityGuard;
 use crate::ipc::{DaemonRuntimeState, publish_committed_events_ordered};
-use unleash_action_broker::{BoxFuture, BrokerJournalEntry, BrokerJournalError, BrokerJournalPort};
-use unleash_domain::{
-    ActionId, ActorId, LineageFence, PoolId, ProviderProbeId, ReceiptId, Revision, Sha256Digest,
-    TimestampMs,
+use std::sync::{Arc, Mutex, Weak};
+use std::time::Duration;
+use unleash_action_broker::{
+    BoxFuture, BrokerJournalEntry, BrokerJournalError, BrokerJournalPort, ObservationCause,
 };
-use unleash_protocol::EventCursor;
+use unleash_domain::{ActionState, PoolId, Revision};
 use unleash_store::{
-    AdmissionCommit, AdmissionEligibilityObservation, AdmissionOutcome, AdmissionSnapshotToken,
-    AdmissionUnit, ExecutionAdmissionSnapshot, ExecutionContinuation, StoreError, UnleashStore,
+    AdmissionOutcome, AdmissionUnit, AdoptedProviderConnectObservation, BrokerPhaseRequest,
+    CommitProviderConnectObservation, ExecutionContinuation, ProviderProbeConnectClaim, StoreError,
+    UnleashStore,
 };
 
-/// Construct only from a freshly acknowledged Store claim, never a client payload
-/// or inspection of a claim whose owner/acknowledgement is unknown.
-#[derive(Clone)]
-pub(super) struct AdmissionBinding {
-    pub(super) probe_id: ProviderProbeId,
-    pub(super) receipt_id: ReceiptId,
-    pub(super) principal_id: ActorId,
-    pub(super) action_id: ActionId,
-    pub(super) claim_revision: Revision,
-    pub(super) context_digest: Sha256Digest,
-    pub(super) request_digest: Sha256Digest,
-    pub(super) control_fence: LineageFence,
-    pub(super) pool_id: PoolId,
-    pub(super) deadline: TimestampMs,
-}
+pub(super) type FactSlot = Mutex<Option<AdoptedProviderConnectObservation>>;
 
-/// Trusted, real eligibility producer and Store adapter; no client implements it.
-pub(super) trait AdmissionPreparation: Send + Sync {
-    /// Read one coherent live claim/continuation, rechecking current identity,
-    /// mandate, epoch and lease. A stale or uncertain owner is an error.
-    fn current_continuation(
-        &self,
-        binding: &AdmissionBinding,
-    ) -> Result<Option<ExecutionContinuation>, StoreError>;
-
-    /// Publish actual local preflight observations under an active service/system
-    /// principal. A queued row alone is not evidence of eligibility.
-    fn observe_eligibility(
-        &self,
-        binding: &AdmissionBinding,
-    ) -> Result<AdmissionEligibilityObservation, StoreError>;
-
-    /// Reuse the shared scheduling input plans for the current snapshot. Missing
-    /// plans stay errors; another selected unit is never replaced with this probe.
-    fn scheduling_inputs(
-        &self,
-        binding: &AdmissionBinding,
-        snapshot: &ExecutionAdmissionSnapshot,
-    ) -> Result<ExecutionSchedulingInputs, StoreError>;
-
-    /// Wait on the existing durable input/event mechanism, including expiry.
-    /// Register/recheck without losing a change; do not poll or return merely
-    /// because this producer recorded its own observation. This is a wake-up,
-    /// never a reservation or permission. The journal retains its exact entry.
-    fn wait_for_change<'a>(
-        &'a self,
-        binding: &'a AdmissionBinding,
-        token: AdmissionSnapshotToken,
-    ) -> BoxFuture<'a, Result<(), StoreError>>;
-}
-
-enum AdmissionGateResult {
-    Ready {
-        cursor: Option<EventCursor>,
-    },
-    Waiting {
-        cursor: Option<EventCursor>,
-        token: AdmissionSnapshotToken,
-    },
-}
-
-fn check_continuation(
-    binding: &AdmissionBinding,
-    continuation: &ExecutionContinuation,
-) -> Result<(), StoreError> {
-    if continuation.unit != AdmissionUnit::Probe(binding.probe_id)
-        || continuation.authority_generation != binding.control_fence.authority_generation
-        || continuation.daemon_epoch != binding.control_fence.epoch
-        || continuation.fence.as_u64() == 0
-    {
-        return Err(StoreError::InvariantViolation(
-            "continuation connect incohérente".to_owned(),
-        ));
-    }
-    Ok(())
-}
-
-fn continuation(commit: &AdmissionCommit) -> ExecutionContinuation {
-    ExecutionContinuation {
-        reservation_id: commit.reservation_id,
-        unit: commit.unit,
-        unit_revision: commit.revision,
-        lease_id: commit.lease.lease_id,
-        authority_generation: commit.lease.authority_generation,
-        daemon_epoch: commit.lease.daemon_epoch,
-        fence: commit.lease.fence,
-        boot_identity: commit.lease.boot_identity.clone(),
-    }
-}
-
-fn gate_blocking(
-    store: &UnleashStore,
-    preparation: &dyn AdmissionPreparation,
-    binding: &AdmissionBinding,
-) -> Result<AdmissionGateResult, StoreError> {
-    if let Some(existing) = preparation.current_continuation(binding)? {
-        check_continuation(binding, &existing)?;
-        return Ok(AdmissionGateResult::Ready { cursor: None });
-    }
-    let observed = preparation.observe_eligibility(binding)?;
-    if observed.unit != AdmissionUnit::Probe(binding.probe_id)
-        || observed.authority_generation != binding.control_fence.authority_generation
-        || observed.daemon_epoch != binding.control_fence.epoch
-    {
-        return Err(StoreError::InvariantViolation(
-            "éligibilité connect incohérente".to_owned(),
-        ));
-    }
-    store.record_admission_eligibility(observed)?;
-    let snapshot = store.execution_admission_snapshot(binding.pool_id)?;
-    let inputs = preparation.scheduling_inputs(binding, &snapshot)?;
-    let (outcome, _decision) = schedule_execution(store, binding.pool_id, snapshot.token, inputs)?;
-    match outcome {
-        AdmissionOutcome::Unchanged => Ok(AdmissionGateResult::Waiting {
-            cursor: None,
-            token: snapshot.token,
-        }),
-        AdmissionOutcome::Admitted(commit) => {
-            let cursor = Some(commit.event_cursor);
-            if commit.unit == AdmissionUnit::Probe(binding.probe_id) {
-                let committed = continuation(&commit);
-                check_continuation(binding, &committed)?;
-                // The future network-context validator must also bind the claim
-                // revision/owner and active mandate inside the V008 transaction.
-                // This re-read additionally refuses a change already observed
-                // after commit, before an Authorizing ACK could start Guard.
-                let current = preparation.current_continuation(binding)?.ok_or_else(|| {
-                    StoreError::InvariantViolation(
-                        "claim connect périmé après admission".to_owned(),
-                    )
-                })?;
-                if current != committed {
-                    return Err(StoreError::InvariantViolation(
-                        "continuation connect modifiée après admission".to_owned(),
-                    ));
-                }
-                Ok(AdmissionGateResult::Ready { cursor })
-            } else {
-                // Its real admission remains committed and its existing outbox
-                // informs the corresponding owner. This gate runs no other unit.
-                Ok(AdmissionGateResult::Waiting {
-                    cursor,
-                    token: snapshot.token,
-                })
-            }
-        }
-    }
-}
-
-pub(super) struct ConnectAdmissionJournal {
-    inner: SqliteBrokerJournal,
+pub(super) struct ConnectJournal {
     runtime: Weak<DaemonRuntimeState>,
-    preparation: Arc<dyn AdmissionPreparation>,
-    binding: AdmissionBinding,
+    pub(super) claim: Arc<ProviderProbeConnectClaim>,
+    pub(super) continuation: Arc<Mutex<Option<ExecutionContinuation>>>,
+    pub(super) fact: Arc<FactSlot>,
+    pub(super) activity: Arc<BrokerActivityGuard>,
 }
 
-impl ConnectAdmissionJournal {
+impl ConnectJournal {
     pub(super) fn new(
         runtime: &Arc<DaemonRuntimeState>,
-        inner: SqliteBrokerJournal,
-        preparation: Arc<dyn AdmissionPreparation>,
-        binding: AdmissionBinding,
+        claim: Arc<ProviderProbeConnectClaim>,
+        activity: Arc<BrokerActivityGuard>,
     ) -> Self {
-        // The caller must supply the qualified connect projection, including its
-        // local-proof success guard and closed Unknown mapping. The generic
-        // journal currently lacks those hooks and is not a product fallback.
         Self {
-            inner,
             runtime: Arc::downgrade(runtime),
-            preparation,
-            binding,
+            claim,
+            continuation: Arc::new(Mutex::new(None)),
+            fact: Arc::new(Mutex::new(None)),
+            activity,
         }
     }
 
     async fn await_admission(
         &self,
         state: &Arc<DaemonRuntimeState>,
-        activity: Arc<BrokerActivityGuard>,
     ) -> Result<(), BrokerJournalError> {
         let remaining = self
-            .binding
+            .claim
+            .context()
             .deadline
             .as_i64()
             .checked_sub(state.store.config().clock.now_ms().as_i64())
-            .and_then(|value| u64::try_from(value).ok())
-            .filter(|value| *value > 0)
+            .and_then(|n| u64::try_from(n).ok())
+            .filter(|n| *n > 0)
             .ok_or(BrokerJournalError)?;
+        // Subscribe before reading durable inputs; a wakeup is never permission.
+        let mut changes = state.subscriptions.observe_internal();
         tokio::time::timeout(Duration::from_millis(remaining), async {
             loop {
+                if *state.drain_started_tx.borrow() {
+                    return Err(BrokerJournalError);
+                }
                 let store = Arc::clone(&state.store);
-                let preparation = Arc::clone(&self.preparation);
-                let binding = self.binding.clone();
-                let worker_activity = Arc::clone(&activity);
-                let outcome = tokio::task::spawn_blocking(move || {
-                    let _activity = worker_activity;
-                    gate_blocking(&store, preparation.as_ref(), &binding)
+                let claim = Arc::clone(&self.claim);
+                let slot = Arc::clone(&self.continuation);
+                let activity = Arc::clone(&self.activity);
+                let result = tokio::task::spawn_blocking(move || {
+                    let _activity = activity;
+                    if let Some(current) = slot.lock().map_err(|_| unavailable())?.clone() {
+                        store.validate_provider_probe_connect_continuation(&claim, current)?;
+                        return Ok(None);
+                    }
+                    observe_eligibility(&store, &claim)?;
+                    let pool = PoolId::from_u128(1);
+                    let snapshot = store.execution_admission_snapshot(pool)?;
+                    let mut inputs = ExecutionSchedulingInputs::default();
+                    // Connect reserves no monetary amount or model call. Other
+                    // producers must supply their own plans; they stay ineligible
+                    // here unless their plan is known, rather than fabricated.
+                    inputs
+                        .budgets
+                        .insert(AdmissionUnit::Probe(claim.context().probe_id), vec![]);
+                    let (outcome, _) =
+                        match schedule_execution(&store, pool, snapshot.token, inputs) {
+                            Ok(result) => result,
+                            // The unresolved-server bound is inside the same V008
+                            // transaction. Wait for a durable change, never dispatch
+                            // or synthesize another capacity reservation.
+                            Err(StoreError::CapacityBlocked(_)) => return Ok(None),
+                            Err(error) => return Err(error),
+                        };
+                    if let AdmissionOutcome::Admitted(commit) = &outcome {
+                        if commit.unit == AdmissionUnit::Probe(claim.context().probe_id) {
+                            let continuation = ExecutionContinuation {
+                                reservation_id: commit.reservation_id,
+                                unit: commit.unit,
+                                unit_revision: commit.revision,
+                                lease_id: commit.lease.lease_id,
+                                authority_generation: commit.lease.authority_generation,
+                                daemon_epoch: commit.lease.daemon_epoch,
+                                fence: commit.lease.fence,
+                                boot_identity: commit.lease.boot_identity.clone(),
+                            };
+                            store.validate_provider_probe_connect_continuation(
+                                &claim,
+                                continuation.clone(),
+                            )?;
+                            *slot.lock().map_err(|_| unavailable())? = Some(continuation);
+                        }
+                        return Ok(Some(commit.event_cursor));
+                    }
+                    Ok(None)
                 })
                 .await
                 .map_err(|_| BrokerJournalError)?
                 .map_err(|_| BrokerJournalError)?;
-                let cursor = match &outcome {
-                    AdmissionGateResult::Ready { cursor }
-                    | AdmissionGateResult::Waiting { cursor, .. } => *cursor,
-                };
-                if let Some(cursor) = cursor {
+                if let Some(cursor) = result {
                     publish_committed_events_ordered(
                         state,
                         cursor.stream_id,
@@ -235,20 +124,15 @@ impl ConnectAdmissionJournal {
                     )
                     .await;
                 }
-                match outcome {
-                    AdmissionGateResult::Ready { .. } => {
-                        if state.store.config().clock.now_ms() >= self.binding.deadline {
-                            return Err(BrokerJournalError);
-                        }
-                        return Ok(());
-                    }
-                    AdmissionGateResult::Waiting { token, .. } => {
-                        self.preparation
-                            .wait_for_change(&self.binding, token)
-                            .await
-                            .map_err(|_| BrokerJournalError)?;
-                    }
+                if self
+                    .continuation
+                    .lock()
+                    .map_err(|_| BrokerJournalError)?
+                    .is_some()
+                {
+                    return Ok(());
                 }
+                changes.changed().await.map_err(|()| BrokerJournalError)?;
             }
         })
         .await
@@ -256,33 +140,160 @@ impl ConnectAdmissionJournal {
     }
 }
 
-impl BrokerJournalPort for ConnectAdmissionJournal {
+fn unavailable() -> StoreError {
+    StoreError::EvidenceUnavailable("orchestrateur connect indisponible".into())
+}
+
+fn observe_eligibility(
+    store: &UnleashStore,
+    claim: &ProviderProbeConnectClaim,
+) -> Result<(), StoreError> {
+    let c = claim.context();
+    let bytes = store.read_verified_object_bytes(c.configuration_digest)?;
+    if unleash_domain::Sha256Digest::from_bytes(&bytes) != c.configuration_digest {
+        return Err(unavailable());
+    }
+    let value = serde_json::json!({"schema_version":1,"producer":"daemon_provider_connect_preflight","probe_id":c.probe_id,
+        "receipt_id":c.receipt_id,"action_id":c.action_id,"claim_id":claim.claim_id(),"context_digest":claim.context_digest(),
+        "configuration_digest":c.configuration_digest,"mandate_digest":c.mandate_digest,"policy_digest":c.policy_digest,
+        "transport":"loopback_only_tcp_tls_no_http_no_secret_no_model","authority_generation":c.authority_generation,"daemon_epoch":c.daemon_epoch});
+    let hash = super::observation::publish_document(
+        store,
+        &value,
+        "provider_probe_connect_eligibility",
+        "eligibility",
+    )?;
+    let snapshot = store.execution_admission_snapshot(PoolId::from_u128(1))?;
+    let candidate = snapshot
+        .queued
+        .iter()
+        .find(|row| row.unit == AdmissionUnit::Probe(c.probe_id))
+        .ok_or_else(unavailable)?;
+    store.record_admission_eligibility(unleash_store::AdmissionEligibilityObservation {
+        evidence_id: store.config().id_generator.new_uuid(),
+        observer_principal_id: unleash_store::CONNECT_OBSERVER_PRINCIPAL.into(),
+        object_hash: hash,
+        unit: candidate.unit,
+        unit_revision: candidate.revision,
+        source_revision: snapshot.source_revision,
+        authority_generation: snapshot.authority_generation,
+        daemon_epoch: snapshot.daemon_epoch,
+        valid_until: c.deadline,
+        urgency: unleash_store::AdmissionUrgency::Ordinary,
+    })
+}
+
+fn project(
+    entry: &BrokerJournalEntry,
+) -> Result<
+    (
+        unleash_store::BrokerEvaluation,
+        unleash_store::BrokerIntent,
+        unleash_store::BrokerPhase,
+    ),
+    BrokerJournalError,
+> {
+    if let BrokerJournalEntry::Observation {
+        intent,
+        receipt,
+        cause: ObservationCause::Execution,
+        ..
+    } = entry
+        && intent.verb == unleash_model_router::connect_transport::CONNECT_VERB
+        && receipt.state == ActionState::OutcomeUnknown
+        && receipt.output_digest.is_none()
+        && receipt.remote_audit_ref.is_none()
+    {
+        let mut safe = entry.clone();
+        if let BrokerJournalEntry::Observation { reason, .. } = &mut safe {
+            *reason = None;
+        }
+        return crate::broker_journal::project(&safe);
+    }
+    crate::broker_journal::project(entry)
+}
+
+impl BrokerJournalPort for ConnectJournal {
     fn append<'a>(
         &'a self,
         entry: &'a BrokerJournalEntry,
     ) -> BoxFuture<'a, Result<(), BrokerJournalError>> {
         Box::pin(async move {
             let state = self.runtime.upgrade().ok_or(BrokerJournalError)?;
-            let activity = Arc::new(state.broker_activity.admit().ok_or(BrokerJournalError)?);
-            if let BrokerJournalEntry::Authorizing { intent, .. } = entry {
-                if intent.action_id != self.binding.action_id
-                    || intent.subject.principal_id() != &self.binding.principal_id
-                    || intent.subject.cause_ref() != format!("receipt:{}", self.binding.receipt_id)
-                    || intent.payload_digest != self.binding.request_digest
-                    || intent.lineage_fence != self.binding.control_fence
-                    || !intent.secret_refs.is_empty()
-                {
-                    return Err(BrokerJournalError);
-                }
-                // The action becomes durable before V008 can inspect it. The
-                // Authorizing ACK is held until admission; Guard cannot run yet.
-                self.inner.append(entry).await?;
-                self.await_admission(&state, activity).await
-            } else {
-                // The Store dispatch transaction must still revalidate mandate,
-                // exact continuation and TTL atomically with its C4 marker.
-                self.inner.append(entry).await
+            let (evaluation, intent, phase) = project(entry)?;
+            if intent.action_id != self.claim.context().action_id {
+                return Err(BrokerJournalError);
             }
+            let authorizing = matches!(&phase, unleash_store::BrokerPhase::Authorizing { .. });
+            let store = Arc::clone(&state.store);
+            let claim = Arc::clone(&self.claim);
+            let continuation = Arc::clone(&self.continuation);
+            let fact = Arc::clone(&self.fact);
+            let activity = Arc::clone(&self.activity);
+            let action = intent.action_id;
+            let result = tokio::task::spawn_blocking(move || {
+                let _activity = activity;
+                let expected_revision = store
+                    .inspect_broker_action(action)?
+                    .map_or(Revision::INITIAL, |s| s.revision);
+                let observation = matches!(&phase, unleash_store::BrokerPhase::Observation { .. });
+                let request = BrokerPhaseRequest {
+                    authority_generation: intent.lineage_fence.authority_generation,
+                    expected_revision,
+                    evaluation,
+                    phase,
+                };
+                if observation {
+                    let continuation = continuation
+                        .lock()
+                        .map_err(|_| unavailable())?
+                        .clone()
+                        .ok_or_else(unavailable)?;
+                    let fact = fact.lock().map_err(|_| unavailable())?.clone();
+                    store.commit_provider_probe_connect_observation(
+                        &claim,
+                        CommitProviderConnectObservation {
+                            continuation,
+                            fact,
+                            request,
+                        },
+                    )
+                } else {
+                    store.commit_provider_probe_connect_phase(&claim, request)
+                }
+            })
+            .await;
+            let cursor = match &result {
+                Ok(Ok(commit)) => Some(commit.event_cursor),
+                _ => {
+                    let store = Arc::clone(&state.store);
+                    tokio::task::spawn_blocking(move || store.inspect_broker_action(action))
+                        .await
+                        .ok()
+                        .and_then(Result::ok)
+                        .flatten()
+                        .map(|s| s.last_event_cursor)
+                }
+            };
+            if let Some(cursor) = cursor
+                && cursor.stream_id == state.stream_id
+            {
+                publish_committed_events_ordered(
+                    &state,
+                    cursor.stream_id,
+                    cursor.sequence.as_u64(),
+                    1,
+                    &[],
+                )
+                .await;
+            }
+            result
+                .map_err(|_| BrokerJournalError)?
+                .map_err(|_| BrokerJournalError)?;
+            if authorizing {
+                self.await_admission(&state).await?;
+            }
+            Ok(())
         })
     }
 }

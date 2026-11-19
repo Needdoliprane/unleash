@@ -147,6 +147,9 @@ pub(crate) struct InternalEventSubscription {
 
 impl InternalEventSubscription {
     pub(crate) async fn changed(&mut self) -> Result<(), ()> {
+        if self.receiver.is_closed() {
+            return Err(());
+        }
         tokio::select! {
             biased;
             ()=self.aborted.notified()=>Err(()),

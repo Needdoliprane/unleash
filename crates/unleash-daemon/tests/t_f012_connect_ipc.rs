@@ -575,6 +575,9 @@ WHERE a.state='observed_success'
             .to_string(),
         proof.output_digest
     );
+    let native_observed = document["observed_at_ms"].as_i64().unwrap();
+    assert!(proof.started_at_ms <= native_observed);
+    assert!(native_observed <= proof.observed_at_ms);
     assert_eq!(
         document,
         json!({
@@ -586,7 +589,7 @@ WHERE a.state='observed_success'
             "certificate_validation":"not_tls",
             "revocation_checked":false,
             "http_application_bytes_sent":0,
-            "observed_at_ms":proof.observed_at_ms,
+            "observed_at_ms":native_observed,
         })
     );
 }

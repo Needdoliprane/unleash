@@ -542,6 +542,125 @@ pub(crate) fn tx_retire_owned_reference(
     tx.execute("UPDATE object_references SET state='tombstone',tombstone_reason=?1 WHERE reference_id=?2 AND object_hash=?3 AND owner_kind=?4 AND owner_id=?5 AND source_field=?6 AND state='live' AND EXISTS(SELECT 1 FROM object_records o WHERE o.object_hash=object_references.object_hash AND o.object_generation=?7)",rusqlite::params![reason,handle.reference_id,handle.object_hash.to_string(),handle.owner_kind,handle.owner_id,handle.source_field,handle.object_generation]).map_err(StoreError::from_rusqlite)
 }
 
+/// Closed producer/target binding for adoption within the caller's writer transaction.
+pub(crate) struct OwnedReferenceAdoption<'a> {
+    pub candidate: &'a PublishedObjectReference,
+    pub object_hash: Sha256Digest,
+    pub producer_kind: &'a str,
+    pub producer_field: &'a str,
+    pub owner_kind: &'a str,
+    pub owner_id: &'a str,
+    pub source_field: &'a str,
+}
+
+pub(crate) fn tx_require_owned_reference(
+    tx: &Transaction<'_>,
+    handle: &PublishedObjectReference,
+    authority: AuthorityGeneration,
+) -> Result<(), StoreError> {
+    if handle.authority_generation != authority {
+        return Err(StoreError::StaleAuthorityGeneration {
+            expected: authority,
+            actual: handle.authority_generation,
+            command_id: None,
+        });
+    }
+    let live:bool=tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM object_references r JOIN object_records o ON o.object_hash=r.object_hash WHERE r.reference_id=?1 AND r.object_hash=?2 AND r.owner_kind=?3 AND r.owner_id=?4 AND r.source_field=?5 AND r.state='live' AND o.state='live' AND o.object_generation=?6)",
+        rusqlite::params![handle.reference_id,handle.object_hash.to_string(),handle.owner_kind,handle.owner_id,handle.source_field,handle.object_generation],|row|row.get(0),
+    )?;
+    if !live {
+        return Err(StoreError::EvidenceUnavailable(
+            "référence adoptée non vivante".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+/// Adopt a precise candidate and retire only that producer's reference atomically.
+/// Existing target references are immutable; a tombstone is never resurrected.
+pub(crate) fn tx_adopt_owned_reference(
+    tx: &Transaction<'_>,
+    ids: &dyn unleash_domain::IdGeneratorPort,
+    authority: AuthorityGeneration,
+    request: &OwnedReferenceAdoption<'_>,
+) -> Result<PublishedObjectReference, StoreError> {
+    let source = request.candidate;
+    if source.authority_generation != authority
+        || source.object_hash != request.object_hash
+        || source.owner_kind != request.producer_kind
+        || source.source_field != request.producer_field
+        || (source.owner_kind == request.owner_kind
+            && source.owner_id == request.owner_id
+            && source.source_field == request.source_field)
+    {
+        return Err(StoreError::EvidenceUnavailable(
+            "candidat d'adoption incompatible".to_owned(),
+        ));
+    }
+    let source_state:Option<(String,Option<String>)> = tx.query_row(
+        "SELECT r.state,r.tombstone_reason FROM object_references r JOIN object_records o ON o.object_hash=r.object_hash WHERE r.reference_id=?1 AND r.object_hash=?2 AND r.owner_kind=?3 AND r.owner_id=?4 AND r.source_field=?5 AND o.state='live' AND o.object_generation=?6",
+        rusqlite::params![source.reference_id,source.object_hash.to_string(),source.owner_kind,source.owner_id,source.source_field,source.object_generation], |row| Ok((row.get(0)?,row.get(1)?)),
+    ).optional()?;
+    let live = source_state
+        .as_ref()
+        .is_some_and(|(state, _)| state == "live");
+    let adopted = source_state.as_ref().is_some_and(|(state, reason)| {
+        state == "tombstone" && reason.as_deref() == Some("producer_reference_adopted")
+    });
+    if !live && !adopted {
+        return Err(StoreError::EvidenceUnavailable(
+            "référence candidate non vivante".to_owned(),
+        ));
+    }
+    let mut statement=tx.prepare("SELECT reference_id,object_hash,state FROM object_references WHERE owner_kind=?1 AND owner_id=?2 AND source_field=?3")?;
+    let existing = statement
+        .query_map(
+            rusqlite::params![request.owner_kind, request.owner_id, request.source_field],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            },
+        )?
+        .collect::<Result<Vec<_>, _>>()?;
+    let reference_id = match existing.as_slice() {
+        [] if live => {
+            let reference = ids.new_uuid().to_string();
+            tx.execute("INSERT INTO object_references(reference_id,object_hash,owner_kind,owner_id,source_field,state,tombstone_reason) VALUES(?1,?2,?3,?4,?5,'live',NULL)",rusqlite::params![reference,request.object_hash.to_string(),request.owner_kind,request.owner_id,request.source_field])?;
+            reference
+        }
+        [(reference, hash, state)]
+            if hash.as_str() == request.object_hash.as_prefixed_str().as_str()
+                && state == "live" =>
+        {
+            reference.clone()
+        }
+        _ => {
+            return Err(StoreError::EvidenceUnavailable(
+                "référence cible déjà attribuée ou purgée".to_owned(),
+            ));
+        }
+    };
+    if live && tx_retire_owned_reference(tx, source, authority, "producer_reference_adopted")? != 1
+    {
+        return Err(StoreError::EvidenceUnavailable(
+            "référence candidate perdue pendant adoption".to_owned(),
+        ));
+    }
+    Ok(PublishedObjectReference {
+        reference_id,
+        object_hash: request.object_hash,
+        object_generation: source.object_generation,
+        owner_kind: request.owner_kind.to_owned(),
+        owner_id: request.owner_id.to_owned(),
+        source_field: request.source_field.to_owned(),
+        authority_generation: authority,
+    })
+}
+
 /// Acquiert un pin de lecture sur un objet `live`.
 pub(crate) fn tx_acquire_read_pin(
     tx: &Transaction<'_>,

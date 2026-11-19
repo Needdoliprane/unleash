@@ -1104,6 +1104,11 @@ async fn handle_command_frame(
                     cmd.clone(),
                 )
                 .await
+            } else if cmd.payload.get("phase").and_then(serde_json::Value::as_str)
+                == Some("connect")
+            {
+                crate::provider_probe_connect_service::commit(state, session.clone(), cmd.clone())
+                    .await
             } else {
                 crate::provider_profile_validation_service::commit(
                     Arc::clone(&state.store),
