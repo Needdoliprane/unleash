@@ -127,6 +127,7 @@ fn openssl(command: &mut Command) -> Result<(), Box<dyn Error>> {
 pub(crate) struct TlsFixture {
     _dir: tempfile::TempDir,
     pub(crate) ca: reqwest::Certificate,
+    pub(crate) ca_der: Vec<u8>,
     pub(crate) server: Arc<ServerConfig>,
 }
 
@@ -137,6 +138,7 @@ impl TlsFixture {
         let root = dir.path();
         let ca_key = root.join("ca.key");
         let ca_pem = root.join("ca.pem");
+        let ca_der = root.join("ca.der");
         let server_key = root.join("server.key");
         let server_csr = root.join("server.csr");
         let server_pem = root.join("server.pem");
@@ -195,6 +197,13 @@ impl TlsFixture {
                 .args(["-outform", "DER", "-out"])
                 .arg(&key_der),
         )?;
+        openssl(
+            Command::new("/usr/bin/openssl")
+                .args(["x509", "-in"])
+                .arg(&ca_pem)
+                .args(["-outform", "DER", "-out"])
+                .arg(&ca_der),
+        )?;
         let ca = reqwest::Certificate::from_pem(&fs::read(ca_pem)?)?;
         let cert = CertificateDer::from(fs::read(cert_der)?);
         let key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(fs::read(key_der)?));
@@ -205,6 +214,7 @@ impl TlsFixture {
         Ok(Self {
             _dir: dir,
             ca,
+            ca_der: fs::read(ca_der)?,
             server: Arc::new(server),
         })
     }

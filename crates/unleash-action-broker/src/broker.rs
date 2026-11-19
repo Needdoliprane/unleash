@@ -3239,6 +3239,17 @@ impl ActionBroker {
         self.lock_state().actions.get(&action_id).map(|r| r.state)
     }
 
+    /// Reports whether the immutable intention contains any secret reference.
+    /// Callers that forbid secret access must reject an unknown action as well.
+    /// This read grants no execution authority and replaces no dispatch checks.
+    #[must_use]
+    pub fn action_has_secret_refs(&self, action_id: ActionId) -> Option<bool> {
+        self.lock_state()
+            .actions
+            .get(&action_id)
+            .map(|record| !record.intent.secret_refs.is_empty())
+    }
+
     /// Retourne une copie des événements d'audit émis (déjà expurgés des canaris configurés).
     #[must_use]
     pub fn audit_events(&self) -> Vec<BrokerAuditEvent> {

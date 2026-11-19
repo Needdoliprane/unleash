@@ -33,6 +33,12 @@ use unleash_protocol::{
 };
 use uuid::Uuid;
 
+pub mod configuration;
+pub mod terminal;
+
+use configuration::{ConfigurationArgs, ConfigurationTarget};
+use terminal::ProcessCommand;
+
 static UUID_COUNTER: AtomicU64 = AtomicU64::new(1);
 
 /// Erreur typée retournée par les commandes de la CLI Unleash.
@@ -59,6 +65,38 @@ pub enum CliError {
         /// Lignée épinglée avant l'envoi.
         authority_generation: AuthorityGeneration,
         /// Erreur retournée lors de l'envoi ou de la lecture du reçu.
+        source: Box<ClientError>,
+    },
+
+    /// Demande de terminal dont le client n'a pas obtenu le reçu.
+    #[error(
+        "Reçu indisponible pour le terminal {terminal_id} du projet {project_id}, commande {command_id}, lignée {authority_generation}. {source}"
+    )]
+    TerminalReceiptMissing {
+        /// Terminal visé par l'enveloppe.
+        terminal_id: Uuid,
+        /// Projet de la commande.
+        project_id: ProjectId,
+        /// Identifiant à utiliser pour retrouver le reçu.
+        command_id: CommandId,
+        /// Lignée épinglée avant l'envoi.
+        authority_generation: AuthorityGeneration,
+        /// Erreur de transport ou refus du daemon.
+        source: Box<ClientError>,
+    },
+
+    /// Mutation de configuration dont le reçu n'a pas été obtenu.
+    #[error(
+        "Reçu de configuration indisponible pour l’agrégat {aggregate_id}, commande {command_id}, lignée {authority_generation}. {source}"
+    )]
+    ConfigurationReceiptMissing {
+        /// Agrégat visé.
+        aggregate_id: Uuid,
+        /// Identifiant à utiliser pour inspecter le reçu.
+        command_id: CommandId,
+        /// Lignée épinglée avant l'envoi.
+        authority_generation: AuthorityGeneration,
+        /// Erreur du client ou issue inconnue retournée par le daemon.
         source: Box<ClientError>,
     },
 
@@ -129,6 +167,12 @@ pub enum Commands {
         /// Action sur les projets.
         #[command(subcommand)]
         action: ProjectCommand,
+    },
+    /// Demande le contrôle d'un terminal supervisé.
+    Process {
+        /// Action sur un terminal.
+        #[command(subcommand)]
+        action: ProcessCommand,
     },
     /// Rapport de récupération durable.
     Recovery,
@@ -213,6 +257,14 @@ pub enum ProjectCommand {
         /// Identifiant d'idempotence optionnel.
         #[arg(long)]
         command_id: Option<Uuid>,
+    },
+    /// Remplace la définition du projet par le contenu complet d'un fichier JSON.
+    Revise {
+        /// Identifiant du projet.
+        project_id: Uuid,
+        /// Fichier et révision de la définition à engager.
+        #[command(flatten)]
+        configuration: ConfigurationArgs,
     },
 }
 
@@ -388,6 +440,7 @@ pub async fn run_cli(cli: &Cli) -> Result<Value, CliError> {
         }
         Commands::Backup { action } => run_backup_command(&mut client, action).await,
         Commands::Project { action } => run_project_command(&mut client, action).await,
+        Commands::Process { action } => terminal::run_process_command(&mut client, action).await,
         Commands::Mission { action } => run_mission_command(&mut client, action).await,
         Commands::Daemon { action } => run_daemon_command(&mut client, action).await,
         Commands::Tui { .. } => Ok(json!({ "status": "exited" })),
@@ -499,6 +552,14 @@ async fn run_project_command(
             )
             .await?;
             Ok(json!({"watermark": resp.watermark, "result": resp.result}))
+        }
+        ProjectCommand::Revise {
+            project_id,
+            configuration,
+        } => {
+            configuration
+                .apply(client, ConfigurationTarget::Project(*project_id))
+                .await
         }
         ProjectCommand::Create {
             name,

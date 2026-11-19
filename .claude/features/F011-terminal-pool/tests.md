@@ -21,4 +21,6 @@ La voie de lancement de T-F011-003 vérifie l’identité d’un processus réel
 
 La lecture causale est testée après acquisition et après transfert sur le vrai daemon. Comparer la réponse typée à la preuve Store et au watermark du snapshot. Vérifier la lecture ordinaire du reçu, puis les refus sur autre acteur, référence étrangère, mauvais projet, ancien bail, forme invalide et ancienne preuve sans séquence native. Conserver le bail et le journal, et observer une réponse stable sur rejeu de lecture. La preuve de perte d’accusé de T-F011-005 exige encore l’écriture PTY réelle et le compteur d’effets.
 
+Le contrôle de forme de T-F011-005 couvre les charges de 1 et 65 536 octets, les valeurs 0 et 255, le projet obligatoire et les six champs fermés. Vérifier le refus des dépassements, du payload vide, des valeurs hors octet et des champs d’autorité ajoutés. Le banc du daemon vérifie séparément le rapprochement de l’agrégat, de la génération, du bail, du fence et de la séquence avec l’état réobservé.
+
 Les EV contiennent OS/version, gestionnaire de service, identités avant/après, commande normalisée, logs redigés, reservations et résultat. Le test ne déclare pas une sandbox complète ; il démontre exactement quels descendants ont été observés et arrêtés. Toute impossibilité sur un OS reste un blocage de qualification identifié.

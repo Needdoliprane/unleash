@@ -16,6 +16,8 @@ use thiserror::Error;
 pub mod anthropic;
 /// One-attempt Anthropic Messages HTTPS executor using the existing broker port.
 pub mod anthropic_transport;
+/// One-attempt loopback TCP/TLS component; no HTTP or provider qualification.
+pub mod connect_transport;
 /// Bounded, explicitly restricted OpenAI Responses SSE dialect.
 pub mod openai;
 /// One-attempt Responses executor for the action-broker port.
@@ -25,6 +27,8 @@ pub mod transport;
 mod anthropic_tests;
 #[cfg(test)]
 mod anthropic_transport_tests;
+#[cfg(test)]
+mod connect_transport_tests;
 #[cfg(test)]
 mod http_fixture_tests;
 #[cfg(test)]

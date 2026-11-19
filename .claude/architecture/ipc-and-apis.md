@@ -132,6 +132,8 @@ La supervision est représentée par des tâches déclarées sous allowed_bounde
 
 Les opérations terminal publiques sont celles de F011 : AcquireTerminal, SendTerminalInput, ResizeTerminal, ReadTerminalLog, ReleaseTerminal, StopProcess et ReconcileProcess. Les libellés de discussion antérieurs SpawnProcess, WriteTerminal et ReadProcessLog ne sont pas des alias wire acceptés. L’acquisition d’une ressource enregistrée suit un payload distinct de la création et conserve génération/lease/fence.
 
+`SendTerminalInput` suit le [contrat d’entrée binaire F011](../features/F011-terminal-pool/interfaces.md#entrée-binaire-du-terminal). Le projet et la cible exacts, le bail, le fence et la séquence sont explicites. Le tableau `payload_bytes` est borné à 65 536 octets. Le schéma valide la forme. Le writer vérifie la capacité active et la séquence avant tout effet.
+
 Pour rapports et reprise, les noms normatifs sont CreateReportSnapshot, GetReportSnapshot, RestoreBackup et InspectRecovery, conformes à F016/F018. RequestReport, GetReport, RestoreProfile et GetRecoveryState étaient des raccourcis de catalogue, remplacés avant implémentation ; aucun alias silencieux. Le flux d’activité utilise SubscribeEvents avec ses filtres ; GetActivitySnapshot demeure une projection de reprise. ExportBundle et ExportReport sont des commandes préparant un artefact ensuite lu par référence.
 
 La création/révision de projet, le redimensionnement PTY, la réconciliation et les décisions sur effets inconnus appartiennent au catalogue commun et aux parcours terminal. La réconciliation peut conserver OutcomeUnknown ; une décision humaine d’accepter le risque d’une nouvelle tentative n’invente pas une preuve de succès antérieur.

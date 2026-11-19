@@ -9,7 +9,7 @@ use std::process::ExitCode;
 
 use clap::Parser;
 use serde_json::json;
-use unleash_cli::{Cli, Commands, run_cli};
+use unleash_cli::{Cli, CliError, Commands, run_cli};
 
 #[tokio::main]
 async fn main() -> ExitCode {
@@ -28,7 +28,33 @@ async fn main() -> ExitCode {
         Err(err) => {
             let mut err_out = std::io::stderr().lock();
             if emit_json {
-                let payload = json!({ "error": err.to_string() });
+                let payload = match &err {
+                    CliError::TerminalReceiptMissing {
+                        terminal_id,
+                        project_id,
+                        command_id,
+                        authority_generation,
+                        ..
+                    } => json!({
+                        "error": err.to_string(),
+                        "project_id": project_id,
+                        "terminal_id": terminal_id,
+                        "command_id": command_id,
+                        "authority_generation": authority_generation,
+                    }),
+                    CliError::ConfigurationReceiptMissing {
+                        aggregate_id,
+                        command_id,
+                        authority_generation,
+                        ..
+                    } => json!({
+                        "error": err.to_string(),
+                        "aggregate_id": aggregate_id,
+                        "command_id": command_id,
+                        "authority_generation": authority_generation,
+                    }),
+                    _ => json!({ "error": err.to_string() }),
+                };
                 let _ = writeln!(err_out, "{payload}");
             } else {
                 let _ = writeln!(err_out, "{err}");
