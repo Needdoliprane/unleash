@@ -338,6 +338,54 @@ async fn t_f012_013_connect_rejects_secret_ref_before_broker_resolution() -> Tes
 }
 
 #[tokio::test]
+async fn t_f012_013_connect_rejects_unknown_action_or_different_request_before_dispatch()
+-> TestResult {
+    for different_request in [false, true] {
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let port = listener.local_addr()?.port();
+        let broker = ConnectHarness::new();
+        let authority = authority();
+        let original = request("http", "127.0.0.1", port, 1000)?;
+        let mut action = intent(&original, &broker, &authority)?;
+        let decision = authorize(&broker, action.clone(), &authority).await?;
+        let frozen = if different_request {
+            FrozenConnectRequest::new_loopback(
+                &format!("http://127.0.0.1:{port}/different/path"),
+                ProfileRef::new(
+                    "synthetic-profile",
+                    1,
+                    Sha256Digest::from_bytes(b"profile fixture"),
+                )?,
+                1000,
+            )?
+        } else {
+            action.action_id = ActionId::from_u128(999);
+            original
+        };
+        let resolver = Resolver::pinned(port);
+        let result = execute_fixture(
+            frozen,
+            broker.dispatch(&action, &decision, &authority),
+            FixtureOptions {
+                resolver: resolver.clone(),
+                ca_der: None,
+            },
+        )
+        .await;
+        assert!(matches!(result, Err(ConnectError::InvalidRequest)));
+        broker.secrets.assert_zero_secret_resolutions();
+        assert_eq!(broker.dispatches.load(Ordering::SeqCst), 0);
+        assert_eq!(resolver.calls.load(Ordering::SeqCst), 0);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), listener.accept())
+                .await
+                .is_err()
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test]
 async fn t_f012_013_connect_tcp_pins_one_resolution_and_sends_no_http() -> TestResult {
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let peer = listener.local_addr()?;

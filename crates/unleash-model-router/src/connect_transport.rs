@@ -541,6 +541,21 @@ async fn execute_inner(
     #[cfg(test)] fixture: Option<FixtureOptions>,
 ) -> Result<ConnectExecution, ConnectError> {
     let digest = request.payload_digest()?;
+    // The broker resolves references before invoking the executor. Reject them
+    // here, using the actual intention on this same broker and ActionId. That
+    // intention cannot be replaced by reevaluation; the full binding is checked
+    // again by the broker and by ConnectExecutor::bound.
+    if dispatch.broker.action_has_secret_refs(dispatch.action) != Some(false)
+        || !dispatch
+            .broker
+            .action_audit(dispatch.action)
+            .is_some_and(|audit| {
+                audit.payload_digest == digest
+                    && audit.decision_ref.as_ref() == Some(dispatch.decision)
+            })
+    {
+        return Err(ConnectError::InvalidRequest);
+    }
     let staged = Arc::new(Mutex::new(None));
     #[cfg(test)]
     let (resolver, ca_der) = fixture.map_or_else(
