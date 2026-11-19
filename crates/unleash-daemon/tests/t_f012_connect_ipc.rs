@@ -344,7 +344,7 @@ where
     }
 }
 
-fn assert_held_dispatch_before_socket(fixture: &ConnectFixture, probe: Uuid) {
+fn assert_held_dispatch_before_socket(fixture: &ConnectFixture, request: &CommandEnvelope) {
     // C4 blocks after the marker's commit and before its ACK authorizes any I/O.
     assert!(matches!(fixture.endpoint.accept(), Err(error) if error.kind()==ErrorKind::WouldBlock));
     let now = i64::try_from(
@@ -360,6 +360,12 @@ JOIN command_receipts c ON c.receipt_id=p.command_receipt_id
 JOIN broker_intents i ON json_extract(i.intent_json,'$.cause.kind')='command_receipt'
  AND json_extract(i.intent_json,'$.cause.receipt_id')=p.command_receipt_id
 JOIN actions a ON a.action_id=i.action_id
+JOIN provider_probe_transport_contexts context ON context.probe_id=p.probe_id
+ AND context.action_id=a.action_id AND context.receipt_id=c.receipt_id
+JOIN broker_phase_records authorizing ON authorizing.action_id=a.action_id
+ AND authorizing.phase_key='authorizing'
+JOIN events requested ON requested.event_id=authorizing.event_id
+ AND requested.event_type='ActionAuthorizationRequested'
 JOIN action_dispatches d ON d.action_id=a.action_id
 JOIN broker_phase_records dispatch ON dispatch.action_id=a.action_id AND dispatch.phase_key='dispatch'
 JOIN events dispatched ON dispatched.sequence=dispatch.event_sequence AND dispatched.event_type='ActionDispatchCommitted'
@@ -369,9 +375,20 @@ JOIN capacity_pools pool ON pool.pool_id=r.pool_id
 JOIN resource_leases l ON l.resource_kind='execution' AND l.resource_key='provider_probe:'||p.probe_id
 WHERE p.probe_id=?1 AND p.phase='connect' AND p.state IN ('admitted','running')
  AND c.command_type='TestProviderProfile' AND c.aggregate_id=p.probe_id
+ AND c.command_digest=?3 AND c.actor_id=context.actor_id
  AND c.authority_generation=p.authority_generation
+ AND context.context_digest=p.context_hash AND context.phase='connect'
+ AND context.principal_id=p.principal_id AND context.profile_version_ref=p.profile_version_ref
+ AND context.claim_state='claimed' AND context.claim_revision=1
+ AND context.claim_id IS NOT NULL AND context.claimed_at_ms<=requested.recorded_at_ms
+ AND context.authority_generation=p.authority_generation AND context.daemon_epoch=p.daemon_epoch
+ AND context.project_id IS a.project_id
  AND a.origin_kind='control_plane' AND a.control_principal_id=p.principal_id AND a.state='dispatching'
+ AND a.action_type='model.provider.connect' AND a.fence=0
  AND a.authority_generation=p.authority_generation AND a.daemon_epoch=p.daemon_epoch
+ AND json_extract(i.intent_json,'$.manifest.effects_class')='network_egress'
+ AND json_array_length(json_extract(i.intent_json,'$.manifest.secret_refs'))=0
+ AND json_extract(i.intent_json,'$.payload_digest')=json_extract(context.context_json,'$.request_digest')
  AND r.owner_type='provider_probe' AND r.owner_id=p.probe_id AND r.admission_class='work'
  AND r.amount=1 AND r.state='held' AND r.authority_generation=p.authority_generation AND r.daemon_epoch=p.daemon_epoch
  AND pool.pool_kind='execution' AND pool.scope_key='global' AND pool.unit='slot'
@@ -383,14 +400,16 @@ WHERE p.probe_id=?1 AND p.phase='connect' AND p.state IN ('admitted','running')
  AND EXISTS(SELECT 1 FROM events admitted WHERE admitted.aggregate_id=p.probe_id
   AND admitted.event_type='ProviderProbeAdmitted' AND admitted.stream_id=dispatched.stream_id
   AND admitted.sequence<dispatched.sequence
+  AND requested.sequence<admitted.sequence
   AND json_extract(admitted.payload_json,'$.reservation_id')=r.reservation_id
   AND json_extract(admitted.payload_json,'$.lease_id')=l.lease_id
   AND json_extract(admitted.payload_json,'$.fence')=p.fence)
-", rusqlite::params![probe.to_string(),now], |row|row.get(0)).unwrap();
+", rusqlite::params![request.aggregate_id.to_string(),now,unleash_protocol::compute_command_digest_v2(request).unwrap().to_string()], |row|row.get(0)).unwrap();
     assert_eq!(
         held, 1,
         "le dispatch exact exige la place held et la lease vivante du vrai probe"
     );
+    assert_no_model_or_secret_rows(fixture);
 }
 
 async fn assert_connect_observation(
@@ -459,6 +478,11 @@ fn assert_completed_probe_without_model(
         actions, 1,
         "le succès reste corrélé au reçu réel de la commande connect"
     );
+    assert_no_model_or_secret_rows(fixture);
+}
+
+fn assert_no_model_or_secret_rows(fixture: &ConnectFixture) {
+    let db = fixture.db();
     for table in [
         "agents",
         "invocations",
@@ -592,7 +616,7 @@ async fn t_f012_013_connect_active_mandate_uses_durable_dispatch_once() {
     let (capture, receipt) = {
         let mut pending = Box::pin(admin.send_command(&request));
         let early = wait_for_dispatch_or_reply(&fixture, &pause, &mut pending).await;
-        assert_held_dispatch_before_socket(&fixture, request.aggregate_id);
+        assert_held_dispatch_before_socket(&fixture, &request);
         let capture = capture_authorized_connect(&fixture);
         dispatch_guard.release();
         let receipt = if let Some(receipt) = early {
