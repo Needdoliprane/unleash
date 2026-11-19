@@ -177,7 +177,12 @@ fn t_f017_012_initial_policy_snapshot_rejects_wrong_fence_and_guard_without_port
         construct(wrong, Arc::new(Journal::default())),
         Err(ActionBrokerError::StaleFence { .. })
     ));
-    for guard_mode in [GuardMode::GuardRequired, GuardMode::GuardOptional] {
+    for guard_mode in [
+        GuardMode::GuardRequired,
+        GuardMode::GuardOptional {
+            fallback_policy_ref: "synthetic.fallback.v1".into(),
+        },
+    ] {
         let mut guarded = snapshot();
         guarded.guard_mode = guard_mode;
         assert!(matches!(
