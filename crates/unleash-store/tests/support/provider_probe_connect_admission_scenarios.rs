@@ -1,0 +1,570 @@
+//! SQLite admission oracle only. No TCP/TLS or provider executor is invoked.
+//! The privileged eligibility observer is explicitly synthetic; the product
+//! composition must supply its real preflight producer and existing scheduler.
+#![expect(
+    clippy::panic,
+    reason = "The exact ownership/admission variant is the oracle"
+)]
+
+use super::{
+    PRINCIPAL, PROFILE, caller, change, command, configure, connect, connect_intent, counts,
+    envelope, policy, prepare,
+};
+use serde_json::json;
+use std::collections::BTreeMap;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
+use unleash_domain::{
+    AccountId, ActionState, AuthorizationEvaluationId, DispatchId, MicrosAmount, PoolId,
+    ProviderProbeId, ReceiptId, Revision, Sha256Digest,
+};
+use unleash_protocol::{ProviderTestLimits, canonical_sha256, canonicalize_to_vec};
+use unleash_store::{
+    AdmissionDecision, AdmissionEligibilityObservation, AdmissionOutcome, AdmissionUnit,
+    AdmissionUrgency, AggregateKind, BrokerAuthorizationCause, BrokerAuthorizationDecision,
+    BrokerAuthorizationOutcome, BrokerEvaluation, BrokerExecutor, BrokerIntent, BrokerPhase,
+    BrokerPhaseRequest, BudgetScopeType, ClaimProviderProbeConnectRequest, CommandMutation,
+    CutpointObserver, ExecutionPoolParams, ExecutionPoolSettings, NoopCutpointObserver,
+    PrepareObjectRequest, ProviderProbeConnectClaim, ProviderProbeConnectClaimOutcome,
+    ProviderProbeConnectRecord, ProviderProbeMandateChange, ProviderProfilePreparation,
+    PublishObjectReferenceRequest, SettingsPatch, SettingsScopeKind, StoreConfig, StoreCutpoint,
+    StoreError, UnleashStore, WriteCriticality,
+};
+use unleash_testkit::local_test_dir;
+
+const OBSERVER: &str = "fixture:connect-admission-observer";
+
+struct LostDispatchAck(AtomicBool);
+
+impl CutpointObserver for LostDispatchAck {
+    fn hit(&self, point: StoreCutpoint) -> Result<(), StoreError> {
+        if point == StoreCutpoint::C4AfterBrokerDispatchCommit
+            && self.0.swap(false, Ordering::SeqCst)
+        {
+            return Err(StoreError::CutpointInjected {
+                cutpoint: "C4".into(),
+                message: "synthetic lost dispatch acknowledgement, no executor invoked".into(),
+            });
+        }
+        Ok(())
+    }
+}
+
+fn publish(store: &UnleashStore, document: &impl serde::Serialize) -> Sha256Digest {
+    let bytes = canonicalize_to_vec(document).unwrap();
+    let hash = Sha256Digest::from_bytes(&bytes);
+    let owner = store.config().id_generator.new_uuid().to_string();
+    let handle = store
+        .prepare_object(PrepareObjectRequest {
+            object_hash: hash,
+            byte_length: u64::try_from(bytes.len()).unwrap(),
+            media_type: "application/json".into(),
+            owner_kind: "connect_admission_fixture".into(),
+            owner_id: owner.clone(),
+        })
+        .unwrap();
+    store.write_prepared_object_bytes(&handle, &bytes).unwrap();
+    store
+        .publish_owned_object_reference(PublishObjectReferenceRequest {
+            pin_id: handle.pin_id,
+            object_hash: hash,
+            object_generation: handle.object_generation,
+            owner_kind: "connect_admission_fixture".into(),
+            owner_id: owner,
+            source_field: "observed_input".into(),
+        })
+        .unwrap();
+    hash
+}
+
+fn fixture(
+    observer: Arc<dyn CutpointObserver>,
+) -> (UnleashStore, impl std::fmt::Debug, ReceiptId, PoolId) {
+    let directory = local_test_dir("f012-connect-admission").unwrap();
+    let mut config = StoreConfig::new(directory.path());
+    config.cutpoints = observer;
+    let store = UnleashStore::open(config).unwrap();
+    store
+        .register_principal(PRINCIPAL, "user", caller().actor_id.as_str())
+        .unwrap();
+    store
+        .register_principal(OBSERVER, "system", OBSERVER)
+        .unwrap();
+    configure(&store);
+    let mut configuration = store
+        .resolve_provider_profile_snapshot(PROFILE, 1)
+        .unwrap()
+        .value
+        .unwrap()
+        .configuration;
+    configuration.profile_version = 2;
+    let mut payload = serde_json::to_value(&configuration.payload).unwrap();
+    payload["limits"]["max_inflight"] = json!(6);
+    payload["limits"]["connect_timeout_ms"] = json!(30_000);
+    configuration.payload = serde_json::from_value(payload).unwrap();
+    let hash = publish(&store, &configuration);
+    let mut wire = envelope(
+        &store,
+        200,
+        PROFILE,
+        "SetProviderProfile",
+        serde_json::to_value(&configuration.payload).unwrap(),
+    );
+    wire.expected_revision = Revision::new(1);
+    store
+        .commit_command(command(
+            wire,
+            AggregateKind::ProviderProfile,
+            CommandMutation::SetProviderProfile {
+                caller: caller(),
+                preparation: Box::new(ProviderProfilePreparation {
+                    configuration,
+                    content_object_hash: hash,
+                }),
+            },
+        ))
+        .unwrap();
+    let mut permission = change(&store);
+    if let ProviderProbeMandateChange::Issue(permission) = &mut permission {
+        permission.profile_version = 2;
+        permission.limits = ProviderTestLimits::new(30_000, 0, 0, MicrosAmount::ZERO);
+    }
+    let mandate = store
+        .commit_command(policy(&store, 201, 0, permission))
+        .unwrap()
+        .receipt()
+        .receipt_id;
+    let pool = store
+        .configure_execution_pool(ExecutionPoolParams::default())
+        .unwrap()
+        .pool_id;
+    (store, directory, mandate, pool)
+}
+
+struct ReadyProbe {
+    record: ProviderProbeConnectRecord,
+    intent: BrokerIntent,
+    evaluation: BrokerEvaluation,
+    claim: ProviderProbeConnectClaim,
+}
+
+fn ready(store: &UnleashStore, mandate: ReceiptId, id: u128) -> ReadyProbe {
+    let mut wire = connect(store, id, mandate);
+    wire.payload.insert("profile_version".into(), json!(2));
+    wire.payload.get_mut("limits").unwrap()["timeout_ms"] = json!(30_000);
+    let receipt = store
+        .commit_command(prepare(store, &wire))
+        .unwrap()
+        .receipt()
+        .clone();
+    let record = store
+        .inspect_provider_probe_connect_snapshot(ProviderProbeId::from_uuid(wire.aggregate_id))
+        .unwrap()
+        .value
+        .unwrap();
+    let request = ClaimProviderProbeConnectRequest {
+        envelope: wire,
+        caller: caller(),
+        receipt_id: receipt.receipt_id,
+        context_digest: record.context_digest,
+        control_fence: unleash_domain::LineageFence::new(
+            record.context.authority_generation,
+            record.context.daemon_epoch,
+            unleash_domain::Fence::ZERO,
+        ),
+    };
+    let ProviderProbeConnectClaimOutcome::FreshClaim(claim) =
+        store.claim_provider_probe_connect(request).unwrap()
+    else {
+        panic!("fresh fixture owner required");
+    };
+    let intent = connect_intent(&record);
+    let evaluation = BrokerEvaluation {
+        evaluation_id: AuthorizationEvaluationId::from_uuid(store.config().id_generator.new_uuid()),
+        previous_evaluation_id: None,
+    };
+    ReadyProbe {
+        record,
+        intent,
+        evaluation,
+        claim,
+    }
+}
+
+fn phase(ready: &ReadyProbe, revision: u64, phase: BrokerPhase) -> BrokerPhaseRequest {
+    BrokerPhaseRequest {
+        authority_generation: ready.intent.lineage_fence.authority_generation,
+        expected_revision: Revision::new(revision),
+        evaluation: ready.evaluation,
+        phase,
+    }
+}
+
+fn authorizing(store: &UnleashStore, ready: &ReadyProbe) {
+    store
+        .commit_broker_phase(phase(
+            ready,
+            0,
+            BrokerPhase::Authorizing {
+                intent: ready.intent.clone(),
+            },
+        ))
+        .unwrap();
+}
+
+fn observe_eligibility(store: &UnleashStore, ready: &ReadyProbe, pool: PoolId) {
+    let c = &ready.record.context;
+    let bytes = store
+        .read_verified_object_bytes(c.configuration_digest)
+        .unwrap();
+    assert_eq!(Sha256Digest::from_bytes(&bytes), c.configuration_digest);
+    let hash = publish(
+        store,
+        &json!({"schema_version":1,"provenance":"synthetic_sqlite_admission_observer","probe_id":c.probe_id,"receipt_id":c.receipt_id,"action_id":c.action_id,"context_digest":ready.record.context_digest,"claim_id":ready.claim.claim_id(),"configuration_object_hash":c.configuration_digest,"policy_digest":c.policy_digest,"mandate_digest":c.mandate_digest,"transport_constraint":"loopback_only","phase":"connect"}),
+    );
+    let snapshot = store.execution_admission_snapshot(pool).unwrap();
+    let candidate = snapshot
+        .queued
+        .iter()
+        .find(|candidate| candidate.unit == AdmissionUnit::Probe(c.probe_id))
+        .unwrap();
+    store
+        .record_admission_eligibility(AdmissionEligibilityObservation {
+            evidence_id: store.config().id_generator.new_uuid(),
+            observer_principal_id: OBSERVER.into(),
+            object_hash: hash,
+            unit: candidate.unit,
+            unit_revision: candidate.revision,
+            source_revision: snapshot.source_revision,
+            authority_generation: snapshot.authority_generation,
+            daemon_epoch: snapshot.daemon_epoch,
+            valid_until: c.deadline,
+            urgency: AdmissionUrgency::Ordinary,
+        })
+        .unwrap();
+}
+
+fn admit(
+    store: &UnleashStore,
+    ready: &ReadyProbe,
+    pool: PoolId,
+) -> Result<AdmissionOutcome, StoreError> {
+    let snapshot = store.execution_admission_snapshot(pool)?;
+    let unit = AdmissionUnit::Probe(ready.record.context.probe_id);
+    // A test proposal, not another product scheduling policy. The real daemon
+    // uses schedule_execution; this oracle exercises the same V008 writer/CAS.
+    store.commit_execution_admission(pool, snapshot.token, move |_| {
+        Ok(AdmissionDecision::Admit {
+            unit,
+            deficit_deltas: BTreeMap::from([(None, 0)]),
+            consecutive_controls: 0,
+            budgets: vec![],
+        })
+    })
+}
+
+fn assert_no_model(store: &UnleashStore) {
+    let values = counts(store);
+    assert_eq!(
+        &values[4..6],
+        &[0, 0],
+        "a transport probe has no ModelCall or manifest"
+    );
+    assert_eq!(
+        values[7], 0,
+        "this local passive phase invents no monetary reservation"
+    );
+}
+
+fn lease_rows(store: &UnleashStore) -> i64 {
+    store
+        .read_snapshot(|db, _| {
+            db.query_row("SELECT COUNT(*) FROM resource_leases", [], |row| row.get(0))
+                .map_err(StoreError::from)
+        })
+        .unwrap()
+}
+
+fn held_capacity(store: &UnleashStore) -> i64 {
+    store
+        .read_snapshot(|db, _| {
+            db.query_row(
+                "SELECT COUNT(*) FROM capacity_reservations WHERE state IN ('held','reconciling')",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(StoreError::from)
+        })
+        .unwrap()
+}
+
+#[test]
+fn t_f012_013_admission_current_claim_authorizing_then_real_v008_reservation() {
+    let (store, _directory, mandate, pool) = fixture(Arc::new(NoopCutpointObserver));
+    let ready = ready(&store, mandate, 300);
+    authorizing(&store, &ready);
+    assert_eq!(
+        counts(&store)[6],
+        0,
+        "Authorizing is not a capacity reservation"
+    );
+    observe_eligibility(&store, &ready, pool);
+    let AdmissionOutcome::Admitted(commit) = admit(&store, &ready, pool).unwrap() else {
+        panic!("the real V008 port must admit the eligible probe");
+    };
+    assert_eq!(
+        commit.unit,
+        AdmissionUnit::Probe(ready.record.context.probe_id)
+    );
+    assert!(commit.lease.fence.as_u64() > 0);
+    assert_eq!(
+        ready.intent.lineage_fence.fence,
+        unleash_domain::Fence::ZERO
+    );
+    let snapshot = store.execution_admission_snapshot(pool).unwrap();
+    assert_eq!(snapshot.active.len(), 1);
+    assert_no_model(&store);
+}
+
+#[test]
+fn t_f012_013_admission_scope_and_control_fence_are_rechecked_before_intention() {
+    for changed_scope in [false, true] {
+        let (store, _directory, mandate, _) = fixture(Arc::new(NoopCutpointObserver));
+        let mut ready = ready(&store, mandate, 301);
+        if changed_scope {
+            let patch = SettingsPatch {
+                execution_pool: Some(ExecutionPoolSettings {
+                    max_active_executions: 4,
+                    ..ExecutionPoolSettings::default()
+                }),
+                ..SettingsPatch::default()
+            };
+            let wire = envelope(
+                &store,
+                302,
+                store.active_authority_generation().unwrap().as_uuid(),
+                "SetSettings",
+                json!({"scope_kind":"user","scope_id":"default","patch":patch}),
+            );
+            store
+                .commit_command(command(
+                    wire,
+                    AggregateKind::Settings,
+                    CommandMutation::SetSettings {
+                        scope_kind: SettingsScopeKind::User,
+                        scope_id: "default".into(),
+                        caller: caller(),
+                        patch,
+                    },
+                ))
+                .unwrap();
+        } else {
+            ready.intent.lineage_fence.fence = unleash_domain::Fence::new(1);
+            ready
+                .intent
+                .manifest
+                .insert("lineage_fence".into(), json!(ready.intent.lineage_fence));
+            ready.intent.intent_digest = canonical_sha256(&ready.intent.manifest).unwrap();
+        }
+        let before = counts(&store);
+        assert!(matches!(
+            store.commit_broker_phase(phase(
+                &ready,
+                0,
+                BrokerPhase::Authorizing {
+                    intent: ready.intent.clone()
+                }
+            )),
+            Err(StoreError::StaleFence { .. })
+        ));
+        assert_eq!(counts(&store), before);
+    }
+}
+
+#[test]
+fn t_f012_013_admission_destination_is_exact_not_just_any_loopback() {
+    let (store, _directory, mandate, _) = fixture(Arc::new(NoopCutpointObserver));
+    let ready = ready(&store, mandate, 303);
+    let before = counts(&store);
+    for (host, port) in [("127.0.0.2", 1234), ("127.0.0.1", 1235)] {
+        let mut intent = ready.intent.clone();
+        intent.manifest.insert("resource_refs".into(), json!([{"kind":"network_endpoint","host":host,"port":port,"is_private_or_loopback":true}]));
+        intent.intent_digest = canonical_sha256(&intent.manifest).unwrap();
+        assert!(matches!(
+            store.commit_broker_phase(phase(&ready, 0, BrokerPhase::Authorizing { intent })),
+            Err(StoreError::InvalidArgument { .. })
+        ));
+        assert_eq!(counts(&store), before);
+    }
+}
+
+#[test]
+fn t_f012_013_admission_global_five_and_sixth_waits_without_a_hidden_place() {
+    let (store, _directory, mandate, pool) = fixture(Arc::new(NoopCutpointObserver));
+    for id in 310..315 {
+        let ready = ready(&store, mandate, id);
+        authorizing(&store, &ready);
+        observe_eligibility(&store, &ready, pool);
+        assert!(matches!(
+            admit(&store, &ready, pool),
+            Ok(AdmissionOutcome::Admitted(_))
+        ));
+    }
+    let sixth = ready(&store, mandate, 315);
+    authorizing(&store, &sixth);
+    observe_eligibility(&store, &sixth, pool);
+    let before = counts(&store);
+    let leases = lease_rows(&store);
+    let fairness = store.execution_admission_snapshot(pool).unwrap().fairness;
+    assert!(matches!(
+        admit(&store, &sixth, pool),
+        Err(StoreError::CapacityBlocked(_))
+    ));
+    assert_eq!(
+        counts(&store),
+        before,
+        "the rejected sixth proposal leaves no lease or fairness delta"
+    );
+    assert_eq!(
+        store
+            .execution_admission_snapshot(pool)
+            .unwrap()
+            .active
+            .len(),
+        5
+    );
+    assert_eq!(lease_rows(&store), leases);
+    assert_eq!(
+        store.execution_admission_snapshot(pool).unwrap().fairness,
+        fairness
+    );
+    assert_eq!(held_capacity(&store), 5);
+    assert_no_model(&store);
+}
+
+fn authorize(store: &UnleashStore, ready: &ReadyProbe) -> BrokerAuthorizationDecision {
+    let c = &ready.record.context;
+    let decision = BrokerAuthorizationDecision {
+        action_id: c.action_id,
+        evaluation_id: ready.evaluation.evaluation_id,
+        source_evaluation_id: None,
+        decision_ref: format!("synthetic-sqlite-decision:{}", c.action_id),
+        policy_revision: c.policy_revision,
+        scope_revision: c.scope_revision,
+        payload_digest: c.request_digest,
+        expiry: Some(c.deadline),
+        applied_obligations: vec![],
+        fallback_policy_ref: None,
+        from_cache: false,
+        executor: BrokerExecutor::Unleash,
+    };
+    store
+        .commit_broker_phase(phase(
+            ready,
+            1,
+            BrokerPhase::Authorization {
+                action_id: c.action_id,
+                intent_digest: ready.intent.intent_digest,
+                outcome: BrokerAuthorizationOutcome::Authorized {
+                    decision: decision.clone(),
+                },
+                cause: BrokerAuthorizationCause::Evaluation,
+            },
+        ))
+        .unwrap();
+    decision
+}
+
+#[test]
+fn t_f012_013_admission_c4_uncertainty_and_restart_keep_the_real_reservation() {
+    let lost = Arc::new(LostDispatchAck(AtomicBool::new(false)));
+    let (store, _directory, mandate, pool) = fixture(lost.clone());
+    let ready = ready(&store, mandate, 320);
+    authorizing(&store, &ready);
+    observe_eligibility(&store, &ready, pool);
+    assert!(matches!(
+        admit(&store, &ready, pool),
+        Ok(AdmissionOutcome::Admitted(_))
+    ));
+    let decision = authorize(&store, &ready);
+    let dispatch = phase(
+        &ready,
+        2,
+        BrokerPhase::Dispatch {
+            action_id: ready.intent.action_id,
+            intent_digest: ready.intent.intent_digest,
+            decision,
+            dispatch_id: DispatchId::from_uuid(store.config().id_generator.new_uuid()),
+            fence: ready.intent.lineage_fence,
+        },
+    );
+    lost.0.store(true, Ordering::SeqCst);
+    assert!(matches!(
+        store.commit_broker_phase(dispatch.clone()),
+        Err(StoreError::CutpointInjected { .. })
+    ));
+    assert_eq!(counts(&store)[6], 1);
+    assert_eq!(held_capacity(&store), 1);
+    let store = store.restart_same_lineage().unwrap();
+    assert!(
+        store
+            .reconcile_recovered_actions_after_restart()
+            .unwrap()
+            .contains(&ready.intent.action_id)
+    );
+    assert_eq!(
+        store
+            .inspect_broker_action(ready.intent.action_id)
+            .unwrap()
+            .unwrap()
+            .state,
+        ActionState::OutcomeUnknown
+    );
+    assert_eq!(
+        store
+            .execution_admission_snapshot(pool)
+            .unwrap()
+            .active
+            .len(),
+        1
+    );
+    assert_eq!(counts(&store)[6], 1, "unknown is not capacity release");
+    assert_eq!(held_capacity(&store), 1);
+    assert!(
+        store.commit_broker_phase(dispatch).is_err(),
+        "the durable marker never authorizes a second effect"
+    );
+    assert_no_model(&store);
+}
+
+#[test]
+fn t_f012_013_admission_local_no_price_still_observes_applicable_overrun() {
+    let (store, _directory, mandate, pool) = fixture(Arc::new(NoopCutpointObserver));
+    let ready = ready(&store, mandate, 330);
+    authorizing(&store, &ready);
+    let account = AccountId::from_u128(330);
+    store
+        .upsert_budget_account(
+            account,
+            BudgetScopeType::Global,
+            "global",
+            "USD",
+            MicrosAmount::new(10),
+        )
+        .unwrap();
+    // Explicit synthetic existing usage, not a claim of observed provider usage.
+    store.execute_in_writer_tx(WriteCriticality::Critical, move |tx,_| {
+        tx.execute("UPDATE budget_accounts SET spent_micros=11,revision=revision+1 WHERE account_id=?1", [account.to_string()])?;
+        Ok(())
+    }).unwrap();
+    observe_eligibility(&store, &ready, pool);
+    let before = counts(&store);
+    assert!(matches!(
+        admit(&store, &ready, pool),
+        Err(StoreError::BudgetExhausted { .. })
+    ));
+    assert_eq!(counts(&store), before);
+    assert_no_model(&store);
+}
