@@ -9,7 +9,7 @@ use crate::config::{CutpointObserver, StoreCutpoint};
 use crate::error::StoreError;
 
 /// Version courante maximale du schéma gérée par cette version de `unleash-store`.
-pub const CURRENT_SCHEMA_VERSION: i64 = 14;
+pub const CURRENT_SCHEMA_VERSION: i64 = 15;
 
 /// État persisté d'une migration dans `schema_migrations`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -138,6 +138,11 @@ const MIGRATIONS: &[MigrationDef] = &[
         version: 14,
         name: "v014_terminal_input_intentions",
         sql: V014_SQL,
+    },
+    MigrationDef {
+        version: 15,
+        name: "v015_provider_probe_transport_contexts",
+        sql: crate::provider_probe_connect::SCHEMA_SQL,
     },
 ];
 

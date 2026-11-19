@@ -342,6 +342,27 @@ fn t_f012_013_connect_mandate_owner_profile_and_phase_are_exact() {
 }
 
 #[test]
+fn t_f012_013_connect_caller_cannot_be_replaced_by_request_metadata() {
+    let (store, _directory, mandate, _) = fixture();
+    let wire = connect(&store, 17, mandate);
+    let request = prepare(&store, &wire);
+    let before = counts(&store);
+    let mut forged_actor = request;
+    forged_actor.actor_id = ActorId::new("user:connect-other").unwrap();
+    assert!(matches!(
+        store.commit_command(forged_actor),
+        Err(StoreError::InvalidArgument { .. })
+    ));
+    let mut forged_ref = wire;
+    forged_ref.actor_ref = Some("user:connect-other".to_owned());
+    assert!(matches!(
+        store.prepare_provider_probe_connect(&forged_ref, &caller()),
+        Err(StoreError::InvalidArgument { .. })
+    ));
+    assert_eq!(counts(&store), before);
+}
+
+#[test]
 fn t_f012_013_connect_c1_rolls_back_receipt_context_and_outbox() {
     let (store, _directory, mandate, failure) = fixture();
     let request = prepare(&store, &connect(&store, 12, mandate));
