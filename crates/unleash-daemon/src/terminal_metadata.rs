@@ -41,12 +41,17 @@ pub(crate) fn read_terminal_metadata(
         FROM terminal_sessions s
         JOIN processes p ON p.process_id=s.process_id
         JOIN terminal_allocations a ON a.terminal_id=s.terminal_id AND a.process_id=p.process_id AND a.process_run_uuid=p.process_run_uuid AND a.action_id=p.action_id
+        JOIN actions launch ON launch.action_id=a.action_id AND launch.origin_kind='control_plane' AND launch.control_principal_id=a.principal_id AND launch.action_type='terminal.acquire' AND launch.state='observed_success' AND launch.authority_generation=json_extract(a.context_json,'$.authority_generation') AND launch.payload_hash=a.context_digest
         JOIN principals owner ON owner.principal_id=a.principal_id
         JOIN resource_leases l ON l.lease_id=s.lease_id
+        JOIN resource_leases initial_lease ON initial_lease.lease_id=a.lease_id AND initial_lease.resource_kind='terminal'
         JOIN daemon_state d ON d.singleton=1
         JOIN capacity_reservations cap ON cap.reservation_id=json_extract(a.context_json,'$.pty_reservation_id') AND cap.owner_type='terminal' AND cap.owner_id=s.terminal_id AND cap.amount=1
         JOIN capacity_pools pool ON pool.pool_id=cap.pool_id AND pool.pool_id=?4 AND pool.pool_kind='pty' AND pool.scope_key='global' AND pool.hard_limit<=50
         WHERE p.authority_generation=d.authority_generation AND p.boot_identity=d.boot_identity AND p.owner_uid=d.owner_uid
+        AND p.pid>0 AND p.pgid>0 AND length(trim(p.start_identity))>0 AND p.identity_backend IN ('macos_proc_pidinfo','linux_procfs')
+        AND l.authority_generation=d.authority_generation AND l.boot_identity=d.boot_identity AND l.resource_kind='terminal' AND l.resource_key=initial_lease.resource_key
+        AND l.owner_type='principal' AND l.owner_id=a.principal_id AND l.state IN ('held','suspect','reconciling')
         AND p.state IN ('live','suspect') AND s.state IN ('ready','busy','detached','suspect')
         AND cap.authority_generation=d.authority_generation AND cap.state IN ('held','reconciling')
         AND owner.actor_id=?1 AND owner.principal_kind='user' AND owner.state='active' AND json_extract(a.context_json,'$.actor_id')=?1

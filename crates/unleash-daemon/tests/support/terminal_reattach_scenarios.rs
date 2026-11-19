@@ -139,6 +139,9 @@ impl LiveFixture {
     }
     async fn restart_daemon_only(&mut self) {
         self.daemon.kill_for_restart();
+        self.start_successor().await;
+    }
+    async fn start_successor(&mut self) {
         let next = FixtureDaemon::spawn(self.data.path(), self.rendezvous.path());
         next.readiness();
         self.daemon = next;
@@ -318,4 +321,40 @@ async fn t_f011_003_successor_reads_control_revision_without_taking_control() {
         std::fs::read_to_string(fixture.project_root.path().join("worker-starts")).unwrap(),
         "started\n"
     );
+}
+
+#[tokio::test]
+async fn t_f011_003_snapshot_hides_incomplete_identity_without_contacting_host() {
+    for injection in [
+        "UPDATE processes SET pid=NULL",
+        "UPDATE processes SET start_identity=NULL",
+        "UPDATE actions SET action_type='different-effect'",
+        "UPDATE resource_leases SET owner_id='foreign-controller'",
+        "UPDATE resource_leases SET boot_identity='foreign-boot'",
+    ] {
+        let mut fixture = LiveFixture::new(true).await;
+        fixture.start_terminal().await;
+        let before = fixture.host_manifest();
+        fixture.daemon.kill_for_restart();
+        // No daemon writer is alive while injecting this incomplete/foreign
+        // historical registration after a genuine observed launch.
+        {
+            let connection =
+                rusqlite::Connection::open(fixture.data.path().join("unleash-authority.db"))
+                    .unwrap();
+            assert_eq!(connection.execute(injection, []).unwrap(), 1);
+        }
+        fixture.start_successor().await;
+        assert!(
+            fixture.snapshot().await["terminals"]["items"]
+                .as_array()
+                .unwrap()
+                .is_empty(),
+            "inadmissible registration is excluded: {injection}"
+        );
+        let after = fixture.host_manifest();
+        assert_eq!(after.daemon_epoch, before.daemon_epoch);
+        assert_eq!(after.highest_fence, before.highest_fence);
+        assert_eq!(after.process_run_uuid, before.process_run_uuid);
+    }
 }
