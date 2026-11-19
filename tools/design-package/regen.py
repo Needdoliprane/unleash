@@ -23,8 +23,9 @@ def main():
     mpath = claude / "catalog/package-manifest.json"
     man = load_manifest(claude)
     prefixes = man.setdefault("excluded_prefixes", [])
-    if "evidence/" not in prefixes:
-        prefixes.append("evidence/")
+    for runtime_prefix in ("evidence/", "cache/"):
+        if runtime_prefix not in prefixes:
+            prefixes.append(runtime_prefix)
     entries = []
     for rel in package_files(claude, man):
         data = (claude / rel).read_bytes()

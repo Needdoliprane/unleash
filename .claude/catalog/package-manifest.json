@@ -10,10 +10,11 @@
   "excluded_prefixes": [
     "state/",
     "worktrees/",
-    "evidence/"
+    "evidence/",
+    "cache/"
   ],
   "hash_algorithm": "sha256",
-  "source_tree_digest": "e842cfa56c9bcfe074e43d459be0b420fb2b029ec34bbebab54a66d029d5ffcb",
+  "source_tree_digest": "0d45a7ff0a006b3b383af288f6c230cee2264e17cf17cce263a9a126b1b5ebcf",
   "files": [
     {
       "path": "INDEX.md",
@@ -347,8 +348,8 @@
     },
     {
       "path": "architecture/ipc-and-apis.md",
-      "sha256": "92d1eb9ff65b9b19acb304cc595885c5678b4dc940f128c45c383da7b2ba7e95",
-      "bytes": 31348,
+      "sha256": "76c4545c4b0f36862d5ce50a3493c2f61cd9a74820a1c0affb566c87a5dfda4a",
+      "bytes": 31489,
       "media_type": "text/markdown"
     },
     {
@@ -395,8 +396,8 @@
     },
     {
       "path": "architecture/sqlite-design.md",
-      "sha256": "e1f44990401ed21faf936d91ed4be7b06ec6dea0ae89d62470e294046abeaa70",
-      "bytes": 64465,
+      "sha256": "91389642556adda9774bd4d200ec050623fd0a704702e7dba2c504963c5c2a0e",
+      "bytes": 66158,
       "media_type": "text/markdown"
     },
     {
@@ -988,6 +989,12 @@
       "media_type": "application/json"
     },
     {
+      "path": "examples/ipc-set-policy-probe-mandate.json",
+      "sha256": "111b4390c53e3605f6b27cba6cd233ca0da124ac0a0c16b6aaed6daae2c11a7e",
+      "bytes": 1047,
+      "media_type": "application/json"
+    },
+    {
       "path": "examples/leader-role.json",
       "sha256": "4be15a1b1cb4dd4faa284e10b57aaed186cdd2e2f85ed00bdd1b7360bb8a9221",
       "bytes": 1916,
@@ -1529,8 +1536,8 @@
     },
     {
       "path": "features/F012-model-api-router/interfaces.md",
-      "sha256": "fcb565e2e466338eabc452949d209998b96d229434918469c13bf36659508466",
-      "bytes": 27201,
+      "sha256": "1fd467d2698212871127404eb1e5c834f0ee59d866e1296f2c01d4d4075b0c32",
+      "bytes": 28503,
       "media_type": "text/markdown"
     },
     {
@@ -1547,8 +1554,8 @@
     },
     {
       "path": "features/F012-model-api-router/tests.md",
-      "sha256": "1bca0276177fb484c5fe580ff30c356e97939fb4ff465dcbf31a7c5590ec1ec7",
-      "bytes": 11351,
+      "sha256": "12e176e9d0479e503ede656c13a29db5594207a9c74344d74c4cb03860499b1a",
+      "bytes": 11673,
       "media_type": "text/markdown"
     },
     {
@@ -1739,8 +1746,8 @@
     },
     {
       "path": "features/F017-ai-guard-integration/interfaces.md",
-      "sha256": "1be80fece72d593150416056ea0697eab4ca945416d7d3f328e1ac1dbcbaac92",
-      "bytes": 6649,
+      "sha256": "4d48956eba03414eb9f84a1e8c3883b124894c2e34a36fc9d3f97edd5ebabb0b",
+      "bytes": 9812,
       "media_type": "text/markdown"
     },
     {
@@ -1757,8 +1764,8 @@
     },
     {
       "path": "features/F017-ai-guard-integration/tests.md",
-      "sha256": "832a90407256ec6c68059e8326c491f516cb23421e4c90c16e0186abf107b10d",
-      "bytes": 4309,
+      "sha256": "1749f87659d63b7dde7b2dfb0e69b7961a753d1bb36f488eb1d72024aac5434a",
+      "bytes": 4626,
       "media_type": "text/markdown"
     },
     {
@@ -1943,8 +1950,8 @@
     },
     {
       "path": "rules/design-dossier.md",
-      "sha256": "688c83fc7f3c187bc331d5ef3a35bfa0b765003cacc384054478bf349084857a",
-      "bytes": 2363,
+      "sha256": "b41f106d15eef4c23af4134f36c4e8ccf07ef9f9361d2dfd22070e8aaea520a9",
+      "bytes": 2395,
       "media_type": "text/markdown"
     },
     {
@@ -2015,8 +2022,8 @@
     },
     {
       "path": "schemas/design-package-manifest.schema.json",
-      "sha256": "1bb0ee70bb35189dd4f96c5f124389e3041621e5ba0b14f14ea66928d7ac45e3",
-      "bytes": 1888,
+      "sha256": "4e9dd328413176a1a8c7ec575e4112a1775e8784f46a54ca7824d4a2a8c6654e",
+      "bytes": 1976,
       "media_type": "application/json"
     },
     {
@@ -2057,8 +2064,8 @@
     },
     {
       "path": "schemas/ipc-command.schema.json",
-      "sha256": "5ff33428527f7e1fd9ac893fb33fb1a8ec53c8360811c7c3a1f1e612e5f13e12",
-      "bytes": 18473,
+      "sha256": "64cf9b97906288b12d37795eb4af5d0974c6eed0d64265929134ff812df02b26",
+      "bytes": 20829,
       "media_type": "application/json"
     },
     {

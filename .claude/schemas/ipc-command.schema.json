@@ -127,6 +127,71 @@
       "not": { "pattern": "[\\u0000-\\u001f\\u007f-\\u009f]" },
       "description": "Chaîne avec au moins un caractère hors White_Space Unicode et sans caractère de contrôle. Le décodeur applique la limite de 256 octets UTF-8."
     },
+    "probe_capabilities": {
+      "type": "array",
+      "maxItems": 64,
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/probe_reference" }
+    },
+    "probe_limits": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["timeout_ms", "max_calls", "max_output_tokens", "max_cost_usd_micros"],
+      "properties": {
+        "timeout_ms": { "$ref": "#/$defs/wire_unsigned_integer", "minimum": 1 },
+        "max_calls": { "$ref": "#/$defs/wire_unsigned_integer" },
+        "max_output_tokens": { "$ref": "#/$defs/wire_unsigned_integer" },
+        "max_cost_usd_micros": { "$ref": "#/$defs/wire_unsigned_integer" }
+      }
+    },
+    "provider_probe_mandate_change": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind", "principal_id", "profile_id", "profile_version", "phase", "locality",
+            "capability_set", "limits", "expires_at_ms"
+          ],
+          "properties": {
+            "kind": { "const": "issue" },
+            "principal_id": { "$ref": "#/$defs/probe_reference" },
+            "profile_id": { "type": "string", "format": "uuid" },
+            "profile_version": { "$ref": "#/$defs/wire_unsigned_integer", "minimum": 1 },
+            "phase": { "enum": ["connect", "inventory", "generation_probe"] },
+            "locality": { "enum": ["local_only", "approved_remote"] },
+            "capability_set": { "$ref": "#/$defs/probe_capabilities" },
+            "limits": { "$ref": "#/$defs/probe_limits" },
+            "expires_at_ms": { "$ref": "#/$defs/wire_unsigned_integer", "minimum": 1 }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "mandate_ref"],
+          "properties": {
+            "kind": { "const": "revoke" },
+            "mandate_ref": { "type": "string", "format": "uuid" }
+          }
+        }
+      ]
+    },
+    "set_policy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["scope_kind", "scope_id", "isolation_mode", "policy_version", "reason"],
+      "properties": {
+        "scope_kind": { "enum": ["global", "project"] },
+        "scope_id": { "type": "string" },
+        "isolation_mode": { "enum": ["standard", "strict"] },
+        "policy_version": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "reason": { "type": "string", "minLength": 1, "maxLength": 1024 },
+        "provider_probe_mandate": { "$ref": "#/$defs/provider_probe_mandate_change" }
+      },
+      "if": { "properties": { "scope_kind": { "const": "global" } } },
+      "then": { "properties": { "scope_id": { "const": "global" } } },
+      "else": { "properties": { "scope_id": { "format": "uuid" } } }
+    },
     "test_provider_profile": {
       "type": "object",
       "additionalProperties": false,
@@ -135,23 +200,8 @@
         "profile_id": { "$ref": "#/$defs/probe_reference" },
         "profile_version": { "$ref": "#/$defs/wire_unsigned_integer", "minimum": 1 },
         "phase": { "enum": ["validate_config", "connect", "inventory", "generation_probe"] },
-        "capability_set": {
-          "type": "array",
-          "maxItems": 64,
-          "uniqueItems": true,
-          "items": { "$ref": "#/$defs/probe_reference" }
-        },
-        "limits": {
-          "type": "object",
-          "additionalProperties": false,
-          "required": ["timeout_ms", "max_calls", "max_output_tokens", "max_cost_usd_micros"],
-          "properties": {
-            "timeout_ms": { "$ref": "#/$defs/wire_unsigned_integer", "minimum": 1 },
-            "max_calls": { "$ref": "#/$defs/wire_unsigned_integer" },
-            "max_output_tokens": { "$ref": "#/$defs/wire_unsigned_integer" },
-            "max_cost_usd_micros": { "$ref": "#/$defs/wire_unsigned_integer" }
-          }
-        },
+        "capability_set": { "$ref": "#/$defs/probe_capabilities" },
+        "limits": { "$ref": "#/$defs/probe_limits" },
         "locality": { "enum": ["local_only", "approved_remote"] },
         "mandate_ref": { "$ref": "#/$defs/probe_reference" }
       },
@@ -353,6 +403,10 @@
     }
   },
   "allOf": [
+    {
+      "if": { "properties": { "command_type": { "const": "SetPolicy" } } },
+      "then": { "properties": { "payload": { "$ref": "#/$defs/set_policy" } } }
+    },
     {
       "if": { "properties": { "command_type": { "const": "TestProviderProfile" } } },
       "then": { "properties": { "payload": { "$ref": "#/$defs/test_provider_profile" } } }
