@@ -416,10 +416,7 @@ fn t_f012_013_pre_dispatch_disposal_replays_after_release_and_rejects_other_fenc
     let retained = store
         .dispose_provider_probe_connect_without_dispatch(&ready.claim, &other)
         .unwrap_err();
-    assert_eq!(
-        retained.error_code(),
-        unleash_protocol::ErrorCode::EvidenceUnavailable
-    );
+    assert!(matches!(retained, StoreError::EvidenceUnavailable(_)));
     let replay = store
         .dispose_provider_probe_connect_without_dispatch(&ready.claim, &continuation)
         .unwrap();
@@ -448,7 +445,7 @@ fn purge_disposition_payload(
     clock: &ManualClock,
     committed: &unleash_store::ProviderConnectDispositionCommit,
 ) {
-    let sequence = committed.event_cursor.sequence.as_u64();
+    let sequence = i64::try_from(committed.event_cursor.sequence.as_u64()).unwrap();
     let before: String = store
         .read_snapshot(|conn, _| {
             Ok(conn.query_row(
