@@ -142,7 +142,7 @@ const MIGRATIONS: &[MigrationDef] = &[
     MigrationDef {
         version: 15,
         name: "v015_provider_probe_transport_contexts",
-        sql: crate::provider_probe_connect::SCHEMA_SQL,
+        sql: include_str!("migrations/v015_provider_probe_transport_contexts.sql"),
     },
 ];
 
