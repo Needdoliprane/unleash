@@ -40,6 +40,20 @@ async fn lookup(
         .map_err(|error| crate::error::store_error_to_ipc_error(&error, Some(id)))
 }
 
+fn unresolved_effect_mandate(command: &CommandEnvelope) -> IpcError {
+    // No qualified producer currently binds an active probe to a network mandate.
+    // A configuration receipt is a cause for local validation only. In particular,
+    // do not derive an empty or permissive authority from that receipt or from the
+    // caller's administrative capability, and do not prepare an effect intention.
+    IpcError::new(
+        ErrorCode::NotFoundOrHidden,
+        None,
+        "Mandat d'effet fournisseur introuvable",
+        RetryClass::Never,
+    )
+    .with_command_id(command.command_id)
+}
+
 /// Rejoue avant tout accès aux octets et utilise le pipeline commun pour la mutation.
 pub(crate) async fn commit(
     store: Arc<UnleashStore>,
@@ -62,6 +76,9 @@ pub(crate) async fn commit(
         )
         .with_command_id(command.command_id)
     })?;
+    if payload.phase() == ProviderTestPhase::Connect {
+        return Err(unresolved_effect_mandate(&command));
+    }
     if payload.phase() != ProviderTestPhase::ValidateConfig {
         return Err(IpcError::new(
             ErrorCode::InvalidArgument,
