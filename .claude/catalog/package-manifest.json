@@ -14,7 +14,7 @@
     "cache/"
   ],
   "hash_algorithm": "sha256",
-  "source_tree_digest": "0d45a7ff0a006b3b383af288f6c230cee2264e17cf17cce263a9a126b1b5ebcf",
+  "source_tree_digest": "d85218c033a22c52214ee290b0de95a4e2106d443a7d7cd2aeb77bef65342efa",
   "files": [
     {
       "path": "INDEX.md",
@@ -312,8 +312,8 @@
     },
     {
       "path": "architecture/client-operation-catalog.md",
-      "sha256": "4c40a680fb8e39f466f3a74b3ddbfd85ba7b2e5801aa5fbcfb9de3d1a7e71d59",
-      "bytes": 38762,
+      "sha256": "eb3aa4ac913acd47fdac4f072fbff59b68169d9b22d95c1ffb66fe0ed6ff3954",
+      "bytes": 38971,
       "media_type": "text/markdown"
     },
     {
@@ -348,8 +348,8 @@
     },
     {
       "path": "architecture/ipc-and-apis.md",
-      "sha256": "76c4545c4b0f36862d5ce50a3493c2f61cd9a74820a1c0affb566c87a5dfda4a",
-      "bytes": 31489,
+      "sha256": "0c7badeb2a781198110070b07ad3379e2b480dda844f7d1ade5e1f9f23639b3e",
+      "bytes": 32018,
       "media_type": "text/markdown"
     },
     {
@@ -1494,8 +1494,8 @@
     },
     {
       "path": "features/F011-terminal-pool/interfaces.md",
-      "sha256": "a5c21233bc67bba183ab42caf6b3071df455f15db51511719510dc0c87ee3dad",
-      "bytes": 11533,
+      "sha256": "64ac63b0f6999700664d94f49dfcc9240ce7b79ee32abd7732583a8a8c3e0151",
+      "bytes": 13729,
       "media_type": "text/markdown"
     },
     {
@@ -1512,8 +1512,8 @@
     },
     {
       "path": "features/F011-terminal-pool/tests.md",
-      "sha256": "cf52b1508a5271ab51f6052b4f19de4843632d53b7f3e9c3bfaca5eeaca3902c",
-      "bytes": 3516,
+      "sha256": "50c5bdf053058b51de2b8744a35976e5dc08fcf3fa7a23a22e6bb5b4b2858000",
+      "bytes": 4066,
       "media_type": "text/markdown"
     },
     {
@@ -1980,8 +1980,8 @@
     },
     {
       "path": "schemas/README.md",
-      "sha256": "f4177afb5438f444aba34502c9f33b6ac0ddcea9c4fca32a5efbb2b1e1956946",
-      "bytes": 6535,
+      "sha256": "a7a9e87505ef245baa706774edd430e82eda75deac844c0a7e3b342e1c29afcf",
+      "bytes": 6679,
       "media_type": "text/markdown"
     },
     {
@@ -2082,14 +2082,14 @@
     },
     {
       "path": "schemas/ipc-query-response.schema.json",
-      "sha256": "9ef2117c5d9f73ca462aa3be37130dab87699c5e3699f1bf588940506248ce71",
-      "bytes": 982,
+      "sha256": "a31be38f04b1f49125bedcff5f66c9eab04608894441177a9f5956bfd6047ad2",
+      "bytes": 3175,
       "media_type": "application/json"
     },
     {
       "path": "schemas/ipc-query.schema.json",
-      "sha256": "70750a3ad83bd20d5a567470e307e0605e6fdefa71f1e6b37362ee4514b1f478",
-      "bytes": 911,
+      "sha256": "6b67103dd272a237a3a154bbdf8ff91812e28e5e2d06ca637e67c1bb56afa203",
+      "bytes": 1830,
       "media_type": "application/json"
     },
     {
