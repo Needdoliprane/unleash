@@ -55,6 +55,7 @@ impl ConnectJournal {
             .ok_or(BrokerJournalError)?;
         // Subscribe before reading durable inputs; a wakeup is never permission.
         let mut changes = state.subscriptions.observe_internal();
+        let mut draining = state.drain_started_tx.subscribe();
         tokio::time::timeout(Duration::from_millis(remaining), async {
             loop {
                 if *state.drain_started_tx.borrow() {
@@ -132,7 +133,14 @@ impl ConnectJournal {
                 {
                     return Ok(());
                 }
-                changes.changed().await.map_err(|()| BrokerJournalError)?;
+                // The stop coordinator first waits for broker activity and only
+                // then publishes stop events. An outbox-only wait would keep
+                // this original owner alive until its deadline, blocking drain.
+                tokio::select! {
+                    biased;
+                    _=draining.changed()=>return Err(BrokerJournalError),
+                    changed=changes.changed()=>changed.map_err(|()|BrokerJournalError)?,
+                }
             }
         })
         .await
