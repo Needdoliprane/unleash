@@ -121,7 +121,7 @@ fd66815a76ace8b136778face8afcfd940d6b6d02d1f2dbe1c2a162d5ef3e666  .claude/brief/
 08e0a0152f290d07fa66453243218c404530afc1dcb92e9fc5d8e24aa366b6eb  .claude/catalog/README.md
 a87fbd5d995747bc222abdef47db8fb9c561b93c0ba0846c08ead13d1a1c6529  .claude/catalog/design-catalog.json
 8aca037c06eff8b169635c824e138bb274ead08d2b53697b9635d7fe8a7bfc28  .claude/catalog/operations.json
-b8cab82e8314106eb7463f087916e721478598a06c3ca34afb1a4e5e5b4a75b6  .claude/catalog/package-manifest.json
+5646adea112e247eaa832cd52c244070240cceb9cc288d3e90cecb44b1af1d9d  .claude/catalog/package-manifest.json
 dc670318f9a2834c72d589fa921567ab3c2da5a6777d6d348697fd54b643f60b  .claude/design/activity-timeline.md
 7e66e407555c2cd16175e2f26c9515ede0d802d8e2bc53b2675d3883dfbfa2a8  .claude/design/agent-tree-and-status.md
 1783877dac336d47efaae65896fdffc5d5ce84616c1c4cf9ed0e411cc39614c4  .claude/design/cli-tui-design.md
@@ -246,7 +246,7 @@ f33538055049b5438f4b330a8ff2f73966359a091f8e353f55f32fbea96111da  .claude/featur
 bf59eaa15d7376552e9b974fbaf4f7304e005e6a10c763015a3ebacf8ec11bd3  .claude/features/F011-terminal-pool/README.md
 a1c4ab1ab5adcdfca2cb885b0c38cdcedb55bf543e55e028308ecad266b6a2f5  .claude/features/F011-terminal-pool/acceptance.md
 2dc6f32dac6f7e1ed975b31267a14a21a4177da431db037edc77ed222c45e302  .claude/features/F011-terminal-pool/dependencies.md
-fa9e11664f0d9980bd093ab05f572efc8fc6a0da9353f7fb0a95769ee3e0777f  .claude/features/F011-terminal-pool/interfaces.md
+e702ca44e6663b1a16445347cefb8114f694f116df77f3d77d4eda675a831392  .claude/features/F011-terminal-pool/interfaces.md
 b85a03aa29a31be6b4b1bd2c71551c6eef762e124533f404db91c2ac698e0b4a  .claude/features/F011-terminal-pool/requirements.md
 73e761dbf3d5ade7b1b45d17974aefca2fdf03dd015bed648d8cf6a7603d2542  .claude/features/F011-terminal-pool/technical-design.md
 cf52b1508a5271ab51f6052b4f19de4843632d53b7f3e9c3bfaca5eeaca3902c  .claude/features/F011-terminal-pool/tests.md
@@ -341,7 +341,7 @@ b5ebfd04e59ce75b7cce2c1bebcb3b8da70a20fb7f1e04e10823b552a891e185  .claude/schema
 1a99cbe714a0483467439a131498ae30c9c3e4fae7cdcb3806b169cb5c09e1af  .claude/schemas/expected-execution-binding.schema.json
 aa92d205cdecb94568aba7dd81bc8aff146eb7fdcaed9a0c6c7ec8a72269927b  .claude/schemas/expected-test-execution.schema.json
 0917d3e7a88f6b6e6b47df46782306fed09c7dd7f9356d3beec01d88a5498e85  .claude/schemas/ipc-client-upload-segment.schema.json
-9f3ab20381270945386c2af02dbb17af90ebfcc7451f4c19a07b51b7256d4692  .claude/schemas/ipc-command.schema.json
+5ff33428527f7e1fd9ac893fb33fb1a8ec53c8360811c7c3a1f1e612e5f13e12  .claude/schemas/ipc-command.schema.json
 d3b118d24928142054b108194e3706e221f4d7f18b2b35d2574eca7aa6caaa5f  .claude/schemas/ipc-error.schema.json
 a63ee5b8b43d130fa67e86aeb165b95f84688784d7be5b3d586a095a55038929  .claude/schemas/ipc-hello.schema.json
 9ef2117c5d9f73ca462aa3be37130dab87699c5e3699f1bf588940506248ce71  .claude/schemas/ipc-query-response.schema.json

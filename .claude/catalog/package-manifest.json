@@ -13,7 +13,7 @@
     "evidence/"
   ],
   "hash_algorithm": "sha256",
-  "source_tree_digest": "a5509966d044be03b267dc1f477b8291cf707f24943e6d160fbadf01795a4c5a",
+  "source_tree_digest": "3d7719c836d7ecc316a3a25c88163906fe5844518334651ee2806f55694c8094",
   "files": [
     {
       "path": "INDEX.md",
@@ -1487,8 +1487,8 @@
     },
     {
       "path": "features/F011-terminal-pool/interfaces.md",
-      "sha256": "fa9e11664f0d9980bd093ab05f572efc8fc6a0da9353f7fb0a95769ee3e0777f",
-      "bytes": 9914,
+      "sha256": "e702ca44e6663b1a16445347cefb8114f694f116df77f3d77d4eda675a831392",
+      "bytes": 10774,
       "media_type": "text/markdown"
     },
     {
@@ -2057,8 +2057,8 @@
     },
     {
       "path": "schemas/ipc-command.schema.json",
-      "sha256": "9f3ab20381270945386c2af02dbb17af90ebfcc7451f4c19a07b51b7256d4692",
-      "bytes": 15520,
+      "sha256": "5ff33428527f7e1fd9ac893fb33fb1a8ec53c8360811c7c3a1f1e612e5f13e12",
+      "bytes": 18473,
       "media_type": "application/json"
     },
     {

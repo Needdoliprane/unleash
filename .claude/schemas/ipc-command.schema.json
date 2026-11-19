@@ -17,6 +17,60 @@
     "payload"
   ],
   "$defs": {
+    "registered_terminal_control": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["terminal_id", "process_run_uuid", "scope_revision", "control_mode"],
+      "properties": {
+        "terminal_id": { "type": "string", "format": "uuid" },
+        "process_run_uuid": { "type": "string", "format": "uuid" },
+        "scope_revision": { "$ref": "#/$defs/wire_unsigned_integer" },
+        "control_mode": { "const": "exclusive" }
+      }
+    },
+    "new_terminal_allocation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "mission_id", "purpose_key", "reuse_policy", "scope_id", "scope_revision", "cwd", "program",
+        "arguments", "environment_profile_id", "pty", "readiness"
+      ],
+      "properties": {
+        "mission_id": { "type": "string", "format": "uuid" },
+        "invocation_id": { "type": ["string", "null"], "format": "uuid" },
+        "purpose_key": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "reuse_policy": { "enum": ["reuse_compatible", "new_required"] },
+        "reuse_justification": { "type": "string", "maxLength": 256, "pattern": "\\S" },
+        "scope_id": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "scope_revision": { "$ref": "#/$defs/wire_unsigned_integer" },
+        "worktree_id": { "type": ["string", "null"], "format": "uuid" },
+        "cwd": { "type": "string", "minLength": 1 },
+        "program": { "type": "string", "minLength": 1 },
+        "arguments": { "type": "array", "items": { "type": "string" } },
+        "environment_profile_id": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "pty": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["rows", "cols"],
+          "properties": {
+            "rows": { "type": "integer", "minimum": 1, "maximum": 500 },
+            "cols": { "type": "integer", "minimum": 1, "maximum": 1000 }
+          }
+        },
+        "readiness": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "timeout_ms"],
+          "properties": {
+            "kind": { "type": "string", "minLength": 1, "maxLength": 64 },
+            "timeout_ms": { "$ref": "#/$defs/wire_unsigned_integer", "minimum": 1 }
+          }
+        }
+      },
+      "if": { "properties": { "reuse_policy": { "const": "new_required" } } },
+      "then": { "required": ["reuse_justification"] },
+      "else": { "not": { "required": ["reuse_justification"] } }
+    },
     "terminal_runtime_settings": {
       "type": "object",
       "additionalProperties": false,
@@ -306,6 +360,20 @@
     {
       "if": { "properties": { "command_type": { "const": "SetProviderProfile" } } },
       "then": { "properties": { "payload": { "$ref": "#/$defs/set_provider_profile" } } }
+    },
+    {
+      "if": { "properties": { "command_type": { "const": "AcquireTerminal" } } },
+      "then": {
+        "properties": {
+          "project_id": { "type": "string", "format": "uuid" },
+          "payload": {
+            "oneOf": [
+              { "$ref": "#/$defs/new_terminal_allocation" },
+              { "$ref": "#/$defs/registered_terminal_control" }
+            ]
+          }
+        }
+      }
     },
     {
       "if": {
