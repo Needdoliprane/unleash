@@ -1253,7 +1253,23 @@ async fn prepare_command_request(
         "PurgeHistory" => prepare_purge_history(session, cmd),
         "RequestBackup" => prepare_request_backup(session, cmd),
         "SetSettings" | "SetPolicy" | "ConfigureGuard" => {
-            prepare_admin_command(state, session, cmd)
+            let mut prepared = prepare_admin_command(state, session, cmd.clone())?;
+            if let Some(pins) = crate::terminal_service::prepare_configuration_objects(
+                state,
+                &session.actor_id,
+                &cmd,
+            )
+            .await?
+                && let CommandMutation::SetSettings { patch, .. } = &mut prepared.req.mutation
+            {
+                patch.extra_typed.get_or_insert_with(Map::new).insert(
+                    "__terminal_prepared".into(),
+                    serde_json::to_value(pins).map_err(|_| {
+                        internal_ipc_error("Terminal preparation serialization", Some(cid))
+                    })?,
+                );
+            }
+            Ok(prepared)
         }
         "AssignMission" => prepare_assign_mission(session, cmd),
         "PauseMission" | "ResumeMission" | "CancelMission" => {
@@ -1472,7 +1488,7 @@ fn has_only_keys(value: &Value, keys: &[&str]) -> bool {
         .is_some_and(|object| object.keys().all(|key| keys.contains(&key.as_str())))
 }
 
-fn strict_settings_patch(value: Value) -> Option<unleash_store::SettingsPatch> {
+fn strict_settings_patch(mut value: Value) -> Option<unleash_store::SettingsPatch> {
     if !has_only_keys(
         &value,
         &[
@@ -1480,6 +1496,7 @@ fn strict_settings_patch(value: Value) -> Option<unleash_store::SettingsPatch> {
             "retention_policy",
             "confirm_retention_shortening",
             "analyzer_paths",
+            "terminal_runtime",
         ],
     ) {
         return None;
@@ -1529,7 +1546,24 @@ fn strict_settings_patch(value: Value) -> Option<unleash_store::SettingsPatch> {
     {
         return None;
     }
-    serde_json::from_value(value).ok()
+    let terminal = value.as_object_mut()?.remove("terminal_runtime");
+    if terminal.is_some() {
+        value
+            .as_object_mut()?
+            .entry("confirm_retention_shortening")
+            .or_insert(Value::Bool(false));
+    }
+    let mut patch: unleash_store::SettingsPatch = serde_json::from_value(value).ok()?;
+    if let Some(raw) = terminal {
+        let typed: unleash_store::terminal_allocations::TerminalRuntimeSettings =
+            serde_json::from_value(raw).ok()?;
+        typed.validate().ok()?;
+        patch.extra_typed = Some(Map::from_iter([(
+            "terminal_runtime".into(),
+            serde_json::to_value(typed).ok()?,
+        )]));
+    }
+    Some(patch)
 }
 
 fn prepare_guard_mutation(

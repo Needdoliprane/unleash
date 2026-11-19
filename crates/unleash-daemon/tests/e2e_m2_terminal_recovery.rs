@@ -1,9 +1,8 @@
 // T-F011-003 / AC-F011-003 / REQ-TERM-003
 //! Product IPC regression: real `unleashd`, authenticated client and local fixtures.
 //!
-//! The first red exercises acquisition only. The environment-profile reference below is a
-//! documented-shaped fixture, not an attested runtime profile: the current product exposes no
-//! API to create one. Host recovery and input replay require that missing contract before use.
+//! Nominal acquisition is qualified separately from daemon crash and input recovery.
+//! Configuration must be accepted through the actual authenticated product entry.
 
 #![expect(
     clippy::unwrap_used,
@@ -110,6 +109,105 @@ fn command(
     }
 }
 
+fn terminal_configuration() -> Value {
+    json!({"schema_version":1,"profiles":[{"profile_id":"terminal-test","version":1,
+        "variables":{"LANG":"C","TERM":"xterm"}}],
+        "max_hosts":2,"max_processes":2,"max_ptys":2,"lease_ttl_ms":60000})
+}
+
+#[tokio::test]
+async fn t_f011_001_configuration_is_durable_idempotent_and_legacy_compatible() {
+    let data = local_test_dir("f011-settings-data").unwrap();
+    let rdv = local_test_dir("f011-settings-rdv").unwrap();
+    std::fs::set_permissions(rdv.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let daemon = FixtureDaemon::spawn(data.path(), rdv.path());
+    daemon.readiness();
+    let mut client = UnleashClient::connect(ClientConfig::new(
+        rdv.path().join("daemon.sock"),
+        ClientKind::Cli,
+        "f011-settings",
+    ))
+    .await
+    .unwrap();
+    let authority = client.hello().authority_generation;
+    let mut configure = command(
+        authority,
+        0xf011_0100,
+        ProjectId::from_u128(1),
+        authority.as_uuid(),
+        0,
+        "SetSettings",
+        json!({"scope_kind":"user","scope_id":"default","patch":{"terminal_runtime":terminal_configuration()}}),
+    );
+    configure.project_id = None;
+    let first = client
+        .send_command(&configure)
+        .await
+        .expect("persist actual terminal configuration");
+    let replay = client
+        .send_command(&configure)
+        .await
+        .expect("same command returns durable receipt");
+    assert_eq!(first.receipt_id, replay.receipt_id);
+    let mut legacy = configure.clone();
+    legacy.command_id = CommandId::from_u128(0xf011_0101);
+    legacy.expected_revision = Revision::new(1);
+    legacy.payload = object(
+        json!({"scope_kind":"user","scope_id":"default","patch":{"confirm_retention_shortening":false}}),
+    );
+    client
+        .send_command(&legacy)
+        .await
+        .expect("legacy patch preserves terminal configuration");
+    let mut conflicting = configure.clone();
+    conflicting.command_id = CommandId::from_u128(0xf011_0102);
+    conflicting.expected_revision = Revision::new(2);
+    let mut changed = terminal_configuration();
+    changed["profiles"][0]["variables"]["LANG"] = json!("C.UTF-8");
+    conflicting.payload = object(
+        json!({"scope_kind":"user","scope_id":"default","patch":{"terminal_runtime":changed}}),
+    );
+    assert!(
+        client.send_command(&conflicting).await.is_err(),
+        "version cannot acquire another digest"
+    );
+    for bad in [
+        Value::Null,
+        json!({"schema_version":1,"profiles":[],"max_hosts":2,"max_processes":2,"max_ptys":2,"lease_ttl_ms":60000}),
+    ] {
+        conflicting.command_id = CommandId::from_u128(0xf011_0103);
+        conflicting.payload = object(
+            json!({"scope_kind":"user","scope_id":"default","patch":{"terminal_runtime":bad}}),
+        );
+        assert!(client.send_command(&conflicting).await.is_err());
+    }
+    drop(client);
+    drop(daemon);
+    let daemon = FixtureDaemon::spawn(data.path(), rdv.path());
+    daemon.readiness();
+    let mut client = UnleashClient::connect(ClientConfig::new(
+        rdv.path().join("daemon.sock"),
+        ClientKind::Cli,
+        "f011-settings-restart",
+    ))
+    .await
+    .unwrap();
+    let snapshot = client
+        .query(&QueryEnvelope {
+            protocol_version: ProtocolVersion,
+            request_id: RequestId::from_u128(0xf011_0104),
+            query_type: "ReadSettings".into(),
+            project_id: None,
+            payload: object(json!({"scope_kind":"user","scope_id":"default"})),
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        snapshot.result["extra_typed"]["terminal_runtime"],
+        terminal_configuration()
+    );
+}
+
 #[tokio::test]
 async fn t_f011_003_real_daemon_accepts_authenticated_terminal_acquisition() {
     let data = local_test_dir("f011-data").unwrap();
@@ -187,8 +285,26 @@ async fn t_f011_003_real_daemon_accepts_authenticated_terminal_acquisition() {
     .expect("read created project");
     assert_eq!(project_snapshot.result["primary_root_path"], project_path);
 
-    // The public F011 example names a profile but the current Store has no profile producer.
-    // This value exercises the absent handler; it is not an attestation of a usable environment.
+    let mut configuration = command(
+        authority,
+        0xf011_0016,
+        project,
+        authority.as_uuid(),
+        0,
+        "SetSettings",
+        json!({"scope_kind":"user","scope_id":"default","patch":{"terminal_runtime":{
+            "schema_version":1,"profiles":[{"profile_id":"terminal-test","version":1,
+                "variables":{"LANG":"C","TERM":"xterm"}}],
+            "max_hosts":2,"max_processes":2,"max_ptys":2,"lease_ttl_ms":60000
+        }}}),
+    );
+    configuration.project_id = None;
+    let configured = tokio::time::timeout(DEADLINE, client.send_command(&configuration))
+        .await
+        .expect("configuration deadline")
+        .expect("authenticated terminal configuration");
+    assert_eq!(configured.state, ReceiptState::Accepted);
+
     let acquire = command(
         authority,
         0xf011_0015,
@@ -199,8 +315,8 @@ async fn t_f011_003_real_daemon_accepts_authenticated_terminal_acquisition() {
         json!({"mission_id":mission, "invocation_id":null,
             "purpose_key":"fixture-terminal", "reuse_policy":"reuse_compatible",
             "scope_id":project.to_string(), "scope_revision":2, "worktree_id":null,
-            "cwd":".", "program":"/usr/bin/true", "arguments":[],
-            "environment_profile_id":"fixture-env", "pty":{"rows":24,"cols":80},
+            "cwd":".", "program":"/usr/bin/printf", "arguments":["terminal-ready\n"],
+            "environment_profile_id":"terminal-test", "pty":{"rows":24,"cols":80},
             "readiness":{"kind":"process_started","timeout_ms":10000}}),
     );
     let receipt = tokio::time::timeout(DEADLINE, client.send_command(&acquire))
@@ -210,4 +326,43 @@ async fn t_f011_003_real_daemon_accepts_authenticated_terminal_acquisition() {
     assert_eq!(receipt.state, ReceiptState::Accepted);
     assert_eq!(receipt.command_id, acquire.command_id);
     assert_eq!(receipt.aggregate_id, acquire.aggregate_id);
+    let deadline = Instant::now() + DEADLINE;
+    loop {
+        let output = client
+            .query(&QueryEnvelope {
+                protocol_version: ProtocolVersion,
+                request_id: RequestId::from_u128(0xf011_0017),
+                query_type: "ReadTerminalLog".into(),
+                project_id: Some(project),
+                payload: object(
+                    json!({"terminal_id":acquire.aggregate_id,"after_offset":0,"max_bytes":65536}),
+                ),
+            })
+            .await
+            .expect("real terminal log query");
+        if output
+            .result
+            .get("text")
+            .and_then(Value::as_str)
+            .is_some_and(|s| s.contains("terminal-ready"))
+        {
+            assert!(
+                output
+                    .result
+                    .get("process_run_uuid")
+                    .and_then(Value::as_str)
+                    .is_some()
+            );
+            assert!(
+                output
+                    .result
+                    .get("pid")
+                    .and_then(Value::as_u64)
+                    .is_some_and(|p| p > 0)
+            );
+            break;
+        }
+        assert!(Instant::now() < deadline, "observed PTY output deadline");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
 }

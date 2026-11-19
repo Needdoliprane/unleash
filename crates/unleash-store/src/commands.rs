@@ -1727,6 +1727,7 @@ fn apply_command_mutation(
                 scope_id,
                 caller,
                 patch,
+                config.id_generator.as_ref(),
             )?;
             let mut payload = Map::new();
             payload.insert(

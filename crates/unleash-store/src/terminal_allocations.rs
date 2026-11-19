@@ -14,6 +14,247 @@ use unleash_domain::{
 /// Verbe fermé du producteur d'allocation humaine.
 pub const TERMINAL_ALLOCATION_VERB: &str = "terminal.acquire";
 
+/// Non-secret environment explicitly configured by an authenticated administrator.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TerminalEnvironmentProfile {
+    /// Stable identifier, unique within the active configuration.
+    pub profile_id: String,
+    /// Immutable version of this profile.
+    pub version: u64,
+    /// Explicit, closed locale/terminal values; never an inherited environment.
+    pub variables: std::collections::BTreeMap<String, String>,
+}
+impl std::fmt::Debug for TerminalEnvironmentProfile {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TerminalEnvironmentProfile")
+            .field("profile_id", &self.profile_id)
+            .field("version", &self.version)
+            .finish_non_exhaustive()
+    }
+}
+impl TerminalEnvironmentProfile {
+    /// Digest of the complete explicit profile, including its values.
+    /// # Errors
+    /// Returns a canonical serialization error.
+    pub fn digest(&self) -> Result<Sha256Digest, StoreError> {
+        Ok(canonical_sha256(self)?)
+    }
+}
+
+/// Version-one global terminal settings, persisted by the existing SetSettings CAS.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TerminalRuntimeSettings {
+    /// Closed format version.
+    pub schema_version: u32,
+    /// Explicit non-secret profiles; no implicit default profile exists.
+    pub profiles: Vec<TerminalEnvironmentProfile>,
+    /// Auxiliary host limit, distinct from execution admission.
+    pub max_hosts: u32,
+    /// Auxiliary child limit.
+    pub max_processes: u32,
+    /// Auxiliary PTY limit.
+    pub max_ptys: u32,
+    /// Explicit lease TTL in milliseconds.
+    pub lease_ttl_ms: i64,
+}
+impl TerminalRuntimeSettings {
+    /// Validate the closed initial profile namespace and finite non-secret values.
+    /// # Errors
+    /// Refuses missing/duplicate profiles, secrets, unknown fields or unsafe bounds.
+    pub fn validate(&self) -> Result<(), StoreError> {
+        let mut ids = std::collections::BTreeSet::new();
+        if self.schema_version != 1
+            || !(1..=16).contains(&self.profiles.len())
+            || [self.max_hosts, self.max_processes, self.max_ptys]
+                .iter()
+                .any(|n| !(1..=50).contains(n))
+            || !(1000..=300_000).contains(&self.lease_ttl_ms)
+        {
+            return Err(invalid("invalid terminal runtime settings"));
+        }
+        for p in &self.profiles {
+            if p.profile_id.is_empty()
+                || p.profile_id.len() > 64
+                || !p.profile_id.bytes().enumerate().all(|(i, b)| {
+                    b.is_ascii_lowercase() || b.is_ascii_digit() || (i > 0 && b"._-".contains(&b))
+                })
+                || !ids.insert(&p.profile_id)
+                || !(1..=9_007_199_254_740_991).contains(&p.version)
+                || p.variables.is_empty()
+                || p.variables.len() > 4
+            {
+                return Err(invalid("invalid terminal environment profile"));
+            }
+            for (key, value) in &p.variables {
+                let allowed = match key.as_str() {
+                    "LANG" | "LC_ALL" => {
+                        ["C", "C.UTF-8", "en_US.UTF-8", "fr_FR.UTF-8"].contains(&value.as_str())
+                    }
+                    "TERM" => {
+                        ["xterm", "xterm-256color", "vt100", "dumb"].contains(&value.as_str())
+                    }
+                    "TZ" => value == "UTC",
+                    _ => false,
+                };
+                if !allowed {
+                    return Err(invalid(
+                        "terminal profile contains an unsupported environment value",
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+    /// Stable identities of the three configured global auxiliary pools.
+    #[must_use]
+    pub const fn pools(&self) -> TerminalAuxiliaryPools {
+        TerminalAuxiliaryPools {
+            host: PoolId::from_u128(0xf011_1001),
+            child: PoolId::from_u128(0xf011_1002),
+            pty: PoolId::from_u128(0xf011_1003),
+        }
+    }
+}
+
+/// Private transport between the authenticated producer and the configuration writer.
+/// It is never accepted from the public IPC payload.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PreparedTerminalEnvironment {
+    profile_id: String,
+    version: u64,
+    digest: Sha256Digest,
+    pin_id: String,
+    object_generation: i64,
+}
+
+pub(crate) fn configure_runtime_tx(
+    tx: &Transaction<'_>,
+    now: TimestampMs,
+    next: &TerminalRuntimeSettings,
+    previous: Option<&Value>,
+    prepared: &[PreparedTerminalEnvironment],
+    command_id: unleash_domain::CommandId,
+    ids: &dyn unleash_domain::IdGeneratorPort,
+) -> Result<(), StoreError> {
+    next.validate()?;
+    if let Some(old) = previous {
+        let old: TerminalRuntimeSettings = serde_json::from_value(old.clone())?;
+        for p in &next.profiles {
+            if let Some(prior) = old.profiles.iter().find(|v| v.profile_id == p.profile_id)
+                && (p.version < prior.version || (p.version == prior.version && p != prior))
+            {
+                return Err(invalid("terminal profile version is immutable"));
+            }
+        }
+    }
+    if prepared.len() != next.profiles.len() {
+        return Err(invalid(
+            "terminal environments were not prepared by the service",
+        ));
+    }
+    for p in &next.profiles {
+        let digest = p.digest()?.to_string();
+        let highest:i64=tx.query_row("SELECT COALESCE(MAX(CAST(source_field AS INTEGER)),0) FROM object_references WHERE owner_kind='terminal_environment' AND owner_id=?1",[&p.profile_id],|r|r.get(0))?;
+        if integer(p.version)? < highest {
+            return Err(invalid("terminal profile version cannot decrease"));
+        }
+        let conflict:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM object_references WHERE owner_kind='terminal_environment' AND owner_id=?1 AND source_field=?2 AND object_hash!=?3)",params![p.profile_id,p.version.to_string(),digest],|r|r.get(0))?;
+        if conflict {
+            return Err(invalid("terminal environment version is conflicting"));
+        }
+        let pin = prepared
+            .iter()
+            .find(|v| {
+                v.profile_id == p.profile_id
+                    && v.version == p.version
+                    && v.digest.to_string() == digest
+            })
+            .ok_or_else(|| invalid("terminal prepared bytes differ from configuration"))?;
+        let owner:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM object_pins WHERE pin_id=?1 AND object_hash=?2 AND owner_kind='terminal_configuration_candidate' AND owner_id=?3 AND state='held')",params![pin.pin_id.to_string(),digest,command_id.to_string()],|r|r.get(0))?;
+        if !owner {
+            return Err(invalid(
+                "terminal prepared pin is not owned by this command",
+            ));
+        }
+        crate::objects::tx_publish_object_reference(
+            tx,
+            ids,
+            now,
+            &crate::PublishObjectReferenceRequest {
+                pin_id: pin.pin_id.clone(),
+                object_hash: pin.digest,
+                object_generation: pin.object_generation,
+                owner_kind: "terminal_environment".into(),
+                owner_id: p.profile_id.clone(),
+                source_field: p.version.to_string(),
+            },
+        )?;
+    }
+    for ((id, kind), limit) in pool_bindings(&next.pools()).into_iter().zip([
+        next.max_hosts,
+        next.max_processes,
+        next.max_ptys,
+    ]) {
+        let occupation:i64=tx.query_row("SELECT COALESCE(SUM(amount),0) FROM capacity_reservations WHERE pool_id=?1 AND state IN ('held','reconciling')",[id.to_string()],|r|r.get(0))?;
+        if occupation > i64::from(limit) {
+            return Err(invalid("terminal limit is below held capacity"));
+        }
+        tx.execute("INSERT INTO capacity_pools(pool_id,pool_kind,scope_key,unit,requested_limit,effective_limit,admissions_frozen,hard_limit,revision) VALUES(?1,?2,'global','slot',?3,?3,0,50,1) ON CONFLICT(pool_id) DO UPDATE SET requested_limit=excluded.requested_limit,effective_limit=excluded.effective_limit,revision=capacity_pools.revision+1",params![id.to_string(),kind,limit])?;
+    }
+    Ok(())
+}
+
+impl crate::UnleashStore {
+    /// Read and validate the actual user/default terminal configuration.
+    /// # Errors
+    /// Missing or invalid configuration is refused, never filled with defaults.
+    pub fn terminal_runtime_settings(&self) -> Result<TerminalRuntimeSettings, StoreError> {
+        let settings = self.read_settings(crate::SettingsScopeKind::User, "default")?;
+        let raw = settings
+            .extra_typed
+            .get("terminal_runtime")
+            .ok_or_else(|| invalid("terminal runtime is not configured"))?;
+        let cfg: TerminalRuntimeSettings = serde_json::from_value(raw.clone())?;
+        cfg.validate()?;
+        Ok(cfg)
+    }
+    /// Prepare explicit profile bytes without reserving the immutable version.
+    /// # Errors
+    /// Refuses invalid bytes. Publication belongs exclusively to the accepted SetSettings transaction.
+    pub fn prepare_terminal_environment(
+        &self,
+        p: &TerminalEnvironmentProfile,
+        command: unleash_domain::CommandId,
+    ) -> Result<PreparedTerminalEnvironment, StoreError> {
+        let bytes = unleash_protocol::canonicalize_to_vec(p)?;
+        let hash = p.digest()?;
+        let handle = self.prepare_object(crate::PrepareObjectRequest {
+            object_hash: hash,
+            byte_length: bytes.len() as u64,
+            media_type: "application/json".into(),
+            owner_kind: "terminal_configuration_candidate".into(),
+            owner_id: command.to_string(),
+        })?;
+        self.write_prepared_object_bytes(&handle, &bytes)?;
+        let record = self.object_record(hash)?;
+        crate::objects::verify_object_file_before_publish(
+            self.config(),
+            &record.relative_path,
+            hash,
+        )?;
+        Ok(PreparedTerminalEnvironment {
+            profile_id: p.profile_id.clone(),
+            version: p.version,
+            digest: hash,
+            pin_id: handle.pin_id,
+            object_generation: handle.object_generation,
+        })
+    }
+}
+
 /// Source de portée authentifiée du sous-chemin humain.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
