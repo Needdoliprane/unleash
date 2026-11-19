@@ -5960,6 +5960,7 @@ dependencies = [
  "unleash-platform",
  "unleash-process-host",
  "unleash-protocol",
+ "unleash-scheduler",
  "unleash-store",
  "unleash-testkit",
  "unleash-tui",

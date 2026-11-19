@@ -28,6 +28,7 @@ pub mod config;
 pub mod daemon;
 pub mod diagnostic;
 pub mod error;
+pub mod execution_scheduler;
 pub mod executors;
 pub mod ipc;
 mod provider_profile_service;
