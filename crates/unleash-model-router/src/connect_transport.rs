@@ -6,9 +6,13 @@ use std::fmt;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use serde::Serialize;
 use serde_json::json;
+use tokio::io::AsyncWriteExt;
+use tokio::net::TcpStream;
+use tokio_rustls::{TlsConnector, rustls};
 use unleash_action_broker::{
     ActionBrokerError, ActionExecutionFailure, ActionExecutionResult, ActionExecutorPort,
     ActionIntent, ActionReceipt, AuthorizationDecision, BoxFuture, EffectsClass, ExecutorKind,
@@ -21,6 +25,8 @@ use crate::transport::{BrokerDispatch, ProfileRef};
 
 /// Exact verb of the passive transport component, not a model dispatch.
 pub const CONNECT_VERB: &str = "model.provider.connect";
+
+const MAX_RESOLVED_ADDRESSES: usize = 64;
 
 /// Closed local failure; no provider-controlled text is included.
 #[derive(Debug, thiserror::Error)]
@@ -37,6 +43,18 @@ pub enum ConnectError {
     /// The local resolver could not return a result.
     #[error("provider connect resolution unavailable")]
     ResolutionUnavailable,
+    /// The complete resolved set is empty, oversized or outside the frozen target.
+    #[error("provider connect destination rejected")]
+    DestinationRejected,
+    /// Offline trust anchors or the strict TLS configuration are unavailable.
+    #[error("provider connect offline trust unavailable")]
+    TrustUnavailable,
+    /// The single TCP/TLS attempt did not establish the expected peer.
+    #[error("provider connect transport unavailable")]
+    TransportUnavailable,
+    /// The action/decision or total monotonic timeout has expired.
+    #[error("provider connect deadline expired")]
+    DeadlineExpired,
 }
 
 /// Immutable input for the first, explicitly loopback-only connect component.
@@ -56,8 +74,8 @@ impl fmt::Debug for FrozenConnectRequest {
 }
 
 impl FrozenConnectRequest {
-    /// Fix endpoint/profile and one total timeout. HTTP requires a loopback literal;
-    /// TLS keeps the original host for strict certificate name validation.
+    /// Fix endpoint/profile and one total timeout. The target must be a loopback
+    /// literal, or `localhost` over TLS. TLS retains the name for certificate checks.
     /// No DNS, socket, credential or qualification is obtained by this constructor.
     ///
     /// # Errors
@@ -84,8 +102,8 @@ impl FrozenConnectRequest {
             || endpoint.fragment().is_some()
             || port == 0
             || !(1..=60_000).contains(&timeout_ms)
-            || endpoint.scheme() == "http"
-                && !host.parse::<IpAddr>().is_ok_and(|ip| ip.is_loopback())
+            || !(host.parse::<IpAddr>().is_ok_and(|ip| ip.is_loopback())
+                || endpoint.scheme() == "https" && host == "localhost")
         {
             return Err(ConnectError::InvalidRequest);
         }
@@ -198,13 +216,20 @@ impl NameResolver for SystemResolver {
         port: u16,
     ) -> BoxFuture<'a, Result<Vec<SocketAddr>, ConnectError>> {
         Box::pin(async move {
-            if let Ok(ip) = host.parse::<IpAddr>() {
+            if let Ok(ip) = host.parse::<IpAddr>()
+                && ip.is_loopback()
+            {
                 return Ok(vec![SocketAddr::new(ip, port)]);
             }
-            tokio::net::lookup_host((host, port))
-                .await
-                .map(|addresses| addresses.collect())
-                .map_err(|_| ConnectError::ResolutionUnavailable)
+            // The first component has no DNS permission or DNS worker. The
+            // special localhost name is resolved locally, retaining its TLS name.
+            if host == "localhost" {
+                return Ok(vec![
+                    SocketAddr::from(([127, 0, 0, 1], port)),
+                    SocketAddr::new(IpAddr::V6(std::net::Ipv6Addr::LOCALHOST), port),
+                ]);
+            }
+            Err(ConnectError::ResolutionUnavailable)
         })
     }
 }
@@ -234,7 +259,58 @@ struct ConnectExecutor {
     ca_der: Option<Vec<u8>>,
 }
 
+struct TlsValidation {
+    config: Arc<rustls::ClientConfig>,
+    source: CertificateValidation,
+}
+
+fn tls_validation(
+    roots: rustls::RootCertStore,
+    source: CertificateValidation,
+) -> Result<TlsValidation, ConnectError> {
+    if roots.is_empty() {
+        return Err(ConnectError::TrustUnavailable);
+    }
+    let config = rustls::ClientConfig::builder_with_provider(Arc::new(
+        rustls::crypto::aws_lc_rs::default_provider(),
+    ))
+    .with_safe_default_protocol_versions()
+    .map_err(|_| ConnectError::TrustUnavailable)?
+    .with_root_certificates(roots)
+    .with_no_client_auth();
+    // WebPKI is entirely offline: no AIA/OCSP fetch and no proxy or HTTP client.
+    // No CRLs have been qualified, so revocation remains explicitly unobserved.
+    Ok(TlsValidation {
+        config: Arc::new(config),
+        source,
+    })
+}
+
+fn system_tls_validation() -> Result<TlsValidation, ConnectError> {
+    // The loader otherwise honors these overrides. An environment-provided root
+    // file must not be described as the operating system's configured trust.
+    if std::env::var_os("SSL_CERT_FILE").is_some() || std::env::var_os("SSL_CERT_DIR").is_some() {
+        return Err(ConnectError::TrustUnavailable);
+    }
+    let loaded = rustls_native_certs::load_native_certs();
+    if !loaded.errors.is_empty() {
+        return Err(ConnectError::TrustUnavailable);
+    }
+    let mut roots = rustls::RootCertStore::empty();
+    for certificate in loaded.certs {
+        roots
+            .add(certificate)
+            .map_err(|_| ConnectError::TrustUnavailable)?;
+    }
+    tls_validation(roots, CertificateValidation::OfflineSystemRoots)
+}
+
 impl ConnectExecutor {
+    fn live(&self, intent: &ActionIntent, decision: &AuthorizationDecision) -> bool {
+        let now = self.clock.now_ms();
+        now < intent.action_deadline && decision.expiry.is_none_or(|deadline| now < deadline)
+    }
+
     fn bound(
         &self,
         intent: &ActionIntent,
@@ -254,10 +330,154 @@ impl ConnectExecutor {
             && intent.resource_refs.as_slice() == [resource]
             && intent.secret_refs.is_empty()
             && secrets.is_empty()
-            && self.clock.now_ms() < intent.action_deadline
-            && decision
-                .expiry
-                .is_none_or(|deadline| self.clock.now_ms() < deadline)
+            && self.live(intent, decision)
+    }
+
+    fn remaining_ms(
+        &self,
+        intent: &ActionIntent,
+        decision: &AuthorizationDecision,
+    ) -> Result<u64, ConnectError> {
+        let deadline = decision.expiry.map_or(intent.action_deadline, |expiry| {
+            expiry.min(intent.action_deadline)
+        });
+        deadline
+            .as_i64()
+            .checked_sub(self.clock.now_ms().as_i64())
+            .and_then(|remaining| u64::try_from(remaining).ok())
+            .filter(|remaining| *remaining > 0)
+            .map(|remaining| remaining.min(self.request.timeout_ms))
+            .ok_or(ConnectError::DeadlineExpired)
+    }
+
+    async fn tls(&self) -> Result<TlsValidation, ConnectError> {
+        #[cfg(test)]
+        if let Some(certificate) = &self.ca_der {
+            let mut roots = rustls::RootCertStore::empty();
+            roots
+                .add(rustls::pki_types::CertificateDer::from(certificate.clone()))
+                .map_err(|_| ConnectError::TrustUnavailable)?;
+            return tls_validation(roots, CertificateValidation::FixtureRoot);
+        }
+        // Root enumeration can block on the local keychain/filesystem. It cannot
+        // contact a peer, and a timed-out waiter never proceeds to DNS or connect.
+        tokio::task::spawn_blocking(system_tls_validation)
+            .await
+            .map_err(|_| ConnectError::TrustUnavailable)?
+    }
+
+    async fn peer(&self) -> Result<SocketAddr, ConnectError> {
+        let addresses = self
+            .resolver
+            .resolve(&self.request.host, self.request.port)
+            .await?;
+        let literal = self.request.host.parse::<IpAddr>().ok();
+        if addresses.is_empty()
+            || addresses.len() > MAX_RESOLVED_ADDRESSES
+            || addresses.iter().any(|address| {
+                address.port() != self.request.port
+                    || !address.ip().is_loopback()
+                    || literal.is_some_and(|ip| address.ip() != ip)
+            })
+        {
+            return Err(ConnectError::DestinationRejected);
+        }
+        addresses
+            .first()
+            .copied()
+            .ok_or(ConnectError::DestinationRejected)
+    }
+
+    async fn connect(
+        &self,
+        intent: &ActionIntent,
+        decision: &AuthorizationDecision,
+    ) -> Result<(SocketAddr, CertificateValidation), ConnectError> {
+        let tls = if self.request.endpoint.scheme() == "https" {
+            Some(self.tls().await?)
+        } else {
+            None
+        };
+        let peer = self.peer().await?;
+        if !self.live(intent, decision) {
+            return Err(ConnectError::DeadlineExpired);
+        }
+        // A sockaddr, never the hostname, is passed to TCP: no second resolution,
+        // fallback address, proxy, redirect or automatic reconnect exists here.
+        let socket = TcpStream::connect(peer)
+            .await
+            .map_err(|_| ConnectError::TransportUnavailable)?;
+        if socket
+            .peer_addr()
+            .map_err(|_| ConnectError::TransportUnavailable)?
+            != peer
+        {
+            return Err(ConnectError::TransportUnavailable);
+        }
+        if !self.live(intent, decision) {
+            return Err(ConnectError::DeadlineExpired);
+        }
+        let source = if let Some(tls) = tls {
+            let name = rustls::pki_types::ServerName::try_from(self.request.host.clone())
+                .map_err(|_| ConnectError::TrustUnavailable)?;
+            let mut stream = TlsConnector::from(tls.config)
+                .connect(name, socket)
+                .await
+                .map_err(|_| ConnectError::TransportUnavailable)?;
+            // Only TLS close_notify is written, never application data.
+            stream
+                .shutdown()
+                .await
+                .map_err(|_| ConnectError::TransportUnavailable)?;
+            tls.source
+        } else {
+            drop(socket);
+            CertificateValidation::NotTls
+        };
+        if !self.live(intent, decision) {
+            return Err(ConnectError::DeadlineExpired);
+        }
+        Ok((peer, source))
+    }
+
+    fn observe(
+        &self,
+        dispatch_id: DispatchId,
+        peer: SocketAddr,
+        source: CertificateValidation,
+    ) -> Result<ActionExecutionResult, ConnectError> {
+        let observed_at_ms = self.clock.now_ms();
+        let observation = ConnectObservation {
+            schema_version: 1,
+            action_id: self.action,
+            dispatch_id,
+            request_digest: self.digest,
+            peer,
+            certificate_validation: source,
+            revocation_checked: false,
+            http_application_bytes_sent: 0,
+            observed_at_ms,
+        };
+        let digest = canonical_sha256(&observation).map_err(|_| ConnectError::Digest)?;
+        let mut stage = self
+            .staged
+            .lock()
+            .map_err(|_| ConnectError::ObservationUnavailable)?;
+        if stage.is_some() {
+            return Err(ConnectError::ObservationUnavailable);
+        }
+        *stage = Some(Staged {
+            action: self.action,
+            dispatch: dispatch_id,
+            digest,
+            observation,
+        });
+        Ok(ActionExecutionResult {
+            dispatch_id,
+            provider_request_id: None,
+            output_digest: digest,
+            observed_at_ms,
+        })
     }
 }
 
@@ -270,17 +490,29 @@ impl ActionExecutorPort for ConnectExecutor {
         secrets: &'a [ResolvedSecret],
     ) -> BoxFuture<'a, Result<ActionExecutionResult, ActionExecutionFailure>> {
         Box::pin(async move {
-            if !self.bound(intent, decision, secrets) || self.consumed.swap(true, Ordering::SeqCst)
-            {
+            if !self.bound(intent, decision, secrets) {
                 return Err(ActionExecutionFailure::ConfirmedFailureNoEffect {
                     dispatch_id,
                     reason: "connect_binding_rejected".to_owned(),
                 });
             }
-            Err(ActionExecutionFailure::ConfirmedFailureNoEffect {
+            let unknown = || ActionExecutionFailure::OutcomeUnknown {
                 dispatch_id,
-                reason: "connect_transport_not_implemented".to_owned(),
-            })
+                reason: "connect_transport_outcome_unknown".to_owned(),
+            };
+            if self.consumed.swap(true, Ordering::SeqCst) {
+                return Err(unknown());
+            }
+            let remaining = self.remaining_ms(intent, decision).map_err(|_| unknown())?;
+            let (peer, source) = tokio::time::timeout(
+                Duration::from_millis(remaining),
+                self.connect(intent, decision),
+            )
+            .await
+            .map_err(|_| unknown())?
+            .map_err(|_| unknown())?;
+            self.observe(dispatch_id, peer, source)
+                .map_err(|_| unknown())
         })
     }
 }

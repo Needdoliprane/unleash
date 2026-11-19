@@ -1,5 +1,5 @@
 //! T-F012-007/013/015: real loopback sockets, synthetic resolver/CA and memory broker.
-//! This bench does not qualify SQLite admission, mandate issuance or a provider.
+//! This bench does not qualify `SQLite` admission, mandate issuance or a provider.
 
 use crate::connect_transport::{
     CONNECT_VERB, CertificateValidation, ConnectError, FixtureOptions, FrozenConnectRequest,
@@ -91,14 +91,14 @@ impl BrokerJournalPort for Journal {
     }
 }
 
-struct Broker {
+struct ConnectHarness {
     broker: ActionBroker,
     clock: Arc<ManualClock>,
     fence: LineageFence,
     secrets: SecretResolutionSpy<unleash_testkit::InMemoryTestSecretStore>,
     dispatches: Arc<AtomicUsize>,
 }
-impl Broker {
+impl ConnectHarness {
     fn new() -> Self {
         let clock = Arc::new(ManualClock::new(1_767_225_600_000));
         let fence = LineageFence::new(
@@ -194,7 +194,7 @@ fn request(
 
 fn intent(
     request: &FrozenConnectRequest,
-    broker: &Broker,
+    broker: &ConnectHarness,
     authority: &EffectiveAuthority,
 ) -> Result<ActionIntent, Box<dyn Error>> {
     Ok(ActionIntent {
@@ -220,7 +220,7 @@ fn intent(
 }
 
 async fn authorize(
-    broker: &Broker,
+    broker: &ConnectHarness,
     action: ActionIntent,
     authority: &EffectiveAuthority,
 ) -> Result<AuthorizationDecision, Box<dyn Error>> {
@@ -290,7 +290,7 @@ async fn t_f012_013_connect_tcp_pins_one_resolution_and_sends_no_http() -> TestR
     let peer = listener.local_addr()?;
     let worker = serve(listener, None);
     let resolver = Resolver::pinned(peer.port());
-    let broker = Broker::new();
+    let broker = ConnectHarness::new();
     let authority = authority();
     let request = request("http", "127.0.0.1", peer.port(), 1000)?;
     let action = intent(&request, &broker, &authority)?;
@@ -328,7 +328,7 @@ async fn t_f012_013_connect_tls_uses_profile_name_with_fixture_ca_and_no_http() 
     let peer = listener.local_addr()?;
     let worker = serve(listener, Some(tls.server.clone()));
     let resolver = Resolver::pinned(peer.port());
-    let broker = Broker::new();
+    let broker = ConnectHarness::new();
     let authority = authority();
     let request = request("https", "localhost", peer.port(), 1000)?;
     let action = intent(&request, &broker, &authority)?;
@@ -377,7 +377,7 @@ async fn t_f012_015_connect_checks_every_address_before_first_socket() -> TestRe
         calls: AtomicUsize::new(0),
         rebind: false,
     });
-    let broker = Broker::new();
+    let broker = ConnectHarness::new();
     let authority = authority();
     let request = request("http", "127.0.0.1", port, 1000)?;
     let action = intent(&request, &broker, &authority)?;
@@ -416,7 +416,7 @@ async fn t_f012_013_connect_rejects_unknown_fixture_ca_and_wrong_name_without_ht
         let port = listener.local_addr()?.port();
         let worker = serve(listener, Some(tls.server.clone()));
         let resolver = Resolver::pinned(port);
-        let broker = Broker::new();
+        let broker = ConnectHarness::new();
         let authority = authority();
         let request = request(
             "https",
@@ -471,7 +471,7 @@ async fn t_f012_007_connect_tls_deadline_closes_without_http_or_retry() -> TestR
         Ok::<_, Box<dyn Error + Send + Sync>>((bytes, extra))
     });
     let resolver = Resolver::pinned(port);
-    let broker = Broker::new();
+    let broker = ConnectHarness::new();
     let authority = authority();
     let request = request("https", "localhost", port, 100)?;
     let action = intent(&request, &broker, &authority)?;
