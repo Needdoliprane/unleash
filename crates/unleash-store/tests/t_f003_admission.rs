@@ -747,6 +747,98 @@ fn t_f003_005_snapshot_expires_without_a_write_and_old_observation_never_revives
 }
 
 #[test]
+fn t_f003_005_clock_rollback_during_decision_does_not_admit() {
+    let dir = local_test_dir("f003-admission-clock-rollback").unwrap();
+    let clock = Arc::new(unleash_testkit::ManualClock::new(1_700_000_000_000));
+    let mut config = StoreConfig::new(dir.path());
+    config.clock = clock.clone();
+    let store = UnleashStore::open(config).unwrap();
+    observe(&store, seed(&store, false));
+    let before = store.execution_admission_snapshot(POOL).unwrap();
+    let decision_clock = clock.clone();
+    let outcome = store.commit_execution_admission(POOL, before.token, move |_| {
+        decision_clock.set_utc_ms(1_699_999_999_999);
+        Ok(proposal(unit(1)))
+    });
+    clock.set_utc_ms(1_700_000_000_000);
+
+    let after = store.execution_admission_snapshot(POOL).unwrap();
+    assert_eq!(after.pool.current_occupation, 0, "{outcome:?}");
+    assert_eq!(after.token, before.token);
+    assert_eq!(
+        store
+            .read_snapshot(|connection, _| {
+                Ok(connection.query_row(
+                    "SELECT (SELECT COUNT(*) FROM invocation_attempts)
+                           + (SELECT COUNT(*) FROM resource_leases WHERE resource_kind='execution')
+                           + (SELECT COUNT(*) FROM events WHERE event_type='InvocationAdmitted')",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )?)
+            })
+            .unwrap(),
+        0
+    );
+    assert!(matches!(outcome, Err(StoreError::InvalidArgument { .. })));
+}
+
+#[test]
+fn t_f003_005_uncertain_clock_during_decision_does_not_return_wait_report() {
+    use std::sync::atomic::Ordering;
+
+    let dir = local_test_dir("f003-admission-clock-uncertain").unwrap();
+    let config = StoreConfig::new(dir.path());
+    let uncertain = Arc::clone(&config.clock_uncertain);
+    let decision_uncertain = Arc::clone(&uncertain);
+    let store = UnleashStore::open(config).unwrap();
+    observe(&store, seed(&store, true));
+    let before = store.execution_admission_snapshot(POOL).unwrap();
+    let outcome = store.commit_execution_admission_with_report(POOL, before.token, move |_| {
+        decision_uncertain.store(true, Ordering::Release);
+        Ok((AdmissionDecision::Wait, "checkpoint proposal"))
+    });
+    assert!(uncertain.swap(false, Ordering::AcqRel));
+    assert!(
+        matches!(outcome, Err(StoreError::InvalidArgument { .. })),
+        "{outcome:?}"
+    );
+    assert_eq!(
+        store.execution_admission_snapshot(POOL).unwrap().token,
+        before.token
+    );
+}
+
+#[test]
+fn t_f003_005_forward_clock_during_decision_sets_full_execution_lease() {
+    let dir = local_test_dir("f003-admission-clock-forward").unwrap();
+    let clock = Arc::new(unleash_testkit::ManualClock::new(1_700_000_000_000));
+    let mut config = StoreConfig::new(dir.path());
+    config.clock = clock.clone();
+    let store = UnleashStore::open(config).unwrap();
+    observe(&store, seed(&store, false));
+    let before = store.execution_admission_snapshot(POOL).unwrap();
+    let outcome = store
+        .commit_execution_admission(POOL, before.token, move |_| {
+            clock.advance_ms(9_000);
+            Ok(proposal(unit(1)))
+        })
+        .unwrap();
+    let AdmissionOutcome::Admitted(commit) = outcome else {
+        panic!("Invocation did not receive a lease");
+    };
+    let (expires, ttl): (i64, i64) = store
+        .read_snapshot(move |connection, _| {
+            Ok(connection.query_row(
+                "SELECT expires_at_ms, ttl_ms FROM resource_leases WHERE lease_id=?1",
+                [commit.lease.lease_id.to_string()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )?)
+        })
+        .unwrap();
+    assert_eq!(expires - ttl, 1_700_000_009_000);
+}
+
+#[test]
 #[expect(
     clippy::too_many_lines,
     reason = "Oracle atomique : coût insuffisant, action étrangère puis réservation positive sans effet partiel"
