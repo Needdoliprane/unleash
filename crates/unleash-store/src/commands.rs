@@ -121,6 +121,13 @@ pub enum CommandMutation {
         /// Configuration et provenance déjà validées côté service.
         preparation: Box<crate::ProviderProfilePreparation>,
     },
+    /// Engage une observation de configuration locale, sans admission ni effet fournisseur.
+    ValidateProviderProfile {
+        /// Autorité administrative dérivée de la session authentifiée.
+        caller: CallerAuthority,
+        /// Observation réelle et objet publié avant la transaction.
+        preparation: Box<crate::ProviderValidationPreparation>,
+    },
     /// Prépare un terminal sans action OS ni action broker préinsérée.
     PrepareTerminalAllocation {
         /// Identité égale à l'agrégat de commande.
@@ -812,8 +819,11 @@ pub(crate) fn classify_command_replay(
     let Some(row) = existing else {
         return Ok(None);
     };
-    let historical_profile = envelope.command_type == "SetProviderProfile"
-        && row.authority_generation != daemon.authority_generation.to_string();
+    let historical_profile = matches!(
+        envelope.command_type.as_str(),
+        "SetProviderProfile" | "TestProviderProfile"
+    ) && row.authority_generation
+        != daemon.authority_generation.to_string();
     if historical_profile || row.digest != digest.as_prefixed_str() {
         return Err(StoreError::IdempotencyConflict {
             command_id: envelope.command_id,
@@ -856,7 +866,10 @@ pub(crate) fn tx_commit_command(
         });
     }
     crate::backup_requests::validate_request_backup_envelope(req)?;
-    crate::provider_probes::validate_command(tx, req)?;
+    let local_validation = crate::provider_profile_validation::validate_identity(req)?;
+    if !local_validation {
+        crate::provider_probes::validate_command(tx, req)?;
+    }
     crate::provider_profiles::validate_identity(req)?;
     crate::terminal_allocations::validate_command(tx, req)?;
 
@@ -869,6 +882,7 @@ pub(crate) fn tx_commit_command(
         return Ok(CommitOutcome::IdempotentReplay(receipt));
     }
     crate::provider_profiles::validate_new_command(req)?;
+    crate::provider_profile_validation::validate_new_command(req)?;
 
     // Mode `read_only_recovery` refuse les nouvelles écritures métier ordinaires tout en
     // autorisant les opérations d'urgence / réconciliation / arrêt / purge.
@@ -1299,6 +1313,22 @@ fn apply_command_mutation(
                 generated_events,
             )
         }
+        CommandMutation::ValidateProviderProfile {
+            caller,
+            preparation,
+        } => crate::provider_profile_validation::commit_tx(
+            tx,
+            config,
+            daemon,
+            now_ms,
+            crate::provider_profile_validation::ValidationCommand {
+                envelope,
+                caller,
+                preparation,
+            },
+            receipt_id,
+            generated_events,
+        ),
         CommandMutation::PrepareTerminalAllocation {
             terminal_id,
             preparation,

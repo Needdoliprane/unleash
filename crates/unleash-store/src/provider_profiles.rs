@@ -245,11 +245,23 @@ pub(crate) fn verify_published(
     let CommandMutation::SetProviderProfile { preparation, .. } = &request.mutation else {
         return Ok(());
     };
-    let bytes = store.read_verified_object_bytes(preparation.content_object_hash)?;
-    if bytes != unleash_protocol::canonicalize_to_vec(&preparation.configuration)? {
+    verify_configuration_objects(
+        store,
+        &preparation.configuration,
+        preparation.content_object_hash,
+    )
+}
+
+pub(crate) fn verify_configuration_objects(
+    store: &crate::UnleashStore,
+    configuration: &ProviderProfileConfiguration,
+    content_object_hash: Sha256Digest,
+) -> Result<(), StoreError> {
+    let bytes = store.read_verified_object_bytes(content_object_hash)?;
+    if bytes != unleash_protocol::canonicalize_to_vec(configuration)? {
         return Err(invalid("objet de configuration divergent"));
     }
-    if let Some(binding) = &preparation.configuration.catalog_binding {
+    if let Some(binding) = &configuration.catalog_binding {
         let bytes = store.read_verified_object_bytes(binding.content_object_hash)?;
         let catalog: serde_json::Value = serde_json::from_slice(&bytes)?;
         let ProviderPricing::Catalog {
@@ -258,7 +270,7 @@ pub(crate) fn verify_published(
             catalog_digest,
             entry_digest,
             ..
-        } = preparation.configuration.payload.pricing()
+        } = configuration.payload.pricing()
         else {
             return Err(invalid("provenance catalogue sans tarif catalogue"));
         };
@@ -279,7 +291,7 @@ pub(crate) fn verify_published(
     Ok(())
 }
 
-fn verify_secret(
+pub(crate) fn verify_secret(
     tx: &Transaction<'_>,
     config: &ProviderProfileConfiguration,
 ) -> Result<(), StoreError> {

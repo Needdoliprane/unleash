@@ -24,6 +24,7 @@ pub mod objects;
 pub mod policies_secrets;
 pub mod projects_settings;
 pub mod provider_probes;
+mod provider_profile_validation;
 pub mod provider_profiles;
 pub mod qualification;
 pub mod recovery_ops;
@@ -93,6 +94,10 @@ pub use projects_settings::{
 pub use provider_probes::{
     ModelContextRef, ModelOrigin, PROVIDER_PROBE_VERB, PreparedProviderProbe,
     ProbeGenerationLimits, ProbeProfileSnapshot, ProviderProbeContext, ProviderProbePreparation,
+};
+pub use provider_profile_validation::{
+    LocalProviderValidation, LocalValidationStatus, ProviderProfileView,
+    ProviderValidationPreparation, ProviderValidationSummary,
 };
 pub use provider_profiles::{
     ConfiguredProviderProfile, ProviderCatalogBinding, ProviderCatalogSource,

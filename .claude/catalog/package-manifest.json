@@ -13,7 +13,7 @@
     "evidence/"
   ],
   "hash_algorithm": "sha256",
-  "source_tree_digest": "cae0aba5728daf07c70f0c548b3cf8657df7d748a8855ef9495c3831a23428c1",
+  "source_tree_digest": "e842cfa56c9bcfe074e43d459be0b420fb2b029ec34bbebab54a66d029d5ffcb",
   "files": [
     {
       "path": "INDEX.md",
@@ -1529,8 +1529,8 @@
     },
     {
       "path": "features/F012-model-api-router/interfaces.md",
-      "sha256": "ca843750f412eac5bc774374c10cb8e2827b318523b9428fa32911d52367c05f",
-      "bytes": 26234,
+      "sha256": "fcb565e2e466338eabc452949d209998b96d229434918469c13bf36659508466",
+      "bytes": 27201,
       "media_type": "text/markdown"
     },
     {

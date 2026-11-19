@@ -488,6 +488,75 @@ impl UnleashStore {
             )
         })
     }
+
+    /// Recherche le reçu d'une validation locale avant toute préparation dynamique.
+    /// # Errors
+    /// Refuse acteur/rôle/lignée incohérents, autre digest et réponse tombstonée.
+    pub fn lookup_provider_validation_command(
+        &self,
+        envelope: &unleash_protocol::CommandEnvelope,
+        caller: &crate::CallerAuthority,
+    ) -> Result<Option<unleash_protocol::CommandReceipt>, StoreError> {
+        crate::provider_profile_validation::validate_envelope_identity(envelope, caller)?;
+        let digest = unleash_protocol::compute_command_digest_v2(envelope)?;
+        self.read_snapshot(|conn, _| {
+            let daemon = read_daemon_state_conn(conn)?;
+            crate::commands::classify_command_replay(
+                conn,
+                &daemon,
+                &caller.actor_id,
+                envelope,
+                digest,
+            )
+        })
+    }
+
+    /// Vérifie les liaisons puis les octets réels d'une configuration exacte, sans réseau/coffre.
+    /// Cette lecture ne crée aucun reçu ni résultat ; le commit revalide les mêmes faits.
+    /// # Errors
+    /// Refuse causalité, autorité, portée, liaison ou contenu insuffisamment attestés.
+    pub fn prepare_provider_profile_validation(
+        &self,
+        envelope: &unleash_protocol::CommandEnvelope,
+        caller: &crate::CallerAuthority,
+    ) -> Result<crate::provider_profile_validation::LocalProviderValidation, StoreError> {
+        let envelope = envelope.clone();
+        let caller = caller.clone();
+        let (mut observation, profile) =
+            self.execute_in_writer_tx(WriteCriticality::Normal, move |tx, now| {
+                let daemon = read_daemon_state_conn(tx)?;
+                crate::provider_profile_validation::prepare_tx(tx, &daemon, now, &envelope, &caller)
+            })?;
+        crate::provider_profile_validation::verify_configuration_bytes(self, &profile)?;
+        observation.observed_at_ms = self.config.clock.now_ms();
+        Ok(observation)
+    }
+
+    /// Projette une version exacte et ses observations locales avec watermark commun.
+    /// Aucun champ privé de liaison ou valeur de coffre n'est exposé.
+    /// # Errors
+    /// Refuse une version hors plage ou une projection durable incohérente.
+    pub fn get_provider_profile_snapshot(
+        &self,
+        profile_id: uuid::Uuid,
+        version: u64,
+        project: Option<ProjectId>,
+    ) -> Result<
+        SnapshotProjection<Option<crate::provider_profile_validation::ProviderProfileView>>,
+        StoreError,
+    > {
+        let projection = self.project_snapshot(|conn| {
+            crate::provider_profile_validation::read_projection(conn, profile_id, version, project)
+        })?;
+        let value = projection
+            .value
+            .map(|value| crate::provider_profile_validation::finish_view(self, value))
+            .transpose()?;
+        Ok(SnapshotProjection {
+            value,
+            cursor: projection.cursor,
+        })
+    }
     /// Ouvre ou initialise la base `SQLite` qualifiée avec vérification de build, PRAGMAs et migrations.
     ///
     /// # Errors
@@ -747,7 +816,9 @@ impl UnleashStore {
         request: &CommitCommandRequest,
         digest: Sha256Digest,
     ) -> Result<Option<CommitOutcome>, StoreError> {
-        if !crate::provider_profiles::validate_identity(request)? {
+        let configuration = crate::provider_profiles::validate_identity(request)?;
+        let validation = crate::provider_profile_validation::validate_identity(request)?;
+        if !configuration && !validation {
             return Ok(None);
         }
         let lookup = || {
@@ -765,7 +836,12 @@ impl UnleashStore {
         if let Some(receipt) = lookup()? {
             return Ok(Some(CommitOutcome::IdempotentReplay(receipt)));
         }
-        if let Err(error) = crate::provider_profiles::verify_published(self, request) {
+        let verified = if validation {
+            crate::provider_profile_validation::verify_published(self, request)
+        } else {
+            crate::provider_profiles::verify_published(self, request)
+        };
+        if let Err(error) = verified {
             // A concurrent writer may have committed while object verification failed.
             if let Some(receipt) = lookup()? {
                 return Ok(Some(CommitOutcome::IdempotentReplay(receipt)));
