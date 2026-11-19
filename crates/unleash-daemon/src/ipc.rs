@@ -59,6 +59,8 @@ pub(crate) struct StopRequest {
 
 /// État d'exécution partagé entre la boucle d'acceptation IPC et les connexions clientes.
 pub(crate) struct DaemonRuntimeState {
+    pub(crate) rendezvous_dir: std::path::PathBuf,
+    pub(crate) terminal_children: Mutex<Vec<std::process::Child>>,
     pub(crate) broker_activity: Arc<crate::broker_activity::BrokerActivity>,
     pub(crate) store: Arc<UnleashStore>,
     pub(crate) authority_generation: AuthorityGeneration,
@@ -491,6 +493,7 @@ async fn dispatch_query(
         "GetStateSnapshot" => query_state_snapshot(state, session, query).await,
         "GetCommandReceipt" => query_command_receipt(state, session, query).await,
         "GetBackupManifest" => query_backup_manifest(state, session, query).await,
+        "ReadTerminalLog" => crate::terminal_service::read_log(state, session, query).await,
         "ListProjects" | "GetProject" | "ReadSettings" | "ReadPolicySummary"
         | "ReadGuardHealth" | "InspectRecovery" => query_m1_projection(state, session, query).await,
         other => Err(IpcError::new(
@@ -847,12 +850,19 @@ async fn query_state_snapshot(
     let store = Arc::clone(&state.store);
     let proj_filter = query.project_id;
     let allowed_projects = session.allowed_projects.clone();
+    let terminal_actor = session.actor_id.clone();
     let (snapshot_val, watermark) = tokio::task::spawn_blocking(move || {
         store.read_snapshot(|conn, _ctx| {
             let daemon_row = read_daemon_row_conn(conn)?;
             let wm = read_watermark_conn(conn, daemon_row.stream_id)?;
             let projects = read_projects_conn(conn, proj_filter, allowed_projects.as_ref())?;
             let missions = read_missions_conn(conn, proj_filter, allowed_projects.as_ref())?;
+            let terminals = crate::terminal_service::read_terminal_metadata(
+                conn,
+                &terminal_actor,
+                proj_filter,
+                allowed_projects.as_ref(),
+            )?;
             let val = json!({
                 "daemon": {
                     "authority_generation": daemon_row.authority_generation,
@@ -864,6 +874,7 @@ async fn query_state_snapshot(
                 },
                 "projects": projects,
                 "missions": missions,
+                "terminals": terminals,
             });
             Ok((val, wm))
         })
@@ -1036,7 +1047,9 @@ async fn handle_command_frame(
 
             if matches!(
                 prepared.req.mutation,
-                CommandMutation::CreateMission { .. } | CommandMutation::RequestBackup { .. }
+                CommandMutation::CreateMission { .. }
+                    | CommandMutation::RequestBackup { .. }
+                    | CommandMutation::PrepareTerminalAllocation { .. }
             ) && let Err(ipc) = ensure_principal_registered(&state.store, session).await
             {
                 let _ = write_json_frame_timeout(stream, &ipc, RESPONSE_WRITE_TIMEOUT).await;
@@ -1107,6 +1120,12 @@ async fn handle_command_frame(
 
     if cmd.command_type == "RequestBackup" {
         crate::backup_service::start(state, unleash_domain::BackupId::from_uuid(cmd.aggregate_id));
+    }
+    if cmd.command_type == "AcquireTerminal" {
+        crate::terminal_service::start(
+            state,
+            unleash_domain::TerminalId::from_uuid(cmd.aggregate_id),
+        );
     }
 
     if newly_committed && let Some(stop_reason) = stop_reason.take() {
@@ -1279,8 +1298,29 @@ async fn prepare_command_request(
         "ReviseProject" => prepare_revise_project(session, cmd),
         "PurgeHistory" => prepare_purge_history(session, cmd),
         "RequestBackup" => prepare_request_backup(session, cmd),
+        "AcquireTerminal" => Ok(PreparedCommand {
+            req: crate::terminal_service::prepare_acquisition(state, session, cmd).await?,
+            stop_reason: None,
+            stop_drain_timeout: None,
+        }),
         "SetSettings" | "SetPolicy" | "ConfigureGuard" => {
-            prepare_admin_command(state, session, cmd)
+            let mut prepared = prepare_admin_command(state, session, cmd.clone())?;
+            if let Some(pins) = crate::terminal_service::prepare_configuration_objects(
+                state,
+                &session.actor_id,
+                &cmd,
+            )
+            .await?
+                && let CommandMutation::SetSettings { patch, .. } = &mut prepared.req.mutation
+            {
+                patch.extra_typed.get_or_insert_with(Map::new).insert(
+                    "__terminal_prepared".into(),
+                    serde_json::to_value(pins).map_err(|_| {
+                        internal_ipc_error("Terminal preparation serialization", Some(cid))
+                    })?,
+                );
+            }
+            Ok(prepared)
         }
         "AssignMission" => prepare_assign_mission(session, cmd),
         "PauseMission" | "ResumeMission" | "CancelMission" => {
@@ -1499,7 +1539,7 @@ fn has_only_keys(value: &Value, keys: &[&str]) -> bool {
         .is_some_and(|object| object.keys().all(|key| keys.contains(&key.as_str())))
 }
 
-fn strict_settings_patch(value: Value) -> Option<unleash_store::SettingsPatch> {
+fn strict_settings_patch(mut value: Value) -> Option<unleash_store::SettingsPatch> {
     if !has_only_keys(
         &value,
         &[
@@ -1507,6 +1547,7 @@ fn strict_settings_patch(value: Value) -> Option<unleash_store::SettingsPatch> {
             "retention_policy",
             "confirm_retention_shortening",
             "analyzer_paths",
+            "terminal_runtime",
         ],
     ) {
         return None;
@@ -1556,7 +1597,24 @@ fn strict_settings_patch(value: Value) -> Option<unleash_store::SettingsPatch> {
     {
         return None;
     }
-    serde_json::from_value(value).ok()
+    let terminal = value.as_object_mut()?.remove("terminal_runtime");
+    if terminal.is_some() {
+        value
+            .as_object_mut()?
+            .entry("confirm_retention_shortening")
+            .or_insert(Value::Bool(false));
+    }
+    let mut patch: unleash_store::SettingsPatch = serde_json::from_value(value).ok()?;
+    if let Some(raw) = terminal {
+        let typed: unleash_store::terminal_allocations::TerminalRuntimeSettings =
+            serde_json::from_value(raw).ok()?;
+        typed.validate().ok()?;
+        patch.extra_typed = Some(Map::from_iter([(
+            "terminal_runtime".into(),
+            serde_json::to_value(typed).ok()?,
+        )]));
+    }
+    Some(patch)
 }
 
 fn prepare_guard_mutation(

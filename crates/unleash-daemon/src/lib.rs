@@ -33,6 +33,7 @@ pub mod ipc;
 mod provider_profile_service;
 pub mod recovery;
 pub mod subscriptions;
+mod terminal_service;
 
 pub use auth::{AuthVerifierPort, AuthenticatedSession, Capability, PeerUidAuthVerifier};
 pub use config::{DaemonConfig, PostCommitAction, PostCommitHook, StoreOverrides};

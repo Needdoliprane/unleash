@@ -65,8 +65,9 @@ pub use isolation::{
     render_macos_seatbelt_profile,
 };
 pub use manifest::{
-    CANARY_SECRETS_FILENAME, CONTROL_SECRET_FILENAME, HOST_MANIFEST_FILENAME, HostBootstrapSpec,
-    HostControlSecret, HostLaunchState, HostManifest, ResourceKind, load_canary_secrets,
+    CANARY_SECRETS_FILENAME, CONTROL_SECRET_FILENAME, EnvironmentMode, HOST_MANIFEST_FILENAME,
+    HostBootstrapSpec, HostControlSecret, HostLaunchState, HostManifest, ResourceKind,
+    effective_environment_digest_v1, explicit_environment_v1, load_canary_secrets,
     load_control_secret, store_canary_secrets, store_control_secret,
 };
 pub use protocol::{HostRequest, HostResponse};

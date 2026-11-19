@@ -220,9 +220,8 @@ pub fn authorize_command(
         "CreateProject" | "ReviseProject" => Capability::ManageProjects,
         "SetSettings" | "SetPolicy" | "ConfigureGuard" | "PurgeHistory" | "RequestBackup"
         | "SetProviderProfile" => Capability::Administer,
-        "AssignMission" | "PauseMission" | "ResumeMission" | "CancelMission" => {
-            Capability::ManageMissions
-        }
+        "AssignMission" | "PauseMission" | "ResumeMission" | "CancelMission"
+        | "AcquireTerminal" => Capability::ManageMissions,
         "StopDaemon" => Capability::StopDaemon,
         "RecordClaim" | "RecordObservation" | "RecordJudgment" => Capability::WorkerReport,
         _ => {
@@ -283,7 +282,7 @@ pub fn authorize_query(
         "GetDaemonStatus" => Capability::QueryDaemonDiagnostic,
         "GetHealth" | "GetStateSnapshot" | "GetCommandReceipt" | "ListProjects" | "GetProject"
         | "ReadSettings" | "ReadPolicySummary" | "ReadGuardHealth" | "InspectRecovery"
-        | "GetBackupManifest" => Capability::QueryState,
+        | "GetBackupManifest" | "ReadTerminalLog" => Capability::QueryState,
         _ => {
             return Err(IpcError::new(
                 ErrorCode::InvalidArgument,

@@ -948,6 +948,7 @@ pub(crate) fn tx_set_settings(
     scope_id: &str,
     caller: &CallerAuthority,
     patch: &SettingsPatch,
+    id_generator: &dyn unleash_domain::IdGeneratorPort,
 ) -> Result<Revision, StoreError> {
     require_security_admin(caller, "SetSettings")?;
     let trimmed_scope = scope_id.trim();
@@ -1082,7 +1083,52 @@ pub(crate) fn tx_set_settings(
         }
         None => current.analyzer_paths,
     };
-    let next_extra = patch.extra_typed.clone().unwrap_or(current.extra_typed);
+    let mut next_extra = patch
+        .extra_typed
+        .clone()
+        .unwrap_or_else(|| current.extra_typed.clone());
+    // Other settings patches must not silently erase an accepted terminal profile.
+    if !next_extra.contains_key("terminal_runtime")
+        && let Some(old) = current.extra_typed.get("terminal_runtime")
+    {
+        next_extra.insert("terminal_runtime".into(), old.clone());
+    }
+    let prepared = next_extra.remove("__terminal_prepared");
+    if patch
+        .extra_typed
+        .as_ref()
+        .is_some_and(|extra| extra.contains_key("terminal_runtime"))
+    {
+        let raw =
+            next_extra
+                .get("terminal_runtime")
+                .ok_or_else(|| StoreError::InvalidArgument {
+                    reason: None,
+                    message: "terminal configuration missing".into(),
+                })?;
+        if scope_kind != SettingsScopeKind::User || trimmed_scope != "default" {
+            return Err(StoreError::InvalidArgument {
+                reason: None,
+                message: "terminal runtime requires user/default".into(),
+            });
+        }
+        let config: crate::terminal_allocations::TerminalRuntimeSettings =
+            serde_json::from_value(raw.clone())?;
+        let prepared: Vec<crate::terminal_allocations::PreparedTerminalEnvironment> =
+            serde_json::from_value(prepared.ok_or_else(|| StoreError::InvalidArgument {
+                reason: None,
+                message: "terminal preparation missing".into(),
+            })?)?;
+        crate::terminal_allocations::configure_runtime_tx(
+            tx,
+            now_ms,
+            &config,
+            current.extra_typed.get("terminal_runtime"),
+            &prepared,
+            cmd_id,
+            id_generator,
+        )?;
+    }
 
     let next_rev = current.revision.as_u64().saturating_add(1);
     let next_rev_i64 = i64::try_from(next_rev).unwrap_or(1);

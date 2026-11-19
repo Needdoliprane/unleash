@@ -14,6 +14,254 @@ use unleash_domain::{
 /// Verbe fermé du producteur d'allocation humaine.
 pub const TERMINAL_ALLOCATION_VERB: &str = "terminal.acquire";
 
+/// Identity of the explicitly configured user/default host pool; not a grant.
+pub const TERMINAL_HOST_POOL_ID: PoolId = PoolId::from_u128(0xf011_1001);
+/// Identity of the explicitly configured user/default child pool; not a grant.
+pub const TERMINAL_CHILD_POOL_ID: PoolId = PoolId::from_u128(0xf011_1002);
+/// Identity of the explicitly configured user/default PTY pool; not a grant.
+pub const TERMINAL_PTY_POOL_ID: PoolId = PoolId::from_u128(0xf011_1003);
+
+/// Non-secret environment explicitly configured by an authenticated administrator.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TerminalEnvironmentProfile {
+    /// Stable identifier, unique within the active configuration.
+    pub profile_id: String,
+    /// Immutable version of this profile.
+    pub version: u64,
+    /// Explicit, closed locale/terminal values; never an inherited environment.
+    pub variables: std::collections::BTreeMap<String, String>,
+}
+impl std::fmt::Debug for TerminalEnvironmentProfile {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TerminalEnvironmentProfile")
+            .field("profile_id", &self.profile_id)
+            .field("version", &self.version)
+            .finish_non_exhaustive()
+    }
+}
+impl TerminalEnvironmentProfile {
+    /// Digest of the complete explicit profile, including its values.
+    /// # Errors
+    /// Returns a canonical serialization error.
+    pub fn digest(&self) -> Result<Sha256Digest, StoreError> {
+        Ok(canonical_sha256(self)?)
+    }
+}
+
+/// Version-one global terminal settings, persisted by the existing `SetSettings` CAS.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TerminalRuntimeSettings {
+    /// Closed format version.
+    pub schema_version: u32,
+    /// Explicit non-secret profiles; no implicit default profile exists.
+    pub profiles: Vec<TerminalEnvironmentProfile>,
+    /// Auxiliary host limit, distinct from execution admission.
+    pub max_hosts: u32,
+    /// Auxiliary child limit.
+    pub max_processes: u32,
+    /// Auxiliary PTY limit.
+    pub max_ptys: u32,
+    /// Explicit lease TTL in milliseconds.
+    pub lease_ttl_ms: i64,
+}
+impl TerminalRuntimeSettings {
+    /// Validate the closed initial profile namespace and finite non-secret values.
+    /// # Errors
+    /// Refuses missing/duplicate profiles, secrets, unknown fields or unsafe bounds.
+    pub fn validate(&self) -> Result<(), StoreError> {
+        let mut ids = std::collections::BTreeSet::new();
+        if self.schema_version != 1
+            || !(1..=16).contains(&self.profiles.len())
+            || [self.max_hosts, self.max_processes, self.max_ptys]
+                .iter()
+                .any(|n| !(1..=50).contains(n))
+            || !(1000..=300_000).contains(&self.lease_ttl_ms)
+        {
+            return Err(invalid("invalid terminal runtime settings"));
+        }
+        for p in &self.profiles {
+            if p.profile_id.is_empty()
+                || p.profile_id.len() > 64
+                || !p.profile_id.bytes().enumerate().all(|(i, b)| {
+                    b.is_ascii_lowercase() || b.is_ascii_digit() || (i > 0 && b"._-".contains(&b))
+                })
+                || !ids.insert(&p.profile_id)
+                || !(1..=9_007_199_254_740_991).contains(&p.version)
+                || p.variables.is_empty()
+                || p.variables.len() > 4
+            {
+                return Err(invalid("invalid terminal environment profile"));
+            }
+            for (key, value) in &p.variables {
+                let allowed = match key.as_str() {
+                    "LANG" | "LC_ALL" => {
+                        ["C", "C.UTF-8", "en_US.UTF-8", "fr_FR.UTF-8"].contains(&value.as_str())
+                    }
+                    "TERM" => {
+                        ["xterm", "xterm-256color", "vt100", "dumb"].contains(&value.as_str())
+                    }
+                    "TZ" => value == "UTC",
+                    _ => false,
+                };
+                if !allowed {
+                    return Err(invalid(
+                        "terminal profile contains an unsupported environment value",
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+    /// Stable identities of the three configured global auxiliary pools.
+    #[must_use]
+    pub const fn pools(&self) -> TerminalAuxiliaryPools {
+        TerminalAuxiliaryPools {
+            host: TERMINAL_HOST_POOL_ID,
+            child: TERMINAL_CHILD_POOL_ID,
+            pty: TERMINAL_PTY_POOL_ID,
+        }
+    }
+}
+
+/// Private transport between the authenticated producer and the configuration writer.
+/// It is never accepted from the public IPC payload.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PreparedTerminalEnvironment {
+    profile_id: String,
+    version: u64,
+    digest: Sha256Digest,
+    pin_id: String,
+    object_generation: i64,
+}
+
+pub(crate) fn configure_runtime_tx(
+    tx: &Transaction<'_>,
+    now: TimestampMs,
+    next: &TerminalRuntimeSettings,
+    previous: Option<&Value>,
+    prepared: &[PreparedTerminalEnvironment],
+    command_id: unleash_domain::CommandId,
+    ids: &dyn unleash_domain::IdGeneratorPort,
+) -> Result<(), StoreError> {
+    next.validate()?;
+    if let Some(old) = previous {
+        let old: TerminalRuntimeSettings = serde_json::from_value(old.clone())?;
+        for p in &next.profiles {
+            if let Some(prior) = old.profiles.iter().find(|v| v.profile_id == p.profile_id)
+                && (p.version < prior.version || (p.version == prior.version && p != prior))
+            {
+                return Err(invalid("terminal profile version is immutable"));
+            }
+        }
+    }
+    if prepared.len() != next.profiles.len() {
+        return Err(invalid(
+            "terminal environments were not prepared by the service",
+        ));
+    }
+    for p in &next.profiles {
+        let digest = p.digest()?.to_string();
+        let highest:i64=tx.query_row("SELECT COALESCE(MAX(CAST(source_field AS INTEGER)),0) FROM object_references WHERE owner_kind='terminal_environment' AND owner_id=?1",[&p.profile_id],|r|r.get(0))?;
+        if integer(p.version)? < highest {
+            return Err(invalid("terminal profile version cannot decrease"));
+        }
+        let conflict:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM object_references WHERE owner_kind='terminal_environment' AND owner_id=?1 AND source_field=?2 AND object_hash!=?3)",params![p.profile_id,p.version.to_string(),digest],|r|r.get(0))?;
+        if conflict {
+            return Err(invalid("terminal environment version is conflicting"));
+        }
+        let pin = prepared
+            .iter()
+            .find(|v| {
+                v.profile_id == p.profile_id
+                    && v.version == p.version
+                    && v.digest.to_string() == digest
+            })
+            .ok_or_else(|| invalid("terminal prepared bytes differ from configuration"))?;
+        let owner:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM object_pins WHERE pin_id=?1 AND object_hash=?2 AND owner_kind='terminal_configuration_candidate' AND owner_id=?3 AND state='held')",params![pin.pin_id.as_str(),digest,command_id.to_string()],|r|r.get(0))?;
+        if !owner {
+            return Err(invalid(
+                "terminal prepared pin is not owned by this command",
+            ));
+        }
+        crate::objects::tx_publish_object_reference(
+            tx,
+            ids,
+            now,
+            &crate::PublishObjectReferenceRequest {
+                pin_id: pin.pin_id.clone(),
+                object_hash: pin.digest,
+                object_generation: pin.object_generation,
+                owner_kind: "terminal_environment".into(),
+                owner_id: p.profile_id.clone(),
+                source_field: p.version.to_string(),
+            },
+        )?;
+    }
+    for ((id, kind), limit) in pool_bindings(&next.pools()).into_iter().zip([
+        next.max_hosts,
+        next.max_processes,
+        next.max_ptys,
+    ]) {
+        let occupation:i64=tx.query_row("SELECT COALESCE(SUM(amount),0) FROM capacity_reservations WHERE pool_id=?1 AND state IN ('held','reconciling')",[id.to_string()],|r|r.get(0))?;
+        if occupation > i64::from(limit) {
+            return Err(invalid("terminal limit is below held capacity"));
+        }
+        tx.execute("INSERT INTO capacity_pools(pool_id,pool_kind,scope_key,unit,requested_limit,effective_limit,admissions_frozen,hard_limit,revision) VALUES(?1,?2,'global','slot',?3,?3,0,50,1) ON CONFLICT(pool_id) DO UPDATE SET requested_limit=excluded.requested_limit,effective_limit=excluded.effective_limit,revision=capacity_pools.revision+1",params![id.to_string(),kind,limit])?;
+    }
+    Ok(())
+}
+
+impl crate::UnleashStore {
+    /// Read and validate the actual user/default terminal configuration.
+    /// # Errors
+    /// Missing or invalid configuration is refused, never filled with defaults.
+    pub fn terminal_runtime_settings(&self) -> Result<TerminalRuntimeSettings, StoreError> {
+        let settings = self.read_settings(crate::SettingsScopeKind::User, "default")?;
+        let raw = settings
+            .extra_typed
+            .get("terminal_runtime")
+            .ok_or_else(|| invalid("terminal runtime is not configured"))?;
+        let cfg: TerminalRuntimeSettings = serde_json::from_value(raw.clone())?;
+        cfg.validate()?;
+        Ok(cfg)
+    }
+    /// Prepare explicit profile bytes without reserving the immutable version.
+    /// # Errors
+    /// Refuses invalid bytes. Publication belongs exclusively to the accepted `SetSettings` transaction.
+    pub fn prepare_terminal_environment(
+        &self,
+        p: &TerminalEnvironmentProfile,
+        command: unleash_domain::CommandId,
+    ) -> Result<PreparedTerminalEnvironment, StoreError> {
+        let bytes = unleash_protocol::canonicalize_to_vec(p)?;
+        let hash = p.digest()?;
+        let handle = self.prepare_object(crate::PrepareObjectRequest {
+            object_hash: hash,
+            byte_length: bytes.len() as u64,
+            media_type: "application/json".into(),
+            owner_kind: "terminal_configuration_candidate".into(),
+            owner_id: command.to_string(),
+        })?;
+        self.write_prepared_object_bytes(&handle, &bytes)?;
+        let record = self.object_record(hash)?;
+        crate::objects::verify_object_file_before_publish(
+            self.config(),
+            &record.relative_path,
+            hash,
+        )?;
+        Ok(PreparedTerminalEnvironment {
+            profile_id: p.profile_id.clone(),
+            version: p.version,
+            digest: hash,
+            pin_id: handle.pin_id,
+            object_generation: handle.object_generation,
+        })
+    }
+}
+
 /// Source de portée authentifiée du sous-chemin humain.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
@@ -363,6 +611,7 @@ fn policy(
 }
 fn validate_preparation(
     tx: &Transaction<'_>,
+    now: TimestampMs,
     prep: &TerminalAllocationPreparation,
     actor: &ActorId,
     principal: &ActorId,
@@ -395,6 +644,40 @@ fn validate_preparation(
         )?;
     }
     let s = &prep.process_spec;
+    // Every new preparation/launch re-reads configured authority under the
+    // writer transaction. Historical lookup, disposition and exact replay do
+    // not call this guard and never manufacture a new environment grant.
+    let settings = crate::projects_settings::read_settings_conn(
+        tx,
+        now,
+        crate::SettingsScopeKind::User,
+        "default",
+    )?;
+    let raw = settings
+        .extra_typed
+        .get("terminal_runtime")
+        .ok_or_else(|| invalid("terminal runtime is not configured"))?;
+    let runtime: TerminalRuntimeSettings = serde_json::from_value(raw.clone())?;
+    runtime.validate()?;
+    let profile = runtime
+        .profiles
+        .iter()
+        .find(|p| p.profile_id == s.environment.profile_id && p.version == s.environment.version)
+        .ok_or_else(|| invalid("terminal configured profile changed"))?;
+    if profile.digest()? != s.environment.digest
+        || runtime.pools() != prep.auxiliary
+        || runtime.lease_ttl_ms != prep.lease_ttl_ms
+    {
+        return Err(invalid(
+            "terminal configured scope, profile or pools changed",
+        ));
+    }
+    let bound:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM object_references WHERE owner_kind='terminal_environment' AND owner_id=?1 AND source_field=?2 AND object_hash=?3 AND state='live')",params![profile.profile_id,profile.version.to_string(),s.environment.digest.to_string()],|r|r.get(0))?;
+    if !bound {
+        return Err(invalid(
+            "terminal configured profile has no durable reference",
+        ));
+    }
     let root = root.ok_or_else(|| invalid("terminal primary project root absent"))?;
     let relative = Path::new(&s.requested_cwd);
     if !Path::new(&root).is_absolute()
@@ -561,7 +844,7 @@ pub(crate) fn prepare_tx(
         return Err(invalid("terminal project differs from mission scope"));
     }
     let principal = principal(tx, actor)?;
-    validate_preparation(tx, prep, actor, &principal)?;
+    validate_preparation(tx, now, prep, actor, &principal)?;
     validate_pools(tx, &prep.auxiliary)?;
     let resource_key = available_property_key(tx, daemon, terminal, prep)?;
     now.as_i64()
@@ -799,7 +1082,7 @@ fn validate_live(
     if principal(tx, &c.actor_id)? != c.principal_id {
         return Err(invalid("terminal principal changed"));
     }
-    validate_preparation(tx, &c.preparation, &c.actor_id, &c.principal_id)?;
+    validate_preparation(tx, now, &c.preparation, &c.actor_id, &c.principal_id)?;
     validate_lease(tx, d, now, c)?;
     validate_holds(tx, c)?;
     let TerminalAllocationScope::ProjectConfiguration { project_id, .. } = c.preparation.scope;
@@ -870,16 +1153,125 @@ pub(crate) fn validate_intent(
 pub(crate) fn guard_observation(
     tx: &Transaction<'_>,
     phase: &crate::BrokerPhase,
+    proof: Option<&TerminalObservationProof>,
 ) -> Result<(), StoreError> {
     if let crate::BrokerPhase::Observation {
         action_id, receipt, ..
     } = phase
         && for_action(tx, *action_id)?.is_some()
         && receipt.state != ActionState::OutcomeUnknown
+        && !proof
+            .is_some_and(|p| canonical_sha256(phase).is_ok_and(|digest| p.phase_digest == digest))
     {
         return Err(invalid("terminal OS observation producer not qualified"));
     }
     Ok(())
+}
+
+/// Exact non-secret facts captured from the live, authenticated host by the daemon.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TerminalLaunchObservation {
+    /// Planned terminal identity.
+    pub terminal_id: TerminalId,
+    /// Exact action.
+    pub action_id: ActionId,
+    /// Unique durable dispatch.
+    pub dispatch_id: DispatchId,
+    /// Immutable preparation.
+    pub context_digest: Sha256Digest,
+    /// Planned host acknowledged by the real host.
+    pub host_id: HostId,
+    /// Physical process identity, never an adopted PID.
+    pub process_run_uuid: ProcessRunUuid,
+    /// Actual OS PID.
+    pub pid: u32,
+    /// Actual OS PGID.
+    pub pgid: u32,
+    /// Actual owner UID.
+    pub owner_uid: u32,
+    /// Actual boot identity.
+    pub boot_identity: String,
+    /// Actual start identity.
+    pub start_identity: String,
+    /// Qualified identity backend.
+    pub identity_backend: String,
+    /// Digest of the protected host manifest actually inspected.
+    pub manifest_digest: Sha256Digest,
+    /// Effective environment attested by the host.
+    pub effective_environment_digest: Sha256Digest,
+    /// Last durable output watermark.
+    pub durable_log_seq: u64,
+    /// Time the authenticated host facts were captured, before proof publication.
+    pub observed_at_ms: TimestampMs,
+    /// Exit code, only when observed.
+    pub exit_code: Option<i32>,
+    /// Exit signal, only when observed.
+    pub exit_signal: Option<i32>,
+    /// Whether completion has been observed by the owning host.
+    pub exited: bool,
+}
+
+pub(crate) struct TerminalObservationProof {
+    phase_digest: Sha256Digest,
+}
+
+impl crate::UnleashStore {
+    /// Commit actual process/PTY facts and the exact broker observation atomically.
+    /// # Errors
+    /// Refuses unbound observations, another incarnation, missing published evidence or replay divergence.
+    pub fn commit_terminal_launch_observation(
+        &self,
+        observation: TerminalLaunchObservation,
+        phase: crate::BrokerPhaseRequest,
+    ) -> Result<crate::BrokerPhaseCommit, StoreError> {
+        let cfg = self.config().clone();
+        let committed=self.execute_in_writer_tx(crate::WriteCriticality::Normal,move|tx,now| {
+            let d=read_daemon_state_conn(tx)?;
+            let r=read_conn(tx,observation.terminal_id)?.ok_or_else(||invalid("terminal observation has no allocation"))?;
+            let c=&r.context;
+            let digest=canonical_sha256(&observation)?;
+            let crate::BrokerPhase::Observation {action_id,receipt,..}=&phase.phase else {return Err(invalid("terminal observation requires observation phase"));};
+            if *action_id!=c.action_id || observation.action_id!=c.action_id || observation.host_id!=c.host_id
+                || observation.process_run_uuid!=c.process_run_uuid || observation.context_digest!=r.context_digest
+                || r.dispatch_id!=Some(observation.dispatch_id) || receipt.dispatch_id!=observation.dispatch_id
+                || receipt.output_digest!=Some(digest) || receipt.state!=ActionState::ObservedSuccess
+                || observation.owner_uid!=d.owner_uid
+                || observation.pid==0 || observation.pgid==0 || observation.boot_identity!=d.boot_identity
+                || observation.start_identity.trim().is_empty() || !["macos_proc_pidinfo","linux_procfs"].contains(&observation.identity_backend.as_str())
+                || (!observation.exited && (observation.exit_code.is_some() || observation.exit_signal.is_some()))
+                || (observation.exit_code.is_some() && observation.exit_signal.is_some()) {
+                return Err(invalid("terminal observation differs from its actual allocation"));
+            }
+            let existing:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM processes WHERE process_id=?1)",[c.process_id.to_string()],|row|row.get(0))?;
+            if existing {return crate::broker_writer::commit_phase_tx(tx,&cfg,now,&phase);}
+            validate_incarnation(tx,&d,c.action_id)?;
+            validate_lease(tx,&d,now,c)?;
+            validate_holds(tx,c)?;
+            crate::broker_writer::validate_execution_dispatch_tx(tx,&d,now,c.action_id,observation.dispatch_id)?;
+            let started_at_ms:i64=tx.query_row("SELECT started_at_ms FROM action_dispatches WHERE dispatch_id=?1 AND action_id=?2",params![observation.dispatch_id.to_string(),c.action_id.to_string()],|row|row.get(0))?;
+            // Facts are captured before publication/fsync; the broker receipt is
+            // created only after the executor returns. Preserve both times.
+            // The generic broker writer also checks receipt <= writer_now.
+            if observation.observed_at_ms.as_i64()<started_at_ms || observation.observed_at_ms>receipt.observed_at_ms {
+                return Err(invalid("terminal capture timestamp is outside dispatch and receipt"));
+            }
+            let evidence:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM object_references f JOIN object_records o ON o.object_hash=f.object_hash WHERE f.owner_kind='terminal_launch_observation' AND f.owner_id=?1 AND f.source_field=?2 AND f.object_hash=?3 AND f.state='live' AND o.state='live')",params![c.terminal_id.to_string(),observation.dispatch_id.to_string(),digest.to_string()],|row|row.get(0))?;
+            if !evidence {return Err(invalid("actual terminal observation object is not published"));}
+            let process_state=if observation.exited {"exited"}else{"live"};
+            let terminal_state=if observation.exited {"exited"}else{"ready"};
+            tx.execute("INSERT INTO processes(process_id,action_id,process_run_uuid,authority_generation,host_id,pid,pgid,boot_identity,start_identity,identity_backend,owner_uid,cwd_ref,worktree_id,state,last_observed_at_ms,exit_code,exit_signal) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,NULL,?13,?14,?15,?16)",params![c.process_id.to_string(),c.action_id.to_string(),c.process_run_uuid.to_string(),c.authority_generation.to_string(),c.host_id.to_string(),observation.pid,observation.pgid,observation.boot_identity,observation.start_identity,observation.identity_backend,observation.owner_uid,c.preparation.process_spec.cwd_canonical,process_state,observation.observed_at_ms.as_i64(),observation.exit_code,observation.exit_signal])?;
+            tx.execute("INSERT INTO terminal_sessions(terminal_id,process_id,owner_agent_id,mission_id,purpose_key,rows,cols,lease_id,input_seq,durable_log_seq,state) VALUES(?1,?2,NULL,?3,?4,?5,?6,?7,0,?8,?9)",params![c.terminal_id.to_string(),c.process_id.to_string(),c.preparation.mission_id.to_string(),c.preparation.purpose_key,c.preparation.process_spec.rows,c.preparation.process_spec.cols,c.lease_id.to_string(),integer(observation.durable_log_seq)?,terminal_state])?;
+            let proof=TerminalObservationProof {phase_digest:canonical_sha256(&phase.phase)?};
+            crate::broker_writer::commit_terminal_observation_tx(tx,&cfg,now,&phase,&proof)
+        })?;
+        if !committed.replayed {
+            self.config()
+                .cutpoints
+                .hit(crate::StoreCutpoint::C2AfterCommandCommit)?;
+        }
+        Ok(committed)
+    }
 }
 pub(crate) fn resolve_tx(
     tx: &Transaction<'_>,

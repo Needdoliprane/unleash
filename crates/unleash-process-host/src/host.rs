@@ -49,6 +49,10 @@ pub const HOST_SOCKET_FILENAME: &str = "host.sock";
 /// Préfixe de la ligne émise sur `stdout` une fois le host lié et l'enfant démarré.
 pub const HOST_READY_PREFIX: &str = "UNLEASH_HOST_READY:";
 
+#[cfg(test)]
+#[path = "host_control_tests.rs"]
+mod control_tests;
+
 const IO_CHUNK_BYTES: usize = 8192;
 const SOCKET_IO_TIMEOUT: Duration = Duration::from_secs(15);
 const MAX_CONCURRENT_CONNECTIONS: usize = 16;
@@ -71,6 +75,9 @@ pub struct LostHostReconciliation {
 }
 
 struct ServerShared {
+    // Serializes authentication/fencing with actual PTY effects and rotation.
+    // Socket reads/writes are outside this gate and cannot pin its owner.
+    operation_gate: Mutex<()>,
     manifest_path: PathBuf,
     control_secret_path: PathBuf,
     socket_path: PathBuf,
@@ -139,14 +146,59 @@ impl ProcessHostServer {
         assert_not_under_claude(&canon_cwd)?;
 
         // Fail-closed avant tout spawn : valide et sonde l'isolation OS si mode strict.
-        let prepared = prepare_launch_command(
-            &spec.program,
-            &spec.arguments,
-            &spec.explicit_env,
-            spec.isolation_mode,
-            spec.strict_spec.as_ref(),
-            isolation_probe,
-        )?;
+        let (prepared, effective_environment_digest) = match spec.environment_mode {
+            None => (
+                prepare_launch_command(
+                    &spec.program,
+                    &spec.arguments,
+                    &spec.explicit_env,
+                    spec.isolation_mode,
+                    spec.strict_spec.as_ref(),
+                    isolation_probe,
+                )?,
+                None,
+            ),
+            Some(crate::manifest::EnvironmentMode::ExplicitV1) => {
+                let invalid = || ProcessHostError::InvalidArgument {
+                    reason: "explicit terminal environment is not qualified".into(),
+                };
+                // Strict with an explicit managed TMPDIR requires its own confinement qualification.
+                // Refuse before a probe or child instead of inheriting or weakening the request.
+                if spec.isolation_mode != crate::isolation::IsolationMode::Standard
+                    || !Path::new(&spec.program).is_absolute()
+                    || spec.program.contains('\0')
+                    || spec.arguments.iter().any(|v| v.contains('\0'))
+                    || spec.allocation_context_digest.is_none()
+                    || canon_cwd != spec.cwd
+                {
+                    return Err(invalid());
+                }
+                let runtime = std::fs::canonicalize(&spec.runtime_dir)?;
+                if runtime != spec.runtime_dir {
+                    return Err(invalid());
+                }
+                let child_tmp = runtime.join("child-tmp");
+                let clean_env =
+                    crate::manifest::explicit_environment_v1(&spec.explicit_env, &child_tmp)?;
+                let digest = crate::manifest::effective_environment_digest_v1(&clean_env)?;
+                if spec.expected_effective_environment_digest != Some(digest) {
+                    return Err(invalid());
+                }
+                unleash_platform::ensure_private_rendezvous_dir(&child_tmp)?;
+                unleash_platform::validate_rendezvous_dir(&child_tmp)?;
+                (
+                    crate::isolation::PreparedLaunchCommand {
+                        executable: PathBuf::from(&spec.program),
+                        args: spec.arguments.clone(),
+                        clean_env,
+                        backend_name: "none_standard".into(),
+                        profile_digest: None,
+                        profile_path: None,
+                    },
+                    Some(digest),
+                )
+            }
+        };
 
         let command_digest = spec.compute_command_digest()?;
         let socket_path = spec.runtime_dir.join(HOST_SOCKET_FILENAME);
@@ -170,6 +222,12 @@ impl ProcessHostServer {
             cwd_canonical: canon_cwd.clone(),
             worktree_id: spec.worktree_id,
             command_digest,
+            effective_environment_digest,
+            allocation_context_digest: if spec.environment_mode.is_some() {
+                spec.allocation_context_digest
+            } else {
+                None
+            },
             owner_uid,
             pid: None,
             pgid: None,
@@ -326,6 +384,7 @@ impl ProcessHostServer {
         let listener = bind_private_unix_listener(&socket_path)?;
 
         let shared = Arc::new(ServerShared {
+            operation_gate: Mutex::new(()),
             manifest_path,
             control_secret_path: spec.control_secret_path.clone(),
             socket_path,
@@ -569,6 +628,11 @@ fn handle_connection(mut stream: UnixStream, shared: &Arc<ServerShared>) {
             }
         };
 
+        let operation = shared
+            .operation_gate
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // Recheck channel generation under the same gate as fencing and I/O.
         // Si le secret a tourné après un Handshake de récupération sur une autre connexion,
         // invalider immédiatement toute ancienne connexion ouverte avant toute opération.
         let current_auth_gen = shared.auth_generation.load(Ordering::SeqCst);
@@ -578,6 +642,7 @@ fn handle_connection(mut stream: UnixStream, shared: &Arc<ServerShared>) {
                     "canal obsolète invalidé par rotation de capacité lors d'une reprise",
                 ),
             };
+            drop(operation);
             let _ = send_response(
                 &mut stream,
                 &HostResponse::Error {
@@ -598,6 +663,7 @@ fn handle_connection(mut stream: UnixStream, shared: &Arc<ServerShared>) {
             bound_auth_gen = shared.auth_generation.load(Ordering::SeqCst);
         }
         let is_shutdown = matches!(resp, HostResponse::ShutdownAck);
+        drop(operation);
         if send_response(&mut stream, &resp).is_err() || is_shutdown {
             break;
         }
@@ -674,11 +740,11 @@ fn process_request(req: HostRequest, shared: &ServerShared) -> HostResponse {
                 secret_rotated = true;
             }
 
-            let unknown_input_seqs = shared.inputs.reconcile_in_flight()?;
-            let (last_confirmed_input_seq, _) = shared.inputs.summary();
+            shared.inputs.reconcile_in_flight()?;
+            let (last_confirmed_input_seq, unknown_input_seqs) = shared.inputs.summary();
             let durable_log_seq = shared.spool.snapshot_index().durable_watermark_offset;
 
-            {
+            let (effective_environment_digest, allocation_context_digest) = {
                 let mut mf = shared
                     .manifest
                     .lock()
@@ -689,9 +755,15 @@ fn process_request(req: HostRequest, shared: &ServerShared) -> HostResponse {
                 mf.last_confirmed_input_seq = last_confirmed_input_seq;
                 mf.in_flight_input_seq = unknown_input_seqs.first().copied();
                 mf.save_atomic(&shared.manifest_path)?;
-            }
+                (
+                    mf.effective_environment_digest,
+                    mf.allocation_context_digest,
+                )
+            };
 
             Ok(HostResponse::HandshakeAck {
+                effective_environment_digest,
+                allocation_context_digest,
                 process_run_uuid: header.process_run_uuid,
                 authority_generation: current_fence.authority_generation,
                 daemon_epoch: current_fence.epoch,
@@ -857,8 +929,8 @@ fn process_request(req: HostRequest, shared: &ServerShared) -> HostResponse {
                         .unwrap_or_else(std::sync::PoisonError::into_inner);
                     fencing.check_and_advance(&header)?;
                 }
-                let unknown_input_seqs = shared.inputs.reconcile_in_flight()?;
-                let (last_confirmed_input_seq, _) = shared.inputs.summary();
+                shared.inputs.reconcile_in_flight()?;
+                let (last_confirmed_input_seq, unknown_input_seqs) = shared.inputs.summary();
                 let durable_log_seq = shared.spool.sync_durable_now()?;
                 let exit_status = shared.anchor.poll_exit(false)?;
                 let anchor_report = shared.anchor.verification_report();
