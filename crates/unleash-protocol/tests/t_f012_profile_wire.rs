@@ -43,6 +43,52 @@ fn decode(value: &Value) -> Result<SetProviderProfilePayload, serde_json::Error>
 }
 
 #[test]
+fn endpoint_normalization_is_an_explicit_copy_and_keeps_original_wire_digest() {
+    let mut raw = remote();
+    set(
+        &mut raw,
+        "endpoint",
+        json!("https://FIXTURE.invalid:443/a%2Fb/v1/responses"),
+    );
+    let payload = decode(&raw).unwrap();
+    let envelope = unleash_protocol::CommandEnvelope {
+        protocol_version: unleash_protocol::ProtocolVersion,
+        request_id: unleash_domain::RequestId::from_u128(1),
+        command_id: unleash_domain::CommandId::from_u128(2),
+        authority_generation: unleash_domain::AuthorityGeneration::from_u128(3),
+        actor_ref: None,
+        project_id: None,
+        aggregate_id: uuid::Uuid::from_u128(4),
+        expected_revision: unleash_domain::Revision::INITIAL,
+        command_type: "SetProviderProfile".to_owned(),
+        payload: raw.as_object().unwrap().clone(),
+    };
+    let before = unleash_protocol::compute_command_digest_v2(&envelope).unwrap();
+    let normalized = payload.with_normalized_endpoint().unwrap();
+    assert_eq!(
+        normalized.endpoint(),
+        "https://fixture.invalid/a%2Fb/v1/responses"
+    );
+    assert_eq!(
+        payload.endpoint(),
+        "https://FIXTURE.invalid:443/a%2Fb/v1/responses"
+    );
+    assert_eq!(serde_json::to_value(&payload).unwrap(), raw);
+    assert_eq!(
+        unleash_protocol::compute_command_digest_v2(&envelope).unwrap(),
+        before
+    );
+    for forbidden in [
+        "http://remote.invalid/v1",
+        "https://name:synthetic@fixture.invalid/v1",
+        "https://fixture.invalid/v1?secret=synthetic",
+    ] {
+        set(&mut raw, "endpoint", json!(forbidden));
+        assert!(decode(&raw).is_err());
+    }
+}
+
+#[test]
 fn exact_remote_local_and_pricing_sources_round_trip() {
     let r = remote();
     assert_eq!(serde_json::to_value(decode(&r).unwrap()).unwrap(), r);

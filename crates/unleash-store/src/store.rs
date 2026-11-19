@@ -465,6 +465,29 @@ impl UnleashStore {
             crate::provider_profiles::resolve(conn, profile_id, profile_version)
         })
     }
+
+    /// Recherche le reçu actif d'une commande F012 authentifiée, sans préparation.
+    /// Un résultat absent n'accorde aucune autorité : le writer répète le lookup.
+    /// # Errors
+    /// Refuse acteur/rôle/enveloppe incohérents, lignée périmée, digest divergent ou tombstone.
+    pub fn lookup_provider_profile_command(
+        &self,
+        envelope: &unleash_protocol::CommandEnvelope,
+        caller: &crate::CallerAuthority,
+    ) -> Result<Option<unleash_protocol::CommandReceipt>, StoreError> {
+        crate::provider_profiles::validate_envelope_identity(envelope, caller)?;
+        let digest = unleash_protocol::compute_command_digest_v2(envelope)?;
+        self.read_snapshot(|conn, _| {
+            let daemon = read_daemon_state_conn(conn)?;
+            crate::commands::classify_command_replay(
+                conn,
+                &daemon,
+                &caller.actor_id,
+                envelope,
+                digest,
+            )
+        })
+    }
     /// Ouvre ou initialise la base `SQLite` qualifiée avec vérification de build, PRAGMAs et migrations.
     ///
     /// # Errors
@@ -730,7 +753,13 @@ impl UnleashStore {
         let lookup = || {
             self.read_snapshot(|conn, _| {
                 let daemon = read_daemon_state_conn(conn)?;
-                crate::commands::classify_command_replay(conn, &daemon, request, digest)
+                crate::commands::classify_command_replay(
+                    conn,
+                    &daemon,
+                    &request.actor_id,
+                    &request.envelope,
+                    digest,
+                )
             })
         };
         if let Some(receipt) = lookup()? {
@@ -1444,6 +1473,57 @@ impl UnleashStore {
         self.writer
             .submit_immediate_blocking(WriteCriticality::Normal, false, move |tx, now_ms| {
                 tx_publish_object_reference(tx, id_gen.as_ref(), now_ms, &req)
+            })
+    }
+
+    /// Publie une référence et rend sa poignée exacte pour le retrait du seul owner.
+    /// Le producteur fournit une identité de tentative distincte ; aucune référence
+    /// partageant seulement le hash ne sera retirée par cette poignée.
+    /// # Errors
+    /// Refuse octets, pin, génération ou lignée incohérents.
+    pub fn publish_owned_object_reference(
+        &self,
+        request: PublishObjectReferenceRequest,
+    ) -> Result<crate::objects::PublishedObjectReference, StoreError> {
+        let record = self.object_record(request.object_hash)?;
+        verify_object_file_before_publish(
+            &self.config,
+            &record.relative_path,
+            request.object_hash,
+        )?;
+        let ids = Arc::clone(&self.config.id_generator);
+        self.writer
+            .submit_immediate_blocking(WriteCriticality::Normal, false, move |tx, now| {
+                let daemon = read_daemon_state_tx(tx)?;
+                crate::objects::tx_publish_owned_reference(
+                    tx,
+                    ids.as_ref(),
+                    now,
+                    &request,
+                    daemon.authority_generation,
+                )
+            })
+    }
+
+    /// Retire uniquement la référence identifiée par la poignée de son producteur.
+    /// Ne supprime aucun octet et ne touche pas les autres références du même hash.
+    /// # Errors
+    /// Refuse une poignée d'ancienne lignée ou une erreur du writer.
+    pub fn retire_owned_object_reference(
+        &self,
+        handle: crate::objects::PublishedObjectReference,
+        reason: &str,
+    ) -> Result<usize, StoreError> {
+        let reason = reason.to_owned();
+        self.writer
+            .submit_immediate_blocking(WriteCriticality::Critical, false, move |tx, _| {
+                let daemon = read_daemon_state_tx(tx)?;
+                crate::objects::tx_retire_owned_reference(
+                    tx,
+                    &handle,
+                    daemon.authority_generation,
+                    &reason,
+                )
             })
     }
 

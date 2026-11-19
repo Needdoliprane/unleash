@@ -436,6 +436,19 @@ impl TryFrom<RawProviderProfile> for SetProviderProfilePayload {
 }
 
 impl SetProviderProfilePayload {
+    /// Produit une copie dont seul l'endpoint est normalisé suivant `Url`.
+    /// Le décodage et le digest de l'enveloppe d'origine restent inchangés.
+    /// Aucune résolution DNS, connexion ou preuve de placement n'est effectuée.
+    /// # Errors
+    /// Refuse une URL invalide ; les interdits structurels restent ceux du DTO.
+    pub fn with_normalized_endpoint(&self) -> Result<Self, ProviderProfilePayloadError> {
+        let endpoint = Url::parse(&self.endpoint)
+            .map_err(|_| ProviderProfilePayloadError::InvalidReference)?;
+        let mut normalized = self.clone();
+        normalized.endpoint = endpoint.to_string();
+        Ok(normalized)
+    }
+
     /// Fournisseur déclaré.
     #[must_use]
     pub const fn provider_kind(&self) -> ProviderKind {
