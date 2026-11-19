@@ -1,5 +1,8 @@
 //! One-use Store permits only. Native effects remain outside this SQLite fixture.
 use super::*;
+
+#[path = "terminal_input_unknown_scenarios.rs"]
+mod unknown_scenarios;
 use unleash_store::terminal_allocations::terminal_input_types::ResolveTerminalInputRequest;
 
 fn input_dispatch(store: &UnleashStore, record: &TerminalInputRecord) -> DispatchId {
