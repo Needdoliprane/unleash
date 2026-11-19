@@ -5,12 +5,11 @@ use crate::provider_probe_connect::{
     ConnectPhasePermission, ProviderProbeConnectClaim, fact_context,
 };
 use crate::{BrokerPhase, ExecutionContinuation, StoreError, UnleashStore, WriteCriticality};
-use rusqlite::{OptionalExtension, Transaction, params};
+use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde::Serialize;
 use unleash_domain::{ActionId, ActionState, Revision, Sequence, Sha256Digest, TimestampMs};
 use unleash_protocol::{EventCursor, RetryClass, canonical_sha256};
 
-const PREFIX: &str = "provider-connect-pre-dispatch:v1:";
 const EVENT: &str = "ProviderProbeDispatchRefused";
 
 /// One durable refusal and its exact outbox cursor; never an execution permission.
@@ -26,7 +25,7 @@ pub struct ProviderConnectDispositionCommit {
     pub replayed: bool,
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Copy, Serialize)]
 #[serde(rename_all = "snake_case")]
 enum RefusalReason {
     PolicyChanged,
@@ -121,14 +120,31 @@ fn replay(
     tx: &Transaction<'_>,
     daemon: &crate::DaemonStateRow,
     input: &RefusalInput,
+    continuation: &ExecutionContinuation,
 ) -> Result<Option<ProviderConnectDispositionCommit>, StoreError> {
+    let reason = match &input.authorization {
+        BrokerPhase::Authorization {
+            outcome: crate::BrokerAuthorizationOutcome::Authorized { .. },
+            ..
+        } => RefusalReason::PolicyChanged,
+        BrokerPhase::Authorization {
+            outcome: crate::BrokerAuthorizationOutcome::Failed { failure },
+            ..
+        } if failure.retry_class == RetryClass::Never => RefusalReason::AuthorizationDenied,
+        _ => {
+            return Err(invalid(
+                "autorisation sans disposition préalable définitive",
+            ));
+        }
+    };
+    let expected = canonical_sha256(&disposition_payload(input, continuation, reason))?;
     let prior: Option<(String,String,i64,i64)> = tx.query_row(
-        "SELECT e.snapshot_ref,v.stream_id,v.sequence,v.aggregate_revision FROM evidence e JOIN events v ON e.snapshot_ref LIKE ?2||'%:'||v.event_id AND v.aggregate_type='action' AND v.aggregate_id=e.action_id AND v.event_type=?3 WHERE e.action_id=?1 AND e.kind='observation' AND e.snapshot_ref LIKE ?2||'%' AND e.producer_id=?4 AND e.availability='available' AND e.object_hash IS NULL",
-        params![input.intent.action_id.to_string(),PREFIX,EVENT,crate::CONNECT_OBSERVER_PRINCIPAL], |row|Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?)),
+        "SELECT payload_hash,stream_id,sequence,aggregate_revision FROM events WHERE aggregate_type='action' AND aggregate_id=?1 AND event_type=?2 AND schema_version=1 AND actor_id=?3 AND project_id IS ?4",
+        params![input.intent.action_id.to_string(),EVENT,input.intent.principal_id.as_str(),input.intent.project_id.map(|project|project.to_string())], |row|Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?)),
     ).optional()?;
     prior
-        .map(|(reference, stream, sequence, revision)| {
-            if !reference.starts_with(&format!("{PREFIX}{}:", input.binding))
+        .map(|(digest, stream, sequence, revision)| {
+            if digest != expected.as_prefixed_str()
                 || stream != daemon.stream_id.to_string()
                 || input.action.state != ActionState::Denied
             {
@@ -149,6 +165,29 @@ fn replay(
             })
         })
         .transpose()
+}
+
+fn disposition_payload(
+    input: &RefusalInput,
+    continuation: &ExecutionContinuation,
+    reason: RefusalReason,
+) -> serde_json::Value {
+    serde_json::json!({"schema_version":1,"probe_id":input.record.context.probe_id,
+        "action_id":input.intent.action_id,"evaluation_id":input.action.evaluation_id,
+        "intent_digest":input.intent.intent_digest,"reason":reason,"disposition_digest":input.binding,
+        "reservation_id":continuation.reservation_id,"lease_id":continuation.lease_id,"fence":continuation.fence})
+}
+
+/// Read-only recognition of a closed refusal never attests a network success.
+/// The immutable event header survives payload retention; no native object is due.
+pub(crate) fn has_closed_refusal(
+    conn: &Connection,
+    probe: unleash_domain::ProviderProbeId,
+) -> Result<bool, StoreError> {
+    Ok(conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM provider_probe_transport_contexts c JOIN provider_probes p ON p.probe_id=c.probe_id AND p.state='ended' JOIN actions a ON a.action_id=c.action_id AND a.state='denied' JOIN events e ON e.aggregate_type='action' AND e.aggregate_id=a.action_id AND e.aggregate_revision=a.revision AND e.actor_id=c.principal_id AND e.project_id IS c.project_id AND e.causation_kind='action' AND e.causation_id=a.action_id AND e.schema_version=1 AND e.payload_hash LIKE 'sha256:%' WHERE c.probe_id=?1 AND e.event_type=?2 AND NOT EXISTS(SELECT 1 FROM action_dispatches d WHERE d.action_id=a.action_id) AND NOT EXISTS(SELECT 1 FROM broker_dispatches d WHERE d.action_id=a.action_id))",
+        params![probe.to_string(),EVENT],|row|row.get(0),
+    )?)
 }
 
 fn refusal_reason(tx: &Transaction<'_>, input: &RefusalInput) -> Result<RefusalReason, StoreError> {
@@ -194,11 +233,8 @@ fn commit_refusal(
     if changed != 1 {
         return Err(invalid("CAS de disposition refusé"));
     }
-    let payload = serde_json::json!({"schema_version":1,"probe_id":input.record.context.probe_id,
-        "action_id":input.intent.action_id,"evaluation_id":input.action.evaluation_id,
-        "intent_digest":input.intent.intent_digest,"reason":reason,"disposition_digest":input.binding,
-        "reservation_id":continuation.reservation_id,"lease_id":continuation.lease_id,"fence":continuation.fence});
-    let (event, sequence) = crate::broker_writer::append_phase_event_tx(
+    let payload = disposition_payload(input, continuation, reason);
+    let (_event, sequence) = crate::broker_writer::append_phase_event_tx(
         tx,
         config,
         daemon,
@@ -208,7 +244,6 @@ fn commit_refusal(
         EVENT,
         &payload,
     )?;
-    tx.execute("INSERT INTO evidence(evidence_id,kind,action_id,snapshot_ref,object_hash,producer_id,observed_at_ms,schema_version,availability) VALUES(?1,'observation',?2,?3,NULL,?4,?5,1,'available')",params![config.id_generator.new_uuid().to_string(),input.intent.action_id.to_string(),format!("{PREFIX}{}:{event}",input.binding),crate::CONNECT_OBSERVER_PRINCIPAL,now.as_i64()])?;
     crate::provider_probe_connect_observation::transition_probe(
         tx,
         &input.record.context,
@@ -247,7 +282,7 @@ impl UnleashStore {
         self.execute_in_writer_tx(WriteCriticality::Normal, move |tx, now| {
             let daemon = crate::commands::read_daemon_state_conn(tx)?;
             let input = read_input(tx, &daemon, &permission, &continuation)?;
-            if let Some(prior) = replay(tx, &daemon, &input)? {
+            if let Some(prior) = replay(tx, &daemon, &input, &continuation)? {
                 return Ok(prior);
             }
             if config

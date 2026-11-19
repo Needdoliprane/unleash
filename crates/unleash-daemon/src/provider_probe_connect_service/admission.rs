@@ -55,15 +55,26 @@ impl ConnectJournal {
             store.dispose_provider_probe_connect_without_dispatch(&claim, &continuation)
         })
         .await;
-        if let Ok(Ok(committed)) = result {
-            publish_committed_events_ordered(
-                state,
-                committed.event_cursor.stream_id,
-                committed.event_cursor.sequence.as_u64(),
-                1,
-                &[],
-            )
-            .await;
+        match result {
+            Ok(Ok(committed)) => {
+                publish_committed_events_ordered(
+                    state,
+                    committed.event_cursor.stream_id,
+                    committed.event_cursor.sequence.as_u64(),
+                    1,
+                    &[],
+                )
+                .await;
+            }
+            Ok(Err(error)) => tracing::debug!(
+                stage="pre_dispatch_disposition",code=%error.error_code(),
+                reason=?error.reason_code(),refusal=closed_disposition_refusal(&error),
+                "Connect disposition not committed"
+            ),
+            Err(_) => tracing::warn!(
+                stage = "pre_dispatch_disposition_task",
+                "Connect disposition not acknowledged"
+            ),
         }
         // Any unproven condition, task error or marker keeps the durable slot.
     }
@@ -180,6 +191,25 @@ impl ConnectJournal {
         })
         .await
         .map_err(|_| BrokerJournalError)?
+    }
+}
+
+fn closed_disposition_refusal(error: &StoreError) -> &'static str {
+    match error {
+        StoreError::EvidenceUnavailable(message) => match message.as_str() {
+            "disposition interdite après marqueur ou observation" => "marker_or_observation",
+            "réservation ou bail natif non exact" => "continuation",
+            "autorisation de disposition incohérente" => "authorization_binding",
+            "action de disposition d'un autre faisceau" => "action_binding",
+            "rejeu divergent de disposition sans dispatch" => "replay_binding",
+            "action encore autorisable, réessayable, ambiguë ou en attente" => {
+                "no_definitive_refusal"
+            }
+            _ => "unqualified_fact",
+        },
+        StoreError::Json(_) => "phase_codec",
+        StoreError::InvariantViolation(_) => "storage_constraint",
+        _ => "typed_writer_error",
     }
 }
 

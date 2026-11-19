@@ -276,7 +276,15 @@ fn t_f012_013_completion_rollback_retains_fact_and_restart_keeps_capacity() {
 }
 
 fn pre_dispatch_dispositions(store: &UnleashStore) -> i64 {
-    store.read_snapshot(|conn,_|Ok(conn.query_row("SELECT COUNT(*) FROM evidence WHERE snapshot_ref LIKE 'provider-connect-pre-dispatch:v1:%'",[],|row|row.get(0))?)).unwrap()
+    store
+        .read_snapshot(|conn, _| {
+            Ok(conn.query_row(
+                "SELECT COUNT(*) FROM events WHERE event_type='ProviderProbeDispatchRefused'",
+                [],
+                |row| row.get(0),
+            )?)
+        })
+        .unwrap()
 }
 
 #[test]
@@ -327,7 +335,32 @@ fn t_f012_013_pre_dispatch_disposal_refuses_active_marker_and_unknown() {
 
 #[test]
 fn t_f012_013_pre_dispatch_disposal_replays_after_release_and_rejects_other_fence() {
-    let (store, _directory, mandate, pool) = fixture(Arc::new(NoopCutpointObserver));
+    let clock = Arc::new(ManualClock::default());
+    let (store, _directory, mandate, pool) =
+        fixture_with_clock(Arc::new(NoopCutpointObserver), Some(clock.clone()));
+    let earlier = dispatched(&store, mandate, pool);
+    let fact = store
+        .adopt_provider_probe_connect_observation(&earlier.ready.claim, candidate(&store, &earlier))
+        .unwrap();
+    store
+        .commit_provider_probe_connect_observation(
+            &earlier.ready.claim,
+            final_request(&store, &earlier, Some(fact)),
+        )
+        .unwrap();
+    let prior = store
+        .get_provider_profile_snapshot(PROFILE, 2, None)
+        .unwrap()
+        .value
+        .unwrap();
+    assert_eq!(
+        prior
+            .observations
+            .iter()
+            .filter(|observation| observation.phase == unleash_protocol::ProviderTestPhase::Connect)
+            .count(),
+        1
+    );
     let ready = ready(&store, mandate, 0xf012_0401);
     authorizing(&store, &ready);
     observe_eligibility(&store, &ready, pool);
@@ -359,6 +392,7 @@ fn t_f012_013_pre_dispatch_disposal_replays_after_release_and_rejects_other_fenc
     assert!(!committed.replayed);
     assert_eq!(held_capacity(&store), 0);
     assert_eq!(pre_dispatch_dispositions(&store), 1);
+    assert_no_connected_view(&store);
     let before = counts(&store);
     let replay = store
         .dispose_provider_probe_connect_without_dispatch(&ready.claim, &continuation)
@@ -367,7 +401,7 @@ fn t_f012_013_pre_dispatch_disposal_replays_after_release_and_rejects_other_fenc
     assert_eq!(replay.event_cursor, committed.event_cursor);
     assert_eq!(replay.revision, committed.revision);
     assert_eq!(counts(&store), before);
-    let mut other = continuation;
+    let mut other = continuation.clone();
     other.fence = unleash_domain::Fence::new(other.fence.as_u64() + 1);
     assert!(
         store
@@ -377,4 +411,95 @@ fn t_f012_013_pre_dispatch_disposal_replays_after_release_and_rejects_other_fenc
     assert_eq!(counts(&store), before);
     assert_eq!(pre_dispatch_dispositions(&store), 1);
     assert_no_model(&store);
+    purge_disposition_payload(&store, &clock, &committed);
+    let before = counts(&store);
+    let retained = store
+        .dispose_provider_probe_connect_without_dispatch(&ready.claim, &other)
+        .unwrap_err();
+    assert_eq!(
+        retained.error_code(),
+        unleash_protocol::ErrorCode::EvidenceUnavailable
+    );
+    let replay = store
+        .dispose_provider_probe_connect_without_dispatch(&ready.claim, &continuation)
+        .unwrap();
+    assert!(replay.replayed);
+    assert_eq!(replay.event_cursor, committed.event_cursor);
+    assert_eq!(counts(&store), before);
+    assert_no_connected_view(&store);
+}
+
+fn assert_no_connected_view(store: &UnleashStore) {
+    let view = store
+        .get_provider_profile_snapshot(PROFILE, 2, None)
+        .unwrap()
+        .value
+        .unwrap();
+    assert!(
+        view.observations
+            .iter()
+            .all(|observation| observation.phase != unleash_protocol::ProviderTestPhase::Connect),
+        "a newer proven refusal never falls back to an earlier connected result"
+    );
+}
+
+fn purge_disposition_payload(
+    store: &UnleashStore,
+    clock: &ManualClock,
+    committed: &unleash_store::ProviderConnectDispositionCommit,
+) {
+    let sequence = committed.event_cursor.sequence.as_u64();
+    let before: String = store
+        .read_snapshot(|conn, _| {
+            Ok(conn.query_row(
+                "SELECT payload_hash FROM events WHERE sequence=?1",
+                [sequence],
+                |row| row.get(0),
+            )?)
+        })
+        .unwrap();
+    // Synthetic local consumers read every envelope before fixture acknowledgement.
+    let destinations: Vec<String> = store
+        .read_snapshot(|conn, _| {
+            let mut statement = conn.prepare("SELECT DISTINCT destination FROM outbox")?;
+            let rows = statement.query_map([], |row| row.get(0))?;
+            Ok(rows.collect::<Result<_, _>>()?)
+        })
+        .unwrap();
+    for destination in destinations {
+        loop {
+            let batch = store.lease_outbox_batch(&destination, 32).unwrap();
+            if batch.is_empty() {
+                break;
+            }
+            for item in batch {
+                assert!(serde_json::to_value(&item.envelope).unwrap().is_object());
+                store
+                    .ack_outbox_delivery(item.event_id, &item.destination)
+                    .unwrap();
+            }
+        }
+    }
+    clock.advance(std::time::Duration::from_secs(8 * 86_400));
+    assert!(
+        store
+            .purge_history(store.config().clock.now_ms())
+            .unwrap()
+            .affected_rows
+            > 0
+    );
+    let after: (String, String) = store
+        .read_snapshot(|conn, _| {
+            Ok(conn.query_row(
+                "SELECT payload_state,payload_hash FROM events WHERE sequence=?1",
+                [sequence],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )?)
+        })
+        .unwrap();
+    assert_eq!(
+        after,
+        ("tombstone".into(), before),
+        "Q12 retains the real canonical event hash used for replay"
+    );
 }

@@ -673,6 +673,9 @@ pub(crate) fn read_projection(
     if state != "ended" {
         return Ok(None);
     }
+    if crate::provider_probe_connect_disposition::has_closed_refusal(conn, probe.parse()?)? {
+        return Ok(None);
+    }
     let proof=conn.query_row(
         "SELECT c.action_id,d.dispatch_id,e.object_hash,json_extract(c.context_json,'$.request_digest'),e.observed_at_ms FROM provider_probe_transport_contexts c JOIN actions a ON a.action_id=c.action_id AND a.state='observed_success' JOIN action_dispatches d ON d.action_id=a.action_id JOIN broker_phase_records b ON b.action_id=a.action_id AND b.phase_key='observation:1' JOIN events v ON v.event_id=b.event_id AND v.event_type='ActionObserved' JOIN evidence e ON e.action_id=a.action_id AND e.snapshot_ref LIKE 'provider-connect-fact:v1:%' AND e.availability='available' AND e.producer_id=?2 JOIN evidence disposition ON disposition.action_id=a.action_id AND disposition.snapshot_ref LIKE 'provider-connect-disposition:v1:%:'||v.event_id AND disposition.object_hash=e.object_hash AND disposition.availability='available' JOIN object_references r ON r.owner_kind='provider_probe' AND r.owner_id=c.probe_id AND r.source_field='connect_observation' AND r.object_hash=e.object_hash AND r.state='live' WHERE c.probe_id=?1 AND json_extract(v.payload_json,'$.output_digest')=e.object_hash",
         params![probe,CONNECT_OBSERVER_PRINCIPAL],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,String>(2)?,r.get::<_,String>(3)?,r.get::<_,i64>(4)?)),
