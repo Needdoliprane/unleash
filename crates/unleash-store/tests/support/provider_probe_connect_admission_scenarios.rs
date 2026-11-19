@@ -32,7 +32,7 @@ use unleash_store::{
     PublishObjectReferenceRequest, SettingsPatch, SettingsScopeKind, StoreConfig, StoreCutpoint,
     StoreError, UnleashStore, WriteCriticality,
 };
-use unleash_testkit::local_test_dir;
+use unleash_testkit::{ManualClock, local_test_dir};
 
 const OBSERVER: &str = "fixture:connect-admission-observer";
 
@@ -82,9 +82,19 @@ fn publish(store: &UnleashStore, document: &impl serde::Serialize) -> Sha256Dige
 fn fixture(
     observer: Arc<dyn CutpointObserver>,
 ) -> (UnleashStore, impl std::fmt::Debug, ReceiptId, PoolId) {
+    fixture_with_clock(observer, None)
+}
+
+fn fixture_with_clock(
+    observer: Arc<dyn CutpointObserver>,
+    clock: Option<Arc<ManualClock>>,
+) -> (UnleashStore, impl std::fmt::Debug, ReceiptId, PoolId) {
     let directory = local_test_dir("f012-connect-admission").unwrap();
     let mut config = StoreConfig::new(directory.path());
     config.cutpoints = observer;
+    if let Some(clock) = clock {
+        config.clock = clock;
+    }
     let store = UnleashStore::open(config).unwrap();
     store
         .register_principal(PRINCIPAL, "user", caller().actor_id.as_str())
@@ -218,6 +228,15 @@ fn authorizing(store: &UnleashStore, ready: &ReadyProbe) {
 }
 
 fn observe_eligibility(store: &UnleashStore, ready: &ReadyProbe, pool: PoolId) {
+    observe_eligibility_until(store, ready, pool, ready.record.context.deadline);
+}
+
+fn observe_eligibility_until(
+    store: &UnleashStore,
+    ready: &ReadyProbe,
+    pool: PoolId,
+    valid_until: unleash_domain::TimestampMs,
+) {
     let c = &ready.record.context;
     let bytes = store
         .read_verified_object_bytes(c.configuration_digest)
@@ -243,7 +262,7 @@ fn observe_eligibility(store: &UnleashStore, ready: &ReadyProbe, pool: PoolId) {
             source_revision: snapshot.source_revision,
             authority_generation: snapshot.authority_generation,
             daemon_epoch: snapshot.daemon_epoch,
-            valid_until: c.deadline,
+            valid_until,
             urgency: AdmissionUrgency::Ordinary,
         })
         .unwrap();
@@ -622,5 +641,49 @@ fn t_f012_013_admission_local_no_price_still_observes_applicable_overrun() {
         Err(StoreError::BudgetExhausted { .. })
     ));
     assert_eq!(counts(&store), before);
+    assert_no_model(&store);
+}
+
+#[test]
+fn t_f012_013_admission_context_expiry_is_rechecked_after_decide() {
+    let clock = Arc::new(ManualClock::new(1_700_000_000_000));
+    let (store, _directory, mandate, pool) =
+        fixture_with_clock(Arc::new(NoopCutpointObserver), Some(clock.clone()));
+    let ready = ready(&store, mandate, 340);
+    authorizing(&store, &ready);
+    // This synthetic observer's lifetime outlasts the transport context. Its
+    // evidence cannot extend either the request deadline or the effect mandate.
+    observe_eligibility_until(
+        &store,
+        &ready,
+        pool,
+        unleash_domain::TimestampMs::new(ready.record.context.deadline.as_i64() + 10_000),
+    );
+    let snapshot = store.execution_admission_snapshot(pool).unwrap();
+    let before = counts(&store);
+    let leases = lease_rows(&store);
+    let unit = AdmissionUnit::Probe(ready.record.context.probe_id);
+    let delta = u64::try_from(
+        ready.record.context.deadline.as_i64() - store.config().clock.now_ms().as_i64() + 1,
+    )
+    .unwrap();
+    let result = store.commit_execution_admission(pool, snapshot.token, move |_| {
+        clock.advance_ms(delta);
+        Ok(AdmissionDecision::Admit {
+            unit,
+            deficit_deltas: BTreeMap::from([(None, 0)]),
+            consecutive_controls: 0,
+            budgets: vec![],
+        })
+    });
+    assert!(
+        matches!(result, Err(StoreError::StaleFence { .. })),
+        "the context expires inside decide while the eligibility token remains live: {result:?}"
+    );
+    assert_eq!(counts(&store), before);
+    assert_eq!(lease_rows(&store), leases);
+    let after = store.execution_admission_snapshot(pool).unwrap();
+    assert_eq!(after.fairness, snapshot.fairness);
+    assert!(after.active.is_empty());
     assert_no_model(&store);
 }
