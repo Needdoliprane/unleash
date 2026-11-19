@@ -43,7 +43,7 @@ pub(super) fn start(state: &Arc<DaemonRuntimeState>, actor: ActorId, command: Co
         let activity = Arc::new(activity);
         let store = Arc::clone(&state.store);
         let found = tokio::task::spawn_blocking(move || {
-            store.inspect_terminal_control_request(&actor, command)
+            store.inspect_registered_terminal_request(&actor, command)
         })
         .await;
         let Ok(Ok(snapshot)) = found else {
@@ -51,6 +51,24 @@ pub(super) fn start(state: &Arc<DaemonRuntimeState>, actor: ActorId, command: Co
         };
         let Some(record) = snapshot.value else {
             return;
+        };
+        use unleash_store::terminal_allocations::terminal_renewal_types::{
+            RegisteredTerminalIntent, TerminalRenewalState,
+        };
+        let record = match record {
+            RegisteredTerminalIntent::Renewal(record) => {
+                if record.state == TerminalRenewalState::Prepared
+                    && record.broker_action_state.is_none()
+                    && record.broker_dispatch_id.is_none()
+                    && super::renewal::run(state, record, activity).await.is_err()
+                {
+                    tracing::warn!(
+                        "Terminal renewal has no confirmed observation; inspect recovery"
+                    );
+                }
+                return;
+            }
+            RegisteredTerminalIntent::Transfer(record) => record,
         };
         if record.state != TerminalControlState::Prepared
             || record.broker_action_state.is_some()

@@ -29,6 +29,8 @@ pub(crate) use metadata::read_terminal_metadata;
 mod control;
 #[path = "terminal_input.rs"]
 mod input;
+#[path = "terminal_renewal.rs"]
+mod renewal;
 pub(crate) use input::{decode as decode_input, prepare as prepare_input, start as start_input};
 
 pub(crate) fn start_registered(
