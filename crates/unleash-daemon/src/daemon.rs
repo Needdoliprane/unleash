@@ -688,15 +688,109 @@ struct ShutdownResources {
     accept: Option<tokio::task::JoinHandle<()>>,
 }
 
+// Until blocking cleanup proves success, a failed or panicking owner must
+// not allow a successor to start on the same resources.
+fn cleanup_with_authority<T, E>(
+    lock: Option<Arc<Mutex<AuthorityLock>>>,
+    cleanup: impl FnOnce() -> Result<T, E>,
+) -> Result<T, E> {
+    let lock = std::mem::ManuallyDrop::new(lock);
+    let result = cleanup()?;
+    drop(std::mem::ManuallyDrop::into_inner(lock));
+    Ok(result)
+}
+
+struct StoreShutdownJob {
+    store: Option<Arc<UnleashStore>>,
+    lock: Option<Arc<Mutex<AuthorityLock>>>,
+}
+
+impl StoreShutdownJob {
+    fn run(mut self) -> Result<(), unleash_store::StoreError> {
+        let Some(mut store) = self.store.take() else {
+            return Ok(());
+        };
+        cleanup_with_authority(self.lock.take(), || {
+            loop {
+                match Arc::try_unwrap(store) {
+                    Ok(owned) => return owned.shutdown(),
+                    Err(shared) => {
+                        store = shared;
+                        std::thread::sleep(Duration::from_millis(10));
+                    }
+                }
+            }
+        })
+    }
+}
+
+impl Drop for StoreShutdownJob {
+    fn drop(&mut self) {
+        let Some(store) = self.store.take() else {
+            return;
+        };
+        // A queued blocking job can be dropped before it starts. Move both
+        // owners to a native thread independent of the runtime in that case.
+        let pending = Arc::new(Mutex::new(Some((store, self.lock.take()))));
+        let job = Arc::clone(&pending);
+        let spawn = std::thread::Builder::new()
+            .name("unleash-shutdown-cleanup".into())
+            .spawn(move || {
+                let Some((store, lock)) = job.lock().unwrap_or_else(PoisonError::into_inner).take()
+                else {
+                    return;
+                };
+                let job = StoreShutdownJob {
+                    store: Some(store),
+                    lock,
+                };
+                if let Err(error) = job.run() {
+                    tracing::error!(%error, "Fermeture de secours du Store incomplète");
+                }
+            });
+        if let Err(error) = spawn {
+            tracing::error!(%error, "Propriétaire de fermeture indisponible ; autorité conservée");
+            // Keep both owners alive if the thread could not be created.
+            std::mem::forget(pending);
+        }
+    }
+}
+
+impl Drop for ShutdownResources {
+    fn drop(&mut self) {
+        let mut store = self.store.take();
+        if let Some(state) = self.state.take() {
+            state.set_mode(DaemonMode::Stopped);
+            state.subscriptions.close_all();
+            state.stop_accepting();
+            if store.is_none() {
+                store = Some(Arc::clone(&state.store));
+            }
+        }
+        if let Some(accept) = self.accept.take() {
+            accept.abort();
+        }
+        if store.is_some() {
+            drop(StoreShutdownJob {
+                store,
+                lock: self.lock.take(),
+            });
+        }
+    }
+}
+
 impl ShutdownResources {
     async fn release_authority_with<F>(&mut self, release: F) -> Result<(), ShutdownCleanupError>
     where
         F: FnOnce(&mut AuthorityLock) -> Result<(), PlatformError> + Send + 'static,
     {
         if let Some(lock) = self.lock.as_ref().map(Arc::clone) {
+            let retained = Arc::clone(&lock);
             tokio::task::spawn_blocking(move || {
-                let mut authority = lock.lock().unwrap_or_else(PoisonError::into_inner);
-                release(&mut authority)
+                cleanup_with_authority(Some(retained), || {
+                    let mut authority = lock.lock().unwrap_or_else(PoisonError::into_inner);
+                    release(&mut authority)
+                })
             })
             .await
             .map_err(|error| {
@@ -778,8 +872,12 @@ impl ShutdownResources {
         }
         drain_connection_tasks(connections, deadline).await?;
         if let Some(store) = self.take_exclusive_store(deadline).await? {
-            // Never detach Store::shutdown, even if the request's wait expired.
-            tokio::task::spawn_blocking(move || store.shutdown())
+            // The job owns the lock even if its async waiter is canceled.
+            let job = StoreShutdownJob {
+                store: Some(Arc::new(store)),
+                lock: self.lock.clone(),
+            };
+            tokio::task::spawn_blocking(move || job.run())
                 .await
                 .map_err(|error| {
                     DaemonError::InvalidConfiguration(format!(
@@ -791,21 +889,25 @@ impl ShutdownResources {
         let socket = socket_path.to_path_buf();
         let directory = rendezvous_dir.to_path_buf();
         let expected = proof.clone();
-        tokio::task::spawn_blocking(move || -> Result<(), DaemonError> {
-            match std::fs::remove_file(socket) {
-                Ok(()) => {}
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                Err(error) => return Err(DaemonError::Io(error)),
-            }
-            if let Some(value) = read_admin_credential(&directory)? {
-                if !AdminProof::from_hex(&value).is_some_and(|actual| actual.matches(&expected)) {
-                    return Err(DaemonError::InvalidConfiguration(String::from(
-                        "Credential local modifié ; verrou d'autorité conservé",
-                    )));
+        let lock = self.lock.clone();
+        tokio::task::spawn_blocking(move || {
+            cleanup_with_authority(lock, || -> Result<(), DaemonError> {
+                match std::fs::remove_file(socket) {
+                    Ok(()) => {}
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(error) => return Err(DaemonError::Io(error)),
                 }
-                std::fs::remove_file(directory.join(ADMIN_PROOF_FILENAME))?;
-            }
-            Ok(())
+                if let Some(value) = read_admin_credential(&directory)? {
+                    if !AdminProof::from_hex(&value).is_some_and(|actual| actual.matches(&expected))
+                    {
+                        return Err(DaemonError::InvalidConfiguration(String::from(
+                            "Credential local modifié ; verrou d'autorité conservé",
+                        )));
+                    }
+                    std::fs::remove_file(directory.join(ADMIN_PROOF_FILENAME))?;
+                }
+                Ok(())
+            })
         })
         .await
         .map_err(|error| {
@@ -951,17 +1053,6 @@ fn spawn_drain_coordinator(params: DrainCoordinatorParams) {
         }
         if let Some(state) = &resources.state {
             state.broker_activity.close_and_wait().await;
-        }
-        let state_drop = resources.state.take();
-        let store_drop = resources.store.take();
-        let lock_drop = resources.lock.take();
-        if state_drop.is_some() || store_drop.is_some() || lock_drop.is_some() {
-            let _ = tokio::task::spawn_blocking(move || {
-                drop(state_drop);
-                drop(store_drop);
-                drop(lock_drop);
-            })
-            .await;
         }
     });
 }
@@ -1308,6 +1399,45 @@ mod shutdown_ownership_tests {
         failed_release_keeps_coordinator_authority(true).await;
     }
 
+    #[tokio::test]
+    async fn dropping_owner_after_release_error_keeps_authority() {
+        let directory = local_test_dir("shutdown-release-error-drop").unwrap();
+        let rendezvous = directory.path().join("rdv");
+        let data = directory.path().join("data");
+        let lock = Arc::new(Mutex::new(
+            AuthorityLock::acquire_in(&rendezvous, &data).unwrap(),
+        ));
+        let retained = Arc::downgrade(&lock);
+        let mut resources = ShutdownResources {
+            state: None,
+            store: None,
+            lock: Some(lock),
+            accept: None,
+        };
+        let result = resources
+            .release_authority_with(|_| {
+                Err(PlatformError::Io(std::io::Error::other(
+                    "injected release error",
+                )))
+            })
+            .await;
+        drop(resources);
+        let protected = matches!(
+            AuthorityLock::acquire_in(&rendezvous, &data),
+            Err(PlatformError::DaemonAlreadyRunning { .. }
+                | PlatformError::AuthorityAlreadyActive { .. })
+        );
+        // Clean up the fixture after observing the lock with no extra owner.
+        if let Some(lock) = retained.upgrade() {
+            lock.lock().unwrap().release().unwrap();
+        }
+        assert!(matches!(result, Err(ShutdownCleanupError::Failed(_))));
+        assert!(
+            protected,
+            "failed release abandoned authority when the owner was dropped"
+        );
+    }
+
     // REQ-CORE-001 / REQ-CORE-007: a connection timeout must keep ownership
     // of an admitted blocking writer until its real completion.
     #[tokio::test]
@@ -1425,5 +1555,276 @@ mod shutdown_ownership_tests {
         })
         .await
         .unwrap();
+    }
+
+    // REQ-CORE-001 / REQ-CORE-007: cancellation must retain the authority
+    // until a transaction on the dedicated writer has actually ended.
+    #[tokio::test]
+    async fn canceling_shutdown_owner_keeps_authority_while_writer_can_mutate() {
+        let directory = local_test_dir("shutdown-aborted-owner").unwrap();
+        let data = directory.path().join("data");
+        let rendezvous = directory.path().join("rdv");
+        let root = data.clone();
+        let store = Arc::new(
+            tokio::task::spawn_blocking(move || UnleashStore::open(StoreConfig::new(root)))
+                .await
+                .unwrap()
+                .unwrap(),
+        );
+        let lock = AuthorityLock::acquire_in(&rendezvous, &data).unwrap();
+        let writer = Arc::clone(&store);
+        let resources = ShutdownResources {
+            state: None,
+            store: Some(store),
+            lock: Some(Arc::new(Mutex::new(lock))),
+            accept: None,
+        };
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let mutation = tokio::task::spawn_blocking(move || {
+            writer.execute_in_writer_tx(unleash_store::WriteCriticality::Normal, move |tx, now| {
+                let _ = entered_tx.send(());
+                // The dedicated writer owns this deadline even if a broken Drop blocks Tokio.
+                release_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+                tx.execute(
+                    "INSERT INTO principals(principal_id,principal_kind,actor_id,created_at_ms)
+                     VALUES('late-owner','system','fixture:late-owner',?1)",
+                    [now.as_i64()],
+                )?;
+                Ok(())
+            })
+        });
+        tokio::time::timeout(Duration::from_secs(5), entered_rx)
+            .await
+            .unwrap()
+            .unwrap();
+        let (owner_started_tx, owner_started_rx) = tokio::sync::oneshot::channel();
+        let owner = tokio::spawn(async move {
+            let _ = owner_started_tx.send(());
+            std::future::pending::<()>().await;
+            drop(resources);
+        });
+        owner_started_rx.await.unwrap();
+        owner.abort();
+        let cancellation = owner.await.unwrap_err();
+
+        let protected = matches!(
+            AuthorityLock::acquire_in(&rendezvous, &data),
+            Err(PlatformError::DaemonAlreadyRunning { .. }
+                | PlatformError::AuthorityAlreadyActive { .. })
+        );
+        release_tx.send(()).unwrap();
+        mutation.await.unwrap().unwrap();
+        assert!(cancellation.is_cancelled());
+        assert!(
+            protected,
+            "cancellation released authority while a transaction was still open"
+        );
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                match AuthorityLock::acquire_in(&rendezvous, &data) {
+                    Ok(_) => break,
+                    Err(
+                        PlatformError::DaemonAlreadyRunning { .. }
+                        | PlatformError::AuthorityAlreadyActive { .. },
+                    ) => {
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                    }
+                    other => panic!("unexpected authority result: {other:?}"),
+                }
+            }
+        })
+        .await
+        .unwrap();
+    }
+
+    struct CommitPause {
+        entered: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+        release: Mutex<std::sync::mpsc::Receiver<()>>,
+    }
+
+    impl unleash_store::CutpointObserver for CommitPause {
+        fn hit(
+            &self,
+            point: unleash_store::StoreCutpoint,
+        ) -> Result<(), unleash_store::StoreError> {
+            if point == unleash_store::StoreCutpoint::C1BeforeCommandCommit
+                && let Some(entered) = self.entered.lock().unwrap().take()
+            {
+                entered.send(()).unwrap();
+                // The dedicated writer must time out even if cleanup blocks Tokio.
+                self.release
+                    .lock()
+                    .unwrap()
+                    .recv_timeout(Duration::from_secs(5))
+                    .unwrap();
+            }
+            Ok(())
+        }
+    }
+
+    fn pending_project_command(
+        project: unleash_domain::ProjectId,
+        lineage: unleash_domain::AuthorityGeneration,
+    ) -> unleash_store::CommitCommandRequest {
+        use unleash_domain::{ActorId, CommandId, RequestId, Revision};
+        use unleash_protocol::{CommandEnvelope, ProtocolVersion, ReceiptState};
+        use unleash_store::{AggregateKind, CommandMutation, CommitCommandRequest};
+
+        CommitCommandRequest {
+            actor_id: ActorId::new("user:fixture").unwrap(),
+            envelope: CommandEnvelope {
+                protocol_version: ProtocolVersion,
+                request_id: RequestId::from_u128(2),
+                command_id: CommandId::from_u128(3),
+                authority_generation: lineage,
+                actor_ref: None,
+                project_id: Some(project),
+                aggregate_id: project.as_uuid(),
+                expected_revision: Revision::INITIAL,
+                command_type: "CreateProject".to_owned(),
+                payload: serde_json::Map::new(),
+            },
+            target_aggregate: AggregateKind::Project,
+            operation_id: None,
+            receipt_state: ReceiptState::Completed,
+            result_ref: None,
+            retention_days_override: None,
+            fence_assertion: None,
+            mutation: CommandMutation::CreateProject {
+                project_id: project,
+                name: "queued write before cancellation".to_owned(),
+                weight: 1,
+            },
+            events: Vec::new(),
+            capacity_reservations: Vec::new(),
+            budget_reservations: Vec::new(),
+        }
+    }
+
+    fn project_is_committed(db_path: PathBuf, project: unleash_domain::ProjectId) -> bool {
+        let db = rusqlite::Connection::open_with_flags(
+            db_path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            let found: bool = db
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM projects WHERE project_id = ?1)",
+                    [project.to_string()],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            if found || std::time::Instant::now() >= deadline {
+                return found;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    // REQ-CORE-001 / REQ-CORE-007: once exclusive ownership of the Store has moved to
+    // the blocking cleanup job, canceling the async continuation still cannot release authority.
+    #[tokio::test]
+    async fn canceling_shutdown_after_store_handoff_keeps_authority_until_writer_joins() {
+        let directory = local_test_dir("shutdown-aborted-blocking-handoff").unwrap();
+        let data = directory.path().join("data");
+        let rendezvous = directory.path().join("rdv");
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let mut config = StoreConfig::new(&data);
+        let db_path = config.db_path.clone();
+        config.cutpoints = Arc::new(CommitPause {
+            entered: Mutex::new(Some(entered_tx)),
+            release: Mutex::new(release_rx),
+        });
+        let store = Arc::new(
+            tokio::task::spawn_blocking(move || UnleashStore::open(config))
+                .await
+                .unwrap()
+                .unwrap(),
+        );
+        let lock = AuthorityLock::acquire_in(&rendezvous, &data).unwrap();
+        let socket_path = lock.socket_path().to_path_buf();
+        let project = unleash_domain::ProjectId::from_u128(1);
+        let weak_store = Arc::downgrade(&store);
+        let lineage = store.active_authority_generation().unwrap();
+        let mut submitted =
+            Box::pin(store.commit_command_async(pending_project_command(project, lineage)));
+        tokio::time::timeout(Duration::from_secs(5), async {
+            tokio::select! {
+                result = &mut submitted => panic!("command did not pause at C1: {result:?}"),
+                entered = entered_rx => entered.unwrap(),
+            }
+        })
+        .await
+        .unwrap();
+        drop(submitted);
+        assert_eq!(weak_store.strong_count(), 1);
+
+        let mut resources = ShutdownResources {
+            state: None,
+            store: Some(store),
+            lock: Some(Arc::new(Mutex::new(lock))),
+            accept: None,
+        };
+        let cleanup_dir = rendezvous.clone();
+        let owner = tokio::spawn(async move {
+            resources
+                .finish(
+                    &Mutex::new(Vec::new()),
+                    &socket_path,
+                    &cleanup_dir,
+                    &AdminProof::from_hex(&"0".repeat(64)).unwrap(),
+                    None,
+                )
+                .await
+        });
+        // Once the Arc is unwrapped, this current-thread runtime cannot resume the
+        // test until finish has submitted the blocking shutdown and yielded on its join.
+        let handoff = tokio::time::timeout(Duration::from_secs(3), async {
+            while weak_store.strong_count() != 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await;
+        owner.abort();
+        let cancellation = owner.await;
+        let protected = matches!(
+            AuthorityLock::acquire_in(&rendezvous, &data),
+            Err(PlatformError::DaemonAlreadyRunning { .. }
+                | PlatformError::AuthorityAlreadyActive { .. })
+        );
+        release_tx.send(()).unwrap();
+        let _lock = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                match AuthorityLock::acquire_in(&rendezvous, &data) {
+                    Ok(lock) => break lock,
+                    Err(
+                        PlatformError::DaemonAlreadyRunning { .. }
+                        | PlatformError::AuthorityAlreadyActive { .. },
+                    ) => {
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                    }
+                    other => panic!("unexpected authority result: {other:?}"),
+                }
+            }
+        })
+        .await
+        .unwrap();
+        let persisted = tokio::task::spawn_blocking(move || project_is_committed(db_path, project))
+            .await
+            .unwrap();
+        assert!(handoff.is_ok(), "the Store never moved to the blocking job");
+        assert!(cancellation.unwrap_err().is_cancelled());
+        assert!(
+            protected,
+            "authority released while the transferred writer was open"
+        );
+        assert!(
+            persisted,
+            "the admitted command must finish before re-acquisition"
+        );
     }
 }
