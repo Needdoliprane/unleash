@@ -169,9 +169,6 @@ fn payload(
         || profile.is_nil()
         || profile.to_string() != wire.profile_id()
         || receipt.to_string() != wire.mandate_ref()
-        || wire.limits().max_calls() != 0
-        || wire.limits().max_output_tokens() != 0
-        || wire.limits().max_cost_usd_micros().as_u64() != 0
     {
         return Err(invalid(
             "phase locale ou limites de validation incompatibles",

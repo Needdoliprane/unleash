@@ -541,6 +541,57 @@ async fn t_f012_013_validate_config_commits_local_observation_and_exact_version_
 }
 
 #[tokio::test]
+async fn t_f012_013_validate_config_positive_ceilings_remain_local_and_idempotent() {
+    let (fixture, mut client) = Fixture::start().await;
+    let profile = Uuid::from_u128(0xf012_8000);
+    let configured = fixture.configure(&mut client, profile, 8001, 0, None).await;
+    let mut request = validation(&client, profile, 1, 8002, &configured);
+    request.payload.insert(
+        "limits".to_owned(),
+        json!({"timeout_ms":1_000,"max_calls":2,"max_output_tokens":128,"max_cost_usd_micros":25}),
+    );
+    let outcome = client.send_command(&request).await;
+    assert!(
+        outcome.is_ok(),
+        "des plafonds positifs ne demandent aucun effet : {outcome:?}"
+    );
+    let receipt = outcome.unwrap();
+    assert_eq!(receipt.state, ReceiptState::Completed);
+    assert_local_observation(&fixture, &request, &receipt);
+    fixture.assert_no_provider_effect();
+    let counts = fixture.validation_counts();
+    let references = fixture.live_references();
+    assert_eq!(counts, (1, 1, 1));
+    request.request_id = RequestId::from_u128(8003);
+    assert_eq!(client.send_command(&request).await.unwrap(), receipt);
+    for (field, value) in [
+        ("max_calls", 3),
+        ("max_output_tokens", 129),
+        ("max_cost_usd_micros", 26),
+    ] {
+        let mut changed = request.clone();
+        changed
+            .payload
+            .get_mut("limits")
+            .unwrap()
+            .as_object_mut()
+            .unwrap()
+            .insert(field.to_owned(), json!(value));
+        assert!(
+            matches!(client.send_command(&changed).await, Err(ClientError::Remote(error)) if error.code == ErrorCode::IdempotencyConflict)
+        );
+    }
+    assert_eq!(fixture.validation_counts(), counts);
+    assert_eq!(fixture.live_references(), references);
+    fixture.assert_no_provider_effect();
+    fixture
+        .handle
+        .shutdown_graceful("validate-config-test")
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
 async fn t_f012_013_validate_config_replay_precedes_missing_bytes_and_changed_wire_conflicts() {
     let (fixture, mut client) = Fixture::start().await;
     let profile = Uuid::from_u128(0xf012_2000);
