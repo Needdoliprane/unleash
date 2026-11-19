@@ -1245,6 +1245,18 @@ impl UnleashStore {
         self.read_snapshot(|conn, _ctx| tx_read_execution_pool(conn, pool_id))
     }
 
+    /// Lit l'identifiant durable du pool global partagé par les producteurs d'exécution.
+    ///
+    /// # Errors
+    /// Retourne une erreur si le pool n'est pas initialisé ou si la lecture échoue.
+    pub fn global_execution_pool_id(&self) -> Result<PoolId, StoreError> {
+        self.read_snapshot(|conn, _| {
+            crate::budgets::tx_global_execution_pool_id(conn)?.ok_or_else(|| {
+                StoreError::NotFound("pool global d'exécution non initialisé".into())
+            })
+        })
+    }
+
     /// Projette les files et réservations réelles dans un seul snapshot `SQLite`.
     /// # Errors
     /// Refuse un propriétaire actif incomplet ou une lecture interrompue ou expirée.

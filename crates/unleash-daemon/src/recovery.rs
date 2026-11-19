@@ -11,7 +11,9 @@ use unleash_platform::{ProcessVerification, inspect_process_identity, verify_pro
 use unleash_protocol::{
     EventCausation, EventCausationKind, EventEnvelope, Sensitivity, canonical_sha256,
 };
-use unleash_store::{DaemonStateRow, UnleashStore, WriteCriticality};
+use unleash_store::{
+    DaemonStateRow, UnleashStore, WriteCriticality, ensure_global_execution_pool_tx,
+};
 use uuid::Uuid;
 
 use crate::error::DaemonError;
@@ -270,6 +272,9 @@ pub fn classify_and_finish_recovery(
             };
             let next_mode = unleash_domain::transition_daemon_mode(row.mode, target_mode)?;
             let next_rev = row.revision.next();
+            if next_mode == DaemonMode::Ready {
+                ensure_global_execution_pool_tx(tx, id_gen.as_ref())?;
+            }
 
             tx.execute(
                 "UPDATE daemon_state SET mode = ?1, revision = ?2 WHERE singleton = 1",

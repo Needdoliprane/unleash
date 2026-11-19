@@ -6,7 +6,9 @@
     clippy::too_many_lines,
     clippy::indexing_slicing
 )]
+use rusqlite::{Connection, OpenFlags, OptionalExtension};
 use serde_json::{Map, Value, json};
+use std::path::Path;
 use unleash_client::{ClientConfig, ClientError, UnleashClient};
 use unleash_daemon::{DaemonConfig, DaemonStartOutcome, UnleashDaemon};
 use unleash_domain::{CommandId, ProjectId, RequestId, Revision, Sequence};
@@ -15,6 +17,41 @@ use unleash_protocol::{
     SubscribeEventsFrame, SubscribeEventsRequest,
 };
 use unleash_testkit::local_test_dir;
+
+#[derive(Debug, PartialEq, Eq)]
+struct PoolRow {
+    id: String,
+    requested: i64,
+    effective: i64,
+    hard: i64,
+    revision: i64,
+}
+
+fn read_global_pool(root: &Path, kind: &str) -> Option<PoolRow> {
+    let connection = Connection::open_with_flags(
+        root.join("unleash-authority.db"),
+        OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .unwrap();
+    connection
+        .query_row(
+            "SELECT pool_id, requested_limit, effective_limit, hard_limit, revision
+             FROM capacity_pools WHERE pool_kind=?1 AND scope_key='global' AND unit='slot'",
+            [kind],
+            |row| {
+                Ok(PoolRow {
+                    id: row.get(0)?,
+                    requested: row.get(1)?,
+                    effective: row.get(2)?,
+                    hard: row.get(3)?,
+                    revision: row.get(4)?,
+                })
+            },
+        )
+        .optional()
+        .unwrap()
+}
+
 fn obj(value: Value) -> Map<String, Value> {
     match value {
         Value::Object(map) => map,
@@ -36,6 +73,7 @@ async fn settings_and_policy_are_authorized_typed_and_revisioned() {
     else {
         panic!("daemon attendu")
     };
+    let initial_pool = read_global_pool(data.path(), "execution");
     let sock = handle.socket_path().to_path_buf();
     let mut admin =
         UnleashClient::connect(ClientConfig::new(sock.clone(), ClientKind::Cli, "test"))
@@ -95,6 +133,7 @@ async fn settings_and_policy_are_authorized_typed_and_revisioned() {
         matches!(unauthorized.send_command(&cmd).await, Err(ClientError::Remote(e)) if e.code == ErrorCode::CapabilityDenied)
     );
     let receipt = admin.send_command(&cmd).await.unwrap();
+    let configured_pool = read_global_pool(data.path(), "execution");
     let event = tokio::time::timeout(std::time::Duration::from_secs(5), events.next_frame())
         .await
         .unwrap()
@@ -296,6 +335,7 @@ async fn settings_and_policy_are_authorized_typed_and_revisioned() {
     let DaemonStartOutcome::Started(restarted) = UnleashDaemon::start(cfg).await.unwrap() else {
         panic!("daemon redémarré attendu")
     };
+    let restarted_pool = read_global_pool(data.path(), "execution");
     let mut reopened = UnleashClient::connect(ClientConfig::new(
         restarted.socket_path().to_path_buf(),
         ClientKind::Cli,
@@ -320,4 +360,73 @@ async fn settings_and_policy_are_authorized_typed_and_revisioned() {
     assert_eq!(policy.result["guard_config"]["health_status"], "unknown");
     assert!(policy.result["guard_config"]["negotiated_version"].is_null());
     restarted.shutdown_graceful("test").await.unwrap();
+    let initial_pool =
+        initial_pool.expect("start exposes a persisted global pool before any settings command");
+    assert_eq!(
+        (
+            initial_pool.requested,
+            initial_pool.effective,
+            initial_pool.hard
+        ),
+        (5, 5, 50)
+    );
+    let configured_pool = configured_pool.unwrap();
+    assert_eq!(configured_pool.id, initial_pool.id);
+    assert_eq!(
+        (configured_pool.requested, configured_pool.effective),
+        (4, 4)
+    );
+    assert_eq!(restarted_pool, Some(configured_pool));
+}
+
+#[tokio::test]
+async fn startup_preserves_another_pool_with_the_default_execution_pool_id() {
+    use std::os::unix::fs::PermissionsExt;
+    use unleash_store::{ExecutionPoolParams, StoreConfig, UnleashStore, WriteCriticality};
+
+    let rdv = local_test_dir("execution-pool-id-rdv").unwrap();
+    std::fs::set_permissions(rdv.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let data = local_test_dir("execution-pool-id-data").unwrap();
+    let occupied_id = ExecutionPoolParams::default().pool_id.to_string();
+    let config = StoreConfig::new(data.path());
+    let fixture_id = occupied_id.clone();
+    tokio::task::spawn_blocking(move || {
+        let store = UnleashStore::open(config).unwrap();
+        store
+            .execute_in_writer_tx(WriteCriticality::Critical, move |tx, _| {
+                tx.execute(
+                    "INSERT INTO capacity_pools(
+                        pool_id,pool_kind,scope_key,unit,requested_limit,effective_limit,
+                        admissions_frozen,hard_limit,revision
+                     ) VALUES (?1,'terminal','global','slot',2,2,0,50,7)",
+                    [fixture_id],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+    })
+    .await
+    .unwrap();
+    let original_terminal = read_global_pool(data.path(), "terminal").unwrap();
+    assert_eq!(original_terminal.id, occupied_id);
+
+    let cfg = DaemonConfig {
+        data_root: Some(data.path().to_path_buf()),
+        rendezvous_dir: Some(rdv.path().to_path_buf()),
+        ..DaemonConfig::default()
+    };
+    let DaemonStartOutcome::Started(handle) = UnleashDaemon::start(cfg).await.unwrap() else {
+        panic!("daemon attendu")
+    };
+    let execution = read_global_pool(data.path(), "execution");
+    let terminal = read_global_pool(data.path(), "terminal");
+    handle.shutdown_graceful("test").await.unwrap();
+    let execution =
+        execution.expect("a distinct global execution pool must be materialized at startup");
+    assert_ne!(execution.id, occupied_id);
+    assert_eq!(
+        (execution.requested, execution.effective, execution.hard),
+        (5, 5, 50)
+    );
+    assert_eq!(terminal, Some(original_terminal));
 }
