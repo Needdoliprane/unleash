@@ -620,18 +620,176 @@ fn read_context(
     .transpose()
 }
 
+fn claim_identity(
+    tx: &Transaction<'_>,
+    daemon: &crate::DaemonStateRow,
+    request: &ClaimProviderProbeConnectRequest,
+) -> Result<ProviderProbeConnectRecord, StoreError> {
+    crate::provider_profile_validation::validate_envelope_identity(
+        &request.envelope,
+        &request.caller,
+    )?;
+    for authority in [
+        request.envelope.authority_generation,
+        request.control_fence.authority_generation,
+    ] {
+        if authority != daemon.authority_generation {
+            return Err(StoreError::StaleAuthorityGeneration {
+                expected: daemon.authority_generation,
+                actual: authority,
+                command_id: Some(request.envelope.command_id),
+            });
+        }
+    }
+    if request.control_fence.epoch != daemon.daemon_epoch
+        || request.control_fence.fence != unleash_domain::Fence::ZERO
+    {
+        return Err(StoreError::StaleFence {
+            message: "fence de contrôle connect périmée ou confondue avec un bail".to_owned(),
+        });
+    }
+    if daemon.mode != unleash_domain::DaemonMode::Ready {
+        return Err(StoreError::RecoveryInProgress(
+            "claim connect exige ready".to_owned(),
+        ));
+    }
+    let digest = unleash_protocol::compute_command_digest_v2(&request.envelope)?;
+    let receipt = crate::commands::classify_command_replay(
+        tx,
+        daemon,
+        &request.caller.actor_id,
+        &request.envelope,
+        digest,
+    )?
+    .ok_or_else(hidden)?;
+    let record = read_context(
+        tx,
+        ProviderProbeId::from_uuid(request.envelope.aggregate_id),
+    )?
+    .ok_or_else(hidden)?;
+    let c = &record.context;
+    if c.authority_generation != daemon.authority_generation {
+        return Err(StoreError::StaleAuthorityGeneration {
+            expected: daemon.authority_generation,
+            actual: c.authority_generation,
+            command_id: Some(request.envelope.command_id),
+        });
+    }
+    if c.daemon_epoch != daemon.daemon_epoch {
+        return Err(StoreError::StaleFence {
+            message: "contexte connect d'une autre incarnation".to_owned(),
+        });
+    }
+    if c.receipt_id != request.receipt_id
+        || c.actor_id != request.caller.actor_id
+        || c.project_id != request.envelope.project_id
+    {
+        return Err(hidden());
+    }
+    if record.context_digest != request.context_digest {
+        return Err(StoreError::StaleFence {
+            message: "digest du contexte claim divergent".to_owned(),
+        });
+    }
+    if receipt.receipt_id != c.receipt_id
+        || receipt.aggregate_id != c.probe_id.as_uuid()
+        || receipt.state != unleash_protocol::ReceiptState::Accepted
+        || digest != c.command_digest
+    {
+        return Err(hidden());
+    }
+    Ok(record)
+}
+
+fn validate_fresh_claim(
+    tx: &Transaction<'_>,
+    daemon: &crate::DaemonStateRow,
+    now: TimestampMs,
+    request: &ClaimProviderProbeConnectRequest,
+    record: &ProviderProbeConnectRecord,
+) -> Result<(), StoreError> {
+    let c = &record.context;
+    let fresh = prepare_tx(tx, daemon, now, &request.envelope, &request.caller)?;
+    if c.deadline <= now
+        || fresh.principal_id != c.principal_id
+        || fresh.profile.profile_version_ref != c.profile_version_ref
+        || fresh.profile.configuration_digest != c.configuration_digest
+        || fresh.profile.configuration.payload.endpoint() != c.destination
+        || fresh.scope_revision != c.scope_revision
+        || fresh.policy_revision != c.policy_revision
+        || fresh.policy_digest != c.policy_digest
+        || fresh.grant.mandate_ref != c.mandate_ref
+        || fresh.grant.mandate_digest != c.mandate_digest
+        || transport_digest(&fresh)? != c.request_digest
+    {
+        return Err(StoreError::StaleFence {
+            message: "préconditions du contexte connect modifiées avant claim".to_owned(),
+        });
+    }
+    let queued: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM provider_probes WHERE probe_id=?1 AND state='queued' AND phase='connect' AND revision=1 AND fence=0 AND principal_id=?2 AND authority_generation=?3 AND daemon_epoch=?4) AND NOT EXISTS(SELECT 1 FROM actions WHERE action_id=?5)", params![c.probe_id.to_string(),c.principal_id.as_str(),c.authority_generation.to_string(),integer(c.daemon_epoch.as_u64())?,c.action_id.to_string()], |row|row.get(0))?;
+    if !queued {
+        return Err(invalid(
+            "probe connect non disponible pour sa première claim",
+        ));
+    }
+    Ok(())
+}
+
+fn claim_tx(
+    tx: &Transaction<'_>,
+    config: &crate::StoreConfig,
+    now: TimestampMs,
+    request: &ClaimProviderProbeConnectRequest,
+) -> Result<ProviderProbeConnectClaimOutcome, StoreError> {
+    let daemon = read_daemon_state_conn(tx)?;
+    let record = claim_identity(tx, &daemon, request)?;
+    if record.claim.is_some() {
+        // This is a readonly inspection. It never returns a new execution token,
+        // including if a prior acknowledgement was lost or the mandate expired.
+        return Ok(ProviderProbeConnectClaimOutcome::AlreadyClaimed(record));
+    }
+    validate_fresh_claim(tx, &daemon, now, request, &record)?;
+    let claim_id = config.id_generator.new_uuid();
+    if claim_id.is_nil() {
+        return Err(invalid("identité de claim nulle"));
+    }
+    let changed = tx.execute("UPDATE provider_probe_transport_contexts SET claim_state='claimed',claim_revision=1,claim_id=?2,claimed_at_ms=?3 WHERE probe_id=?1 AND receipt_id=?4 AND context_digest=?5 AND claim_state='reserved' AND claim_revision=0", params![record.context.probe_id.to_string(),claim_id.to_string(),now.as_i64(),request.receipt_id.to_string(),request.context_digest.to_string()])?;
+    if changed != 1 {
+        return Err(StoreError::StaleFence {
+            message: "CAS claim connect refusé".to_owned(),
+        });
+    }
+    let record = read_context(tx, record.context.probe_id)?.ok_or_else(hidden)?;
+    let claim = record
+        .claim
+        .clone()
+        .ok_or_else(|| invalid("claim connect perdue après CAS"))?;
+    config
+        .cutpoints
+        .hit(crate::StoreCutpoint::C1BeforeCommandCommit)?;
+    Ok(ProviderProbeConnectClaimOutcome::FreshClaim(
+        ProviderProbeConnectClaim { record, claim },
+    ))
+}
+
 impl UnleashStore {
     /// Revendique une seule fois le contexte sous son autorité courante.
     /// # Errors
     /// Refuse identité, reçu, lignée, époque, fence ou contexte incompatibles.
     pub fn claim_provider_probe_connect(
         &self,
-        _request: ClaimProviderProbeConnectRequest,
+        request: ClaimProviderProbeConnectRequest,
     ) -> Result<ProviderProbeConnectClaimOutcome, StoreError> {
-        // TDD: no token is minted until the writer/CAS path is qualified.
-        Err(StoreError::EvidenceUnavailable(
-            "claim connect non raccordée".to_owned(),
-        ))
+        let config = self.config().clone();
+        let outcome = self.execute_in_writer_tx(WriteCriticality::Normal, move |tx, now| {
+            claim_tx(tx, &config, now, &request)
+        })?;
+        if matches!(&outcome, ProviderProbeConnectClaimOutcome::FreshClaim(_)) {
+            self.config()
+                .cutpoints
+                .hit(crate::StoreCutpoint::C3AfterProviderProbeConnectClaimCommit)?;
+        }
+        Ok(outcome)
     }
 
     /// Résout le mandat authentifié exact sans créer intention, reçu ou réservation.
