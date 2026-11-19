@@ -773,6 +773,21 @@ fn claim_tx(
 }
 
 impl UnleashStore {
+    /// Porte les phases du seul orchestrateur possédant le token frais original.
+    /// Le port broker générique reste fermé pour connect, y compris son rejeu.
+    /// # Errors
+    /// Refuse une permission absente, périmée ou incompatible avec la phase.
+    pub fn commit_provider_probe_connect_phase(
+        &self,
+        _claim: &ProviderProbeConnectClaim,
+        _request: crate::BrokerPhaseRequest,
+    ) -> Result<crate::BrokerPhaseCommit, StoreError> {
+        // TDD: no generic-phase fallback while the typed writer gate is absent.
+        Err(StoreError::EvidenceUnavailable(
+            "phases connect typées non raccordées".to_owned(),
+        ))
+    }
+
     /// Revendique une seule fois le contexte sous son autorité courante.
     /// # Errors
     /// Refuse identité, reçu, lignée, époque, fence ou contexte incompatibles.

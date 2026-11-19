@@ -204,13 +204,16 @@ fn phase(ready: &ReadyProbe, revision: u64, phase: BrokerPhase) -> BrokerPhaseRe
 
 fn authorizing(store: &UnleashStore, ready: &ReadyProbe) {
     store
-        .commit_broker_phase(phase(
-            ready,
-            0,
-            BrokerPhase::Authorizing {
-                intent: ready.intent.clone(),
-            },
-        ))
+        .commit_provider_probe_connect_phase(
+            &ready.claim,
+            phase(
+                ready,
+                0,
+                BrokerPhase::Authorizing {
+                    intent: ready.intent.clone(),
+                },
+            ),
+        )
         .unwrap();
 }
 
@@ -305,6 +308,19 @@ fn t_f012_013_admission_current_claim_authorizing_then_real_v008_reservation() {
     let (store, _directory, mandate, pool) = fixture(Arc::new(NoopCutpointObserver));
     let ready = ready(&store, mandate, 300);
     authorizing(&store, &ready);
+    assert!(
+        matches!(
+            store.commit_broker_phase(phase(
+                &ready,
+                0,
+                BrokerPhase::Authorizing {
+                    intent: ready.intent.clone()
+                }
+            )),
+            Err(StoreError::EvidenceUnavailable(_))
+        ),
+        "a generic cached replay cannot mint an owner acknowledgement"
+    );
     assert_eq!(
         counts(&store)[6],
         0,
@@ -370,13 +386,16 @@ fn t_f012_013_admission_scope_and_control_fence_are_rechecked_before_intention()
         }
         let before = counts(&store);
         assert!(matches!(
-            store.commit_broker_phase(phase(
-                &ready,
-                0,
-                BrokerPhase::Authorizing {
-                    intent: ready.intent.clone()
-                }
-            )),
+            store.commit_provider_probe_connect_phase(
+                &ready.claim,
+                phase(
+                    &ready,
+                    0,
+                    BrokerPhase::Authorizing {
+                        intent: ready.intent.clone()
+                    }
+                )
+            ),
             Err(StoreError::StaleFence { .. })
         ));
         assert_eq!(counts(&store), before);
@@ -393,7 +412,10 @@ fn t_f012_013_admission_destination_is_exact_not_just_any_loopback() {
         intent.manifest.insert("resource_refs".into(), json!([{"kind":"network_endpoint","host":host,"port":port,"is_private_or_loopback":true}]));
         intent.intent_digest = canonical_sha256(&intent.manifest).unwrap();
         assert!(matches!(
-            store.commit_broker_phase(phase(&ready, 0, BrokerPhase::Authorizing { intent })),
+            store.commit_provider_probe_connect_phase(
+                &ready.claim,
+                phase(&ready, 0, BrokerPhase::Authorizing { intent })
+            ),
             Err(StoreError::InvalidArgument { .. })
         ));
         assert_eq!(counts(&store), before);
@@ -461,18 +483,21 @@ fn authorize(store: &UnleashStore, ready: &ReadyProbe) -> BrokerAuthorizationDec
         executor: BrokerExecutor::Unleash,
     };
     store
-        .commit_broker_phase(phase(
-            ready,
-            1,
-            BrokerPhase::Authorization {
-                action_id: c.action_id,
-                intent_digest: ready.intent.intent_digest,
-                outcome: BrokerAuthorizationOutcome::Authorized {
-                    decision: decision.clone(),
+        .commit_provider_probe_connect_phase(
+            &ready.claim,
+            phase(
+                ready,
+                1,
+                BrokerPhase::Authorization {
+                    action_id: c.action_id,
+                    intent_digest: ready.intent.intent_digest,
+                    outcome: BrokerAuthorizationOutcome::Authorized {
+                        decision: decision.clone(),
+                    },
+                    cause: BrokerAuthorizationCause::Evaluation,
                 },
-                cause: BrokerAuthorizationCause::Evaluation,
-            },
-        ))
+            ),
+        )
         .unwrap();
     decision
 }
@@ -502,11 +527,17 @@ fn t_f012_013_admission_c4_uncertainty_and_restart_keep_the_real_reservation() {
     );
     lost.0.store(true, Ordering::SeqCst);
     assert!(matches!(
-        store.commit_broker_phase(dispatch.clone()),
+        store.commit_provider_probe_connect_phase(&ready.claim, dispatch.clone()),
         Err(StoreError::CutpointInjected { .. })
     ));
     assert_eq!(counts(&store)[6], 1);
     assert_eq!(held_capacity(&store), 1);
+    assert!(
+        store
+            .commit_provider_probe_connect_phase(&ready.claim, dispatch.clone())
+            .is_err(),
+        "even the live owner cannot replay a durable dispatch marker"
+    );
     let store = store.restart_same_lineage().unwrap();
     assert!(
         store
@@ -533,7 +564,9 @@ fn t_f012_013_admission_c4_uncertainty_and_restart_keep_the_real_reservation() {
     assert_eq!(counts(&store)[6], 1, "unknown is not capacity release");
     assert_eq!(held_capacity(&store), 1);
     assert!(
-        store.commit_broker_phase(dispatch).is_err(),
+        store
+            .commit_provider_probe_connect_phase(&ready.claim, dispatch)
+            .is_err(),
         "the durable marker never authorizes a second effect"
     );
     assert_no_model(&store);
