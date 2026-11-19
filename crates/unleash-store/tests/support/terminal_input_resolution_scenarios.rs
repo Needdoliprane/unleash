@@ -3,6 +3,9 @@ use super::*;
 
 #[path = "terminal_input_unknown_scenarios.rs"]
 mod unknown_scenarios;
+
+#[path = "terminal_input_observation_scenarios.rs"]
+mod observation_scenarios;
 use unleash_store::terminal_allocations::terminal_input_types::ResolveTerminalInputRequest;
 
 fn input_dispatch(store: &UnleashStore, record: &TerminalInputRecord) -> DispatchId {

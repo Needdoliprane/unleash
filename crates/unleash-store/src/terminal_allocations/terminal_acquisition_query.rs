@@ -175,8 +175,14 @@ pub(super) fn read_result(
     // input belongs to the physical run, including after control rotates;
     // consulting this projection cannot dispose or retry that uncertain write.
     super::terminal_input_writer::guard_causal_assertions(conn, &binding.allocation)?;
-    let (proof, cursor) = observation(conn, config, &binding, &daemon)?;
-    if !proof.unknown_input_seqs.is_empty() || proof.last_confirmed_input_seq != session.input_seq {
+    let (mut proof, cursor) = observation(conn, config, &binding, &daemon)?;
+    if !proof.unknown_input_seqs.is_empty() {
+        return Err(stale("terminal native input state requires reconciliation"));
+    }
+    if proof.last_confirmed_input_seq < session.input_seq {
+        proof = confirmed_input_state(conn, config, &binding, &daemon, session.input_seq)?;
+    }
+    if proof.last_confirmed_input_seq != session.input_seq {
         return Err(stale("terminal native input state requires reconciliation"));
     }
     Ok(TerminalAcquisitionResult {
@@ -420,6 +426,29 @@ fn observation(
     binding: &AcquisitionBinding,
     daemon: &crate::commands::DaemonStateRow,
 ) -> Result<(TerminalObservedInputState, EventCursor), StoreError> {
+    let (receipt, cursor) = sealed_observation(
+        conn,
+        daemon,
+        binding.action,
+        binding.dispatch,
+        binding.digest,
+        &binding.allocation.context.principal_id,
+    )?;
+    let hash = receipt
+        .output_digest
+        .ok_or_else(|| unavailable("acquisition has no observation digest"))?;
+    let input = native_proof(conn, config, binding, hash)?;
+    Ok((input, cursor))
+}
+
+fn sealed_observation(
+    conn: &Connection,
+    daemon: &crate::commands::DaemonStateRow,
+    expected_action: ActionId,
+    expected_dispatch: DispatchId,
+    expected_payload: Sha256Digest,
+    principal: &ActorId,
+) -> Result<(crate::BrokerActionReceipt, EventCursor), StoreError> {
     let row: Option<(String, String, String, i64)> = conn
         .query_row(
             "SELECT phase.phase_json,phase.phase_digest,event.stream_id,event.sequence
@@ -432,10 +461,10 @@ fn observation(
            AND dispatch.authority_generation=?5 AND dispatch.daemon_epoch=?6
          ORDER BY phase.action_revision DESC LIMIT 1",
             params![
-                binding.action.to_string(),
-                binding.dispatch.to_string(),
-                binding.digest.to_string(),
-                binding.allocation.context.principal_id.as_str(),
+                expected_action.to_string(),
+                expected_dispatch.to_string(),
+                expected_payload.to_string(),
+                principal.as_str(),
                 daemon.authority_generation.to_string(),
                 integer(daemon.daemon_epoch.as_u64())?
             ],
@@ -457,22 +486,97 @@ fn observation(
     else {
         return Err(unavailable("acquisition has no observation receipt"));
     };
-    if action_id != binding.action
-        || receipt.action_id != binding.action
-        || receipt.dispatch_id != binding.dispatch
+    if action_id != expected_action
+        || receipt.action_id != expected_action
+        || receipt.dispatch_id != expected_dispatch
         || receipt.state != ActionState::ObservedSuccess
         || receipt.evaluation_id != phase.evaluation.evaluation_id
     {
         return Err(unavailable("acquisition observation receipt differs"));
     }
-    let hash = receipt
-        .output_digest
-        .ok_or_else(|| unavailable("acquisition has no observation digest"))?;
-    let input = native_proof(conn, config, binding, hash)?;
     Ok((
-        input,
+        receipt,
         EventCursor::new(daemon.stream_id, Sequence::new(unsigned(sequence)?)),
     ))
+}
+
+fn confirmed_input_state(
+    conn: &Connection,
+    config: &StoreConfig,
+    binding: &AcquisitionBinding,
+    daemon: &crate::commands::DaemonStateRow,
+    sequence: u64,
+) -> Result<TerminalObservedInputState, StoreError> {
+    let base = &binding.allocation.context;
+    if daemon.schema_version < 14 {
+        return Err(unavailable("confirmed native input receipt is absent"));
+    }
+    let action:Option<String>=conn.query_row(
+        "SELECT action_id FROM terminal_input_intents WHERE terminal_id=?1 AND authority_generation=?2 AND state='observed' AND input_seq=?3 AND lease_id=?4 AND resource_fence=?5 AND daemon_epoch=?6 AND json_extract(context_json,'$.process_run_uuid')=?7 AND json_extract(context_json,'$.initial_context_digest')=?8",
+        params![base.terminal_id.to_string(),daemon.authority_generation.to_string(),integer(sequence)?,binding.lease.to_string(),integer(binding.fence.as_u64())?,integer(binding.epoch.as_u64())?,base.process_run_uuid.to_string(),binding.allocation.context_digest.to_string()], |row|row.get(0),
+    ).optional()?;
+    let action = action.ok_or_else(|| unavailable("confirmed native input receipt is absent"))?;
+    let input = super::terminal_input_writer::read_input_conn(conn, action.parse()?)?
+        .ok_or_else(|| unavailable("confirmed native input intention disappeared"))?;
+    let c = &input.context;
+    let TerminalAllocationScope::ProjectConfiguration { project_id, .. } = base.preparation.scope;
+    if input.state != super::terminal_input_types::TerminalInputState::Observed
+        || c.actor_id != base.actor_id
+        || c.principal_id != base.principal_id
+        || c.initial_action_id != base.action_id
+        || c.process_id != base.process_id
+        || c.host_id != base.host_id
+        || c.control_revision != binding.revision
+        || c.project_id != project_id
+        || input.broker_action_state != Some(ActionState::ObservedSuccess)
+        || input.broker_dispatch_id != input.dispatch_id
+    {
+        return Err(unavailable(
+            "confirmed native input is outside the current physical controller",
+        ));
+    }
+    let dispatch = input
+        .dispatch_id
+        .ok_or_else(|| unavailable("confirmed native input dispatch missing"))?;
+    let (receipt, _) = sealed_observation(
+        conn,
+        daemon,
+        c.action_id,
+        dispatch,
+        input.context_digest,
+        &c.principal_id,
+    )?;
+    let hash = receipt
+        .output_digest
+        .ok_or_else(|| unavailable("confirmed native input proof missing"))?;
+    if input.observation_object_hash != Some(hash) {
+        return Err(unavailable("confirmed native input proof hash differs"));
+    }
+    let native = super::terminal_input_observation::read_published_native_observation(
+        conn,
+        config,
+        c.action_id,
+        dispatch,
+        hash,
+    )?;
+    super::terminal_input_observation::validate_native_observation_context(&input, &native)?;
+    let started: i64 = conn.query_row(
+        "SELECT started_at_ms FROM action_dispatches WHERE action_id=?1 AND dispatch_id=?2",
+        params![c.action_id.to_string(), dispatch.to_string()],
+        |row| row.get(0),
+    )?;
+    if native.observed_at_ms.as_i64() < started
+        || native.observed_at_ms > receipt.observed_at_ms
+        || native.native_receipt.input_seq != sequence
+    {
+        return Err(unavailable(
+            "confirmed native input observation time or sequence differs",
+        ));
+    }
+    Ok(TerminalObservedInputState {
+        last_confirmed_input_seq: native.native_receipt.input_seq,
+        unknown_input_seqs: vec![],
+    })
 }
 
 fn native_proof(
