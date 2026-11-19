@@ -544,6 +544,9 @@ fn t_f011_003_sigkill_daemon_during_active_pty_survives_and_reattaches_same_line
     );
 
     let spec = HostBootstrapSpec {
+        environment_mode: None,
+        expected_effective_environment_digest: None,
+        allocation_context_digest: None,
         runtime_dir: runtime_dir.clone(),
         host_id: HostId::from_u128(1),
         process_id: ProcessId::from_u128(2),
@@ -885,6 +888,7 @@ fn t_f011_003_sigkill_daemon_during_active_pty_survives_and_reattaches_same_line
             last_confirmed_input_seq: 1,
             unknown_input_seqs,
             secret_rotated: false,
+            ..
         } if process_run_uuid == run_uuid
             && authority_generation == gen_a
             && daemon_epoch == DaemonEpoch::new(3)
@@ -997,6 +1001,9 @@ fn t_f011_005_sigkill_host_after_pty_write_before_receipt_outcome_unknown_zero_r
     explicit_env.insert(ENV_ORACLE_DIR.to_owned(), oracle_dir.display().to_string());
 
     let spec = HostBootstrapSpec {
+        environment_mode: None,
+        expected_effective_environment_digest: None,
+        allocation_context_digest: None,
         runtime_dir: runtime_dir.clone(),
         host_id: HostId::from_u128(10),
         process_id: ProcessId::from_u128(20),
@@ -1137,6 +1144,9 @@ fn t_f011_006_t_f011_010_sigkill_host_preserves_logs_and_stop_reports_detached_d
     );
 
     let spec = HostBootstrapSpec {
+        environment_mode: None,
+        expected_effective_environment_digest: None,
+        allocation_context_digest: None,
         runtime_dir: runtime_dir.clone(),
         host_id: HostId::from_u128(1),
         process_id: ProcessId::from_u128(2),
@@ -1218,6 +1228,9 @@ fn t_f011_006_t_f011_010_sigkill_host_preserves_logs_and_stop_reports_detached_d
         sync_svc_path.display().to_string(),
     );
     let svc_bootstrap = HostBootstrapSpec {
+        environment_mode: None,
+        expected_effective_environment_digest: None,
+        allocation_context_digest: None,
         runtime_dir: rt_svc.clone(),
         host_id: HostId::from_u128(11),
         process_id: ProcessId::from_u128(22),
@@ -1287,6 +1300,9 @@ fn t_f011_006_t_f011_010_sigkill_host_preserves_logs_and_stop_reports_detached_d
     env2.insert(ENV_SYNC_SOCK.to_owned(), sock2_path.display().to_string());
 
     let spec2 = HostBootstrapSpec {
+        environment_mode: None,
+        expected_effective_environment_digest: None,
+        allocation_context_digest: None,
         runtime_dir: rt2.clone(),
         host_id: HostId::from_u128(2),
         process_id: ProcessId::from_u128(3),
@@ -1402,6 +1418,9 @@ fn t_f011_008_t_f011_004_spool_redaction_gap_and_zero_model() {
     );
 
     let spec = HostBootstrapSpec {
+        environment_mode: None,
+        expected_effective_environment_digest: None,
+        allocation_context_digest: None,
         runtime_dir: runtime_dir.clone(),
         host_id: HostId::from_u128(1),
         process_id: ProcessId::from_u128(2),
@@ -1608,6 +1627,9 @@ fn t_sec_macos_seatbelt_strict_mode_and_isolation_unavailable_negative() {
     };
 
     let spec = HostBootstrapSpec {
+        environment_mode: None,
+        expected_effective_environment_digest: None,
+        allocation_context_digest: None,
         runtime_dir: runtime_dir.clone(),
         host_id: HostId::from_u128(1),
         process_id: ProcessId::from_u128(2),
@@ -1833,6 +1855,9 @@ fn t_f011_010_external_sigkill_on_child_observed_by_reconcile_and_shutdown() {
     );
 
     let spec = HostBootstrapSpec {
+        environment_mode: None,
+        expected_effective_environment_digest: None,
+        allocation_context_digest: None,
         runtime_dir: runtime_dir.clone(),
         host_id: HostId::from_u128(7),
         process_id: ProcessId::from_u128(8),

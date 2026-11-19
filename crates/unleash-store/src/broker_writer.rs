@@ -393,16 +393,35 @@ fn check_expected(
     Ok(Revision::new(next))
 }
 
-/// Résout la phase avant toute I/O ; un dispatch durable n'est jamais acquitté une seconde fois.
-#[expect(
-    clippy::too_many_lines,
-    reason = "Algorithme writer fermé : identité, rejeu, CAS et quatre phases atomiques"
-)]
 pub(crate) fn commit_phase_tx(
     tx: &Transaction<'_>,
     config: &StoreConfig,
     now: TimestampMs,
     request: &BrokerPhaseRequest,
+) -> Result<BrokerPhaseCommit, StoreError> {
+    commit_phase_tx_inner(tx, config, now, request, None)
+}
+pub(crate) fn commit_terminal_observation_tx(
+    tx: &Transaction<'_>,
+    config: &StoreConfig,
+    now: TimestampMs,
+    request: &BrokerPhaseRequest,
+    proof: &crate::terminal_allocations::TerminalObservationProof,
+) -> Result<BrokerPhaseCommit, StoreError> {
+    commit_phase_tx_inner(tx, config, now, request, Some(proof))
+}
+
+/// Résout la phase avant toute I/O ; un dispatch durable n'est jamais acquitté une seconde fois.
+#[expect(
+    clippy::too_many_lines,
+    reason = "Algorithme writer fermé : identité, rejeu, CAS et quatre phases atomiques"
+)]
+fn commit_phase_tx_inner(
+    tx: &Transaction<'_>,
+    config: &StoreConfig,
+    now: TimestampMs,
+    request: &BrokerPhaseRequest,
+    terminal_proof: Option<&crate::terminal_allocations::TerminalObservationProof>,
 ) -> Result<BrokerPhaseCommit, StoreError> {
     let daemon = read_daemon_state_tx(tx)?;
     if daemon.authority_generation != request.authority_generation {
@@ -433,7 +452,6 @@ pub(crate) fn commit_phase_tx(
     }
     crate::provider_probes::validate_incarnation(tx, &daemon, action)?;
     crate::terminal_allocations::validate_incarnation(tx, &daemon, action)?;
-    crate::terminal_allocations::guard_observation(tx, &request.phase)?;
     if matches!(request.phase, BrokerPhase::Dispatch { .. }) {
         let markers: i64 = tx
             .query_row(
@@ -466,6 +484,7 @@ pub(crate) fn commit_phase_tx(
             replayed: true,
         });
     }
+    crate::terminal_allocations::guard_observation(tx, &request.phase, terminal_proof)?;
     let current = inspect_action_conn(tx, action)?;
     let revision = check_expected(current.as_ref(), request.expected_revision)?;
     let intent = if let BrokerPhase::Authorizing { intent } = &request.phase {

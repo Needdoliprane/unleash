@@ -30,6 +30,7 @@ const DEADLINE: Duration = Duration::from_secs(20);
 struct FixtureDaemon {
     child: Child,
     ready: mpsc::Receiver<std::io::Result<String>>,
+    data_root: PathBuf,
 }
 
 impl FixtureDaemon {
@@ -42,7 +43,7 @@ impl FixtureDaemon {
             .args(["--foreground", "--ready-json"])
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
+            .stderr(Stdio::inherit())
             .spawn()
             .expect("start the real fixture daemon");
         let stdout = child.stdout.take().expect("fixture daemon stdout");
@@ -52,7 +53,11 @@ impl FixtureDaemon {
             let result = BufReader::new(stdout).read_line(&mut line).map(|_| line);
             let _ = tx.send(result);
         });
-        Self { child, ready }
+        Self {
+            child,
+            ready,
+            data_root: data.to_path_buf(),
+        }
     }
 
     fn readiness(&self) -> Value {
@@ -69,6 +74,13 @@ impl FixtureDaemon {
 
 impl Drop for FixtureDaemon {
     fn drop(&mut self) {
+        // Only this fixture's private hosts, authenticated by their actual capability.
+        // Never signal a guessed/reused PID as cleanup.
+        if let Ok(entries) = std::fs::read_dir(self.data_root.join("process-hosts")) {
+            for entry in entries.flatten() {
+                let _ = stop_fixture_host(&entry.path());
+            }
+        }
         if self.child.try_wait().ok().flatten().is_none() {
             let _ = self.child.kill();
         }
@@ -82,8 +94,118 @@ impl Drop for FixtureDaemon {
     }
 }
 
+fn stop_fixture_host(runtime: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    use unleash_process_host::*;
+    let manifest = HostManifest::load_private(&runtime.join(HOST_MANIFEST_FILENAME))?;
+    let secret = load_control_secret(&runtime.join(CONTROL_SECRET_FILENAME))?;
+    let mut client = HostClient::connect(
+        &runtime.join(HOST_SOCKET_FILENAME),
+        manifest.process_run_uuid,
+        manifest.authority_generation,
+        manifest.daemon_epoch,
+        manifest.highest_fence,
+    )?;
+    let digest = manifest.command_digest;
+    let header = client.make_header(
+        CommandId::from_u128(0xf011_ff01),
+        manifest.action_id,
+        digest,
+    );
+    let reply = client.call(&HostRequest::Handshake {
+        header,
+        current_secret: secret.expose_secret().into(),
+        rotate_to_secret: None,
+        require_higher_epoch: false,
+    })?;
+    if !matches!(reply, HostResponse::HandshakeAck { .. }) {
+        return Err("fixture host not authenticated".into());
+    }
+    let header = client.make_header(
+        CommandId::from_u128(0xf011_ff02),
+        manifest.action_id,
+        digest,
+    );
+    let _ = client.call(&HostRequest::Stop {
+        header,
+        secret: secret.expose_secret().into(),
+        escalate_to_sigkill: true,
+        known_descendant_pids: vec![],
+    })?;
+    let header = client.make_header(
+        CommandId::from_u128(0xf011_ff03),
+        manifest.action_id,
+        digest,
+    );
+    let _ = client.call(&HostRequest::Shutdown {
+        header,
+        secret: secret.expose_secret().into(),
+    })?;
+    Ok(())
+}
+
 fn object(value: Value) -> Map<String, Value> {
     value.as_object().expect("fixture payload object").clone()
+}
+
+fn terminal_diagnostic(data: &Path) -> String {
+    let Ok(conn) = rusqlite::Connection::open_with_flags(
+        data.join("unleash-authority.db"),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    ) else {
+        return "diagnostic unavailable".into();
+    };
+    let mut result = Vec::new();
+    for (label, sql) in [
+        (
+            "allocations",
+            "SELECT group_concat(state) FROM terminal_allocations",
+        ),
+        ("actions", "SELECT group_concat(state) FROM actions"),
+        (
+            "dispatches",
+            "SELECT CAST(COUNT(*) AS TEXT) FROM broker_dispatches",
+        ),
+        (
+            "phases",
+            "SELECT group_concat(phase_key) FROM broker_phase_records",
+        ),
+        ("processes", "SELECT CAST(COUNT(*) AS TEXT) FROM processes"),
+        (
+            "published_observation",
+            "SELECT CAST(EXISTS(SELECT 1 FROM object_references WHERE owner_kind='terminal_launch_observation' AND state='live') AS TEXT)",
+        ),
+        (
+            "sessions",
+            "SELECT CAST(COUNT(*) AS TEXT) FROM terminal_sessions",
+        ),
+    ] {
+        let value = conn
+            .query_row(sql, [], |r| r.get::<_, Option<String>>(0))
+            .ok()
+            .flatten();
+        result.push(format!("{label}={}", value.as_deref().unwrap_or("none")));
+    }
+    if let Ok(entries) = std::fs::read_dir(data.join("process-hosts")) {
+        for entry in entries.flatten() {
+            use unleash_process_host::*;
+            let runtime = entry.path();
+            let stage = HostManifest::load_private(&runtime.join(HOST_MANIFEST_FILENAME))
+                .map(|m| match m.launch_state {
+                    HostLaunchState::Prepared => "prepared",
+                    HostLaunchState::Running => "running",
+                    HostLaunchState::Exited { .. } => "exited",
+                    HostLaunchState::LaunchOutcomeUnknown => "unknown",
+                    HostLaunchState::Lost => "lost",
+                })
+                .unwrap_or("no_manifest");
+            result.push(format!(
+                "host_stage={stage} bootstrap={} socket={}",
+                runtime.join("bootstrap.json").is_file(),
+                runtime.join(HOST_SOCKET_FILENAME).exists()
+            ));
+        }
+    }
+    result.join(" ")
 }
 
 fn command(
@@ -229,7 +351,8 @@ async fn t_f011_003_real_daemon_accepts_authenticated_terminal_acquisition() {
 
     let project = ProjectId::from_u128(0xf011_0001);
     let mission = Uuid::from_u128(0xf011_0002);
-    let project_path = project_root.path().to_str().unwrap();
+    let canonical_project_root = project_root.path().canonicalize().unwrap();
+    let project_path = canonical_project_root.to_str().unwrap();
     let setup = [
         command(
             authority,
@@ -328,7 +451,7 @@ async fn t_f011_003_real_daemon_accepts_authenticated_terminal_acquisition() {
     assert_eq!(receipt.aggregate_id, acquire.aggregate_id);
     let deadline = Instant::now() + DEADLINE;
     loop {
-        let output = client
+        let queried = client
             .query(&QueryEnvelope {
                 protocol_version: ProtocolVersion,
                 request_id: RequestId::from_u128(0xf011_0017),
@@ -338,8 +461,26 @@ async fn t_f011_003_real_daemon_accepts_authenticated_terminal_acquisition() {
                     json!({"terminal_id":acquire.aggregate_id,"after_offset":0,"max_bytes":65536}),
                 ),
             })
-            .await
-            .expect("real terminal log query");
+            .await;
+        let output = match queried {
+            Ok(output) => output,
+            Err(unleash_client::ClientError::Remote(error))
+                if error.code == unleash_protocol::ErrorCode::ResourceBusy
+                    && error.retry_class == unleash_protocol::RetryClass::AfterRefresh =>
+            {
+                assert!(
+                    Instant::now() < deadline,
+                    "durable launch observation deadline: {}",
+                    terminal_diagnostic(data.path())
+                );
+                tokio::time::sleep(Duration::from_millis(10)).await;
+                continue;
+            }
+            Err(error) => panic!(
+                "real terminal log query failed: {error:?}; {}",
+                terminal_diagnostic(data.path())
+            ),
+        };
         if output
             .result
             .get("text")

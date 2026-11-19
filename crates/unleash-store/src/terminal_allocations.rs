@@ -604,6 +604,7 @@ fn policy(
 }
 fn validate_preparation(
     tx: &Transaction<'_>,
+    now: TimestampMs,
     prep: &TerminalAllocationPreparation,
     actor: &ActorId,
     principal: &ActorId,
@@ -636,6 +637,40 @@ fn validate_preparation(
         )?;
     }
     let s = &prep.process_spec;
+    // When the authenticated runtime producer is configured, re-read its exact
+    // version, pools and TTL under this writer transaction. Older normalized
+    // internal preparations remain a separate compatibility port, never a daemon fallback.
+    let settings = crate::projects_settings::read_settings_conn(
+        tx,
+        now,
+        crate::SettingsScopeKind::User,
+        "default",
+    )?;
+    if let Some(raw) = settings.extra_typed.get("terminal_runtime") {
+        let runtime: TerminalRuntimeSettings = serde_json::from_value(raw.clone())?;
+        runtime.validate()?;
+        let profile = runtime
+            .profiles
+            .iter()
+            .find(|p| {
+                p.profile_id == s.environment.profile_id && p.version == s.environment.version
+            })
+            .ok_or_else(|| invalid("terminal configured profile changed"))?;
+        if profile.digest()? != s.environment.digest
+            || runtime.pools() != prep.auxiliary
+            || runtime.lease_ttl_ms != prep.lease_ttl_ms
+        {
+            return Err(invalid(
+                "terminal configured scope, profile or pools changed",
+            ));
+        }
+        let bound:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM object_references WHERE owner_kind='terminal_environment' AND owner_id=?1 AND source_field=?2 AND object_hash=?3 AND state='live')",params![profile.profile_id,profile.version.to_string(),s.environment.digest.to_string()],|r|r.get(0))?;
+        if !bound {
+            return Err(invalid(
+                "terminal configured profile has no durable reference",
+            ));
+        }
+    }
     let root = root.ok_or_else(|| invalid("terminal primary project root absent"))?;
     let relative = Path::new(&s.requested_cwd);
     if !Path::new(&root).is_absolute()
@@ -802,7 +837,7 @@ pub(crate) fn prepare_tx(
         return Err(invalid("terminal project differs from mission scope"));
     }
     let principal = principal(tx, actor)?;
-    validate_preparation(tx, prep, actor, &principal)?;
+    validate_preparation(tx, now, prep, actor, &principal)?;
     validate_pools(tx, &prep.auxiliary)?;
     let resource_key = available_property_key(tx, daemon, terminal, prep)?;
     now.as_i64()
@@ -1040,7 +1075,7 @@ fn validate_live(
     if principal(tx, &c.actor_id)? != c.principal_id {
         return Err(invalid("terminal principal changed"));
     }
-    validate_preparation(tx, &c.preparation, &c.actor_id, &c.principal_id)?;
+    validate_preparation(tx, now, &c.preparation, &c.actor_id, &c.principal_id)?;
     validate_lease(tx, d, now, c)?;
     validate_holds(tx, c)?;
     let TerminalAllocationScope::ProjectConfiguration { project_id, .. } = c.preparation.scope;
@@ -1111,16 +1146,125 @@ pub(crate) fn validate_intent(
 pub(crate) fn guard_observation(
     tx: &Transaction<'_>,
     phase: &crate::BrokerPhase,
+    proof: Option<&TerminalObservationProof>,
 ) -> Result<(), StoreError> {
     if let crate::BrokerPhase::Observation {
         action_id, receipt, ..
     } = phase
         && for_action(tx, *action_id)?.is_some()
         && receipt.state != ActionState::OutcomeUnknown
+        && !proof
+            .is_some_and(|p| canonical_sha256(phase).is_ok_and(|digest| p.phase_digest == digest))
     {
         return Err(invalid("terminal OS observation producer not qualified"));
     }
     Ok(())
+}
+
+/// Exact non-secret facts captured from the live, authenticated host by the daemon.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TerminalLaunchObservation {
+    /// Planned terminal identity.
+    pub terminal_id: TerminalId,
+    /// Exact action.
+    pub action_id: ActionId,
+    /// Unique durable dispatch.
+    pub dispatch_id: DispatchId,
+    /// Immutable preparation.
+    pub context_digest: Sha256Digest,
+    /// Planned host acknowledged by the real host.
+    pub host_id: HostId,
+    /// Physical process identity, never an adopted PID.
+    pub process_run_uuid: ProcessRunUuid,
+    /// Actual OS PID.
+    pub pid: u32,
+    /// Actual OS PGID.
+    pub pgid: u32,
+    /// Actual owner UID.
+    pub owner_uid: u32,
+    /// Actual boot identity.
+    pub boot_identity: String,
+    /// Actual start identity.
+    pub start_identity: String,
+    /// Qualified identity backend.
+    pub identity_backend: String,
+    /// Digest of the protected host manifest actually inspected.
+    pub manifest_digest: Sha256Digest,
+    /// Effective environment attested by the host.
+    pub effective_environment_digest: Sha256Digest,
+    /// Last durable output watermark.
+    pub durable_log_seq: u64,
+    /// Time the authenticated host facts were captured, before proof publication.
+    pub observed_at_ms: TimestampMs,
+    /// Exit code, only when observed.
+    pub exit_code: Option<i32>,
+    /// Exit signal, only when observed.
+    pub exit_signal: Option<i32>,
+    /// Whether completion has been observed by the owning host.
+    pub exited: bool,
+}
+
+pub(crate) struct TerminalObservationProof {
+    phase_digest: Sha256Digest,
+}
+
+impl crate::UnleashStore {
+    /// Commit actual process/PTY facts and the exact broker observation atomically.
+    /// # Errors
+    /// Refuses unbound observations, another incarnation, missing published evidence or replay divergence.
+    pub fn commit_terminal_launch_observation(
+        &self,
+        observation: TerminalLaunchObservation,
+        phase: crate::BrokerPhaseRequest,
+    ) -> Result<crate::BrokerPhaseCommit, StoreError> {
+        let cfg = self.config().clone();
+        let committed=self.execute_in_writer_tx(crate::WriteCriticality::Normal,move|tx,now| {
+            let d=read_daemon_state_conn(tx)?;
+            let r=read_conn(tx,observation.terminal_id)?.ok_or_else(||invalid("terminal observation has no allocation"))?;
+            let c=&r.context;
+            let digest=canonical_sha256(&observation)?;
+            let crate::BrokerPhase::Observation {action_id,receipt,..}=&phase.phase else {return Err(invalid("terminal observation requires observation phase"));};
+            if *action_id!=c.action_id || observation.action_id!=c.action_id || observation.host_id!=c.host_id
+                || observation.process_run_uuid!=c.process_run_uuid || observation.context_digest!=r.context_digest
+                || r.dispatch_id!=Some(observation.dispatch_id) || receipt.dispatch_id!=observation.dispatch_id
+                || receipt.output_digest!=Some(digest) || receipt.state!=ActionState::ObservedSuccess
+                || observation.owner_uid!=d.owner_uid
+                || observation.pid==0 || observation.pgid==0 || observation.boot_identity!=d.boot_identity
+                || observation.start_identity.trim().is_empty() || !["macos_proc_pidinfo","linux_procfs"].contains(&observation.identity_backend.as_str())
+                || (!observation.exited && (observation.exit_code.is_some() || observation.exit_signal.is_some()))
+                || (observation.exit_code.is_some() && observation.exit_signal.is_some()) {
+                return Err(invalid("terminal observation differs from its actual allocation"));
+            }
+            let existing:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM processes WHERE process_id=?1)",[c.process_id.to_string()],|row|row.get(0))?;
+            if existing {return crate::broker_writer::commit_phase_tx(tx,&cfg,now,&phase);}
+            validate_incarnation(tx,&d,c.action_id)?;
+            validate_lease(tx,&d,now,c)?;
+            validate_holds(tx,c)?;
+            crate::broker_writer::validate_execution_dispatch_tx(tx,&d,now,c.action_id,observation.dispatch_id)?;
+            let started_at_ms:i64=tx.query_row("SELECT started_at_ms FROM action_dispatches WHERE dispatch_id=?1 AND action_id=?2",params![observation.dispatch_id.to_string(),c.action_id.to_string()],|row|row.get(0))?;
+            // Facts are captured before publication/fsync; the broker receipt is
+            // created only after the executor returns. Preserve both times.
+            // The generic broker writer also checks receipt <= writer_now.
+            if observation.observed_at_ms.as_i64()<started_at_ms || observation.observed_at_ms>receipt.observed_at_ms {
+                return Err(invalid("terminal capture timestamp is outside dispatch and receipt"));
+            }
+            let evidence:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM object_references f JOIN object_records o ON o.object_hash=f.object_hash WHERE f.owner_kind='terminal_launch_observation' AND f.owner_id=?1 AND f.source_field=?2 AND f.object_hash=?3 AND f.state='live' AND o.state='live')",params![c.terminal_id.to_string(),observation.dispatch_id.to_string(),digest.to_string()],|row|row.get(0))?;
+            if !evidence {return Err(invalid("actual terminal observation object is not published"));}
+            let process_state=if observation.exited {"exited"}else{"live"};
+            let terminal_state=if observation.exited {"exited"}else{"ready"};
+            tx.execute("INSERT INTO processes(process_id,action_id,process_run_uuid,authority_generation,host_id,pid,pgid,boot_identity,start_identity,identity_backend,owner_uid,cwd_ref,worktree_id,state,last_observed_at_ms,exit_code,exit_signal) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,NULL,?13,?14,?15,?16)",params![c.process_id.to_string(),c.action_id.to_string(),c.process_run_uuid.to_string(),c.authority_generation.to_string(),c.host_id.to_string(),observation.pid,observation.pgid,observation.boot_identity,observation.start_identity,observation.identity_backend,observation.owner_uid,c.preparation.process_spec.cwd_canonical,process_state,observation.observed_at_ms.as_i64(),observation.exit_code,observation.exit_signal])?;
+            tx.execute("INSERT INTO terminal_sessions(terminal_id,process_id,owner_agent_id,mission_id,purpose_key,rows,cols,lease_id,input_seq,durable_log_seq,state) VALUES(?1,?2,NULL,?3,?4,?5,?6,?7,0,?8,?9)",params![c.terminal_id.to_string(),c.process_id.to_string(),c.preparation.mission_id.to_string(),c.preparation.purpose_key,c.preparation.process_spec.rows,c.preparation.process_spec.cols,c.lease_id.to_string(),integer(observation.durable_log_seq)?,terminal_state])?;
+            let proof=TerminalObservationProof {phase_digest:canonical_sha256(&phase.phase)?};
+            crate::broker_writer::commit_terminal_observation_tx(tx,&cfg,now,&phase,&proof)
+        })?;
+        if !committed.replayed {
+            self.config()
+                .cutpoints
+                .hit(crate::StoreCutpoint::C2AfterCommandCommit)?;
+        }
+        Ok(committed)
+    }
 }
 pub(crate) fn resolve_tx(
     tx: &Transaction<'_>,

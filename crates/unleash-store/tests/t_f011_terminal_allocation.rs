@@ -785,6 +785,194 @@ fn t_f011_001_future_disposition_requires_bound_observation_and_frees_only_activ
     assert!(s.commit_broker_phase(authorizing(&next)).is_err());
 }
 
+// Writer fixtures only: synthetic OS facts exercise atomic correlation, not OS qualification.
+fn launch_observation_fixture(
+    s: &UnleashStore,
+    r: &TerminalAllocationRecord,
+    dispatch_id: DispatchId,
+    captured: i64,
+    received: i64,
+) -> (
+    terminal_allocations::TerminalLaunchObservation,
+    BrokerPhaseRequest,
+) {
+    let c = &r.context;
+    let d = s.daemon_state().unwrap();
+    let observation = terminal_allocations::TerminalLaunchObservation {
+        terminal_id: c.terminal_id,
+        action_id: c.action_id,
+        dispatch_id,
+        context_digest: r.context_digest,
+        host_id: c.host_id,
+        process_run_uuid: c.process_run_uuid,
+        pid: 123,
+        pgid: 123,
+        owner_uid: d.owner_uid,
+        boot_identity: d.boot_identity,
+        start_identity: "synthetic-sqlite-start".into(),
+        identity_backend: "macos_proc_pidinfo".into(),
+        manifest_digest: Sha256Digest::from_bytes(b"synthetic manifest"),
+        effective_environment_digest: c.preparation.process_spec.environment.digest,
+        durable_log_seq: 0,
+        observed_at_ms: unleash_domain::TimestampMs::new(captured),
+        exit_code: Some(0),
+        exit_signal: None,
+        exited: true,
+    };
+    let hash = canonical_sha256(&observation).unwrap();
+    let bytes = canonicalize_to_vec(&observation).unwrap();
+    let pin = s
+        .prepare_object(PrepareObjectRequest {
+            object_hash: hash,
+            byte_length: bytes.len() as u64,
+            media_type: "application/json".into(),
+            owner_kind: "terminal_launch_observation".into(),
+            owner_id: c.terminal_id.to_string(),
+        })
+        .unwrap();
+    s.write_prepared_object_bytes(&pin, &bytes).unwrap();
+    s.publish_object_reference(PublishObjectReferenceRequest {
+        pin_id: pin.pin_id,
+        object_hash: hash,
+        object_generation: pin.object_generation,
+        owner_kind: "terminal_launch_observation".into(),
+        owner_id: c.terminal_id.to_string(),
+        source_field: dispatch_id.to_string(),
+    })
+    .unwrap();
+    let original = authorizing(r);
+    let intent_digest = match original.phase {
+        BrokerPhase::Authorizing { intent } => intent.intent_digest,
+        _ => unreachable!(),
+    };
+    let snapshot = s.inspect_broker_action(c.action_id).unwrap().unwrap();
+    let phase = BrokerPhaseRequest {
+        authority_generation: c.authority_generation,
+        expected_revision: snapshot.revision,
+        evaluation: original.evaluation,
+        phase: BrokerPhase::Observation {
+            action_id: c.action_id,
+            intent_digest,
+            receipt: BrokerActionReceipt {
+                action_id: c.action_id,
+                evaluation_id: original.evaluation.evaluation_id,
+                dispatch_id,
+                decision_ref: "synthetic-sqlite-allow".into(),
+                state: unleash_domain::ActionState::ObservedSuccess,
+                output_digest: Some(hash),
+                enforcement_refs: vec![],
+                remote_audit_ref: None,
+                remote_audit_unavailable: false,
+                observed_at_ms: unleash_domain::TimestampMs::new(received),
+            },
+            observation_revision: Revision::new(1),
+            cause: BrokerObservationCause::Execution,
+            reason: None,
+        },
+    };
+    (observation, phase)
+}
+
+#[test]
+fn t_f011_003_capture_precedes_receipt_and_observation_commit_replays_without_new_rows() {
+    for point in [
+        StoreCutpoint::C1BeforeCommandCommit,
+        StoreCutpoint::C2AfterCommandCommit,
+    ] {
+        let fault = Arc::new(FailAt {
+            armed: AtomicBool::new(false),
+            point,
+        });
+        let (s, _cfg, clock, prep, _dir) = fixture(fault.clone());
+        s.commit_command(request(&s, prep, 1401)).unwrap();
+        let before = read(&s, 1401);
+        clock.set_utc_ms(100);
+        let id = dispatch(&s, &before);
+        s.resolve_terminal_launch(resolution(&before, id)).unwrap();
+        let record = read(&s, 1401);
+        clock.set_utc_ms(105);
+        let (observation, phase) = launch_observation_fixture(&s, &record, id, 101, 103);
+        fault.armed.store(true, Ordering::Release);
+        let cut_result = s.commit_terminal_launch_observation(observation.clone(), phase.clone());
+        assert!(
+            matches!(&cut_result, Err(StoreError::CutpointInjected { .. })),
+            "point={point:?}, result={cut_result:?}"
+        );
+        let committed_before_retry = point == StoreCutpoint::C2AfterCommandCommit;
+        assert_eq!(
+            (counts(&s).2, counts(&s).3),
+            if committed_before_retry {
+                (1, 1)
+            } else {
+                (0, 0)
+            }
+        );
+        let committed = s
+            .commit_terminal_launch_observation(observation.clone(), phase.clone())
+            .unwrap();
+        assert_eq!(committed.replayed, committed_before_retry);
+        let replay = s
+            .commit_terminal_launch_observation(observation, phase.clone())
+            .unwrap();
+        assert!(replay.replayed);
+        assert_eq!(replay.event_cursor, committed.event_cursor);
+        assert_eq!((counts(&s).2, counts(&s).3), (1, 1));
+        let times=s.read_snapshot(|conn,_| {
+            Ok(conn.query_row("SELECT p.last_observed_at_ms,d.ended_at_ms FROM processes p JOIN action_dispatches d ON d.action_id=p.action_id WHERE p.process_id=?1 AND d.dispatch_id=?2",rusqlite::params![record.context.process_id.to_string(),id.to_string()],|row|Ok((row.get::<_,i64>(0)?,row.get::<_,i64>(1)?)))?)
+        }).unwrap();
+        assert_eq!(
+            times,
+            (101, 103),
+            "capture and later broker receipt are distinct durable facts"
+        );
+        let mut forged = phase;
+        if let BrokerPhase::Observation { receipt, .. } = &mut forged.phase {
+            receipt.enforcement_refs.push("unproven-control".into());
+        }
+        assert!(s.commit_broker_phase(forged).is_err());
+        assert!(
+            s.resolve_terminal_launch(resolution(&before, id)).is_err(),
+            "observation replay never reissues launch permit"
+        );
+    }
+}
+
+#[test]
+fn t_f011_003_capture_before_dispatch_or_after_receipt_cannot_publish_process_rows() {
+    for captured in [99, 104] {
+        let (s, _cfg, clock, prep, _dir) = fixture(Arc::new(NoopCutpointObserver));
+        s.commit_command(request(&s, prep, 1501)).unwrap();
+        let before = read(&s, 1501);
+        clock.set_utc_ms(100);
+        let id = dispatch(&s, &before);
+        s.resolve_terminal_launch(resolution(&before, id)).unwrap();
+        let record = read(&s, 1501);
+        clock.set_utc_ms(105);
+        let (observation, phase) = launch_observation_fixture(&s, &record, id, captured, 103);
+        let prior = s
+            .inspect_broker_action(record.context.action_id)
+            .unwrap()
+            .unwrap();
+        let refused = s.commit_terminal_launch_observation(observation, phase);
+        assert!(
+            matches!(refused,Err(StoreError::InvalidArgument {message,..}) if message=="terminal capture timestamp is outside dispatch and receipt")
+        );
+        assert_eq!((counts(&s).2, counts(&s).3), (0, 0));
+        assert_eq!(
+            s.inspect_broker_action(record.context.action_id)
+                .unwrap()
+                .unwrap(),
+            prior,
+            "failed evidence cannot append a phase or advance action"
+        );
+        let (phases,events)=s.read_snapshot(|conn,_| {
+            let action=record.context.action_id.to_string();
+            Ok((conn.query_row("SELECT COUNT(*) FROM broker_phase_records WHERE action_id=?1 AND phase_key LIKE 'observation:%'",[&action],|row|row.get::<_,i64>(0))?,conn.query_row("SELECT COUNT(*) FROM events WHERE aggregate_id=?1 AND event_type='ActionObserved'",[&action],|row|row.get::<_,i64>(0))?))
+        }).unwrap();
+        assert_eq!((phases, events), (0, 0));
+    }
+}
+
 fn publish_disposition_fixture(
     store: &UnleashStore,
     record: &TerminalAllocationRecord,

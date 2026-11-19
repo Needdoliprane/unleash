@@ -59,6 +59,8 @@ pub(crate) struct StopRequest {
 
 /// État d'exécution partagé entre la boucle d'acceptation IPC et les connexions clientes.
 pub(crate) struct DaemonRuntimeState {
+    pub(crate) rendezvous_dir: std::path::PathBuf,
+    pub(crate) terminal_children: Mutex<Vec<std::process::Child>>,
     pub(crate) broker_activity: Arc<crate::broker_activity::BrokerActivity>,
     pub(crate) store: Arc<UnleashStore>,
     pub(crate) authority_generation: AuthorityGeneration,
@@ -491,6 +493,7 @@ async fn dispatch_query(
         "GetStateSnapshot" => query_state_snapshot(state, session, query).await,
         "GetCommandReceipt" => query_command_receipt(state, session, query).await,
         "GetBackupManifest" => query_backup_manifest(state, session, query).await,
+        "ReadTerminalLog" => crate::terminal_service::read_log(state, session, query).await,
         "ListProjects" | "GetProject" | "ReadSettings" | "ReadPolicySummary"
         | "ReadGuardHealth" | "InspectRecovery" => query_m1_projection(state, session, query).await,
         other => Err(IpcError::new(
@@ -1019,7 +1022,9 @@ async fn handle_command_frame(
 
     if matches!(
         prepared.req.mutation,
-        CommandMutation::CreateMission { .. } | CommandMutation::RequestBackup { .. }
+        CommandMutation::CreateMission { .. }
+            | CommandMutation::RequestBackup { .. }
+            | CommandMutation::PrepareTerminalAllocation { .. }
     ) && let Err(ipc) = ensure_principal_registered(&state.store, session).await
     {
         let _ = write_json_frame_timeout(stream, &ipc, RESPONSE_WRITE_TIMEOUT).await;
@@ -1080,6 +1085,12 @@ async fn handle_command_frame(
 
     if cmd.command_type == "RequestBackup" {
         crate::backup_service::start(state, unleash_domain::BackupId::from_uuid(cmd.aggregate_id));
+    }
+    if cmd.command_type == "AcquireTerminal" {
+        crate::terminal_service::start(
+            state,
+            unleash_domain::TerminalId::from_uuid(cmd.aggregate_id),
+        );
     }
 
     if newly_committed && let Some(stop_reason) = prepared.stop_reason.take() {
@@ -1252,6 +1263,11 @@ async fn prepare_command_request(
         "ReviseProject" => prepare_revise_project(session, cmd),
         "PurgeHistory" => prepare_purge_history(session, cmd),
         "RequestBackup" => prepare_request_backup(session, cmd),
+        "AcquireTerminal" => Ok(PreparedCommand {
+            req: crate::terminal_service::prepare_acquisition(state, session, cmd).await?,
+            stop_reason: None,
+            stop_drain_timeout: None,
+        }),
         "SetSettings" | "SetPolicy" | "ConfigureGuard" => {
             let mut prepared = prepare_admin_command(state, session, cmd.clone())?;
             if let Some(pins) = crate::terminal_service::prepare_configuration_objects(

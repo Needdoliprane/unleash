@@ -201,6 +201,12 @@ impl fmt::Debug for HostRequest {
 pub enum HostResponse {
     /// Accusé du handshake authentifié et état courant après fencing/rotation.
     HandshakeAck {
+        /// Effective explicit environment verified before spawn; absent on legacy hosts.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        effective_environment_digest: Option<unleash_domain::Sha256Digest>,
+        /// Allocation link supplied by the authenticated launcher.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        allocation_context_digest: Option<unleash_domain::Sha256Digest>,
         /// UUID de l'exécution physique.
         process_run_uuid: ProcessRunUuid,
         /// Lignée active confirmée.

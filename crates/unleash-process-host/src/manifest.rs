@@ -178,6 +178,12 @@ pub struct HostManifest {
     pub worktree_id: Option<WorktreeId>,
     /// Empreinte SHA-256 canonique (RFC 8785) du programme, des arguments et des clés d'environnement.
     pub command_digest: Sha256Digest,
+    /// Environment actually prepared in explicit mode; absent for legacy hosts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effective_environment_digest: Option<Sha256Digest>,
+    /// Allocation supplied by the authenticated launcher, separate from the applied environment.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allocation_context_digest: Option<Sha256Digest>,
     /// UID effectif propriétaire.
     pub owner_uid: u32,
     /// PID observé du processus enfant direct.
@@ -299,12 +305,74 @@ pub fn load_control_secret(path: &Path) -> Result<HostControlSecret, ProcessHost
     HostControlSecret::new(raw)
 }
 
+/// Qualified explicit environment format, distinct from the legacy inherited baseline.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EnvironmentMode {
+    /// Only configured finite locale values and the private managed TMPDIR.
+    ExplicitV1,
+}
+
+/// Build the exact explicit environment without consulting the parent environment.
+/// # Errors
+/// Refuses unknown values or an invalid managed temporary directory.
+pub fn explicit_environment_v1(
+    explicit: &BTreeMap<String, String>,
+    child_tmp: &Path,
+) -> Result<BTreeMap<String, String>, ProcessHostError> {
+    let bad = || ProcessHostError::InvalidArgument {
+        reason: "invalid explicit environment".into(),
+    };
+    if !child_tmp.is_absolute() || explicit.is_empty() || explicit.len() > 4 {
+        return Err(bad());
+    }
+    for (k, v) in explicit {
+        let allowed = match k.as_str() {
+            "LANG" | "LC_ALL" => {
+                ["C", "C.UTF-8", "en_US.UTF-8", "fr_FR.UTF-8"].contains(&v.as_str())
+            }
+            "TERM" => ["xterm", "xterm-256color", "vt100", "dumb"].contains(&v.as_str()),
+            "TZ" => v == "UTC",
+            _ => false,
+        };
+        if !allowed {
+            return Err(bad());
+        }
+    }
+    let mut result = explicit.clone();
+    result.insert(
+        "TMPDIR".into(),
+        child_tmp.to_str().ok_or_else(bad)?.to_owned(),
+    );
+    Ok(result)
+}
+
+/// Digest of the complete effective, non-secret environment under a versioned convention.
+/// # Errors
+/// Returns a canonical serialization error.
+pub fn effective_environment_digest_v1(
+    environment: &BTreeMap<String, String>,
+) -> Result<Sha256Digest, ProcessHostError> {
+    Ok(unleash_protocol::canonical_sha256(
+        &serde_json::json!({"version":1,"environment":environment}),
+    )?)
+}
+
 /// Spécification de démarrage lue depuis le fichier privé `--bootstrap` par le binaire `unleash-process-host`.
 ///
 /// Aucun secret de contrôle ni canari ne transite par la ligne de commande (`argv`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HostBootstrapSpec {
+    /// Absent preserves legacy behavior; configured terminals never fall back to it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub environment_mode: Option<EnvironmentMode>,
+    /// Expected digest checked before a configured child can be started.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_effective_environment_digest: Option<Sha256Digest>,
+    /// Immutable allocation supplied by the daemon.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allocation_context_digest: Option<Sha256Digest>,
     /// Répertoire privé `0700` du host (manifeste, socket, journal, spool).
     pub runtime_dir: PathBuf,
     /// Identifiant du host.
@@ -491,6 +559,8 @@ mod tests {
         store_control_secret(&secret_path, &secret).unwrap();
 
         let manifest = HostManifest {
+            effective_environment_digest: None,
+            allocation_context_digest: None,
             schema_version: 1,
             host_id: HostId::from_u128(1),
             process_id: ProcessId::from_u128(2),
