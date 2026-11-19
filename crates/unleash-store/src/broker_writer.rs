@@ -222,8 +222,18 @@ fn validate_live_intent(
     now: TimestampMs,
     intent: &BrokerIntent,
 ) -> Result<(), StoreError> {
+    validate_live_intent_with_connect(tx, daemon, now, intent, false)
+}
+
+fn validate_live_intent_with_connect(
+    tx: &Transaction<'_>,
+    daemon: &DaemonStateRow,
+    now: TimestampMs,
+    intent: &BrokerIntent,
+    connect_authorized: bool,
+) -> Result<(), StoreError> {
     crate::backup_requests::validate_backup_intent_tx(tx, daemon, intent)?;
-    if !crate::provider_probe_connect::validate_intent(tx, daemon, intent)? {
+    if !connect_authorized && !crate::provider_probe_connect::validate_intent(tx, daemon, intent)? {
         crate::provider_probes::validate_intent(tx, daemon, intent)?;
     }
     crate::terminal_allocations::validate_intent(tx, daemon, now, intent)?;
@@ -401,7 +411,7 @@ pub(crate) fn commit_phase_tx(
     now: TimestampMs,
     request: &BrokerPhaseRequest,
 ) -> Result<BrokerPhaseCommit, StoreError> {
-    commit_phase_tx_inner(tx, config, now, request, None)
+    commit_phase_tx_inner(tx, config, now, request, None, None)
 }
 pub(crate) fn commit_terminal_observation_tx(
     tx: &Transaction<'_>,
@@ -410,7 +420,17 @@ pub(crate) fn commit_terminal_observation_tx(
     request: &BrokerPhaseRequest,
     proof: &crate::terminal_allocations::TerminalObservationProof,
 ) -> Result<BrokerPhaseCommit, StoreError> {
-    commit_phase_tx_inner(tx, config, now, request, Some(proof))
+    commit_phase_tx_inner(tx, config, now, request, Some(proof), None)
+}
+
+pub(crate) fn commit_connect_phase_tx(
+    tx: &Transaction<'_>,
+    config: &StoreConfig,
+    now: TimestampMs,
+    request: &BrokerPhaseRequest,
+    permission: &crate::provider_probe_connect::ConnectPhasePermission,
+) -> Result<BrokerPhaseCommit, StoreError> {
+    commit_phase_tx_inner(tx, config, now, request, None, Some(permission))
 }
 
 /// Résout la phase avant toute I/O ; un dispatch durable n'est jamais acquitté une seconde fois.
@@ -424,6 +444,7 @@ fn commit_phase_tx_inner(
     now: TimestampMs,
     request: &BrokerPhaseRequest,
     terminal_proof: Option<&crate::terminal_allocations::TerminalObservationProof>,
+    connect_permission: Option<&crate::provider_probe_connect::ConnectPhasePermission>,
 ) -> Result<BrokerPhaseCommit, StoreError> {
     let daemon = read_daemon_state_tx(tx)?;
     if daemon.authority_generation != request.authority_generation {
@@ -452,6 +473,13 @@ fn commit_phase_tx_inner(
             });
         }
     }
+    let connect_authorized = crate::provider_probe_connect::guard_phase_access(
+        tx,
+        &daemon,
+        now,
+        &request.phase,
+        connect_permission,
+    )?;
     crate::provider_probes::validate_incarnation(tx, &daemon, action)?;
     crate::terminal_allocations::validate_incarnation(tx, &daemon, action)?;
     if matches!(request.phase, BrokerPhase::Dispatch { .. }) {
@@ -509,7 +537,7 @@ fn commit_phase_tx_inner(
     }
     let (state, event_name, extra) = match &request.phase {
         BrokerPhase::Authorizing { .. } => {
-            validate_live_intent(tx, &daemon, now, &intent)?;
+            validate_live_intent_with_connect(tx, &daemon, now, &intent, connect_authorized)?;
             let (snapshot, policy_hash) = policy_snapshot(tx, &intent)?;
             let ordinal = if let Some(prior) = current.as_ref() {
                 if prior.intent_digest != intent.intent_digest
@@ -545,7 +573,7 @@ fn commit_phase_tx_inner(
                 .as_ref()
                 .ok_or_else(|| invalid("action broker absente"))?;
             require_current_evaluation(tx, current, request.evaluation)?;
-            validate_live_intent(tx, &daemon, now, &intent)?;
+            validate_live_intent_with_connect(tx, &daemon, now, &intent, connect_authorized)?;
             require_policy_unchanged(tx, &intent, request.evaluation)?;
             if !matches!(cause, BrokerAuthorizationCause::Evaluation) {
                 return Err(invalid(
@@ -642,7 +670,7 @@ fn commit_phase_tx_inner(
             {
                 return Err(invalid("dispatch sans état autorisé/fence exact"));
             }
-            validate_live_intent(tx, &daemon, now, &intent)?;
+            validate_live_intent_with_connect(tx, &daemon, now, &intent, connect_authorized)?;
             require_policy_unchanged(tx, &intent, request.evaluation)?;
             validate_decision(&intent, request.evaluation, now, decision)?;
             let encoded:String=tx.query_row("SELECT phase_json FROM broker_phase_records WHERE action_id=?1 AND evaluation_id=?2 AND phase_key='authorization'",params![action.to_string(),request.evaluation.evaluation_id.to_string()],|r|r.get(0)).map_err(StoreError::from_rusqlite)?;

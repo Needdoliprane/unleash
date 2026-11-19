@@ -441,6 +441,70 @@ pub(crate) fn resolve_connect_grant(
             command_id: Some(envelope.command_id),
         });
     }
+    resolve_connect_binding(
+        tx,
+        daemon,
+        now,
+        &ConnectGrantBinding {
+            actor_id: &caller.actor_id,
+            project_id: envelope.project_id,
+            wire,
+            profile,
+        },
+    )
+}
+
+struct ConnectGrantBinding<'a> {
+    actor_id: &'a ActorId,
+    project_id: Option<ProjectId>,
+    wire: &'a TestProviderProfilePayload,
+    profile: &'a crate::ConfiguredProviderProfile,
+}
+
+/// Checks the already authorized context's facts for admission. This does not
+/// construct a caller role, a fresh claim or permission to append broker phases.
+pub(crate) fn revalidate_connect_grant(
+    tx: &Transaction<'_>,
+    daemon: &DaemonStateRow,
+    now: TimestampMs,
+    context: &crate::ProviderProbeConnectContext,
+    profile: &crate::ConfiguredProviderProfile,
+) -> Result<ResolvedConnectGrant, StoreError> {
+    let wire = TestProviderProfilePayload::try_new(
+        context.profile_id.to_string(),
+        context.profile_version,
+        context.phase,
+        context.capability_set.clone(),
+        context.limits.clone(),
+        context.locality,
+        context.mandate_ref.to_string(),
+    )
+    .map_err(|_| hidden())?;
+    resolve_connect_binding(
+        tx,
+        daemon,
+        now,
+        &ConnectGrantBinding {
+            actor_id: &context.actor_id,
+            project_id: context.project_id,
+            wire: &wire,
+            profile,
+        },
+    )
+}
+
+fn resolve_connect_binding(
+    tx: &Transaction<'_>,
+    daemon: &DaemonStateRow,
+    now: TimestampMs,
+    binding: &ConnectGrantBinding<'_>,
+) -> Result<ResolvedConnectGrant, StoreError> {
+    let ConnectGrantBinding {
+        actor_id,
+        project_id,
+        wire,
+        profile,
+    } = binding;
     let reference: ReceiptId = wire.mandate_ref().parse().map_err(|_| hidden())?;
     if reference.as_uuid().is_nil() || reference.to_string() != wire.mandate_ref() {
         return Err(hidden());
@@ -450,7 +514,7 @@ pub(crate) fn resolve_connect_grant(
     let principal = grant.permission.principal_id.clone();
     let current_principal: bool = tx.query_row(
         "SELECT EXISTS(SELECT 1 FROM principals WHERE principal_id=?1 AND actor_id=?2 AND state='active' AND principal_kind IN ('user','service','system'))",
-        params![principal.as_str(),caller.actor_id.as_str()], |row|row.get(0),
+        params![principal.as_str(),actor_id.as_str()], |row|row.get(0),
     )?;
     let target = project(grant.scope_kind, &grant.scope_id)?;
     if stored.revocation.is_some()
@@ -460,7 +524,7 @@ pub(crate) fn resolve_connect_grant(
         || grant.permission.expires_at_ms <= now
         || grant.issued_at_ms > now
         || !current_principal
-        || target != envelope.project_id
+        || target != *project_id
         || target != profile.configuration.project_id
         || grant.permission.profile_id != profile.configuration.profile_id
         || wire.profile_id() != profile.configuration.profile_id.to_string()
@@ -482,7 +546,7 @@ pub(crate) fn resolve_connect_grant(
         return Err(hidden());
     }
     ensure_scope_not_frozen_tx(tx, target, None, None)?;
-    for subject in [principal.as_str(), caller.actor_id.as_str()] {
+    for subject in [principal.as_str(), actor_id.as_str()] {
         ensure_subject_not_blocked_tx(tx, SubjectKind::Actor, subject, target)?;
     }
     provider_profiles::verify_secret(tx, &profile.configuration)?;

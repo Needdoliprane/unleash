@@ -222,6 +222,14 @@ impl std::fmt::Debug for ClaimProviderProbeConnectRequest {
 pub struct ProviderProbeConnectClaim {
     record: ProviderProbeConnectRecord,
     claim: ProviderProbeConnectClaimRecord,
+    // Kept from the authenticated call, never reconstructed from a projection.
+    request: Box<ClaimProviderProbeConnectRequest>,
+}
+
+/// Private writer capability copied only from the original opaque fresh token.
+pub(crate) struct ConnectPhasePermission {
+    record: ProviderProbeConnectRecord,
+    request: ClaimProviderProbeConnectRequest,
 }
 
 impl ProviderProbeConnectClaim {
@@ -351,6 +359,145 @@ pub(crate) fn validate_intent(
         return Err(hidden());
     }
     Ok(false)
+}
+
+fn for_action(
+    conn: &Connection,
+    action: ActionId,
+) -> Result<Option<ProviderProbeConnectRecord>, StoreError> {
+    if read_daemon_state_conn(conn)?.schema_version < 15 {
+        return Ok(None);
+    }
+    let probe: Option<String> = conn
+        .query_row(
+            "SELECT probe_id FROM provider_probe_transport_contexts WHERE action_id=?1",
+            [action.to_string()],
+            |row| row.get(0),
+        )
+        .optional()?;
+    probe
+        .map(|id| read_context(conn, id.parse()?))
+        .transpose()
+        .map(Option::flatten)
+}
+
+/// Runs before the shared phase replay lookup. Inspection cannot mint this capability.
+pub(crate) fn guard_phase_access(
+    tx: &Transaction<'_>,
+    daemon: &crate::DaemonStateRow,
+    now: TimestampMs,
+    phase: &crate::BrokerPhase,
+    permission: Option<&ConnectPhasePermission>,
+) -> Result<bool, StoreError> {
+    let record = for_action(tx, phase.action_id())?;
+    let is_connect = matches!(phase, crate::BrokerPhase::Authorizing { intent }
+        if intent.manifest.get("verb") == Some(&serde_json::json!("model.provider.connect")));
+    let Some(record) = record else {
+        return if is_connect || permission.is_some() {
+            Err(hidden())
+        } else {
+            Ok(false)
+        };
+    };
+    let permission = permission.ok_or_else(|| {
+        StoreError::EvidenceUnavailable(
+            "connect exige le token frais original, même pour un rejeu".to_owned(),
+        )
+    })?;
+    let current = claim_identity(tx, daemon, &permission.request)?;
+    if current != record || record != permission.record || record.claim.is_none() {
+        return Err(StoreError::StaleFence {
+            message: "claim connect différente du propriétaire frais".to_owned(),
+        });
+    }
+    if matches!(phase, crate::BrokerPhase::Observation { .. }) {
+        return Err(StoreError::EvidenceUnavailable(
+            "observation connect exige le port de preuve de transport".to_owned(),
+        ));
+    }
+    let fresh = validate_live_context(tx, daemon, now, &permission.request, &record)?;
+    if let crate::BrokerPhase::Authorizing { intent } = phase {
+        validate_bound_intent(&record.context, &fresh.profile, intent)?;
+    }
+    if matches!(
+        phase,
+        crate::BrokerPhase::Authorization { .. } | crate::BrokerPhase::Dispatch { .. }
+    ) {
+        validate_execution_reservation(tx, daemon, now, &record.context)?;
+    }
+    Ok(true)
+}
+
+fn validate_bound_intent(
+    context: &ProviderProbeConnectContext,
+    profile: &crate::ConfiguredProviderProfile,
+    intent: &crate::BrokerIntent,
+) -> Result<(), StoreError> {
+    use unleash_domain::{ActionOrigin, Fence, LineageFence, ReconcileStrategy};
+    if intent.lineage_fence
+        != LineageFence::new(
+            context.authority_generation,
+            context.daemon_epoch,
+            Fence::ZERO,
+        )
+    {
+        return Err(StoreError::StaleFence {
+            message: "fence de contrôle connect différente du contexte".to_owned(),
+        });
+    }
+    let destination = profile
+        .configuration
+        .payload
+        .endpoint_destination()
+        .map_err(|_| invalid("destination connect invalide"))?;
+    let resources = serde_json::json!([{"kind":"network_endpoint","host":destination.host(),
+        "port":destination.port(),"is_private_or_loopback":destination.is_loopback_literal()}]);
+    if intent.action_id != context.action_id
+        || intent.origin
+            != (ActionOrigin::ControlPlane {
+                control_principal_id: context.principal_id.clone(),
+            })
+        || intent.principal_id != context.principal_id
+        || intent.cause
+            != (crate::BrokerCause::CommandReceipt {
+                receipt_id: context.receipt_id,
+            })
+        || intent.project_id != context.project_id
+        || intent.payload_digest != context.request_digest
+        || intent.scope_revision != context.scope_revision
+        || intent.policy_revision != context.policy_revision
+        || intent.action_deadline != context.deadline
+        || intent.reconcile_strategy != ReconcileStrategy::ObserveThenDecide
+        || intent.manifest.get("verb") != Some(&serde_json::json!("model.provider.connect"))
+        || intent.manifest.get("effects_class") != Some(&serde_json::json!("network_egress"))
+        || intent.manifest.get("resource_refs") != Some(&resources)
+        || intent.manifest.get("secret_refs") != Some(&serde_json::json!([]))
+        || intent.manifest.get("provenance")
+            != Some(&serde_json::json!({"origin":"engine_internal"}))
+    {
+        return Err(invalid(
+            "intention connect divergente du contexte authentique",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_execution_reservation(
+    tx: &Transaction<'_>,
+    daemon: &crate::DaemonStateRow,
+    now: TimestampMs,
+    context: &ProviderProbeConnectContext,
+) -> Result<(), StoreError> {
+    let valid: bool = tx.query_row(
+        "SELECT COUNT(*)=1 FROM provider_probes p JOIN execution_reservation_owners o ON o.provider_probe_id=p.probe_id JOIN capacity_reservations c ON c.reservation_id=o.reservation_id JOIN capacity_pools pool ON pool.pool_id=c.pool_id JOIN resource_leases l ON l.owner_type=c.owner_type AND l.owner_id=c.owner_id WHERE p.probe_id=?1 AND p.state IN ('admitted','running') AND p.fence>0 AND c.state='held' AND c.amount=1 AND c.owner_type='provider_probe' AND c.authority_generation=?2 AND c.daemon_epoch=?3 AND pool.pool_kind='execution' AND pool.scope_key='global' AND l.resource_kind='execution' AND l.resource_key=?4 AND l.authority_generation=?2 AND l.daemon_epoch=?3 AND l.fence=p.fence AND p.authority_generation=?2 AND p.daemon_epoch=?3 AND l.boot_identity=?5 AND l.state='held' AND l.expires_at_ms>?6",
+        params![context.probe_id.to_string(),daemon.authority_generation.to_string(),integer(daemon.daemon_epoch.as_u64())?,format!("provider_probe:{}",context.probe_id),daemon.boot_identity,now.as_i64()], |row| row.get(0),
+    )?;
+    if !valid {
+        return Err(StoreError::StaleFence {
+            message: "réservation V008 ou bail connect non courant".to_owned(),
+        });
+    }
+    Ok(())
 }
 
 fn invalid(message: &'static str) -> StoreError {
@@ -585,7 +732,7 @@ struct ConnectContextRow {
     claimed_at_ms: Option<i64>,
 }
 
-fn read_context(
+pub(crate) fn read_context(
     conn: &Connection,
     probe: ProviderProbeId,
 ) -> Result<Option<ProviderProbeConnectRecord>, StoreError> {
@@ -618,6 +765,126 @@ fn read_context(
         })
     })
     .transpose()
+}
+
+fn current_profile(
+    tx: &Transaction<'_>,
+    daemon: &crate::DaemonStateRow,
+    now: TimestampMs,
+    record: &ProviderProbeConnectRecord,
+) -> Result<crate::ConfiguredProviderProfile, StoreError> {
+    let c = &record.context;
+    if c.authority_generation != daemon.authority_generation {
+        return Err(StoreError::StaleAuthorityGeneration {
+            expected: daemon.authority_generation,
+            actual: c.authority_generation,
+            command_id: None,
+        });
+    }
+    if c.daemon_epoch != daemon.daemon_epoch || c.deadline <= now || record.claim.is_none() {
+        return Err(StoreError::StaleFence {
+            message: "claim, incarnation ou échéance connect non courante".to_owned(),
+        });
+    }
+    let profile = crate::provider_profiles::resolve(tx, c.profile_id, c.profile_version)?
+        .ok_or_else(hidden)?;
+    let grant =
+        crate::provider_probe_mandates::revalidate_connect_grant(tx, daemon, now, c, &profile)?;
+    let (revision, digest) = policy(tx, c.project_id)?;
+    if profile.profile_version_ref != c.profile_version_ref
+        || profile.configuration_digest != c.configuration_digest
+        || profile.configuration.payload.endpoint() != c.destination
+        || scope_revision(tx, c.project_id)? != c.scope_revision
+        || revision != c.policy_revision
+        || digest != c.policy_digest
+        || grant.principal_id != c.principal_id
+        || grant.mandate_ref != c.mandate_ref
+        || grant.mandate_digest != c.mandate_digest
+        || grant.expires_at_ms < c.deadline
+    {
+        return Err(StoreError::StaleFence {
+            message: "liaison connect modifiée avant admission".to_owned(),
+        });
+    }
+    let valid: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM command_receipts r JOIN principals p ON p.principal_id=?1 WHERE r.receipt_id=?2 AND r.actor_id=?3 AND p.actor_id=r.actor_id AND p.state='active' AND r.command_type='TestProviderProfile' AND r.aggregate_id=?4 AND r.authority_generation=?5 AND r.command_digest=?6 AND r.state='accepted' AND r.response_state='full') AND EXISTS(SELECT 1 FROM object_records WHERE object_hash=?7 AND state='live') AND NOT EXISTS(SELECT 1 FROM provider_probe_contexts WHERE probe_id=?4)",
+        params![c.principal_id.as_str(),c.receipt_id.to_string(),c.actor_id.as_str(),c.probe_id.to_string(),c.authority_generation.to_string(),c.command_digest.to_string(),c.configuration_digest.to_string()], |row| row.get(0),
+    )?;
+    if !valid {
+        return Err(hidden());
+    }
+    Ok(profile)
+}
+
+/// Transport admission uses the existing Probe unit, without a ModelCall parent.
+pub(crate) fn validate_admission(
+    tx: &Transaction<'_>,
+    probe: ProviderProbeId,
+    now: TimestampMs,
+) -> Result<bool, StoreError> {
+    let daemon = read_daemon_state_conn(tx)?;
+    if daemon.schema_version < 15 {
+        return Ok(false);
+    }
+    let Some(record) = read_context(tx, probe)? else {
+        return Ok(false);
+    };
+    let profile = current_profile(tx, &daemon, now, &record)?;
+    let c = &record.context;
+    let intent: Option<String> = tx.query_row(
+        "SELECT b.intent_json FROM provider_probes p JOIN actions a ON a.action_id=?2 JOIN broker_intents b ON b.action_id=a.action_id WHERE p.probe_id=?1 AND p.state='queued' AND p.phase='connect' AND p.admission_class='work' AND p.fence=0 AND p.authority_generation=?3 AND p.daemon_epoch=?4 AND p.context_hash=?5 AND p.command_receipt_id=?6 AND p.principal_id=?7 AND p.profile_version_ref=?8 AND a.state='authorizing' AND a.authority_generation=?3 AND a.daemon_epoch=?4 AND a.fence=0 AND a.origin_kind='control_plane' AND a.control_principal_id=?7",
+        params![probe.to_string(),c.action_id.to_string(),c.authority_generation.to_string(),integer(c.daemon_epoch.as_u64())?,record.context_digest.to_string(),c.receipt_id.to_string(),c.principal_id.as_str(),c.profile_version_ref], |row| row.get(0),
+    ).optional()?;
+    let intent: crate::BrokerIntent = serde_json::from_str(&intent.ok_or_else(hidden)?)?;
+    validate_bound_intent(c, &profile, &intent)?;
+    validate_profile_capacity(tx, &profile)?;
+    Ok(true)
+}
+
+fn validate_profile_capacity(
+    tx: &Transaction<'_>,
+    profile: &crate::ConfiguredProviderProfile,
+) -> Result<(), StoreError> {
+    // Stable configured profile identity across its immutable versions. This is
+    // not a fabricated identity for other profiles pointing at the same server.
+    let active: i64 = tx.query_row(
+        "SELECT COUNT(*) FROM capacity_reservations r JOIN execution_reservation_owners o ON o.reservation_id=r.reservation_id JOIN provider_probes p ON p.probe_id=o.provider_probe_id JOIN provider_profiles f ON f.profile_version_ref=p.profile_version_ref WHERE r.state IN ('held','reconciling') AND f.profile_id=?1",
+        [profile.configuration.profile_id.to_string()], |row| row.get(0),
+    )?;
+    if active >= integer(profile.configuration.payload.limits().max_inflight)? {
+        return Err(StoreError::CapacityBlocked(
+            "limite du profil fournisseur atteinte".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_admission_budgets(
+    tx: &Transaction<'_>,
+    probe: ProviderProbeId,
+    budgets: &[crate::BudgetReservationRequest],
+) -> Result<bool, StoreError> {
+    if read_daemon_state_conn(tx)?.schema_version < 15 {
+        return Ok(false);
+    }
+    let Some(record) = read_context(tx, probe)? else {
+        return Ok(false);
+    };
+    if !budgets.is_empty() {
+        return Err(invalid(
+            "connect ne fabrique aucune réservation de ModelCall",
+        ));
+    }
+    // No model price is invented for TCP/TLS. Existing applicable overspend
+    // remains authoritative even when this passive phase adds no monetary charge.
+    let overrun: Option<String> = tx.query_row(
+        "SELECT a.account_id FROM budget_accounts a JOIN provider_profiles f ON f.profile_version_ref=?1 WHERE a.currency='USD' AND (a.scope_type='global' OR a.scope_type='project' AND a.scope_id=?2 OR a.scope_type='provider' AND a.scope_id=f.provider_id) AND a.spent_micros>a.limit_micros-a.reserved_micros ORDER BY a.account_id LIMIT 1",
+        params![record.context.profile_version_ref,record.context.project_id.map(|id|id.to_string())], |row| row.get(0),
+    ).optional()?;
+    if let Some(account_id) = overrun {
+        return Err(StoreError::BudgetExhausted { account_id });
+    }
+    Ok(true)
 }
 
 fn claim_identity(
@@ -701,13 +968,13 @@ fn claim_identity(
     Ok(record)
 }
 
-fn validate_fresh_claim(
+fn validate_live_context(
     tx: &Transaction<'_>,
     daemon: &crate::DaemonStateRow,
     now: TimestampMs,
     request: &ClaimProviderProbeConnectRequest,
     record: &ProviderProbeConnectRecord,
-) -> Result<(), StoreError> {
+) -> Result<ProviderProbeConnectPreparation, StoreError> {
     let c = &record.context;
     let fresh = prepare_tx(tx, daemon, now, &request.envelope, &request.caller)?;
     if c.deadline <= now
@@ -726,6 +993,18 @@ fn validate_fresh_claim(
             message: "préconditions du contexte connect modifiées avant claim".to_owned(),
         });
     }
+    Ok(fresh)
+}
+
+fn validate_fresh_claim(
+    tx: &Transaction<'_>,
+    daemon: &crate::DaemonStateRow,
+    now: TimestampMs,
+    request: &ClaimProviderProbeConnectRequest,
+    record: &ProviderProbeConnectRecord,
+) -> Result<(), StoreError> {
+    validate_live_context(tx, daemon, now, request, record)?;
+    let c = &record.context;
     let queued: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM provider_probes WHERE probe_id=?1 AND state='queued' AND phase='connect' AND revision=1 AND fence=0 AND principal_id=?2 AND authority_generation=?3 AND daemon_epoch=?4) AND NOT EXISTS(SELECT 1 FROM actions WHERE action_id=?5)", params![c.probe_id.to_string(),c.principal_id.as_str(),c.authority_generation.to_string(),integer(c.daemon_epoch.as_u64())?,c.action_id.to_string()], |row|row.get(0))?;
     if !queued {
         return Err(invalid(
@@ -768,7 +1047,11 @@ fn claim_tx(
         .cutpoints
         .hit(crate::StoreCutpoint::C1BeforeCommandCommit)?;
     Ok(ProviderProbeConnectClaimOutcome::FreshClaim(
-        ProviderProbeConnectClaim { record, claim },
+        ProviderProbeConnectClaim {
+            record,
+            claim,
+            request: Box::new(request.clone()),
+        },
     ))
 }
 
@@ -779,13 +1062,30 @@ impl UnleashStore {
     /// Refuse une permission absente, périmée ou incompatible avec la phase.
     pub fn commit_provider_probe_connect_phase(
         &self,
-        _claim: &ProviderProbeConnectClaim,
-        _request: crate::BrokerPhaseRequest,
+        claim: &ProviderProbeConnectClaim,
+        request: crate::BrokerPhaseRequest,
     ) -> Result<crate::BrokerPhaseCommit, StoreError> {
-        // TDD: no generic-phase fallback while the typed writer gate is absent.
-        Err(StoreError::EvidenceUnavailable(
-            "phases connect typées non raccordées".to_owned(),
-        ))
+        let permission = ConnectPhasePermission {
+            record: claim.record.clone(),
+            request: (*claim.request).clone(),
+        };
+        let cutpoint = match &request.phase {
+            crate::BrokerPhase::Authorizing { .. } => {
+                Some(crate::StoreCutpoint::C3AfterBrokerIntentCommit)
+            }
+            crate::BrokerPhase::Dispatch { .. } => {
+                Some(crate::StoreCutpoint::C4AfterBrokerDispatchCommit)
+            }
+            _ => None,
+        };
+        let config = self.config().clone();
+        let committed = self.execute_in_writer_tx(WriteCriticality::Normal, move |tx, now| {
+            crate::broker_writer::commit_connect_phase_tx(tx, &config, now, &request, &permission)
+        })?;
+        if let Some(point) = cutpoint {
+            self.config().cutpoints.hit(point)?;
+        }
+        Ok(committed)
     }
 
     /// Revendique une seule fois le contexte sous son autorité courante.
