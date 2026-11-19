@@ -18,7 +18,7 @@ use unleash_domain::{
 };
 use unleash_protocol::{
     ClientKind, CommandEnvelope, CommandReceipt, ErrorCode, ProtocolVersion, QueryEnvelope,
-    QueryResponse, ReasonCode,
+    QueryResponse,
 };
 use unleash_testkit::local_test_dir;
 use uuid::Uuid;
@@ -374,7 +374,7 @@ fn assert_lifecycle(flow: &Lifecycle, profile: &Profile, expires: u64) {
     assert_eq!(flow.revoke.new_revision, Revision::new(4));
     assert_eq!(flow.replay, flow.a);
     assert!(
-        matches!(&flow.divergent, Err(ClientError::Remote(error)) if error.reason_code == Some(ReasonCode::IdempotencyConflict))
+        matches!(&flow.divergent, Err(ClientError::Remote(error)) if error.code == ErrorCode::IdempotencyConflict)
     );
     assert_eq!(flow.before.watermark.as_ref(), Some(&flow.b.event_cursor));
     assert_eq!(
