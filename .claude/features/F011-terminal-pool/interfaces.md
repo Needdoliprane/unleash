@@ -42,6 +42,8 @@ Le writer revalide acteur, principal, révisions de mission et de projet et poli
 
 La résolution du lancement vérifie le marqueur durable exact du broker, le digest figé, les propriétaires et réservations, la lignée, le boot, l’époque, le fence et le délai du bail. Elle consomme une fois la préparation avant tout lancement. Une issue inconnue passe par la réconciliation. Un état `launch_resolved` ne suffit pas à constater qu’un processus est parti ou qu’un PTY est prêt. Ces constats attendent le producteur OS et le handshake du host.
 
+Le writer engage la preuve du lancement et les lignes processus/terminal avec la phase d’observation du broker. L’instant de capture de l’identité peut précéder celui du reçu. La preuve doit appartenir au dispatch exact et satisfaire l’ordre temporel du [contrat SQLite](../../architecture/sqlite-design.md#actions-processus-et-preuves). Une identité observée puis une sortie confirmée par le même host peuvent former une observation valable même pour un processus bref.
+
 Le retrait de la préparation conserve son historique. Le writer exige une observation interne attribuable à la même incarnation et liée causalement au marqueur ou à l’absence vérifiée de dispatch. Il vérifie toute ligne de terminal ou de processus déjà inscrite. Une ressource inconnue, un bail expiré, un redémarrage ou une restauration ne libèrent pas la propriété à eux seuls. L’opération de disposition reste interne. L’API publique ne permet pas au client de produire cette preuve. Voir le [contrat SQLite](../../architecture/sqlite-design.md#actions-processus-et-preuves).
 
 ## Configuration du terminal

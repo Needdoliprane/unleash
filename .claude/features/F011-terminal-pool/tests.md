@@ -17,4 +17,6 @@
 
 Le test de PID réutilisé combine un modèle déterministe de l'adaptateur et, lorsqu'obtenable, une observation OS réelle ; il ne dépend pas d'une allocation aléatoire heureuse de PID. Les tests groupes/PTY s'exécutent dans un environnement isolé et ciblent seulement leurs fixtures.
 
+La voie de lancement de T-F011-003 vérifie l’identité d’un processus réellement observé, y compris s’il sort après la capture, et la conservation de sa sortie PTY après le handshake. Dans les contrôles Store, chaque cas fournit un objet de preuve déjà publié dont le digest, le contexte et le dispatch courant correspondent. Un écart positif contrôlé entre capture et reçu, par exemple 25 ms, garde les deux instants. Une capture antérieure au dispatch ou postérieure au reçu doit échouer sur l’ordre temporel. `processes` et `terminal_sessions` restent vides et aucun événement de succès n’est écrit. Le test de reprise après arrêt du daemon reste distinct de ces contrôles de lancement.
+
 Les EV contiennent OS/version, gestionnaire de service, identités avant/après, commande normalisée, logs redigés, reservations et résultat. Le test ne déclare pas une sandbox complète ; il démontre exactement quels descendants ont été observés et arrêtés. Toute impossibilité sur un OS reste un blocage de qualification identifié.
