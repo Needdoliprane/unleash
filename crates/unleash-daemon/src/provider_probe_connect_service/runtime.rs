@@ -7,10 +7,10 @@ use std::sync::Arc;
 use std::time::Duration;
 use unleash_action_broker::{
     ActionBroker, ActionIntent, ActionProvenance, ActionSubject, AuthorityLayer,
-    AuthorizationOutcome, BrokerConfig, EffectsClass, HostIsolationProbe, IsolationMode,
-    IsolationRequirements, LocalAuthorityFallbackPolicy, NormalizedResourceRef,
-    PlatformKeyringSecretStore, ScopeKind, StrictNoneAcceptedObligationChecker,
-    SystemClockAndTimer, compute_effective_authority,
+    AuthorizationOutcome, BrokerConfig, EffectsClass, GuardMode, HostIsolationProbe,
+    InitialEffectivePolicy, IsolationMode, IsolationRequirements, LocalAuthorityFallbackPolicy,
+    NormalizedResourceRef, PlatformKeyringSecretStore, ScopeKind,
+    StrictNoneAcceptedObligationChecker, SystemClockAndTimer, compute_effective_authority,
 };
 use unleash_domain::{Fence, LineageFence, ModelPolicy, ReceiptId, ReconcileStrategy};
 use unleash_model_router::{
@@ -96,20 +96,12 @@ async fn run(
         return Err(failed("request_digest_binding"));
     }
     let store = Arc::clone(&state.store);
-    let project = c.project_id;
-    let policy = tokio::task::spawn_blocking(move || store.read_policy_summary_snapshot(project))
+    let policy_claim = Arc::clone(&claim);
+    let policy = tokio::task::spawn_blocking(move || store.provider_probe_connect_policy_snapshot(&policy_claim))
         .await
         .map_err(|_| failed("policy_reader_task"))?
-        .map_err(|error| {tracing::warn!(stage="policy_reader",code=%error.error_code(),reason=?error.reason_code(),"Connect preparation refused");()})?
-        .value;
-    if policy.effective_isolation_mode != unleash_store::PolicyIsolationMode::Standard
-        || policy
-            .guard_config
-            .as_ref()
-            .is_some_and(|guard| guard.guard_mode != unleash_store::GuardPolicyMode::BrokerOnly)
-    {
-        return Err(failed("policy_executor_profile"));
-    }
+        .map_err(|error| {tracing::warn!(stage="policy_reader",code=%error.error_code(),reason=?error.reason_code(),"Connect preparation refused");()})?;
+    let initial_policy = initial_policy(c, policy)?;
     let authority = compute_effective_authority(
         c.project_id,
         c.policy_revision,
@@ -168,7 +160,7 @@ async fn run(
         Arc::clone(&activity),
     ));
     let timer = Arc::new(SystemClockAndTimer::new());
-    let broker = ActionBroker::new(
+    let broker = ActionBroker::new_with_policy_snapshot(
         state.store.config().clock.clone(),
         timer.clone(),
         timer,
@@ -185,7 +177,8 @@ async fn run(
             canaries_to_redact: vec![],
         },
         journal.clone(),
-    );
+        initial_policy,
+    ).map_err(|error| {tracing::warn!(stage="policy_initialization",code=%error.error_code(),reason=?error.reason_code(),"Connect preparation refused");()})?;
     let decision = match broker
         .authorize_action(intent, &authority)
         .await
@@ -225,4 +218,48 @@ async fn run(
 
 fn failed(stage: &'static str) {
     tracing::warn!(stage, "Connect preparation refused");
+}
+
+fn initial_policy(
+    context: &unleash_store::ProviderProbeConnectContext,
+    policy: unleash_store::ProviderConnectPolicySnapshot,
+) -> Result<InitialEffectivePolicy, ()> {
+    let control_fence = LineageFence::new(
+        context.authority_generation,
+        context.daemon_epoch,
+        Fence::ZERO,
+    );
+    if policy.project_id != context.project_id
+        || policy.policy_revision != context.policy_revision
+        || policy.scope_revision != context.scope_revision
+        || policy.policy_digest != context.policy_digest
+        || policy.control_fence != control_fence
+    {
+        return Err(failed("policy_snapshot_binding"));
+    }
+    if policy.isolation_mode != unleash_store::PolicyIsolationMode::Standard {
+        return Err(failed("policy_executor_profile"));
+    }
+    if let Some(guard) = policy.guard_config {
+        if guard.guard_mode != unleash_store::GuardPolicyMode::BrokerOnly
+            || guard.endpoint.is_some()
+            || guard.transport != unleash_store::GuardTransport::None
+            || guard.secret_ref_id.is_some()
+            || guard.fallback_policy_ref.is_some()
+            || guard.guard_mapping_profile != unleash_action_broker::NONE_ACCEPTED_PROFILE_ID
+        {
+            return Err(failed("guard_profile_unqualified"));
+        }
+    }
+    // Absence is the canonical BrokerOnly default. NetworkEgress still requires
+    // Evaluate whenever Guard is configured; no such port is qualified here.
+    Ok(InitialEffectivePolicy {
+        project_id: policy.project_id,
+        policy_revision: policy.policy_revision,
+        scope_revision: policy.scope_revision,
+        policy_digest: policy.policy_digest,
+        isolation_mode: IsolationMode::Standard,
+        guard_mode: GuardMode::BrokerOnly,
+        lineage_fence: policy.control_fence,
+    })
 }

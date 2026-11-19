@@ -126,6 +126,35 @@ pub struct ProviderProbeConnectClaimRecord {
     pub claimed_at_ms: TimestampMs,
 }
 
+/// Actual effective policy read for the original acknowledged connect owner.
+/// These facts never mint another claim or grant an effect on their own.
+#[derive(Clone)]
+pub struct ProviderConnectPolicySnapshot {
+    /// Exact authenticated scope.
+    pub project_id: Option<ProjectId>,
+    /// Current effective policy revision, verified against the frozen context.
+    pub policy_revision: Revision,
+    /// Current scope revision, verified against the frozen context.
+    pub scope_revision: Revision,
+    /// Complete global/project/Guard snapshot identity, including revisions below max.
+    pub policy_digest: Sha256Digest,
+    /// Current control-plane incarnation, distinct from the resource lease.
+    pub control_fence: unleash_domain::LineageFence,
+    /// Effective isolation of every applicable policy.
+    pub isolation_mode: crate::PolicyIsolationMode,
+    /// Real Guard configuration, without loading any referenced credential.
+    pub guard_config: Option<crate::GuardConfigRecord>,
+}
+
+impl std::fmt::Debug for ProviderConnectPolicySnapshot {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ProviderConnectPolicySnapshot")
+            .field("project_id", &self.project_id)
+            .field("policy_revision", &self.policy_revision)
+            .finish_non_exhaustive()
+    }
+}
+
 /// Entrée interne authentifiée ; aucun codec IPC n'accepte cette structure.
 #[derive(Clone)]
 pub struct ClaimProviderProbeConnectRequest {
@@ -1146,6 +1175,36 @@ fn claim_tx(
 }
 
 impl UnleashStore {
+    /// Reads the real policy only after revalidating the original fresh owner.
+    /// Scope, actor, mandate, full digest and incarnation share this writer snapshot.
+    /// Authorization and dispatch still repeat their own checks later.
+    /// # Errors
+    /// Rejects stale or unqualified ownership and policy; never reconstructs a token.
+    pub fn provider_probe_connect_policy_snapshot(
+        &self,
+        claim: &ProviderProbeConnectClaim,
+    ) -> Result<ProviderConnectPolicySnapshot, StoreError> {
+        let permission = claim.permission();
+        self.execute_in_writer_tx(WriteCriticality::Normal, move |tx, now| {
+            let daemon = read_daemon_state_conn(tx)?;
+            let record = validate_live_permission(tx, &daemon, now, &permission)?;
+            let context = &record.context;
+            let summary = read_policy_summary_conn(tx, context.project_id)?;
+            Ok(ProviderConnectPolicySnapshot {
+                project_id: context.project_id,
+                policy_revision: context.policy_revision,
+                scope_revision: context.scope_revision,
+                policy_digest: context.policy_digest,
+                control_fence: unleash_domain::LineageFence::new(
+                    daemon.authority_generation,
+                    daemon.daemon_epoch,
+                    unleash_domain::Fence::ZERO,
+                ),
+                isolation_mode: summary.effective_isolation_mode,
+                guard_config: summary.guard_config,
+            })
+        })
+    }
     /// Porte les phases du seul orchestrateur possédant le token frais original.
     /// Le port broker générique reste fermé pour connect, y compris son rejeu.
     /// # Errors
