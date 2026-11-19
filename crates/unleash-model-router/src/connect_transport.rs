@@ -186,6 +186,20 @@ impl fmt::Debug for ConnectObservation {
     }
 }
 
+/// Durable acknowledgement of the actual local transport observation.
+/// The implementation is trusted server code, never a provider receipt or client claim.
+pub trait ConnectObservationPort: Send + Sync {
+    /// Persist these exact facts and their action/dispatch binding after channel
+    /// closure and before the broker may commit a successful observation.
+    ///
+    /// # Errors
+    /// Any failure or uncertain acknowledgement keeps the dispatched effect unknown.
+    fn persist<'a>(
+        &'a self,
+        observation: &'a ConnectObservation,
+    ) -> BoxFuture<'a, Result<(), ConnectError>>;
+}
+
 /// Broker result and separately correlated, non-durable local observation.
 pub struct ConnectExecution {
     /// The actual broker result, including uncertain commit outcomes.
@@ -238,6 +252,8 @@ impl NameResolver for SystemResolver {
 pub(crate) struct FixtureOptions {
     pub resolver: Arc<dyn NameResolver>,
     pub ca_der: Option<Vec<u8>>,
+    pub observation_port: Arc<dyn ConnectObservationPort>,
+    pub closed_probe: Option<Arc<AtomicBool>>,
 }
 
 struct Staged {
@@ -257,6 +273,8 @@ struct ConnectExecutor {
     staged: Arc<Mutex<Option<Staged>>>,
     #[cfg(test)]
     ca_der: Option<Vec<u8>>,
+    #[cfg(test)]
+    _closed_probe: Option<Arc<AtomicBool>>,
 }
 
 struct TlsValidation {
@@ -525,10 +543,12 @@ impl ActionExecutorPort for ConnectExecutor {
 pub async fn execute(
     request: FrozenConnectRequest,
     dispatch: BrokerDispatch<'_>,
+    observation_port: Arc<dyn ConnectObservationPort>,
 ) -> Result<ConnectExecution, ConnectError> {
     execute_inner(
         request,
         dispatch,
+        observation_port,
         #[cfg(test)]
         None,
     )
@@ -538,6 +558,7 @@ pub async fn execute(
 async fn execute_inner(
     request: FrozenConnectRequest,
     dispatch: BrokerDispatch<'_>,
+    _observation_port: Arc<dyn ConnectObservationPort>,
     #[cfg(test)] fixture: Option<FixtureOptions>,
 ) -> Result<ConnectExecution, ConnectError> {
     let digest = request.payload_digest()?;
@@ -558,9 +579,15 @@ async fn execute_inner(
     }
     let staged = Arc::new(Mutex::new(None));
     #[cfg(test)]
-    let (resolver, ca_der) = fixture.map_or_else(
-        || (Arc::new(SystemResolver) as Arc<dyn NameResolver>, None),
-        |options| (options.resolver, options.ca_der),
+    let (resolver, ca_der, closed_probe) = fixture.map_or_else(
+        || {
+            (
+                Arc::new(SystemResolver) as Arc<dyn NameResolver>,
+                None,
+                None,
+            )
+        },
+        |options| (options.resolver, options.ca_der, options.closed_probe),
     );
     #[cfg(not(test))]
     let resolver = Arc::new(SystemResolver) as Arc<dyn NameResolver>;
@@ -574,6 +601,8 @@ async fn execute_inner(
         staged: Arc::clone(&staged),
         #[cfg(test)]
         ca_der,
+        #[cfg(test)]
+        _closed_probe: closed_probe,
     };
     let receipt = dispatch
         .broker
@@ -617,5 +646,6 @@ pub(crate) async fn execute_fixture(
     dispatch: BrokerDispatch<'_>,
     fixture: FixtureOptions,
 ) -> Result<ConnectExecution, ConnectError> {
-    execute_inner(request, dispatch, Some(fixture)).await
+    let observation_port = Arc::clone(&fixture.observation_port);
+    execute_inner(request, dispatch, observation_port, Some(fixture)).await
 }
