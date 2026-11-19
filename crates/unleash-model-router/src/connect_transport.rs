@@ -269,12 +269,13 @@ struct ConnectExecutor {
     digest: Sha256Digest,
     clock: Arc<dyn ClockPort>,
     resolver: Arc<dyn NameResolver>,
+    observation_port: Arc<dyn ConnectObservationPort>,
     consumed: AtomicBool,
     staged: Arc<Mutex<Option<Staged>>>,
     #[cfg(test)]
     ca_der: Option<Vec<u8>>,
     #[cfg(test)]
-    _closed_probe: Option<Arc<AtomicBool>>,
+    closed_probe: Option<Arc<AtomicBool>>,
 }
 
 struct TlsValidation {
@@ -447,18 +448,25 @@ impl ConnectExecutor {
                 .shutdown()
                 .await
                 .map_err(|_| ConnectError::TransportUnavailable)?;
+            drop(stream);
             tls.source
         } else {
             drop(socket);
             CertificateValidation::NotTls
         };
+        // Instrument the actual drop boundary only in the fixture. No product
+        // authorization, durable proof or observation depends on this probe.
+        #[cfg(test)]
+        if let Some(probe) = &self.closed_probe {
+            probe.store(true, Ordering::SeqCst);
+        }
         if !self.live(intent, decision) {
             return Err(ConnectError::DeadlineExpired);
         }
         Ok((peer, source))
     }
 
-    fn observe(
+    async fn observe(
         &self,
         dispatch_id: DispatchId,
         peer: SocketAddr,
@@ -477,6 +485,9 @@ impl ConnectExecutor {
             observed_at_ms,
         };
         let digest = canonical_sha256(&observation).map_err(|_| ConnectError::Digest)?;
+        // No execution result or staged success exists until the exact local
+        // document and its dispatch binding have been durably acknowledged.
+        self.observation_port.persist(&observation).await?;
         let mut stage = self
             .staged
             .lock()
@@ -522,21 +533,24 @@ impl ActionExecutorPort for ConnectExecutor {
                 return Err(unknown());
             }
             let remaining = self.remaining_ms(intent, decision).map_err(|_| unknown())?;
-            let (peer, source) = tokio::time::timeout(
-                Duration::from_millis(remaining),
-                self.connect(intent, decision),
-            )
+            let result = tokio::time::timeout(Duration::from_millis(remaining), async {
+                let (peer, source) = self.connect(intent, decision).await?;
+                self.observe(dispatch_id, peer, source).await
+            })
             .await
             .map_err(|_| unknown())?
             .map_err(|_| unknown())?;
-            self.observe(dispatch_id, peer, source)
-                .map_err(|_| unknown())
+            if !self.live(intent, decision) {
+                return Err(unknown());
+            }
+            Ok(result)
         })
     }
 }
 
-/// Execute exclusively through the existing broker. Real durable journaling,
-/// mandate/admission/fence proof and result persistence remain caller obligations.
+/// Execute through the broker and a required durable local observation port.
+/// The port is awaited after channel closure and before a successful result.
+/// Real journaling and mandate/admission/fence proof remain caller obligations.
 ///
 /// # Errors
 /// Reports local digest/staging failures; broker failures remain in `receipt`.
@@ -558,7 +572,7 @@ pub async fn execute(
 async fn execute_inner(
     request: FrozenConnectRequest,
     dispatch: BrokerDispatch<'_>,
-    _observation_port: Arc<dyn ConnectObservationPort>,
+    observation_port: Arc<dyn ConnectObservationPort>,
     #[cfg(test)] fixture: Option<FixtureOptions>,
 ) -> Result<ConnectExecution, ConnectError> {
     let digest = request.payload_digest()?;
@@ -597,12 +611,13 @@ async fn execute_inner(
         digest,
         clock: dispatch.clock,
         resolver,
+        observation_port,
         consumed: AtomicBool::new(false),
         staged: Arc::clone(&staged),
         #[cfg(test)]
         ca_der,
         #[cfg(test)]
-        _closed_probe: closed_probe,
+        closed_probe,
     };
     let receipt = dispatch
         .broker

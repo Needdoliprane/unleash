@@ -744,28 +744,28 @@ async fn t_f012_013_connect_durable_observation_ack_precedes_success() -> TestRe
     assert_eq!(publisher.acknowledged.load(Ordering::SeqCst), 1);
     let receipt = execution.receipt?;
     assert_eq!(receipt.state, ActionState::ObservedSuccess);
-    let published = publisher
+    let document = publisher
         .records
         .lock()
         .map_err(|_| "fixture publisher mutex")?
         .first()
         .cloned()
         .ok_or("missing published observation")?;
-    assert_eq!(published.action_id, action.action_id);
-    assert_eq!(published.dispatch_id, receipt.dispatch_id);
-    assert_eq!(published.request_digest, request_digest);
-    assert_eq!(published.peer, peer);
-    assert_eq!(published.http_application_bytes_sent, 0);
+    assert_eq!(document.action_id, action.action_id);
+    assert_eq!(document.dispatch_id, receipt.dispatch_id);
+    assert_eq!(document.request_digest, request_digest);
+    assert_eq!(document.peer, peer);
+    assert_eq!(document.http_application_bytes_sent, 0);
     assert_eq!(
         receipt.output_digest,
-        Some(unleash_protocol::canonical_sha256(&published)?)
+        Some(unleash_protocol::canonical_sha256(&document)?)
     );
     let exposed = execution
         .observation?
         .ok_or("missing acknowledged observation")?;
     assert_eq!(
         unleash_protocol::canonical_sha256(&exposed)?,
-        unleash_protocol::canonical_sha256(&published)?
+        unleash_protocol::canonical_sha256(&document)?
     );
     assert_eq!(broker.dispatches.load(Ordering::SeqCst), 1);
     broker.secrets.assert_zero_secret_resolutions();
