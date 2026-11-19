@@ -49,6 +49,10 @@ pub const HOST_SOCKET_FILENAME: &str = "host.sock";
 /// Préfixe de la ligne émise sur `stdout` une fois le host lié et l'enfant démarré.
 pub const HOST_READY_PREFIX: &str = "UNLEASH_HOST_READY:";
 
+#[cfg(test)]
+#[path = "host_control_tests.rs"]
+mod control_tests;
+
 const IO_CHUNK_BYTES: usize = 8192;
 const SOCKET_IO_TIMEOUT: Duration = Duration::from_secs(15);
 const MAX_CONCURRENT_CONNECTIONS: usize = 16;
@@ -725,8 +729,8 @@ fn process_request(req: HostRequest, shared: &ServerShared) -> HostResponse {
                 secret_rotated = true;
             }
 
-            let unknown_input_seqs = shared.inputs.reconcile_in_flight()?;
-            let (last_confirmed_input_seq, _) = shared.inputs.summary();
+            shared.inputs.reconcile_in_flight()?;
+            let (last_confirmed_input_seq, unknown_input_seqs) = shared.inputs.summary();
             let durable_log_seq = shared.spool.snapshot_index().durable_watermark_offset;
 
             let (effective_environment_digest, allocation_context_digest) = {
@@ -914,8 +918,8 @@ fn process_request(req: HostRequest, shared: &ServerShared) -> HostResponse {
                         .unwrap_or_else(std::sync::PoisonError::into_inner);
                     fencing.check_and_advance(&header)?;
                 }
-                let unknown_input_seqs = shared.inputs.reconcile_in_flight()?;
-                let (last_confirmed_input_seq, _) = shared.inputs.summary();
+                shared.inputs.reconcile_in_flight()?;
+                let (last_confirmed_input_seq, unknown_input_seqs) = shared.inputs.summary();
                 let durable_log_seq = shared.spool.sync_durable_now()?;
                 let exit_status = shared.anchor.poll_exit(false)?;
                 let anchor_report = shared.anchor.verification_report();
