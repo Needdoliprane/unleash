@@ -57,6 +57,180 @@ fn ipc_command_fixture() -> String {
 }
 
 #[test]
+fn test_validate_exclusive_acquire_terminal_payloads() {
+    let validator = build_validator("ipc-command.schema.json");
+    let mut command: Value = serde_json::from_str(&ipc_command_fixture()).unwrap();
+    let terminal = "00000000-0000-4000-8000-000000000020";
+    let run = "00000000-0000-4000-8000-000000000021";
+    command["command_type"] = json!("AcquireTerminal");
+    command["project_id"] = json!("00000000-0000-4000-8000-000000000022");
+    command["payload"] = json!({
+        "terminal_id": terminal,
+        "process_run_uuid": run,
+        "scope_revision": 2,
+        "control_mode": "exclusive"
+    });
+    assert!(validator.is_valid(&command));
+
+    for (field, value) in [
+        ("program", json!("/usr/bin/printf")),
+        ("lease_id", json!(terminal)),
+        ("control_mode", json!("observe")),
+        ("terminal_id", json!("terminal")),
+        ("scope_revision", json!(-1)),
+        ("scope_revision", json!(9_007_199_254_740_992_u64)),
+    ] {
+        let mut invalid = command.clone();
+        invalid["payload"][field] = value;
+        assert!(!validator.is_valid(&invalid), "payload.{field}");
+    }
+
+    for field in [
+        "terminal_id",
+        "process_run_uuid",
+        "scope_revision",
+        "control_mode",
+    ] {
+        let mut incomplete = command.clone();
+        incomplete["payload"].as_object_mut().unwrap().remove(field);
+        assert!(!validator.is_valid(&incomplete), "missing payload.{field}");
+    }
+
+    let mut wrong_scope = command.clone();
+    wrong_scope["project_id"] = Value::Null;
+    assert!(!validator.is_valid(&wrong_scope));
+
+    command["payload"] = json!({});
+    assert!(!validator.is_valid(&command));
+    command["payload"] = json!({"scope_revision": 2, "principal_id": "fixture:forged"});
+    assert!(!validator.is_valid(&command));
+
+    command["payload"] = json!({
+        "mission_id": run,
+        "purpose_key": "test-runner",
+        "reuse_policy": "reuse_compatible",
+        "scope_id": "00000000-0000-4000-8000-000000000022",
+        "scope_revision": 2,
+        "cwd": ".",
+        "program": "/usr/bin/printf",
+        "arguments": ["ready"],
+        "environment_profile_id": "terminal-test",
+        "pty": {"rows": 24, "cols": 80},
+        "readiness": {"kind": "process_started", "timeout_ms": 10_000}
+    });
+    assert!(validator.is_valid(&command));
+    let mut forged_launch = command.clone();
+    forged_launch["payload"]["principal_id"] = json!("fixture:forged");
+    assert!(!validator.is_valid(&forged_launch));
+    forged_launch["payload"]["readiness"]["actor_id"] = json!("fixture:forged");
+    forged_launch["payload"]
+        .as_object_mut()
+        .unwrap()
+        .remove("principal_id");
+    assert!(!validator.is_valid(&forged_launch));
+
+    command["payload"]["reuse_policy"] = json!("new_required");
+    assert!(!validator.is_valid(&command));
+    command["payload"]["reuse_justification"] = json!("isolated fixture");
+    assert!(validator.is_valid(&command));
+    command["payload"]["reuse_policy"] = json!("reuse_compatible");
+    assert!(!validator.is_valid(&command));
+}
+
+#[test]
+fn test_validate_terminal_runtime_settings_schema() {
+    let validator = build_validator("ipc-command.schema.json");
+    let mut command: Value = serde_json::from_str(&ipc_command_fixture()).unwrap();
+    command["command_type"] = json!("SetSettings");
+    command["project_id"] = Value::Null;
+    command["payload"] = json!({
+        "scope_kind": "user",
+        "scope_id": "default",
+        "patch": {
+            "terminal_runtime": {
+                "schema_version": 1,
+                "profiles": [{"profile_id": "terminal-test", "version": 1,
+                    "variables": {"LANG": "C", "TERM": "xterm"}}],
+                "max_hosts": 2,
+                "max_processes": 2,
+                "max_ptys": 2,
+                "lease_ttl_ms": 60_000
+            }
+        }
+    });
+    assert!(validator.is_valid(&command));
+
+    let mut legacy = command.clone();
+    legacy["payload"]["patch"] = json!({"confirm_retention_shortening": false});
+    assert!(validator.is_valid(&legacy));
+
+    let mut combined = command.clone();
+    combined["payload"]["patch"]["confirm_retention_shortening"] = json!(false);
+    assert!(validator.is_valid(&combined));
+
+    for (pointer, field) in [
+        ("/payload", "principal_id"),
+        ("/payload/patch", "actor_ref"),
+        ("/payload/patch/terminal_runtime/profiles/0", "principal_id"),
+    ] {
+        let mut forged = command.clone();
+        forged
+            .pointer_mut(pointer)
+            .unwrap()
+            .as_object_mut()
+            .unwrap()
+            .insert(field.to_owned(), json!("fixture:principal"));
+        assert!(
+            !validator.is_valid(&forged),
+            "le champ {field} est interdit à {pointer}"
+        );
+    }
+
+    let mut project = command.clone();
+    project["payload"]["scope_kind"] = json!("project");
+    assert!(
+        !validator.is_valid(&project),
+        "la capacité auxiliaire est configurée au scope utilisateur"
+    );
+
+    let invalid_values = [
+        ("/project_id", json!(ProjectId::from_u128(1))),
+        ("/payload/scope_id", json!("another-user-scope")),
+        ("/payload/patch/terminal_runtime", Value::Null),
+        ("/payload/patch/terminal_runtime/max_ptys", json!(0)),
+        ("/payload/patch/terminal_runtime/max_hosts", json!(51)),
+        ("/payload/patch/terminal_runtime/lease_ttl_ms", json!(999)),
+        (
+            "/payload/patch/terminal_runtime/profiles/0/profile_id",
+            json!("terminal-test\n"),
+        ),
+        (
+            "/payload/patch/terminal_runtime/profiles/0/variables",
+            json!({"API_KEY": "fixture"}),
+        ),
+        (
+            "/payload/patch/terminal_runtime/profiles/0/variables/TERM",
+            json!("unknown-terminal"),
+        ),
+    ];
+    for (pointer, replacement) in invalid_values {
+        let mut invalid = command.clone();
+        *invalid.pointer_mut(pointer).unwrap() = replacement;
+        assert!(!validator.is_valid(&invalid), "valeur invalide à {pointer}");
+    }
+
+    let mut versionless = command;
+    versionless["payload"]["patch"]["terminal_runtime"]["profiles"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("version");
+    assert!(
+        !validator.is_valid(&versionless),
+        "la version exacte du profil est requise"
+    );
+}
+
+#[test]
 fn test_validate_ipc_command_schema() {
     let validator = build_validator("ipc-command.schema.json");
 

@@ -82,6 +82,14 @@ Le [schéma de commande](../../schemas/ipc-command.schema.json) ferme le payload
 
 La configuration peut référencer un modèle local à tous les scopes de sélection prévus. Les paramètres spécifiques restent dans une extension de dialecte validée ; aucun paramètre d’un backend n’est transmis arbitrairement à un autre. Chaque fallback produit le manifeste distinct déjà exigé ci-dessus et revalide destination, localité, capacités et réservations.
 
+### Versions de configuration dans le Store
+
+Le port V011 reçoit du service authentifié l’objet canonique de configuration et l’identité de son contenu publié. Le service contrôle la normalisation de l’endpoint et la provenance du tarif. Pour un catalogue, le Store recoupe l’identité, le digest des octets publiés, le pointeur vers l’entrée, son empreinte et les dates de publication et de validité fournies. Les paliers restent dans l’objet du catalogue. Une version configurée attend une qualification pour servir une requête de production. Enregistrer cette version ne déclenche aucun accès au fournisseur.
+
+Lorsqu’une référence de secret est requise, le binding F017 porte `namespace=provider`, `purpose=api_key`, `target_kind=provider_profile` et l’UUID canonique comme `target_id`. La portée utilise `project` et son UUID ou `user/default` selon la configuration autorisée. Le writer recoupe la référence active, la portée, la cible, le type, le backend et leur révision. Il fige ces métadonnées avec la version. Le probe recoupe le binding à son tour avant effet. La valeur du secret reste dans son coffre.
+
+Une demande de probe de profil configuré doit résoudre le couple exact UUID/version. Le writer relit aussi la référence technique, le modèle, la portée et le binding associés. La durée demandée reste dans la limite de génération épinglée par la version. Une demande pour un UUID configuré ne peut utiliser une référence historique comme substitut. Les versions d’origine et les références historiques restent lisibles sous leurs identités respectives. Voir le [contrat SQLite](../../architecture/sqlite-design.md#catalogue-de-modèles-r7).
+
 ## ProviderProbeContext sans agent — R6
 
 TestProviderProfile possède les phases fermées `validate_config`, `connect`, `inventory`, `generation_probe`. Les trois premières ne génèrent pas de texte et ne préchauffent/chargent pas de modèle pour compléter silencieusement une donnée absente. Un endpoint dont l’inventaire charge implicitement un modèle ne peut être présenté comme inventaire passif ; le profil l’annonce et requiert le mandat correspondant. generation_probe teste le profil exact, sans fallback automatique.

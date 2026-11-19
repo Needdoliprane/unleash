@@ -451,6 +451,20 @@ impl UnleashStore {
     ) -> Result<Option<crate::PreparedProviderProbe>, StoreError> {
         self.read_snapshot(|conn, _| crate::provider_probes::read_context(conn, probe_id))
     }
+
+    /// Résout uniquement la version configurée exacte, avec watermark du même snapshot.
+    /// Les références historiques non attestées ne sont pas promues.
+    /// # Errors
+    /// Refuse un contenu incohérent ou une version hors plage `SQLite`.
+    pub fn resolve_provider_profile_snapshot(
+        &self,
+        profile_id: uuid::Uuid,
+        profile_version: u64,
+    ) -> Result<SnapshotProjection<Option<crate::ConfiguredProviderProfile>>, StoreError> {
+        self.project_snapshot(|conn| {
+            crate::provider_profiles::resolve(conn, profile_id, profile_version)
+        })
+    }
     /// Ouvre ou initialise la base `SQLite` qualifiée avec vérification de build, PRAGMAs et migrations.
     ///
     /// # Errors
@@ -703,6 +717,35 @@ impl UnleashStore {
         Ok(validated)
     }
 
+    // F012 replays are reads of the authoritative wire receipt, not revalidation
+    // of a newly resolved configuration. The writer repeats this classifier.
+    fn preflight_provider_profile(
+        &self,
+        request: &CommitCommandRequest,
+        digest: Sha256Digest,
+    ) -> Result<Option<CommitOutcome>, StoreError> {
+        if !crate::provider_profiles::validate_identity(request)? {
+            return Ok(None);
+        }
+        let lookup = || {
+            self.read_snapshot(|conn, _| {
+                let daemon = read_daemon_state_conn(conn)?;
+                crate::commands::classify_command_replay(conn, &daemon, request, digest)
+            })
+        };
+        if let Some(receipt) = lookup()? {
+            return Ok(Some(CommitOutcome::IdempotentReplay(receipt)));
+        }
+        if let Err(error) = crate::provider_profiles::verify_published(self, request) {
+            // A concurrent writer may have committed while object verification failed.
+            if let Some(receipt) = lookup()? {
+                return Ok(Some(CommitOutcome::IdempotentReplay(receipt)));
+            }
+            return Err(error);
+        }
+        Ok(None)
+    }
+
     /// Exécute l'algorithme transactionnel canonique `CommitCommand` sur le thread writer unique.
     ///
     /// # Errors
@@ -722,6 +765,9 @@ impl UnleashStore {
             crate::commands::CommandMutation::PurgeHistory { .. }
         );
         let (digest, retention_days) = self.run_command_prechecks(&req)?;
+        if let Some(replay) = self.preflight_provider_profile(&req, digest)? {
+            return Ok(replay);
+        }
         let cfg = self.config.clone();
         let cutpoints = Arc::clone(&self.config.cutpoints);
         let outcome = self.writer.submit_immediate_blocking(
@@ -773,6 +819,9 @@ impl UnleashStore {
             crate::commands::CommandMutation::PurgeHistory { .. }
         );
         let (digest, retention_days) = self.run_command_prechecks(&req)?;
+        if let Some(replay) = self.preflight_provider_profile(&req, digest)? {
+            return Ok(replay);
+        }
         let cfg = self.config.clone();
         let cutpoints = Arc::clone(&self.config.cutpoints);
         let outcome = self
