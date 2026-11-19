@@ -13,7 +13,7 @@
     "evidence/"
   ],
   "hash_algorithm": "sha256",
-  "source_tree_digest": "f2055931a9c9cd49c1393f418181b8cf70d8e53d9806267a8b50db418206f4fe",
+  "source_tree_digest": "f00215f6e373b6548e521e4697c053eceb30f9a2da6bf9ced148c24ad4fecc45",
   "files": [
     {
       "path": "INDEX.md",
@@ -395,8 +395,8 @@
     },
     {
       "path": "architecture/sqlite-design.md",
-      "sha256": "d12d655f73de35a17b725941065f28ffc368a917aead7a448980b3374bd2045e",
-      "bytes": 60801,
+      "sha256": "2f2d8e8a6e0896c9f2c68b186c7146654aa19f677b1bbc55c45c40e4e7a0510f",
+      "bytes": 61674,
       "media_type": "text/markdown"
     },
     {
@@ -1487,8 +1487,8 @@
     },
     {
       "path": "features/F011-terminal-pool/interfaces.md",
-      "sha256": "73d1c77ab31f7ac9b43dbdd2b4d33baf97e98827373533c9196743c2ed5c6ac0",
-      "bytes": 5558,
+      "sha256": "def808da63477e90c1e893b1486f65482a133e4570fef7692f594607fb19129b",
+      "bytes": 7733,
       "media_type": "text/markdown"
     },
     {
