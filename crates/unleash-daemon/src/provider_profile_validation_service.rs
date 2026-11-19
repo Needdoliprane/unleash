@@ -93,10 +93,10 @@ fn commit_blocking(
         return Ok(CommitOutcome::IdempotentReplay(receipt));
     }
     let result = prepare_and_commit(store, command, caller);
-    if result.is_err() {
-        if let Some(receipt) = store.lookup_provider_validation_command(command, caller)? {
-            return Ok(CommitOutcome::IdempotentReplay(receipt));
-        }
+    if result.is_err()
+        && let Some(receipt) = store.lookup_provider_validation_command(command, caller)?
+    {
+        return Ok(CommitOutcome::IdempotentReplay(receipt));
     }
     result
 }
