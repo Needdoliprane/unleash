@@ -2160,7 +2160,13 @@ impl UnleashStore {
         &self,
         project_id: Option<ProjectId>,
     ) -> Result<SnapshotProjection<PolicySummary>, StoreError> {
-        self.project_snapshot(|conn| read_policy_summary_conn(conn, project_id))
+        self.project_snapshot(|conn| {
+            let now = self.config.clock.now_ms();
+            let mut summary = read_policy_summary_conn(conn, project_id)?;
+            summary.provider_probe_mandates =
+                crate::provider_probe_mandates::read_visible(conn, project_id, now)?;
+            Ok(summary)
+        })
     }
 
     /// Lit récupération et watermark dans une seule transaction lectrice.
@@ -2209,7 +2215,8 @@ impl UnleashStore {
         &self,
         project_id: Option<ProjectId>,
     ) -> Result<PolicySummary, StoreError> {
-        self.read_snapshot(|conn, _ctx| read_policy_summary_conn(conn, project_id))
+        self.read_policy_summary_snapshot(project_id)
+            .map(|snapshot| snapshot.value)
     }
 
     /// Lit une configuration AI-Guard par identifiant (`"default"`, etc.).

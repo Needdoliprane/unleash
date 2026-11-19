@@ -339,6 +339,23 @@ pub enum CommandMutation {
         /// Autorité appelante.
         caller: CallerAuthority,
     },
+    /// Voie `SetPolicy` avec émission ou révocation de permission fournisseur.
+    SetPolicyWithProviderProbeMandate {
+        /// Portée de politique authentifiée.
+        scope_kind: PolicyScopeKind,
+        /// Identité de portée canonique.
+        scope_id: String,
+        /// Mode d'isolation demandé.
+        isolation_mode: PolicyIsolationMode,
+        /// Version logique de politique.
+        policy_version: String,
+        /// Motif de la commande administrative.
+        reason: String,
+        /// Autorité issue de la session.
+        caller: CallerAuthority,
+        /// Permission fermée, sans exécution ni observation implicite.
+        mandate: crate::ProviderProbeMandateChange,
+    },
     /// Configure l'intégration AI-Guard (`ConfigureGuard`).
     ConfigureGuard {
         /// Configuration typée AI-Guard.
@@ -1896,6 +1913,57 @@ fn apply_command_mutation(
                 payload,
                 sensitivity: Sensitivity::Project,
                 outbox_destinations: vec![],
+            });
+            Ok(new_rev)
+        }
+        CommandMutation::SetPolicyWithProviderProbeMandate {
+            scope_kind,
+            scope_id,
+            isolation_mode,
+            policy_version,
+            reason,
+            caller,
+            mandate,
+        } => {
+            let (new_rev, audit) = crate::provider_probe_mandates::apply_policy_change_tx(
+                tx,
+                &crate::provider_probe_mandates::PolicyMandateCommand {
+                    daemon,
+                    envelope,
+                    actor_id,
+                    caller,
+                    receipt_id,
+                    now: now_ms,
+                    scope_kind: *scope_kind,
+                    scope_id,
+                    isolation_mode: *isolation_mode,
+                    policy_version,
+                    reason,
+                },
+                mandate,
+            )?;
+            let mut payload = Map::new();
+            payload.insert(
+                "isolation_mode".to_owned(),
+                Value::String(isolation_mode.as_str().to_owned()),
+            );
+            payload.insert("reason".to_owned(), Value::String(reason.clone()));
+            payload.insert(
+                "provider_probe_mandate".to_owned(),
+                serde_json::to_value(audit)?,
+            );
+            generated_events.push(EventAppendSpec {
+                event_type: "SecurityPolicyUpdated".to_owned(),
+                aggregate_type: AggregateKind::SecurityPolicy,
+                aggregate_id: envelope.aggregate_id,
+                aggregate_revision: new_rev,
+                project_id: envelope.project_id,
+                correlation_id: cmd_id.as_uuid(),
+                causation_kind: EventCausationKind::Command,
+                causation_id: None,
+                payload,
+                sensitivity: Sensitivity::Project,
+                outbox_destinations: vec!["clients".to_owned()],
             });
             Ok(new_rev)
         }

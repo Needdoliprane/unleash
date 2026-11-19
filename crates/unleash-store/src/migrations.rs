@@ -9,7 +9,7 @@ use crate::config::{CutpointObserver, StoreCutpoint};
 use crate::error::StoreError;
 
 /// Version courante maximale du schéma gérée par cette version de `unleash-store`.
-pub const CURRENT_SCHEMA_VERSION: i64 = 11;
+pub const CURRENT_SCHEMA_VERSION: i64 = 13;
 
 /// État persisté d'une migration dans `schema_migrations`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -124,7 +124,182 @@ const MIGRATIONS: &[MigrationDef] = &[
         name: "v011_immutable_configured_provider_profiles",
         sql: V011_SQL,
     },
+    MigrationDef {
+        version: 12,
+        name: "v012_terminal_control_transfer_intentions",
+        sql: V012_SQL,
+    },
+    MigrationDef {
+        version: 13,
+        name: "v013_policy_provider_probe_mandates",
+        sql: V013_SQL,
+    },
 ];
+
+const V013_SQL: &str = r"
+CREATE TABLE provider_probe_mandates (
+ mandate_ref TEXT PRIMARY KEY REFERENCES command_receipts(receipt_id) DEFERRABLE INITIALLY DEFERRED,
+ scope_kind TEXT NOT NULL CHECK(scope_kind IN ('global','project')),
+ scope_id TEXT NOT NULL CHECK(length(scope_id)>0 AND (scope_kind!='global' OR scope_id='global')),
+ authority_generation TEXT NOT NULL,
+ principal_id TEXT NOT NULL REFERENCES principals(principal_id),
+ profile_version_ref TEXT NOT NULL REFERENCES provider_profiles(profile_version_ref),
+ profile_id TEXT NOT NULL,
+ profile_version INTEGER NOT NULL CHECK(profile_version>=1),
+ configuration_digest TEXT NOT NULL,
+ phase TEXT NOT NULL CHECK(phase IN ('connect','inventory','generation_probe')),
+ expires_at_ms INTEGER NOT NULL,
+ issued_by_actor TEXT NOT NULL,
+ issued_at_ms INTEGER NOT NULL CHECK(expires_at_ms>issued_at_ms),
+ mandate_digest TEXT NOT NULL,
+ grant_json TEXT NOT NULL CHECK(json_valid(grant_json)),
+ revocation_receipt_id TEXT UNIQUE REFERENCES command_receipts(receipt_id) DEFERRABLE INITIALLY DEFERRED,
+ revocation_digest TEXT,
+ revocation_json TEXT CHECK(revocation_json IS NULL OR json_valid(revocation_json)),
+ CHECK(revocation_receipt_id IS NULL OR revocation_receipt_id!=mandate_ref),
+ CHECK(COALESCE(json_extract(grant_json,'$.schema_version')=1
+   AND json_extract(grant_json,'$.mandate_ref')=mandate_ref
+   AND json_extract(grant_json,'$.scope_kind')=scope_kind
+   AND json_extract(grant_json,'$.scope_id')=scope_id
+   AND json_extract(grant_json,'$.authority_generation')=authority_generation
+   AND json_extract(grant_json,'$.permission.principal_id')=principal_id
+   AND json_extract(grant_json,'$.profile_version_ref')=profile_version_ref
+   AND json_extract(grant_json,'$.permission.profile_id')=profile_id
+   AND json_extract(grant_json,'$.permission.profile_version')=profile_version
+   AND json_extract(grant_json,'$.configuration_digest')=configuration_digest
+   AND json_extract(grant_json,'$.permission.phase')=phase
+   AND json_extract(grant_json,'$.permission.expires_at_ms')=expires_at_ms
+   AND json_extract(grant_json,'$.issued_by_actor')=issued_by_actor
+   AND json_extract(grant_json,'$.issued_at_ms')=issued_at_ms,0)),
+ CHECK((revocation_receipt_id IS NULL AND revocation_digest IS NULL AND revocation_json IS NULL)
+   OR (revocation_receipt_id IS NOT NULL AND revocation_digest IS NOT NULL AND revocation_json IS NOT NULL
+     AND COALESCE(json_extract(revocation_json,'$.schema_version')=1
+       AND json_extract(revocation_json,'$.mandate_ref')=mandate_ref
+       AND json_extract(revocation_json,'$.mandate_digest')=mandate_digest
+       AND json_extract(revocation_json,'$.revocation_receipt_id')=revocation_receipt_id
+       AND json_extract(revocation_json,'$.authority_generation')=authority_generation
+       AND json_extract(revocation_json,'$.scope_kind')=scope_kind
+       AND json_extract(revocation_json,'$.scope_id')=scope_id,0))),
+ FOREIGN KEY(scope_kind,scope_id) REFERENCES security_policies(scope_kind,scope_id)
+) STRICT;
+CREATE INDEX provider_probe_mandates_scope ON provider_probe_mandates(scope_kind,scope_id);
+CREATE TRIGGER provider_probe_mandate_initial BEFORE INSERT ON provider_probe_mandates
+WHEN NEW.revocation_receipt_id IS NOT NULL
+ OR EXISTS(SELECT 1 FROM command_receipts WHERE receipt_id=NEW.mandate_ref)
+ OR EXISTS(SELECT 1 FROM provider_probe_mandates WHERE revocation_receipt_id=NEW.mandate_ref)
+BEGIN SELECT RAISE(ABORT,'provider probe mandate must precede its new receipt'); END;
+CREATE TRIGGER provider_probe_mandate_profile_binding BEFORE INSERT ON provider_probe_mandates
+WHEN NOT EXISTS(SELECT 1 FROM provider_profiles p WHERE p.profile_version_ref=NEW.profile_version_ref
+ AND p.profile_id=NEW.profile_id AND p.profile_version=NEW.profile_version
+ AND p.config_digest=NEW.configuration_digest
+ AND ((NEW.scope_kind='global' AND p.scope_kind='user' AND p.scope_owner_key='default')
+   OR (NEW.scope_kind='project' AND p.scope_kind='project' AND p.scope_owner_key=NEW.scope_id)))
+BEGIN SELECT RAISE(ABORT,'provider probe mandate profile binding invalid'); END;
+CREATE TRIGGER provider_probe_mandate_immutable BEFORE UPDATE ON provider_probe_mandates
+WHEN NEW.mandate_ref IS NOT OLD.mandate_ref OR NEW.scope_kind IS NOT OLD.scope_kind
+ OR NEW.scope_id IS NOT OLD.scope_id OR NEW.authority_generation IS NOT OLD.authority_generation
+ OR NEW.principal_id IS NOT OLD.principal_id OR NEW.profile_version_ref IS NOT OLD.profile_version_ref
+ OR NEW.profile_id IS NOT OLD.profile_id OR NEW.profile_version IS NOT OLD.profile_version
+ OR NEW.configuration_digest IS NOT OLD.configuration_digest OR NEW.phase IS NOT OLD.phase
+ OR NEW.expires_at_ms IS NOT OLD.expires_at_ms OR NEW.issued_by_actor IS NOT OLD.issued_by_actor
+ OR NEW.issued_at_ms IS NOT OLD.issued_at_ms OR NEW.mandate_digest IS NOT OLD.mandate_digest
+ OR NEW.grant_json IS NOT OLD.grant_json
+BEGIN SELECT RAISE(ABORT,'provider probe mandate immutable'); END;
+CREATE TRIGGER provider_probe_mandate_revocation_once
+BEFORE UPDATE OF revocation_receipt_id,revocation_digest,revocation_json ON provider_probe_mandates
+WHEN NOT(OLD.revocation_receipt_id IS NULL AND NEW.revocation_receipt_id IS NOT NULL
+ AND NEW.revocation_digest IS NOT NULL AND NEW.revocation_json IS NOT NULL)
+ OR EXISTS(SELECT 1 FROM command_receipts WHERE receipt_id=NEW.revocation_receipt_id)
+ OR EXISTS(SELECT 1 FROM provider_probe_mandates WHERE mandate_ref=NEW.revocation_receipt_id)
+BEGIN SELECT RAISE(ABORT,'provider probe mandate revocation immutable'); END;
+CREATE TRIGGER provider_probe_mandate_durable BEFORE DELETE ON provider_probe_mandates
+BEGIN SELECT RAISE(ABORT,'provider probe mandate durable'); END;
+CREATE TRIGGER provider_probe_mandate_receipt_binding BEFORE INSERT ON command_receipts
+WHEN EXISTS(SELECT 1 FROM provider_probe_mandates m WHERE m.mandate_ref=NEW.receipt_id
+ AND NOT COALESCE(NEW.command_type='SetPolicy' AND NEW.actor_id=m.issued_by_actor
+   AND NEW.command_id=json_extract(m.grant_json,'$.command_id')
+   AND NEW.authority_generation=m.authority_generation AND NEW.state IN ('accepted','completed')
+   AND NEW.aggregate_id=CASE WHEN m.scope_kind='global' THEN m.authority_generation ELSE m.scope_id END,0))
+ OR EXISTS(SELECT 1 FROM provider_probe_mandates m WHERE m.revocation_receipt_id=NEW.receipt_id
+ AND NOT COALESCE(NEW.command_type='SetPolicy' AND NEW.actor_id=json_extract(m.revocation_json,'$.revoked_by_actor')
+   AND NEW.command_id=json_extract(m.revocation_json,'$.command_id')
+   AND NEW.authority_generation=m.authority_generation AND NEW.state IN ('accepted','completed')
+   AND NEW.aggregate_id=CASE WHEN m.scope_kind='global' THEN m.authority_generation ELSE m.scope_id END,0))
+BEGIN SELECT RAISE(ABORT,'provider probe mandate receipt binding invalid'); END;
+CREATE TRIGGER admission_source_mandate_insert AFTER INSERT ON provider_probe_mandates
+BEGIN UPDATE admission_source_clock SET revision=revision+1 WHERE singleton=1; END;
+CREATE TRIGGER admission_source_mandate_update AFTER UPDATE ON provider_probe_mandates
+BEGIN UPDATE admission_source_clock SET revision=revision+1 WHERE singleton=1; END;
+CREATE TRIGGER admission_source_mandate_delete AFTER DELETE ON provider_probe_mandates
+BEGIN UPDATE admission_source_clock SET revision=revision+1 WHERE singleton=1; END;
+";
+
+const V012_SQL: &str = r"
+ALTER TABLE terminal_sessions ADD COLUMN control_revision INTEGER NOT NULL DEFAULT 0 CHECK(control_revision>=0);
+CREATE TRIGGER terminal_control_revision_monotone BEFORE UPDATE OF control_revision ON terminal_sessions
+WHEN NEW.control_revision!=OLD.control_revision AND NEW.control_revision!=OLD.control_revision+1
+BEGIN SELECT RAISE(ABORT,'terminal control revision must advance once'); END;
+CREATE TABLE terminal_control_intents (
+ action_id TEXT PRIMARY KEY,
+ terminal_id TEXT NOT NULL REFERENCES terminal_sessions(terminal_id),
+ receipt_id TEXT NOT NULL UNIQUE REFERENCES command_receipts(receipt_id) DEFERRABLE INITIALLY DEFERRED,
+ command_id TEXT NOT NULL,
+ actor_id TEXT NOT NULL,
+ principal_id TEXT NOT NULL REFERENCES principals(principal_id),
+ authority_generation TEXT NOT NULL,
+ daemon_epoch INTEGER NOT NULL CHECK(daemon_epoch>=0),
+ context_digest TEXT NOT NULL,
+ context_json TEXT NOT NULL CHECK(json_valid(context_json)),
+ previous_lease_id TEXT NOT NULL REFERENCES resource_leases(lease_id),
+ next_lease_id TEXT NOT NULL UNIQUE CHECK(next_lease_id!=previous_lease_id),
+ next_fence INTEGER NOT NULL CHECK(next_fence>0),
+ state TEXT NOT NULL CHECK(state IN ('prepared','handshake_resolved','observed','outcome_unknown','disposed')),
+ revision INTEGER NOT NULL CHECK(revision>=1),
+ dispatch_id TEXT UNIQUE REFERENCES action_dispatches(dispatch_id),
+ observation_object_hash TEXT REFERENCES object_records(object_hash),
+ CHECK(COALESCE(json_extract(context_json,'$.schema_version')=1
+   AND json_extract(context_json,'$.action_id')=action_id
+   AND json_extract(context_json,'$.initial_action_id')!=action_id
+   AND json_extract(context_json,'$.terminal_id')=terminal_id
+   AND json_extract(context_json,'$.receipt_id')=receipt_id
+   AND json_extract(context_json,'$.command_id')=command_id
+   AND json_extract(context_json,'$.actor_id')=actor_id
+   AND json_extract(context_json,'$.principal_id')=principal_id
+   AND json_extract(context_json,'$.authority_generation')=authority_generation
+   AND json_extract(context_json,'$.daemon_epoch')=daemon_epoch
+   AND json_extract(context_json,'$.previous_lease_id')=previous_lease_id
+   AND json_extract(context_json,'$.next_lease_id')=next_lease_id
+   AND json_extract(context_json,'$.next_fence')=next_fence
+   AND json_extract(context_json,'$.previous_fence')<next_fence,0)),
+ CHECK((state='prepared' AND dispatch_id IS NULL AND observation_object_hash IS NULL)
+    OR (state IN ('handshake_resolved','outcome_unknown') AND dispatch_id IS NOT NULL AND observation_object_hash IS NULL)
+    OR (state='observed' AND dispatch_id IS NOT NULL AND observation_object_hash IS NOT NULL)
+    OR (state='disposed' AND observation_object_hash IS NOT NULL))
+) STRICT;
+CREATE UNIQUE INDEX terminal_control_one_pending ON terminal_control_intents(terminal_id)
+WHERE state IN ('prepared','handshake_resolved','outcome_unknown');
+CREATE TRIGGER terminal_control_initial BEFORE INSERT ON terminal_control_intents
+WHEN NEW.state!='prepared' OR NEW.revision!=1
+BEGIN SELECT RAISE(ABORT,'terminal control must start prepared'); END;
+CREATE TRIGGER terminal_control_immutable BEFORE UPDATE ON terminal_control_intents
+WHEN NEW.action_id IS NOT OLD.action_id OR NEW.terminal_id IS NOT OLD.terminal_id
+ OR NEW.receipt_id IS NOT OLD.receipt_id OR NEW.command_id IS NOT OLD.command_id
+ OR NEW.actor_id IS NOT OLD.actor_id OR NEW.principal_id IS NOT OLD.principal_id
+ OR NEW.authority_generation IS NOT OLD.authority_generation OR NEW.daemon_epoch IS NOT OLD.daemon_epoch
+ OR NEW.context_digest IS NOT OLD.context_digest OR NEW.context_json IS NOT OLD.context_json
+ OR NEW.previous_lease_id IS NOT OLD.previous_lease_id OR NEW.next_lease_id IS NOT OLD.next_lease_id
+ OR NEW.next_fence IS NOT OLD.next_fence
+BEGIN SELECT RAISE(ABORT,'terminal control intention immutable'); END;
+CREATE TRIGGER terminal_control_transition BEFORE UPDATE ON terminal_control_intents
+WHEN NOT(NEW.revision=OLD.revision+1 AND (
+ (OLD.state='prepared' AND NEW.state='handshake_resolved' AND NEW.dispatch_id IS NOT NULL)
+ OR (OLD.state='handshake_resolved' AND NEW.state IN ('observed','outcome_unknown') AND NEW.dispatch_id IS OLD.dispatch_id)
+ OR (OLD.state='outcome_unknown' AND NEW.state='observed' AND NEW.dispatch_id IS OLD.dispatch_id)
+ OR (OLD.state IN ('prepared','handshake_resolved','outcome_unknown') AND NEW.state='disposed' AND NEW.dispatch_id IS OLD.dispatch_id)))
+BEGIN SELECT RAISE(ABORT,'terminal control transition invalid'); END;
+CREATE TRIGGER terminal_control_durable BEFORE DELETE ON terminal_control_intents
+BEGIN SELECT RAISE(ABORT,'terminal control intention durable'); END;
+";
 
 const V011_SQL: &str = r"
 ALTER TABLE provider_profiles ADD COLUMN profile_id TEXT;
