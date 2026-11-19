@@ -114,6 +114,20 @@ impl UnleashStore {
                     "acquisition observation is outside the read watermark",
                 ));
             }
+            // Artifact verification may outlive the initial lease check. Sample
+            // UTC again only after all snapshot/proof reads, before releasing
+            // assertions; this never renews the lease or changes its state.
+            let now = self.config().clock.now_ms();
+            if self.config().clock_uncertain.load(Ordering::Acquire) {
+                return Err(stale(
+                    "terminal clock became uncertain during result inspection",
+                ));
+            }
+            if now >= value.lease_expires_at {
+                return Err(stale(
+                    "terminal acquisition lease expired during result inspection",
+                ));
+            }
             Ok(SnapshotProjection { value, cursor })
         })
     }
