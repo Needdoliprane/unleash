@@ -94,7 +94,9 @@ pub use projects_settings::{
     RetentionShorteningNotice, SettingsPatch, SettingsRecord, SettingsScopeKind,
 };
 pub use provider_probe_connect::{
-    ProviderProbeConnectContext, ProviderProbeConnectPreparation, ProviderProbeConnectRecord,
+    ClaimProviderProbeConnectRequest, ProviderProbeConnectClaim, ProviderProbeConnectClaimOutcome,
+    ProviderProbeConnectClaimRecord, ProviderProbeConnectContext, ProviderProbeConnectPreparation,
+    ProviderProbeConnectRecord,
 };
 pub use provider_probe_mandates::{
     ProviderProbeMandateChange, ProviderProbeMandateIssue, ProviderProbeMandateStatus,

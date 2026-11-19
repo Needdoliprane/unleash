@@ -188,6 +188,8 @@ pub enum StoreCutpoint {
     C2AfterCommandCommit,
     /// Intention broker engagée, avant Guard ou tout marqueur de dispatch (`C3`).
     C3AfterBrokerIntentCommit,
+    /// Claim connect engagée, avant de remettre le token frais au service (`C3`).
+    C3AfterProviderProbeConnectClaimCommit,
     /// Marqueur broker engagé, avant retour autorisant l'effet (`C4`).
     C4AfterBrokerDispatchCommit,
     /// Juste après `COMMIT` du pin de préparation objet (`C10a`).

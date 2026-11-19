@@ -25,6 +25,9 @@ use unleash_store::{
 use unleash_testkit::local_test_dir;
 use uuid::Uuid;
 
+#[path = "support/provider_probe_connect_claim_scenarios.rs"]
+mod claim_scenarios;
+
 const PROFILE: Uuid = Uuid::from_u128(0xf012_c501);
 const PRINCIPAL: &str = "connect-store-principal";
 

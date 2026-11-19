@@ -178,6 +178,82 @@ pub struct ProviderProbeConnectRecord {
     pub context: ProviderProbeConnectContext,
     /// Empreinte canonique du contexte immuable.
     pub context_digest: Sha256Digest,
+    /// Métadonnées d'inspection ; elles ne constituent jamais un nouveau token.
+    pub claim: Option<ProviderProbeConnectClaimRecord>,
+}
+
+/// Claim durable consultable, sans capacité de démarrer un nouvel effecteur.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderProbeConnectClaimRecord {
+    /// Identité créée une seule fois dans le writer.
+    pub claim_id: uuid::Uuid,
+    /// Révision CAS de la claim.
+    pub revision: Revision,
+    /// Date du commit de propriété.
+    pub claimed_at_ms: TimestampMs,
+}
+
+/// Entrée interne authentifiée ; aucun codec IPC n'accepte cette structure.
+#[derive(Clone)]
+pub struct ClaimProviderProbeConnectRequest {
+    /// Wire original dont le digest est revérifié, jamais normalisé.
+    pub envelope: CommandEnvelope,
+    /// Autorité résolue par la session serveur.
+    pub caller: CallerAuthority,
+    /// Reçu du contexte exact préparé.
+    pub receipt_id: ReceiptId,
+    /// Empreinte CAS lue dans le même contexte.
+    pub context_digest: Sha256Digest,
+    /// Fence de contrôle, distincte du futur bail d'exécution V008.
+    pub control_fence: unleash_domain::LineageFence,
+}
+
+impl std::fmt::Debug for ClaimProviderProbeConnectRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ClaimProviderProbeConnectRequest")
+            .field("receipt_id", &self.receipt_id)
+            .field("probe_id", &self.envelope.aggregate_id)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Token non clonable émis uniquement pour une nouvelle claim acquittée.
+#[derive(Debug)]
+pub struct ProviderProbeConnectClaim {
+    record: ProviderProbeConnectRecord,
+    claim: ProviderProbeConnectClaimRecord,
+}
+
+impl ProviderProbeConnectClaim {
+    /// Contexte immuable autorisé pour cet unique propriétaire.
+    #[must_use]
+    pub const fn context(&self) -> &ProviderProbeConnectContext {
+        &self.record.context
+    }
+    /// Empreinte du contexte autorisé.
+    #[must_use]
+    pub const fn context_digest(&self) -> Sha256Digest {
+        self.record.context_digest
+    }
+    /// Identité durable de cette claim fraîche.
+    #[must_use]
+    pub const fn claim_id(&self) -> uuid::Uuid {
+        self.claim.claim_id
+    }
+    /// Révision de propriété.
+    #[must_use]
+    pub const fn claim_revision(&self) -> Revision {
+        self.claim.revision
+    }
+}
+
+/// Seul FreshClaim permet au service de commencer l'orchestration broker.
+#[derive(Debug)]
+pub enum ProviderProbeConnectClaimOutcome {
+    /// Nouveau propriétaire connu comme acquitté ; token consommable une fois.
+    FreshClaim(ProviderProbeConnectClaim),
+    /// Inspection uniquement, notamment après perte d'un accusé précédent.
+    AlreadyClaimed(ProviderProbeConnectRecord),
 }
 
 pub(crate) struct ConnectCommand<'a> {
@@ -501,14 +577,22 @@ pub(crate) fn commit_tx(
     Ok(Revision::new(1))
 }
 
+struct ConnectContextRow {
+    json: String,
+    digest: String,
+    claim_id: Option<String>,
+    claim_revision: i64,
+    claimed_at_ms: Option<i64>,
+}
+
 fn read_context(
     conn: &Connection,
     probe: ProviderProbeId,
 ) -> Result<Option<ProviderProbeConnectRecord>, StoreError> {
-    let row: Option<(String,String)> = conn.query_row("SELECT context_json,context_digest FROM provider_probe_transport_contexts WHERE probe_id=?1", [probe.to_string()], |row| Ok((row.get(0)?,row.get(1)?))).optional()?;
-    row.map(|(json, digest)| {
-        let context: ProviderProbeConnectContext = serde_json::from_str(&json)?;
-        let digest: Sha256Digest = digest.parse()?;
+    let row: Option<ConnectContextRow> = conn.query_row("SELECT context_json,context_digest,claim_id,claim_revision,claimed_at_ms FROM provider_probe_transport_contexts WHERE probe_id=?1", [probe.to_string()], |row| Ok(ConnectContextRow { json:row.get(0)?,digest:row.get(1)?,claim_id:row.get(2)?,claim_revision:row.get(3)?,claimed_at_ms:row.get(4)? })).optional()?;
+    row.map(|row| {
+        let context: ProviderProbeConnectContext = serde_json::from_str(&row.json)?;
+        let digest: Sha256Digest = row.digest.parse()?;
         if context.probe_id != probe
             || context.schema_version != 1
             || context.phase != ProviderTestPhase::Connect
@@ -516,15 +600,40 @@ fn read_context(
         {
             return Err(invalid("contexte connect durable incohérent"));
         }
+        let claim = match (row.claim_id, row.claimed_at_ms, row.claim_revision) {
+            (None, None, 0) => None,
+            (Some(id), Some(at), 1) => Some(ProviderProbeConnectClaimRecord {
+                claim_id: id
+                    .parse()
+                    .map_err(|_| invalid("identité de claim incohérente"))?,
+                revision: Revision::new(1),
+                claimed_at_ms: TimestampMs::new(at),
+            }),
+            _ => return Err(invalid("état de claim durable incohérent")),
+        };
         Ok(ProviderProbeConnectRecord {
             context,
             context_digest: digest,
+            claim,
         })
     })
     .transpose()
 }
 
 impl UnleashStore {
+    /// Revendique une seule fois le contexte sous son autorité courante.
+    /// # Errors
+    /// Refuse identité, reçu, lignée, époque, fence ou contexte incompatibles.
+    pub fn claim_provider_probe_connect(
+        &self,
+        _request: ClaimProviderProbeConnectRequest,
+    ) -> Result<ProviderProbeConnectClaimOutcome, StoreError> {
+        // TDD: no token is minted until the writer/CAS path is qualified.
+        Err(StoreError::EvidenceUnavailable(
+            "claim connect non raccordée".to_owned(),
+        ))
+    }
+
     /// Résout le mandat authentifié exact sans créer intention, reçu ou réservation.
     /// # Errors
     /// Refuse autorité, scope, version, phase ou mandat incompatibles.
