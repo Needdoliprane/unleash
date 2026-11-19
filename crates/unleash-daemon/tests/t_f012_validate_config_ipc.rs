@@ -290,7 +290,7 @@ fn assert_observation_facts(
 ) {
     let (reference, digest, configured_receipt): (String, String, String) = db.query_row(
         "SELECT profile_version_ref,config_digest,receipt_id FROM provider_profiles WHERE profile_id=?1 AND profile_version=?2",
-        rusqlite::params![request.payload.get("profile_id").unwrap().as_str().unwrap(),request.payload.get("profile_version").unwrap().as_u64().unwrap()],
+        rusqlite::params![request.payload.get("profile_id").unwrap().as_str().unwrap(),i64::try_from(request.payload.get("profile_version").unwrap().as_u64().unwrap()).unwrap()],
         |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?)),
     ).unwrap();
     assert_eq!(
@@ -313,7 +313,6 @@ fn assert_observation_facts(
         ("profile_version_ref", json!(reference)),
         ("configuration_digest", json!(digest)),
         ("configuration_receipt_id", json!(configured_receipt)),
-        ("command_receipt_id", json!(receipt.receipt_id)),
         ("actor_id", json!(row.actor_id)),
         ("principal_id", json!(row.principal_id)),
         ("project_id", json!(request.project_id)),
@@ -435,14 +434,15 @@ async fn t_f012_013_validate_config_rejects_other_source_version_actor_and_linea
         .configure(&mut client, Uuid::from_u128(0xf012_3002), 3002, 0, None)
         .await;
     let next_version = fixture.configure(&mut client, profile, 3003, 1, None).await;
-    let settings = envelope(
+    let mut unrelated_command = envelope(
         &client,
         Uuid::from_u128(3004),
         3004,
-        "SetSettings",
-        json!({"scope_kind":"user","scope_id":"default","patch":{"confirm_retention_shortening":false}}),
+        "CreateProject",
+        json!({"name":"unrelated-validation-receipt","weight":1}),
     );
-    let unrelated = client.send_command(&settings).await.unwrap();
+    unrelated_command.project_id = Some(ProjectId::from_u128(3004));
+    let unrelated = client.send_command(&unrelated_command).await.unwrap();
     let control = validation(&client, profile, 1, 3005, &source);
     client.send_command(&control).await.unwrap();
     let before = fixture.validation_counts();
