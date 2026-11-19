@@ -10,6 +10,9 @@ mod time_query_scenarios;
 
 #[path = "terminal_input_writer_scenarios.rs"]
 mod input_writer_scenarios;
+
+#[path = "terminal_renewal_time_scenarios.rs"]
+mod renewal_time_scenarios;
 use unleash_domain::{ActionState, TimestampMs};
 use unleash_store::terminal_allocations::{
     RegisteredTerminalControl, ResolveTerminalControlRequest, TERMINAL_CONTROL_VERB,
@@ -94,7 +97,20 @@ fn observed_with_cutpoint(
         armed: AtomicBool::new(false),
         point,
     });
-    let (store, _cfg, clock, preparation, directory) = fixture(fault.clone());
+    let (store, clock, allocation, directory) = observed_with_observer(successor, fault.clone());
+    (store, clock, fault, allocation, directory)
+}
+
+fn observed_with_observer(
+    successor: bool,
+    observer: Arc<dyn CutpointObserver>,
+) -> (
+    UnleashStore,
+    Arc<ManualClock>,
+    TerminalAllocationRecord,
+    impl std::fmt::Debug,
+) {
+    let (store, _cfg, clock, preparation, directory) = fixture(observer);
     store
         .commit_command(request(&store, preparation, TERMINAL))
         .unwrap();
@@ -142,7 +158,7 @@ fn observed_with_cutpoint(
             .unwrap();
     }
     let allocation = read(&store, TERMINAL);
-    (store, clock, fault, allocation, directory)
+    (store, clock, allocation, directory)
 }
 
 fn prepared() -> (
@@ -230,6 +246,13 @@ fn control_dispatch(
     control: &TerminalControlRecord,
 ) -> (BrokerPhaseRequest, BrokerPhaseRequest) {
     let first = control_authorizing(control);
+    dispatch_authorizing(store, first)
+}
+
+fn dispatch_authorizing(
+    store: &UnleashStore,
+    first: BrokerPhaseRequest,
+) -> (BrokerPhaseRequest, BrokerPhaseRequest) {
     let committed = store.commit_broker_phase(first.clone()).unwrap();
     let BrokerPhase::Authorizing { intent } = &first.phase else {
         unreachable!()
@@ -397,19 +420,54 @@ fn t_f011_003_control_resolution_rollback_keeps_unknown_visible_without_a_new_pe
 }
 
 #[test]
-fn t_f011_003_same_epoch_transfer_refused_before_intent_preserves_current_control() {
+fn t_f011_003_same_epoch_classifies_renewal_without_successor_or_effect() {
     let (store, _clock, _fault, allocation, _directory) = observed(false);
     let before = counts(&store);
-    let result = store.commit_command(registered_request(&store, &allocation, CONTROL));
-    assert!(
-        matches!(result,Err(StoreError::StaleFence {ref message}) if message=="registered terminal transfer requires a successor daemon epoch"),
-        "unexpected preparation result: {result:?}"
+    let request = registered_request(&store, &allocation, CONTROL);
+    let result = store.commit_command(request.clone()).unwrap();
+    let CommitOutcome::Committed(receipt) = result else {
+        unreachable!()
+    };
+    let renewal = store
+        .inspect_terminal_renewal_request(&allocation.context.actor_id, request.envelope.command_id)
+        .unwrap()
+        .value
+        .unwrap();
+    assert_eq!(renewal.context.receipt_id, receipt.receipt_id);
+    assert_eq!(renewal.context.lease_id, allocation.context.lease_id);
+    assert_eq!(
+        renewal.context.resource_fence,
+        allocation.context.resource_fence
     );
-    assert_eq!(counts(&store), before);
+    assert_eq!(
+        renewal.state,
+        unleash_store::terminal_allocations::terminal_renewal_types::TerminalRenewalState::Prepared
+    );
+    assert!(renewal.dispatch_id.is_none());
+    assert!(
+        store
+            .inspect_terminal_control_request(
+                &allocation.context.actor_id,
+                request.envelope.command_id
+            )
+            .unwrap()
+            .value
+            .is_none()
+    );
+    assert!(
+        matches!(store.commit_command(request).unwrap(),CommitOutcome::IdempotentReplay(ref replay) if replay==&receipt)
+    );
+    let mut expected = before;
+    expected.6 += 1;
+    assert_eq!(counts(&store), expected);
     store.read_snapshot(|conn,_| {
         assert_eq!(conn.query_row("SELECT COUNT(*) FROM terminal_control_intents",[],|row|row.get::<_,i64>(0))?,0);
         let control:(i64,String,String)=conn.query_row("SELECT s.control_revision,s.lease_id,l.state FROM terminal_sessions s JOIN resource_leases l ON l.lease_id=s.lease_id",[],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?)))?;
         assert_eq!(control,(0,allocation.context.lease_id.to_string(),"held".into()));
+        let expiry:i64=conn.query_row("SELECT expires_at_ms FROM resource_leases WHERE lease_id=?1",[allocation.context.lease_id.to_string()],|row|row.get(0))?;
+        assert_eq!(expiry,allocation.context.lease_expires_at.as_i64());
+        assert_eq!(conn.query_row("SELECT COUNT(*) FROM terminal_renewal_intents",[],|row|row.get::<_,i64>(0))?,1);
+        assert!(!conn.prepare("SELECT 1 FROM action_dispatches WHERE action_id=?1")?.exists([renewal.context.action_id.to_string()])?);
         Ok(())
     }).unwrap();
     assert!(!store.config().data_root.join("process-hosts").exists());
