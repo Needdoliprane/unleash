@@ -78,6 +78,9 @@ struct ServerShared {
     // Serializes authentication/fencing with actual PTY effects and rotation.
     // Socket reads/writes are outside this gate and cannot pin its owner.
     operation_gate: Mutex<()>,
+    last_transfer: Mutex<Option<ControlTransferAttempt>>,
+    #[cfg(test)]
+    operation_contentions: AtomicU64,
     manifest_path: PathBuf,
     control_secret_path: PathBuf,
     socket_path: PathBuf,
@@ -92,6 +95,13 @@ struct ServerShared {
     inputs: PtyInputTracker,
     shutdown: AtomicBool,
     active_connections: AtomicU64,
+}
+
+struct ControlTransferAttempt {
+    header: HostCommandHeader,
+    dispatch_id: unleash_domain::DispatchId,
+    initial_context_digest: unleash_domain::Sha256Digest,
+    ack: Option<crate::ControlTransferAck>,
 }
 
 /// Instance active d'un `unleash-process-host` prêt à servir les requêtes du daemon.
@@ -385,6 +395,9 @@ impl ProcessHostServer {
 
         let shared = Arc::new(ServerShared {
             operation_gate: Mutex::new(()),
+            last_transfer: Mutex::new(None),
+            #[cfg(test)]
+            operation_contentions: AtomicU64::new(0),
             manifest_path,
             control_secret_path: spec.control_secret_path.clone(),
             socket_path,
@@ -619,6 +632,31 @@ fn handle_connection(mut stream: UnixStream, shared: &Arc<ServerShared>) {
             }
         };
 
+        if let Ok(crate::control_transfer::TransferEnvelope::TransferControlV1(request)) =
+            serde_json::from_slice(&frame)
+        {
+            let response = {
+                let _operation = lock_operation(shared);
+                let response = match process_control_transfer(&request, shared) {
+                    Ok(ack) => crate::ControlTransferResponse::Ack { ack },
+                    Err(error) => crate::ControlTransferResponse::Refused {
+                        error: error.to_ipc_error(Some(request.header.command_id)),
+                    },
+                };
+                if matches!(response, crate::ControlTransferResponse::Ack { .. }) {
+                    bound_auth_gen = shared.auth_generation.load(Ordering::SeqCst);
+                }
+                response
+            };
+            let Ok(payload) = serde_json::to_vec(&response) else {
+                break;
+            };
+            if write_frame(&mut stream, &payload).is_err() {
+                break;
+            }
+            continue;
+        }
+
         let req: HostRequest = match serde_json::from_slice(&frame) {
             Ok(r) => r,
             Err(err) => {
@@ -628,10 +666,7 @@ fn handle_connection(mut stream: UnixStream, shared: &Arc<ServerShared>) {
             }
         };
 
-        let operation = shared
-            .operation_gate
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let operation = lock_operation(shared);
         // Recheck channel generation under the same gate as fencing and I/O.
         // Si le secret a tourné après un Handshake de récupération sur une autre connexion,
         // invalider immédiatement toute ancienne connexion ouverte avant toute opération.
@@ -668,6 +703,140 @@ fn handle_connection(mut stream: UnixStream, shared: &Arc<ServerShared>) {
             break;
         }
     }
+}
+
+fn lock_operation(shared: &ServerShared) -> std::sync::MutexGuard<'_, ()> {
+    match shared.operation_gate.try_lock() {
+        Ok(guard) => guard,
+        Err(std::sync::TryLockError::Poisoned(error)) => error.into_inner(),
+        Err(std::sync::TryLockError::WouldBlock) => {
+            #[cfg(test)]
+            shared.operation_contentions.fetch_add(1, Ordering::SeqCst);
+            shared
+                .operation_gate
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+        }
+    }
+}
+
+fn process_control_transfer(
+    request: &crate::ControlTransferRequest,
+    shared: &ServerShared,
+) -> Result<crate::ControlTransferAck, ProcessHostError> {
+    verify_secret(shared, &request.current_secret)?;
+    {
+        let previous = shared
+            .last_transfer
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(previous) = previous.as_ref() {
+            if previous.header == request.header
+                && previous.dispatch_id == request.dispatch_id
+                && previous.initial_context_digest == request.initial_context_digest
+            {
+                // After an ACK is lost only the currently active capability
+                // can inspect the same transfer; no second rotation occurs.
+                verify_secret(shared, &request.next_secret)?;
+                return previous.ack.clone().ok_or_else(|| {
+                    ProcessHostError::LaunchOutcomeUnknown {
+                        reason: "control transfer requires inspection; no repeat permit".into(),
+                    }
+                });
+            }
+            if previous.ack.is_none() {
+                return Err(ProcessHostError::LaunchOutcomeUnknown {
+                    reason: "a control transfer is unresolved".into(),
+                });
+            }
+        }
+    }
+    if verify_secret(shared, &request.next_secret).is_ok() {
+        return Err(ProcessHostError::InvalidArgument {
+            reason: "control transfer requires a different capability".into(),
+        });
+    }
+    let _validated_secret = HostControlSecret::new(request.next_secret.clone())?;
+    let manifest = shared
+        .manifest
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if manifest.allocation_context_digest != Some(request.initial_context_digest)
+        || manifest.effective_environment_digest.is_none()
+    {
+        return Err(ProcessHostError::IdentityUnverified {
+            reason: "control transfer launch binding differs".into(),
+        });
+    }
+    drop(manifest);
+    let anchor = shared.anchor.verification_report();
+    if anchor.reaped || !anchor.sigchld_qualified || anchor.identity_status != "match" {
+        return Err(ProcessHostError::IdentityUnverified {
+            reason: "control transfer requires the same live anchored child".into(),
+        });
+    }
+    let mut candidate = *shared
+        .fencing
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if request.header.resource_fence <= candidate.current().fence {
+        return Err(ProcessHostError::StaleEpochOrFence {
+            reason: "control transfer requires a higher resource fence".into(),
+        });
+    }
+    candidate.check_recovery_handshake(&request.header, true)?;
+    *shared
+        .last_transfer
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(ControlTransferAttempt {
+        header: request.header.clone(),
+        dispatch_id: request.dispatch_id,
+        initial_context_digest: request.initial_context_digest,
+        ack: None,
+    });
+    let response = process_request(
+        HostRequest::Handshake {
+            header: request.header.clone(),
+            current_secret: request.current_secret.clone(),
+            rotate_to_secret: Some(request.next_secret.clone()),
+            require_higher_epoch: true,
+        },
+        shared,
+    );
+    let HostResponse::HandshakeAck {
+        os_identity,
+        effective_environment_digest: Some(effective_environment_digest),
+        allocation_context_digest: Some(initial_context_digest),
+        durable_log_seq,
+        last_confirmed_input_seq,
+        unknown_input_seqs,
+        secret_rotated: true,
+        ..
+    } = response
+    else {
+        return Err(ProcessHostError::LaunchOutcomeUnknown {
+            reason: "control transfer has no complete acknowledgement".into(),
+        });
+    };
+    let ack = crate::ControlTransferAck {
+        header: request.header.clone(),
+        dispatch_id: request.dispatch_id,
+        initial_context_digest,
+        effective_environment_digest,
+        os_identity,
+        durable_log_seq,
+        last_confirmed_input_seq,
+        unknown_input_seqs,
+    };
+    if let Some(attempt) = shared
+        .last_transfer
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .as_mut()
+    {
+        attempt.ack = Some(ack.clone());
+    }
+    Ok(ack)
 }
 
 fn send_response(stream: &mut UnixStream, resp: &HostResponse) -> Result<(), ProcessHostError> {
@@ -1105,6 +1274,33 @@ impl std::fmt::Debug for HostClient {
 }
 
 impl HostClient {
+    /// Send a correlated control transfer to an existing host. No legacy fallback exists.
+    /// # Errors
+    /// Refuses mismatched client coordinates, transport failure or an unsupported response.
+    pub fn transfer_control(
+        &mut self,
+        request: &crate::ControlTransferRequest,
+    ) -> Result<crate::ControlTransferResponse, ProcessHostError> {
+        if request.header.process_run_uuid != self.process_run_uuid
+            || request.header.authority_generation != self.authority_generation
+            || request.header.daemon_epoch != self.daemon_epoch
+            || request.header.resource_fence != self.fence
+        {
+            return Err(ProcessHostError::InvalidArgument {
+                reason: "control transfer differs from client coordinates".into(),
+            });
+        }
+        let bytes = serde_json::to_vec(
+            &crate::control_transfer::TransferEnvelope::TransferControlV1(request.clone()),
+        )?;
+        write_frame(&mut self.stream, &bytes)?;
+        let response =
+            read_frame(&mut self.stream)?.ok_or_else(|| ProcessHostError::TerminalUnavailable {
+                reason: "control transfer connection closed".into(),
+            })?;
+        Ok(serde_json::from_slice(&response)?)
+    }
+
     /// Ouvre une connexion Unix privée vers `socket_path` (vérifiant `0700`/`0600` et UID pair).
     ///
     /// # Errors
