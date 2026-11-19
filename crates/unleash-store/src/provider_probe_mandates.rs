@@ -500,11 +500,11 @@ fn validate_connect_bounds(
     profile: &crate::ConfiguredProviderProfile,
 ) -> Result<(), StoreError> {
     let limits = wire.limits();
-    if limits.timeout_ms > permission.limits.timeout_ms
-        || limits.timeout_ms > profile.configuration.payload.limits().connect_timeout_ms
-        || limits.max_calls > permission.limits.max_calls
-        || limits.max_output_tokens > permission.limits.max_output_tokens
-        || limits.max_cost_usd_micros > permission.limits.max_cost_usd_micros
+    if limits.timeout_ms() > permission.limits.timeout_ms()
+        || limits.timeout_ms() > profile.configuration.payload.limits().connect_timeout_ms
+        || limits.max_calls() > permission.limits.max_calls()
+        || limits.max_output_tokens() > permission.limits.max_output_tokens()
+        || limits.max_cost_usd_micros() > permission.limits.max_cost_usd_micros()
         || wire
             .capability_set()
             .iter()
