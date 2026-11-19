@@ -619,6 +619,26 @@ pub enum BrokerAuditEvent {
     },
 }
 
+/// Effective policy loaded by a trusted durable service for one exact scope.
+/// This is internal initialization data, never a client codec or an authority grant.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InitialEffectivePolicy {
+    /// Exact project scope, or the global user scope.
+    pub project_id: Option<ProjectId>,
+    /// Effective max of applicable policy revisions, without fabricating an update.
+    pub policy_revision: Revision,
+    /// Actual scope revision retained by the original producer.
+    pub scope_revision: Revision,
+    /// Digest of the complete global/project/Guard snapshot; revalidated by the journal writer.
+    pub policy_digest: Sha256Digest,
+    /// Strict if any applicable policy requires it.
+    pub isolation_mode: IsolationMode,
+    /// Actual configured mode; unsupported Guard integration must remain closed.
+    pub guard_mode: GuardMode,
+    /// Exact authority incarnation of the durable snapshot.
+    pub lineage_fence: LineageFence,
+}
+
 /// Configuration d'initialisation de [`ActionBroker`].
 #[derive(Clone)]
 pub struct BrokerConfig {
@@ -883,6 +903,31 @@ impl ActionBroker {
                 evaluations: BTreeMap::new(),
             }),
         }
+    }
+
+    /// Constructs a new broker bound to one durable effective policy snapshot.
+    /// No admin mutation or revision increment is synthesized.
+    /// # Errors
+    /// Rejects an unqualified snapshot; no broker or journal acknowledgement is returned.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "Explicit constructor injection of existing ports plus the durable policy snapshot"
+    )]
+    pub fn new_with_policy_snapshot(
+        _clock: Arc<dyn ClockPort>,
+        _monotonic_clock: Arc<dyn MonotonicClockPort>,
+        _sleep_port: Arc<dyn SleepPort>,
+        _ids: Arc<dyn IdGeneratorPort>,
+        _isolation_probe: Arc<dyn IsolationProbePort>,
+        _obligation_checker: Arc<dyn ObligationCapabilityPort>,
+        _fallback_policy: Arc<dyn FallbackPolicyPort>,
+        _config: BrokerConfig,
+        _journal: Arc<dyn BrokerJournalPort>,
+        _snapshot: InitialEffectivePolicy,
+    ) -> Result<Self, ActionBrokerError> {
+        Err(ActionBrokerError::GuardUnavailable {
+            reason: "Scoped durable policy initialization is not yet qualified".into(),
+        })
     }
 
     /// Creates an explicitly non-durable broker for local tests and examples only.

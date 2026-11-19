@@ -54,8 +54,8 @@ pub use broker::{
     ActionBroker, ActionExecutionFailure, ActionExecutionResult, ActionExecutorPort, ActionReceipt,
     ApprovalDecision, AuthorizationDecision, AuthorizationOutcome, BrokerAdminCapability,
     BrokerAuditEvent, BrokerAuditRecord, BrokerConfig, CallerIdentity, ConfigureGuardCommand,
-    FallbackPolicyPort, GuardHealthSnapshot, LocalAuthorityFallbackPolicy, PolicySummary,
-    RemotePropagationStatus, ResolveActionApprovalCommand, ResumeSubjectCommand,
+    FallbackPolicyPort, GuardHealthSnapshot, InitialEffectivePolicy, LocalAuthorityFallbackPolicy,
+    PolicySummary, RemotePropagationStatus, ResolveActionApprovalCommand, ResumeSubjectCommand,
     RevokeSubjectCommand, SetPolicyCommand, SubjectRevocationReceipt, SubjectSuspensionReceipt,
     SuspendSubjectCommand,
 };
