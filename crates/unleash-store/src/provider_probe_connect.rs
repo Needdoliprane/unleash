@@ -430,6 +430,11 @@ fn validate_execution_reservation(
             message: "réservation V008 ou bail connect non courant".to_owned(),
         });
     }
+    if unresolved_connect_occupation(tx)? != 1 {
+        return Err(StoreError::CapacityBlocked(
+            "connect non identifié : une seule réservation conservatrice".to_owned(),
+        ));
+    }
     Ok(())
 }
 
@@ -770,8 +775,23 @@ pub(crate) fn validate_admission(
     ).optional()?;
     let intent: crate::BrokerIntent = serde_json::from_str(&intent.ok_or_else(hidden)?)?;
     validate_bound_intent(c, &profile, &intent)?;
+    if unresolved_connect_occupation(tx)? != 0 {
+        return Err(StoreError::CapacityBlocked(
+            "connect non identifié : réservation held ou reconciling déjà retenue".to_owned(),
+        ));
+    }
     validate_profile_capacity(tx, &profile)?;
     Ok(true)
+}
+
+fn unresolved_connect_occupation(tx: &Transaction<'_>) -> Result<i64, StoreError> {
+    // No qualified server identity exists in this first transport. All connect
+    // contexts share one conservative bound, independent of profile/locality,
+    // authority generation and epoch. This is not Q-19 server qualification.
+    Ok(tx.query_row(
+        "SELECT COUNT(*) FROM capacity_reservations r JOIN capacity_pools pool ON pool.pool_id=r.pool_id JOIN execution_reservation_owners o ON o.reservation_id=r.reservation_id JOIN provider_probe_transport_contexts c ON c.probe_id=o.provider_probe_id WHERE r.state IN ('held','reconciling') AND r.amount>0 AND r.owner_type='provider_probe' AND c.phase='connect' AND pool.pool_kind='execution' AND pool.scope_key='global'",
+        [], |row| row.get(0),
+    )?)
 }
 
 fn validate_profile_capacity(
