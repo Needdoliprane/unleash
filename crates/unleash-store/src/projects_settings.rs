@@ -7,10 +7,13 @@ use std::path::{Component, Path};
 use rusqlite::{Connection, OptionalExtension, Transaction};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
-use unleash_domain::{CommandId, PoolId, ProjectId, Revision, TimestampMs};
+use unleash_domain::{CommandId, ProjectId, Revision, TimestampMs};
 use unleash_protocol::ReasonCode;
 
-use crate::budgets::{ControlReserveMode, ExecutionPoolParams, tx_configure_execution_pool};
+use crate::budgets::{
+    ControlReserveMode, ExecutionPoolParams, tx_configure_execution_pool,
+    tx_global_execution_pool_id,
+};
 use crate::error::StoreError;
 use crate::policies_secrets::{
     AlertSeverity, CallerAuthority, NewAlertSpec, record_alert_tx, require_security_admin,
@@ -991,19 +994,8 @@ pub(crate) fn tx_set_settings(
     };
 
     if patch.execution_pool.is_some() && scope_kind == SettingsScopeKind::User {
-        let existing_pool_id: Option<String> = tx
-            .query_row(
-                "SELECT pool_id FROM capacity_pools
-                 WHERE pool_kind = 'execution' AND scope_key = 'global' AND unit = 'slot'",
-                [],
-                |r| r.get(0),
-            )
-            .optional()
-            .map_err(StoreError::from_rusqlite)?;
-        let pool_id = match existing_pool_id {
-            Some(s) => s.parse::<PoolId>()?,
-            None => ExecutionPoolParams::default().pool_id,
-        };
+        let pool_id = tx_global_execution_pool_id(tx)?
+            .unwrap_or_else(|| ExecutionPoolParams::default().pool_id);
         tx_configure_execution_pool(
             tx,
             &ExecutionPoolParams {

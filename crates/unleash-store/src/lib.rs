@@ -53,7 +53,7 @@ pub use backup_requests::{
 pub use budgets::{
     BudgetAccountCharge, BudgetAccountSnapshot, BudgetReservationRecord, BudgetReservationRequest,
     BudgetScopeType, CapacityPoolState, CapacityReservationRequest, ControlReserveMode,
-    ExecutionOwner, ExecutionPoolParams, PricingCheckStatus,
+    ExecutionOwner, ExecutionPoolParams, PricingCheckStatus, ensure_global_execution_pool_tx,
 };
 pub use commands::{
     AggregateKind, CommandMutation, CommitCommandRequest, CommitOutcome, DaemonStateRow,

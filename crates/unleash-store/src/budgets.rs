@@ -2,8 +2,9 @@
 
 use serde::{Deserialize, Serialize};
 use unleash_domain::{
-    AccountId, ActionId, AttemptId, AuthorityGeneration, DaemonEpoch, InvocationId, MicrosAmount,
-    PoolId, ProviderProbeId, ReplayWorkerId, ReservationId, Sha256Digest, TimestampMs,
+    AccountId, ActionId, AttemptId, AuthorityGeneration, DaemonEpoch, IdGeneratorPort,
+    InvocationId, MicrosAmount, PoolId, ProviderProbeId, ReplayWorkerId, ReservationId,
+    Sha256Digest, TimestampMs,
 };
 
 /// Mode de réserve pour la classe `control` sur le pool `execution` (Q-15).
@@ -228,6 +229,47 @@ use unleash_domain::AdmissionClass;
 
 use crate::error::StoreError;
 
+pub(crate) fn tx_global_execution_pool_id(
+    connection: &Connection,
+) -> Result<Option<PoolId>, StoreError> {
+    let id: Option<String> = connection
+        .query_row(
+            "SELECT pool_id FROM capacity_pools
+             WHERE pool_kind='execution' AND scope_key='global' AND unit='slot'",
+            [],
+            |row| row.get(0),
+        )
+        .optional()?;
+    id.map(|value| value.parse().map_err(StoreError::from))
+        .transpose()
+}
+
+/// Initialise le pool global dans la transaction qui rend le daemon prêt.
+///
+/// Un pool déjà présent conserve son identifiant, sa configuration et sa révision.
+///
+/// # Errors
+/// Retourne une erreur si le pool ne peut pas être lu ou créé.
+pub fn ensure_global_execution_pool_tx(
+    tx: &Transaction<'_>,
+    id_generator: &dyn IdGeneratorPort,
+) -> Result<(), StoreError> {
+    if tx_global_execution_pool_id(tx)?.is_some() {
+        return Ok(());
+    }
+    let mut params = ExecutionPoolParams::default();
+    let id_in_use: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM capacity_pools WHERE pool_id=?1)",
+        [params.pool_id.to_string()],
+        |row| row.get(0),
+    )?;
+    if id_in_use {
+        params.pool_id = PoolId::from_uuid(id_generator.new_uuid());
+    }
+    tx_configure_execution_pool(tx, &params)?;
+    Ok(())
+}
+
 #[expect(
     clippy::too_many_lines,
     reason = "Validation stricte de cohérence du pool d'exécution (soft/hard) et calcul de drainage atomique"
@@ -268,7 +310,8 @@ pub(crate) fn tx_configure_execution_pool(
     let pool_str = params.pool_id.to_string();
     let existing: Option<(i64, i64)> = tx
         .query_row(
-            "SELECT effective_limit, revision FROM capacity_pools WHERE pool_id = ?1",
+            "SELECT effective_limit, revision FROM capacity_pools WHERE pool_id = ?1
+             AND pool_kind='execution' AND scope_key='global' AND unit='slot'",
             [&pool_str],
             |r| Ok((r.get(0)?, r.get(1)?)),
         )
