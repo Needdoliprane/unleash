@@ -133,7 +133,7 @@ impl UnleashStore {
     }
 }
 
-fn read_result(
+pub(super) fn read_result(
     conn: &Connection,
     config: &StoreConfig,
     actor: &ActorId,
@@ -501,7 +501,10 @@ fn native_proof(
     if !published {
         return Err(unavailable("acquisition observation is not published"));
     }
-    let bytes = crate::objects::read_verified_object_bytes_conn(conn, config, hash)?;
+    // The same reader can be used for new input admission under the writer.
+    // Bound physical I/O and retain anchored no-follow/owner checks.
+    let bytes =
+        crate::objects::read_verified_evidence_bytes_bounded(conn, config, hash, 2 * 1024 * 1024)?;
     if let Some(control) = &binding.control {
         control_input_state(conn, binding, control, hash, &bytes)
     } else {

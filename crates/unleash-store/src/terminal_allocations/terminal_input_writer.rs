@@ -208,6 +208,7 @@ pub(crate) fn prepare_tx(
     control_identity(tx, daemon, &allocation)?;
     control_holds(tx, daemon, &allocation)?;
     let (policy_revision, security_policy_digest) = policy(tx, project_id)?;
+    verify_native_input_state(tx, config, &command, &allocation, revision)?;
     let context = TerminalInputContext {
         schema_version: 1,
         action_id: ActionId::from_uuid(config.id_generator.new_uuid()),
@@ -260,6 +261,65 @@ pub(crate) fn prepare_tx(
         outbox_destinations: vec!["clients".into(),"harness".into()],
     });
     Ok(revision)
+}
+
+fn verify_native_input_state(
+    tx: &Transaction<'_>,
+    config: &StoreConfig,
+    command: &InputCommand<'_>,
+    allocation: &super::TerminalAllocationRecord,
+    revision: Revision,
+) -> Result<(), StoreError> {
+    let c = &allocation.context;
+    let input = command.request;
+    let (source_command, reference): (String, String) = if input.lease_id == c.lease_id
+        && revision == Revision::INITIAL
+    {
+        let source: String = tx.query_row(
+            "SELECT command_id FROM command_receipts WHERE receipt_id=?1 AND actor_id=?2",
+            params![c.receipt_id.to_string(), command.actor_id.as_str()],
+            |row| row.get(0),
+        )?;
+        (source, format!("terminal-allocation:{}", c.terminal_id))
+    } else {
+        let (source, action): (String,String) = tx.query_row(
+            "SELECT r.command_id,t.action_id FROM terminal_control_intents t JOIN command_receipts r ON r.receipt_id=t.receipt_id WHERE t.terminal_id=?1 AND t.next_lease_id=?2 AND t.state='observed' AND t.authority_generation=?3 AND t.actor_id=?4 AND json_extract(t.context_json,'$.previous_control_revision')+1=?5",
+            params![c.terminal_id.to_string(),input.lease_id.to_string(),c.authority_generation.to_string(),command.actor_id.as_str(),integer(revision.as_u64())?],
+            |row|Ok((row.get(0)?,row.get(1)?)),
+        ).optional()?.ok_or_else(|| StoreError::EvidenceUnavailable("current terminal control has no qualified native observation".into()))?;
+        (source, format!("terminal-control:{action}"))
+    };
+    let super::TerminalAllocationScope::ProjectConfiguration { project_id, .. } =
+        c.preparation.scope;
+    let observed = super::terminal_acquisition_query::read_result(
+        tx,
+        config,
+        command.actor_id,
+        source_command.parse()?,
+        &reference,
+        project_id,
+    )?;
+    if observed.terminal_id != input.terminal_id
+        || observed.process_run_uuid != input.process_run_uuid
+        || observed.lease_id != input.lease_id
+        || observed.fence != input.fence
+        || observed.control_revision != revision
+        || observed.input_seq.checked_add(1) != Some(input.input_seq)
+    {
+        return Err(StoreError::EvidenceUnavailable(
+            "native terminal input state differs from the requested sequence or controller".into(),
+        ));
+    }
+    if config
+        .clock_uncertain
+        .load(std::sync::atomic::Ordering::Acquire)
+        || config.clock.now_ms() >= observed.lease_expires_at
+    {
+        return Err(stale(
+            "terminal lease became unavailable during input attestation",
+        ));
+    }
+    Ok(())
 }
 
 fn insert_intent(tx: &Transaction<'_>, context: &TerminalInputContext) -> Result<(), StoreError> {

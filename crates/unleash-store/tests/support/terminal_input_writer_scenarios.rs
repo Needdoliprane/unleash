@@ -4,6 +4,9 @@ use super::*;
 
 #[path = "terminal_input_resolution_scenarios.rs"]
 mod resolution_scenarios;
+
+#[path = "terminal_input_native_proof_scenarios.rs"]
+mod native_proof_scenarios;
 use unleash_domain::{CommandId, LeaseId};
 use unleash_store::terminal_allocations::terminal_input_types::{
     TERMINAL_INPUT_VERB, TerminalInputRecord, TerminalInputRequest, TerminalInputState,

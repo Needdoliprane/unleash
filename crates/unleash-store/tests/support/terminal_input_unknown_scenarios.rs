@@ -77,10 +77,10 @@ fn initial_query(store: &UnleashStore, record: &TerminalInputRecord) -> (Command
 
 fn transfer_without_disposing_input(
     store: &UnleashStore,
-    input: &TerminalInputRecord,
+    terminal: TerminalId,
 ) -> (CommandId, String) {
     let allocation = store
-        .inspect_terminal_allocation_snapshot(input.context.terminal_id)
+        .inspect_terminal_allocation_snapshot(terminal)
         .unwrap()
         .value
         .unwrap();
@@ -328,7 +328,7 @@ fn t_f011_005_unknown_input_does_not_disclose_a_foreign_causal_result() {
 #[test]
 fn t_f011_005_unknown_input_survives_control_rotation_of_the_same_physical_run() {
     let (store, record, _directory) = unknown_input();
-    let (command, reference) = transfer_without_disposing_input(&store, &record);
+    let (command, reference) = transfer_without_disposing_input(&store, record.context.terminal_id);
     let current = store.daemon_state().unwrap();
     assert!(current.daemon_epoch > record.context.daemon_epoch);
     let ordinary = store
@@ -349,5 +349,94 @@ fn t_f011_005_unknown_input_survives_control_rotation_of_the_same_physical_run()
             .inspect_command_receipt(&record.context.actor_id, command)
             .unwrap(),
         ordinary
+    );
+}
+
+#[test]
+fn t_f011_005_qualified_transferred_control_admits_one_new_input_permit() {
+    let (store, _clock, _fault, allocation, _directory) = observed(false);
+    let (command, reference) =
+        transfer_without_disposing_input(&store, allocation.context.terminal_id);
+    let control = store
+        .inspect_terminal_control_request(&allocation.context.actor_id, command)
+        .unwrap()
+        .value
+        .unwrap();
+    let qualified = store
+        .inspect_terminal_acquisition_result(
+            &allocation.context.actor_id,
+            command,
+            &reference,
+            PROJECT,
+        )
+        .unwrap()
+        .value;
+    assert_eq!(qualified.input_seq, 0);
+    assert_eq!(qualified.lease_id, control.context.next_lease_id);
+    assert_eq!(qualified.fence, control.context.next_fence);
+    let mut request = input_request(&store, &allocation, INPUT + 300);
+    request.envelope.expected_revision = qualified.control_revision;
+    // Old explicit assertions do not fall back to the newly held controller.
+    assert!(matches!(
+        store.commit_command(request.clone()),
+        Err(StoreError::StaleFence { .. })
+    ));
+    let CommandMutation::PrepareTerminalInput {
+        request: payload, ..
+    } = &mut request.mutation
+    else {
+        unreachable!()
+    };
+    payload.lease_id = qualified.lease_id;
+    payload.fence = qualified.fence;
+    request.envelope.payload = serde_json::to_value(payload)
+        .unwrap()
+        .as_object()
+        .unwrap()
+        .clone();
+    let receipt = store
+        .commit_command(request.clone())
+        .unwrap()
+        .receipt()
+        .clone();
+    assert_eq!(receipt.state, ReceiptState::Accepted);
+    let input = store
+        .inspect_terminal_input_request(&request.actor_id, request.envelope.command_id)
+        .unwrap()
+        .value
+        .unwrap();
+    assert_eq!(input.context.lease_id, qualified.lease_id);
+    assert_eq!(input.context.resource_fence, qualified.fence);
+    assert_eq!(input.context.daemon_epoch, qualified.daemon_epoch);
+    assert_eq!(input.context.control_revision, qualified.control_revision);
+    assert_eq!(
+        input.context.process_run_uuid,
+        allocation.context.process_run_uuid
+    );
+    let marker = input_dispatch(&store, &input);
+    let permit = store
+        .resolve_terminal_input(resolution(&input, marker))
+        .unwrap();
+    assert_eq!(permit.input.state, TerminalInputState::WriteResolved);
+    assert_eq!(permit.input.dispatch_id, Some(marker));
+    let (sequence, deadline): (i64, i64) = store
+        .read_snapshot(|conn, _| {
+            Ok((
+                conn.query_row(
+                    "SELECT input_seq FROM terminal_sessions WHERE terminal_id=?1",
+                    [qualified.terminal_id.to_string()],
+                    |row| row.get(0),
+                )?,
+                conn.query_row(
+                    "SELECT expires_at_ms FROM resource_leases WHERE lease_id=?1",
+                    [qualified.lease_id.to_string()],
+                    |row| row.get(0),
+                )?,
+            ))
+        })
+        .unwrap();
+    assert_eq!(
+        (sequence, deadline),
+        (0, qualified.lease_expires_at.as_i64())
     );
 }
