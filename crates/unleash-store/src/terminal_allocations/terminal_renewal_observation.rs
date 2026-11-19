@@ -146,6 +146,9 @@ fn commit_tx(
         .cutpoints
         .hit(StoreCutpoint::C1BeforeTerminalRenewalObservationCommit)?;
     let final_now = config.clock.now_ms();
+    if final_now < now {
+        return Err(invalid("renewal clock moved backwards during observation"));
+    }
     if config
         .clock_uncertain
         .load(std::sync::atomic::Ordering::Acquire)
