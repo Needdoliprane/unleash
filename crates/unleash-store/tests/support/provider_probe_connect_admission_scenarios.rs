@@ -592,6 +592,8 @@ fn authorize(store: &UnleashStore, ready: &ReadyProbe) -> BrokerAuthorizationDec
 fn t_f012_013_admission_c4_uncertainty_and_restart_keep_the_real_reservation() {
     let lost = Arc::new(LostDispatchAck(AtomicBool::new(false)));
     let (store, _directory, mandate, pool) = fixture(lost.clone());
+    let other_profile = uuid::Uuid::from_u128(0xf012_c502);
+    let other_mandate = configure_second_profile(&store, other_profile);
     let ready = ready(&store, mandate, 320);
     authorizing(&store, &ready);
     observe_eligibility(&store, &ready, pool);
@@ -660,7 +662,40 @@ fn t_f012_013_admission_c4_uncertainty_and_restart_keep_the_real_reservation() {
             .is_err(),
         "the durable marker never authorizes a second effect"
     );
+    assert_other_profile_waits_after_unknown(&store, other_profile, other_mandate, pool);
     assert_no_model(&store);
+}
+
+fn assert_other_profile_waits_after_unknown(
+    store: &UnleashStore,
+    profile: uuid::Uuid,
+    mandate: ReceiptId,
+    pool: PoolId,
+) {
+    let next = ready_for_profile(store, mandate, 354, profile, 1);
+    authorizing(store, &next);
+    for reconciling in [false, true] {
+        if reconciling {
+            // The action above became Unknown through real C4/restart recovery.
+            // This explicit fixture labels its retained reservation conservatively;
+            // it does not manufacture a stop, disposition or neutralization proof.
+            store.execute_in_writer_tx(WriteCriticality::Critical, |tx,_| {
+                assert_eq!(tx.execute("UPDATE capacity_reservations SET state='reconciling' WHERE state='held'",[])?,1);
+                Ok(())
+            }).unwrap();
+        }
+        observe_eligibility(store, &next, pool);
+        let before = counts(store);
+        let leases = lease_rows(store);
+        let result = admit(store, &next, pool);
+        assert!(
+            matches!(result, Err(StoreError::CapacityBlocked(_))),
+            "another incarnation retains the unknown connect's slot (reconciling={reconciling}): {result:?}"
+        );
+        assert_eq!(counts(store), before);
+        assert_eq!(lease_rows(store), leases);
+        assert_eq!(held_capacity(store), 1);
+    }
 }
 
 #[test]
