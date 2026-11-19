@@ -80,6 +80,10 @@ pub enum AggregateKind {
     ProviderProfile,
     /// Préparation d'allocation terminal humaine.
     TerminalAllocation,
+    /// Contrôle courant d'un terminal enregistré, distinct de son lancement.
+    TerminalControl,
+    /// Intention de transfert, distincte de la révision effective du terminal.
+    TerminalControlIntent,
 }
 
 impl AggregateKind {
@@ -107,6 +111,8 @@ impl AggregateKind {
             Self::ProviderProbe => "provider_probe",
             Self::ProviderProfile => "provider_profile",
             Self::TerminalAllocation => "terminal_allocation",
+            Self::TerminalControl => "terminal_control",
+            Self::TerminalControlIntent => "terminal_control_intent",
         }
     }
 }
@@ -114,6 +120,13 @@ impl AggregateKind {
 /// Mutation pure décidée par le domaine et exécutée atomiquement par [`CommitCommandRequest`].
 #[derive(Debug, Clone)]
 pub enum CommandMutation {
+    /// Prépare un transfert de contrôle sans contact host ni nouvelle lease held.
+    PrepareTerminalControl {
+        /// Autorité humaine dérivée de la session.
+        caller: CallerAuthority,
+        /// Les quatre champs fermés de la cible enregistrée.
+        request: crate::terminal_allocations::RegisteredTerminalControl,
+    },
     /// Enregistre une version de configuration sans qualifier le fournisseur.
     SetProviderProfile {
         /// Autorité humaine dérivée de la session authentifiée.
@@ -811,8 +824,11 @@ pub(crate) fn classify_command_replay(
     let Some(row) = existing else {
         return Ok(None);
     };
-    let historical_profile = matches!(req.mutation, CommandMutation::SetProviderProfile { .. })
-        && row.authority_generation != daemon.authority_generation.to_string();
+    let historical_profile = matches!(
+        req.mutation,
+        CommandMutation::SetProviderProfile { .. } | CommandMutation::PrepareTerminalControl { .. }
+    ) && row.authority_generation
+        != daemon.authority_generation.to_string();
     if historical_profile || row.digest != digest.as_prefixed_str() {
         return Err(StoreError::IdempotencyConflict {
             command_id: req.envelope.command_id,
@@ -1098,10 +1114,17 @@ pub(crate) fn tx_commit_command(
         || matches!(
             req.mutation,
             CommandMutation::PrepareTerminalAllocation { .. }
+                | CommandMutation::PrepareTerminalControl { .. }
         ) {
         ReceiptState::Accepted
     } else {
         req.receipt_state
+    };
+    let control_result = if matches!(req.mutation, CommandMutation::PrepareTerminalControl { .. }) {
+        let action:String=tx.query_row("SELECT action_id FROM terminal_control_intents WHERE receipt_id=?1 AND actor_id=?2 AND command_id=?3",rusqlite::params![receipt_id.to_string(),actor_str,cmd_str],|row|row.get(0))?;
+        Some(format!("terminal-control:{action}"))
+    } else {
+        None
     };
     let receipt = CommandReceipt {
         receipt_id,
@@ -1139,6 +1162,7 @@ pub(crate) fn tx_commit_command(
                     None
                 }
             })
+            .or(control_result)
             .or_else(|| req.result_ref.clone()),
     };
     let receipt_json = serde_json::to_string(&receipt)?;
@@ -1281,6 +1305,21 @@ fn apply_command_mutation(
 ) -> Result<Revision, StoreError> {
     let exp_i64 = i64::try_from(expected_rev.as_u64()).unwrap_or(0);
     match mutation {
+        CommandMutation::PrepareTerminalControl { request, .. } => {
+            crate::terminal_allocations::prepare_control_tx(
+                tx,
+                config,
+                daemon,
+                now_ms,
+                request,
+                receipt_id,
+                cmd_id,
+                actor_id,
+                envelope.project_id,
+                expected_rev,
+                generated_events,
+            )
+        }
         CommandMutation::SetProviderProfile { preparation, .. } => {
             crate::provider_profiles::set_tx(
                 tx,

@@ -877,6 +877,20 @@ fn launch_observation_fixture(
     terminal_allocations::TerminalLaunchObservation,
     BrokerPhaseRequest,
 ) {
+    launch_observation_state_fixture(s, r, dispatch_id, captured, received, true)
+}
+
+fn launch_observation_state_fixture(
+    s: &UnleashStore,
+    r: &TerminalAllocationRecord,
+    dispatch_id: DispatchId,
+    captured: i64,
+    received: i64,
+    exited: bool,
+) -> (
+    terminal_allocations::TerminalLaunchObservation,
+    BrokerPhaseRequest,
+) {
     let c = &r.context;
     let d = s.daemon_state().unwrap();
     let observation = terminal_allocations::TerminalLaunchObservation {
@@ -896,9 +910,9 @@ fn launch_observation_fixture(
         effective_environment_digest: c.preparation.process_spec.environment.digest,
         durable_log_seq: 0,
         observed_at_ms: unleash_domain::TimestampMs::new(captured),
-        exit_code: Some(0),
+        exit_code: exited.then_some(0),
         exit_signal: None,
-        exited: true,
+        exited,
     };
     let hash = canonical_sha256(&observation).unwrap();
     let bytes = canonicalize_to_vec(&observation).unwrap();
@@ -953,6 +967,9 @@ fn launch_observation_fixture(
     };
     (observation, phase)
 }
+
+#[path = "support/terminal_control_scenarios.rs"]
+mod control_scenarios;
 
 #[test]
 fn t_f011_003_capture_precedes_receipt_and_observation_commit_replays_without_new_rows() {

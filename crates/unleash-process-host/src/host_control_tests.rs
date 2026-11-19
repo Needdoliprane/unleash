@@ -293,11 +293,7 @@ fn t_f011_control_correlated_lost_ack_replays_without_rotation_or_spawn() {
         panic!("exact ACK replay must remain stable");
     };
     assert_eq!(again, ack);
-    replay.header.action_id = ActionId::from_u128(33);
-    assert!(matches!(
-        retry.transfer_control(&replay).unwrap(),
-        ControlTransferResponse::Refused { .. }
-    ));
+    assert_correlated_transfer_refusals(spec, &request);
     assert_eq!(
         fixture.server.shared.auth_generation.load(Ordering::SeqCst),
         2
@@ -310,6 +306,54 @@ fn t_f011_control_correlated_lost_ack_replays_without_rotation_or_spawn() {
     assert_eq!(manifest.highest_fence, Fence::new(2));
     let debug = format!("{request:?}");
     assert!(!debug.contains(SECRET) && !debug.contains(&request.next_secret));
+}
+
+fn assert_correlated_transfer_refusals(
+    spec: &HostBootstrapSpec,
+    original: &crate::ControlTransferRequest,
+) {
+    use crate::ControlTransferResponse;
+    let mut current = HostClient::connect(
+        &spec.runtime_dir.join(HOST_SOCKET_FILENAME),
+        spec.process_run_uuid,
+        spec.authority_generation,
+        DaemonEpoch::new(2),
+        Fence::new(3),
+    )
+    .unwrap();
+    let mut same_epoch = original.clone();
+    same_epoch.header = current.make_header(
+        CommandId::from_u128(33),
+        ActionId::from_u128(34),
+        Sha256Digest::from_bytes(b"different-accepted-control-context"),
+    );
+    same_epoch.dispatch_id = unleash_domain::DispatchId::from_u128(35);
+    same_epoch.current_secret = original.next_secret.clone();
+    same_epoch.next_secret = "synthetic-third-control-capability".into();
+    let ControlTransferResponse::Refused { error } = current.transfer_control(&same_epoch).unwrap()
+    else {
+        panic!("a different action/fence cannot reuse the same daemon epoch");
+    };
+    assert_eq!(
+        error.reason_code,
+        Some(unleash_protocol::ReasonCode::StaleEpoch)
+    );
+    let mut stale = HostClient::connect(
+        &spec.runtime_dir.join(HOST_SOCKET_FILENAME),
+        spec.process_run_uuid,
+        spec.authority_generation,
+        DaemonEpoch::new(2),
+        Fence::new(2),
+    )
+    .unwrap();
+    let ControlTransferResponse::Refused { error } = stale.transfer_control(original).unwrap()
+    else {
+        panic!("the former capability cannot inspect or repeat a transfer");
+    };
+    assert_eq!(
+        error.code,
+        unleash_protocol::ErrorCode::AuthenticationFailed
+    );
 }
 fn handshake(client: &mut HostClient, id: u128, action: ActionId) -> HostResponse {
     let header = client.make_header(

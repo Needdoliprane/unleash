@@ -358,3 +358,205 @@ async fn t_f011_003_snapshot_hides_incomplete_identity_without_contacting_host()
         assert_eq!(after.process_run_uuid, before.process_run_uuid);
     }
 }
+
+#[tokio::test]
+async fn t_f011_003_registered_acquisition_after_real_daemon_crash_reuses_the_same_pty() {
+    let mut fixture = LiveFixture::new(true).await;
+    let original = fixture.start_terminal().await;
+    let before = fixture.host_manifest();
+    let (old_secret, mut old_channel) = open_controller(&before);
+    fixture.restart_daemon_only().await;
+    let request = command(
+        fixture.authority,
+        0xf011_4201,
+        fixture.project,
+        Uuid::from_u128(0xf011_4003),
+        0,
+        "AcquireTerminal",
+        json!({"terminal_id":original["terminal_id"],"process_run_uuid":original["process_run_uuid"],"scope_revision":2,"control_mode":"exclusive"}),
+    );
+    let accepted = fixture
+        .client
+        .send_command(&request)
+        .await
+        .expect("registered acquisition must be accepted by the real successor daemon");
+    assert_eq!(accepted.state, ReceiptState::Accepted);
+    let deadline = Instant::now() + DEADLINE;
+    loop {
+        let snapshot = fixture.snapshot().await;
+        let observed = snapshot["terminals"]["items"].as_array().and_then(|items| {
+            items
+                .iter()
+                .find(|item| item["terminal_id"] == original["terminal_id"])
+        });
+        if observed.is_some_and(|item| {
+            item["lease_state"] == "held"
+                && item["control_revision"]
+                    .as_u64()
+                    .is_some_and(|revision| revision == 1)
+        }) {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "actual control activation deadline"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(
+        fixture.client.send_command(&request).await.unwrap(),
+        accepted,
+        "exact wire retry does not transfer again"
+    );
+    let after = fixture.host_manifest();
+    assert_eq!(after.host_id, before.host_id);
+    assert_eq!(after.process_run_uuid, before.process_run_uuid);
+    assert_eq!(after.pid, before.pid);
+    assert_eq!(after.pgid, before.pgid);
+    assert_eq!(after.start_identity, before.start_identity);
+    assert_eq!(after.boot_identity, before.boot_identity);
+    assert_eq!(
+        after.allocation_context_digest,
+        before.allocation_context_digest
+    );
+    assert!(after.daemon_epoch > before.daemon_epoch);
+    assert!(after.highest_fence > before.highest_fence);
+    assert_closed_old_controller(&before, &after, &old_secret, &mut old_channel);
+    assert_preserved_output(&mut fixture, &original).await;
+    assert_eq!(
+        std::fs::read_to_string(fixture.project_root.path().join("worker-starts")).unwrap(),
+        "started\n"
+    );
+}
+
+fn open_controller(
+    manifest: &unleash_process_host::HostManifest,
+) -> (
+    unleash_process_host::HostControlSecret,
+    unleash_process_host::HostClient,
+) {
+    use unleash_process_host::{HostClient, HostRequest, HostResponse, load_control_secret};
+    let secret = load_control_secret(&manifest.control_secret_path).unwrap();
+    let mut client = HostClient::connect(
+        &manifest.socket_path,
+        manifest.process_run_uuid,
+        manifest.authority_generation,
+        manifest.daemon_epoch,
+        manifest.highest_fence,
+    )
+    .unwrap();
+    let header = client.make_header(
+        unleash_domain::CommandId::from_u128(0xf011_4401),
+        manifest.action_id,
+        manifest.allocation_context_digest.unwrap(),
+    );
+    assert!(matches!(
+        client
+            .call(&HostRequest::Handshake {
+                header,
+                current_secret: secret.expose_secret().into(),
+                rotate_to_secret: None,
+                require_higher_epoch: false
+            })
+            .unwrap(),
+        HostResponse::HandshakeAck { .. }
+    ));
+    (secret, client)
+}
+
+fn assert_closed_old_controller(
+    before: &unleash_process_host::HostManifest,
+    after: &unleash_process_host::HostManifest,
+    old_secret: &unleash_process_host::HostControlSecret,
+    old_channel: &mut unleash_process_host::HostClient,
+) {
+    use unleash_process_host::{HostClient, HostRequest, HostResponse, load_control_secret};
+    let digest = before.allocation_context_digest.unwrap();
+    let header = old_channel.make_header(
+        unleash_domain::CommandId::from_u128(0xf011_4402),
+        before.action_id,
+        digest,
+    );
+    assert!(
+        matches!(old_channel.call(&HostRequest::ReadLog {header,secret:old_secret.expose_secret().into(),after_offset:0,max_bytes:1024,strict_cursor:true}).unwrap(),HostResponse::Error {ref error} if error.code==unleash_protocol::ErrorCode::AuthenticationFailed)
+    );
+    let mut stale = HostClient::connect(
+        &after.socket_path,
+        after.process_run_uuid,
+        after.authority_generation,
+        after.daemon_epoch,
+        after.highest_fence,
+    )
+    .unwrap();
+    let header = stale.make_header(
+        unleash_domain::CommandId::from_u128(0xf011_4403),
+        before.action_id,
+        digest,
+    );
+    assert!(
+        matches!(stale.call(&HostRequest::ReadLog {header,secret:old_secret.expose_secret().into(),after_offset:0,max_bytes:1024,strict_cursor:true}).unwrap(),HostResponse::Error {ref error} if error.code==unleash_protocol::ErrorCode::AuthenticationFailed)
+    );
+    let current = load_control_secret(&after.control_secret_path).unwrap();
+    let mut foreign = HostClient::connect(
+        &after.socket_path,
+        after.process_run_uuid,
+        AuthorityGeneration::from_u128(0xf011_ffff),
+        unleash_domain::DaemonEpoch::new(after.daemon_epoch.as_u64() + 100),
+        unleash_domain::Fence::new(after.highest_fence.as_u64() + 100),
+    )
+    .unwrap();
+    let header = foreign.make_header(
+        unleash_domain::CommandId::from_u128(0xf011_4404),
+        before.action_id,
+        digest,
+    );
+    assert!(
+        matches!(foreign.call(&HostRequest::Handshake {header,current_secret:current.expose_secret().into(),rotate_to_secret:None,require_higher_epoch:false}).unwrap(),HostResponse::Error {ref error} if error.reason_code==Some(unleash_protocol::ReasonCode::StaleAuthorityGeneration))
+    );
+}
+
+async fn assert_preserved_output(fixture: &mut LiveFixture, original: &Value) {
+    let response = fixture
+        .client
+        .query(&QueryEnvelope {
+            protocol_version: ProtocolVersion,
+            request_id: RequestId::from_u128(0xf011_4405),
+            query_type: "ReadTerminalLog".into(),
+            project_id: Some(fixture.project),
+            payload: object(
+                json!({"terminal_id":original["terminal_id"],"after_offset":0,"max_bytes":65536}),
+            ),
+        })
+        .await
+        .expect("the successor reads the same PTY through its committed controller");
+    let old: unleash_process_host::LogReadResult =
+        serde_json::from_value(original["log"].clone()).unwrap();
+    let new: unleash_process_host::LogReadResult =
+        serde_json::from_value(response.result["log"].clone()).unwrap();
+    let bytes = |log: &unleash_process_host::LogReadResult| {
+        log.segments
+            .iter()
+            .flat_map(|segment| segment.bytes.iter().copied())
+            .collect::<Vec<_>>()
+    };
+    assert!(
+        bytes(&new).starts_with(&bytes(&old)),
+        "daemon crash preserves output bytes and offsets"
+    );
+    assert!(
+        old.durable_watermark_offset > 0,
+        "initial real output is durable before killing only daemon"
+    );
+    assert!(new.durable_watermark_offset >= old.durable_watermark_offset);
+    for segment in old.segments.iter().filter(|segment| !segment.is_volatile) {
+        let same = new
+            .segments
+            .iter()
+            .find(|other| other.segment_seq == segment.segment_seq)
+            .expect("old durable segment remains present");
+        assert_eq!(
+            (same.start_offset, same.end_offset, same.sha256),
+            (segment.start_offset, segment.end_offset, segment.sha256)
+        );
+    }
+}
