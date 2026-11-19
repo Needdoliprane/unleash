@@ -98,6 +98,22 @@ Pour lire la page suivante, passer l’`end_offset` du dernier segment dans `--a
 
 Pour rejouer une révision ou une configuration, conserver le fichier, la révision, le `--command-id` et l’`--authority-generation` d’origine. La saisie interactive reste en développement.
 
+## Envoyer des octets à un terminal
+
+À partir du résultat observé de l’acquisition, utiliser `terminal_id`, `process_run_uuid`, `lease_id`, `fence` et `control_revision`. La séquence de la prochaine entrée est `input_seq + 1`. Le bail doit être encore valide.
+
+```sh
+cargo run --locked -p unleash-cli -- --json process input \
+  --project-id "$PROJECT_ID" --terminal-id "$TERMINAL_ID" \
+  --process-run-uuid "$PROCESS_RUN_UUID" --lease-id "$LEASE_ID" --fence "$FENCE" \
+  --control-revision "$CONTROL_REVISION" --input-seq "$NEXT_INPUT_SEQ" \
+  --file terminal-input.bin
+```
+
+Le fichier contient de 1 à 65 536 octets. Utiliser `--file -` pour une entrée standard redirigée. Le reçu confirme l’acceptation de la demande. Relire le résultat d’acquisition pour vérifier que `input_seq` a avancé.
+
+Pour reprendre la même demande, utiliser les mêmes octets, le même contrôle et la même séquence avec le `--command-id` et l’`--authority-generation` de la demande initiale.
+
 ## Sauvegarder les données locales
 
 Avec le daemon en cours d’exécution, demander une sauvegarde manuelle.

@@ -11,12 +11,18 @@ struct TerminalCli<'a> {
 }
 
 impl TerminalCli<'_> {
-    fn invoke(&self, args: &[&str]) -> std::process::Output {
-        Command::new(self.binary)
+    fn command(&self, args: &[&str]) -> Command {
+        let mut command = Command::new(self.binary);
+        command
             .arg("--socket")
             .arg(&self.socket)
             .args(["--json", "--timeout-ms", "5000"])
-            .args(args)
+            .args(args);
+        command
+    }
+
+    fn invoke(&self, args: &[&str]) -> std::process::Output {
+        self.command(args)
             .output()
             .expect("run the prebuilt CLI against the owned fixture socket")
     }
@@ -406,4 +412,384 @@ async fn t_f011_cli_acquires_observes_and_replays_the_same_terminal() {
         std::fs::read_to_string(fixture.project_root.path().join("worker-starts")).unwrap(),
         "started\n"
     );
+}
+
+mod input_cli_scenarios {
+    use super::*;
+    use std::io::{BufRead, Write};
+
+    const WORKER: &str = "reattach_scenarios::cli_scenarios::input_cli_scenarios::cli_input_worker";
+    const INPUT: &[u8] = b"PAYLOAD-ONLY\0\xff\n";
+
+    fn input_args(cli: &TerminalCli<'_>, observed: &Value, file: &Path) -> Vec<String> {
+        let mut args = [
+            "process",
+            "input",
+            "--project-id",
+            &cli.project,
+            "--terminal-id",
+            &cli.terminal,
+            "--process-run-uuid",
+            observed
+                .get("process_run_uuid")
+                .and_then(Value::as_str)
+                .unwrap(),
+            "--lease-id",
+            observed.get("lease_id").and_then(Value::as_str).unwrap(),
+            "--authority-generation",
+            &cli.authority,
+            "--command-id",
+            "00000000-0000-4000-8000-0000f0114802",
+            "--file",
+            file.to_str().unwrap(),
+        ]
+        .map(str::to_owned)
+        .to_vec();
+        for (flag, field, increment) in [
+            ("--fence", "fence", 0),
+            ("--control-revision", "control_revision", 0),
+            ("--input-seq", "input_seq", 1),
+        ] {
+            args.push(flag.into());
+            args.push(
+                observed
+                    .get(field)
+                    .and_then(Value::as_u64)
+                    .unwrap()
+                    .checked_add(increment)
+                    .unwrap()
+                    .to_string(),
+            );
+        }
+        args
+    }
+
+    fn replace(args: &mut [String], flag: &str, value: &str) {
+        let index = args
+            .iter()
+            .position(|item| item == flag)
+            .unwrap()
+            .checked_add(1)
+            .unwrap();
+        value.clone_into(args.get_mut(index).unwrap());
+    }
+
+    fn invoke(cli: &TerminalCli<'_>, args: &[String]) -> std::process::Output {
+        cli.invoke(&args.iter().map(String::as_str).collect::<Vec<_>>())
+    }
+
+    fn invoke_stdin(cli: &TerminalCli<'_>, args: &[String]) -> std::process::Output {
+        let mut child = cli
+            .command(&args.iter().map(String::as_str).collect::<Vec<_>>())
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut pipe = child.stdin.take().unwrap();
+        pipe.write_all(INPUT).unwrap();
+        drop(pipe); // EOF completes the bounded binary read before waiting.
+        child.wait_with_output().unwrap()
+    }
+
+    fn assert_exact_replays(cli: &TerminalCli<'_>, args: &[String], receipt: &Value) {
+        for replay_index in 0..3 {
+            let replay = if replay_index == 1 {
+                let mut stdin_args = args.to_vec();
+                replace(&mut stdin_args, "--file", "-");
+                invoke_stdin(cli, &stdin_args)
+            } else {
+                invoke(cli, args)
+            };
+            assert!(replay.status.success());
+            assert_eq!(
+                &serde_json::from_slice::<Value>(&replay.stdout).unwrap(),
+                receipt
+            );
+        }
+    }
+
+    fn input_counts(fixture: &LiveFixture) -> (i64, i64, i64) {
+        let conn = rusqlite::Connection::open_with_flags(
+            fixture.data.path().join("unleash-authority.db"),
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .unwrap();
+        conn.query_row("SELECT (SELECT COUNT(*) FROM terminal_input_intents),(SELECT COUNT(*) FROM actions WHERE action_type='terminal.send_input'),(SELECT COUNT(*) FROM action_dispatches d JOIN actions a ON a.action_id=d.action_id WHERE a.action_type='terminal.send_input')", [], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?))).unwrap()
+    }
+
+    fn assert_local_bounds(cli: &TerminalCli<'_>, fixture: &LiveFixture, observed: &Value) {
+        for (name, bytes) in [
+            ("empty-input", Vec::new()),
+            ("oversized-input", vec![0; 65_537]),
+        ] {
+            let file = fixture.project_root.path().join(name);
+            std::fs::write(&file, bytes).unwrap();
+            let output = invoke(cli, &input_args(cli, observed, &file));
+            assert!(!output.status.success());
+            let error: Value = serde_json::from_slice(&output.stderr).unwrap();
+            assert!(
+                error
+                    .get("error")
+                    .and_then(Value::as_str)
+                    .unwrap()
+                    .contains("1..=65536"),
+                "bounded local refusal: {error}"
+            );
+            assert!(
+                error.get("code").is_none(),
+                "local bounds precede a remote mutation"
+            );
+            assert_eq!(input_counts(fixture), (0, 0, 0));
+        }
+    }
+
+    fn assert_remote_fence_and_sequence(
+        cli: &TerminalCli<'_>,
+        fixture: &LiveFixture,
+        args: &[String],
+    ) {
+        for (flag, identity) in [("--fence", 0xf011_48f1), ("--input-seq", 0xf011_48f2)] {
+            let mut invalid = args.to_vec();
+            let current = args
+                .iter()
+                .position(|item| item == flag)
+                .unwrap()
+                .checked_add(1)
+                .unwrap();
+            let different = args
+                .get(current)
+                .unwrap()
+                .parse::<u64>()
+                .unwrap()
+                .checked_add(1)
+                .unwrap();
+            replace(&mut invalid, flag, &different.to_string());
+            replace(
+                &mut invalid,
+                "--command-id",
+                &Uuid::from_u128(identity).to_string(),
+            );
+            let output = invoke(cli, &invalid);
+            assert!(!output.status.success());
+            let error: Value = serde_json::from_slice(&output.stderr).unwrap();
+            assert_eq!(input_counts(fixture), (0, 0, 0));
+            assert!(
+                !fixture
+                    .project_root
+                    .path()
+                    .join("cli-input-effects")
+                    .exists()
+            );
+            let expected = if flag == "--fence" {
+                "StaleFence"
+            } else {
+                "InvalidArgument"
+            };
+            assert_eq!(
+                error.get("code"),
+                Some(&json!(expected)),
+                "writer refuses the mismatching {flag}: {error}"
+            );
+            if flag == "--fence" {
+                assert_eq!(error.get("reason_code"), Some(&json!("STALE_EPOCH")));
+                assert_eq!(
+                    error.get("retry_class"),
+                    Some(&json!("after_reconciliation"))
+                );
+            }
+        }
+    }
+
+    async fn wait_known(fixture: &LiveFixture) {
+        let deadline = Instant::now() + DEADLINE;
+        loop {
+            let conn = rusqlite::Connection::open_with_flags(
+                fixture.data.path().join("unleash-authority.db"),
+                rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+            )
+            .unwrap();
+            let known: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM terminal_input_intents i JOIN actions a ON a.action_id=i.action_id WHERE i.state='observed' AND a.state='observed_success' AND i.observation_object_hash IS NOT NULL)",[],|row|row.get(0)).unwrap();
+            let effect = match std::fs::read(fixture.project_root.path().join("cli-input-effects"))
+            {
+                Ok(bytes) => bytes,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+                Err(error) => panic!("owned effect file: {error}"),
+            };
+            if known && effect == b"effect\n" {
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "native receipt and fsynced effect must both be observed"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
+    async fn fence_old_controller(fixture: &mut LiveFixture, cli: &TerminalCli<'_>, known: &Value) {
+        let before = fixture.host_manifest();
+        // Kill only the owned daemon after the explicit replays. Its old socket
+        // can no longer schedule a later input. The existing transfer gate
+        // serializes native writes and invalidates all old epoch/fence headers.
+        fixture.restart_daemon_only().await;
+        let command = Uuid::from_u128(0xf011_4804).to_string();
+        let revision = known
+            .get("control_revision")
+            .and_then(Value::as_u64)
+            .unwrap();
+        let process_run = known
+            .get("process_run_uuid")
+            .and_then(Value::as_str)
+            .unwrap();
+        let accepted = cli.acquire(
+            "registered",
+            &command,
+            &[
+                "--process-run-uuid",
+                process_run,
+                "--control-revision",
+                &revision.to_string(),
+            ],
+        );
+        wait_for_control(fixture, &cli.terminal, revision.checked_add(1).unwrap()).await;
+        let transferred = cli.observe(&command, &accepted);
+        assert_eq!(
+            transferred.get("input_seq"),
+            Some(&json!(1)),
+            "fresh native summary after fencing the old controller"
+        );
+        assert_eq!(
+            transferred.get("process_run_uuid"),
+            Some(&json!(process_run))
+        );
+        let after = fixture.host_manifest();
+        assert_eq!(after.host_id, before.host_id);
+        assert_eq!(after.pid, before.pid);
+        assert!(after.highest_fence > before.highest_fence);
+    }
+
+    #[tokio::test]
+    #[ignore = "explicit UNLEASH_TEST_CLI_BIN plus daemon/host built from this tree"]
+    async fn t_f011_cli_input_uses_observed_control_and_replays_one_binary_effect() {
+        let binary = PathBuf::from(std::env::var_os("UNLEASH_TEST_CLI_BIN").unwrap());
+        assert!(binary.is_absolute() && binary.is_file());
+        let mut fixture = LiveFixture::empty().await;
+        let cli = TerminalCli {
+            binary: &binary,
+            socket: fixture.rendezvous.path().join("daemon.sock"),
+            project: fixture.project.to_string(),
+            authority: fixture.authority.to_string(),
+            terminal: Uuid::from_u128(0xf011_4801).to_string(),
+        };
+        configure_project(&cli, &fixture);
+        configure_terminal_and_mission(&cli, &fixture);
+        let program = std::env::current_exe().unwrap();
+        let command = Uuid::from_u128(0xf011_4803).to_string();
+        let accepted = cli.acquire(
+            "new",
+            &command,
+            &[
+                "--mission-id",
+                &fixture.mission.to_string(),
+                "--purpose-key",
+                "cli-binary-input",
+                "--program",
+                program.to_str().unwrap(),
+                "--environment-profile-id",
+                "terminal-test",
+                "--",
+                "--ignored",
+                "--exact",
+                WORKER,
+                "--nocapture",
+            ],
+        );
+        wait_for_control(&mut fixture, &cli.terminal, 0).await;
+        wait_for_log_marker(&cli).await;
+        let observed = cli.observe(&command, &accepted);
+        assert_eq!(observed.get("input_seq"), Some(&json!(0)));
+        let help = cli.invoke(&["process", "input", "--help"]);
+        assert!(
+            help.status.success(),
+            "real CLI process input is absent: {}",
+            String::from_utf8_lossy(&help.stderr)
+        );
+        assert_local_bounds(&cli, &fixture, &observed);
+        let file = fixture.project_root.path().join("input.bin");
+        std::fs::write(&file, INPUT).unwrap();
+        let args = input_args(&cli, &observed, &file);
+        assert_remote_fence_and_sequence(&cli, &fixture, &args);
+        let sent = invoke(&cli, &args);
+        assert!(
+            sent.status.success(),
+            "real CLI input: {}",
+            String::from_utf8_lossy(&sent.stderr)
+        );
+        let receipt: Value = serde_json::from_slice(&sent.stdout).unwrap();
+        assert_eq!(receipt.pointer("/receipt/state"), Some(&json!("accepted")));
+        assert_eq!(
+            receipt.pointer("/receipt/command_id"),
+            Some(&json!("00000000-0000-4000-8000-0000f0114802"))
+        );
+        assert!(!String::from_utf8_lossy(&sent.stdout).contains("PAYLOAD-ONLY"));
+        assert!(!String::from_utf8_lossy(&sent.stderr).contains("PAYLOAD-ONLY"));
+        wait_known(&fixture).await;
+        let known = cli.observe(&command, &accepted);
+        assert_eq!(known.get("input_seq"), Some(&json!(1)));
+        assert_eq!(known.get("lease_id"), observed.get("lease_id"));
+        assert_exact_replays(&cli, &args, &receipt);
+        fence_old_controller(&mut fixture, &cli, &known).await;
+        let replay = invoke(&cli, &args);
+        assert!(
+            replay.status.success(),
+            "the old exact command remains an inspection, not a new permission"
+        );
+        assert_eq!(
+            serde_json::from_slice::<Value>(&replay.stdout).unwrap(),
+            receipt
+        );
+        assert_eq!(input_counts(&fixture), (1, 1, 1));
+        assert_eq!(
+            std::fs::read(fixture.project_root.path().join("cli-input-effects")).unwrap(),
+            b"effect\n"
+        );
+        assert_eq!(
+            std::fs::read(fixture.project_root.path().join("worker-starts")).unwrap(),
+            b"started\n"
+        );
+    }
+
+    #[test]
+    #[ignore = "owned native PTY worker selected only by exact fixture argv"]
+    fn cli_input_worker() {
+        let mut starts = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open("worker-starts")
+            .unwrap();
+        starts.write_all(b"started\n").unwrap();
+        starts.sync_all().unwrap();
+        let mut output = std::io::stdout().lock();
+        writeln!(output, "live-terminal-ready").unwrap();
+        output.flush().unwrap();
+        drop(output);
+        let stdin = std::io::stdin();
+        let mut reader = stdin.lock();
+        let mut bytes = Vec::new();
+        loop {
+            bytes.clear();
+            if reader.read_until(b'\n', &mut bytes).unwrap() == 0 {
+                break;
+            }
+            assert_eq!(bytes, INPUT, "native child receives the exact binary input");
+            let mut effect = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open("cli-input-effects")
+                .unwrap();
+            effect.write_all(b"effect\n").unwrap();
+            effect.sync_all().unwrap();
+        }
+    }
 }
