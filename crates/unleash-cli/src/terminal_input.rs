@@ -56,14 +56,9 @@ fn envelope(
     current: AuthorityGeneration,
     bytes: Vec<u8>,
 ) -> Result<CommandEnvelope, CliError> {
-    if [
-        args.project_id,
-        args.terminal_id,
-        args.process_run_uuid,
-        args.lease_id,
-    ]
-    .iter()
-    .any(uuid::Uuid::is_nil)
+    if [args.terminal_id, args.process_run_uuid, args.lease_id]
+        .iter()
+        .any(uuid::Uuid::is_nil)
         || args.command_id.is_some_and(|id| id.is_nil())
         || args.authority_generation.is_some_and(|id| id.is_nil())
     {
