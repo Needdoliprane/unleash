@@ -501,7 +501,7 @@ fn connect_intent(
         "action_id":c.action_id,
         "subject":{"kind":"control_plane","principal_id":c.principal_id,"cause_ref":format!("receipt:{}",c.receipt_id),"invocation_id":null,"attempt_id":null,"replay_worker_id":null,"agent_id":null,"mission_id":null,"role_version":null},
         "project_id":c.project_id,"verb":"model.provider.connect",
-        "resource_refs":[{"kind":"network_endpoint","host":"127.0.0.1","port":1234,"is_private_or_loopback":true}],
+        "resource_refs":[{"kind":"network_endpoint","value":{"host":"127.0.0.1","port":1234,"is_private_or_loopback":true}}],
         "payload_digest":c.request_digest,"reconcile_strategy":"observe_then_decide","effects_class":"network_egress",
         "scope_revision":c.scope_revision,"policy_revision":c.policy_revision,"lineage_fence":fence,"action_deadline":c.deadline,
         "isolation_requirements":{"mode":"standard","require_process_confinement":false,"required_capabilities":[]},

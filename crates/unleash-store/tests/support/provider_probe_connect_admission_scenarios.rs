@@ -234,8 +234,8 @@ fn ready_for_profile(
     intent.manifest.insert(
         "resource_refs".into(),
         json!([{
-            "kind":"network_endpoint", "host":destination.host(), "port":destination.port(),
-            "is_private_or_loopback":destination.is_loopback_literal(),
+            "kind":"network_endpoint", "value":{"host":destination.host(), "port":destination.port(),
+            "is_private_or_loopback":destination.is_loopback_literal()},
         }]),
     );
     intent.intent_digest = canonical_sha256(&intent.manifest).unwrap();
@@ -499,7 +499,7 @@ fn t_f012_013_admission_destination_is_exact_not_just_any_loopback() {
     let before = counts(&store);
     for (host, port) in [("127.0.0.2", 1234), ("127.0.0.1", 1235)] {
         let mut intent = ready.intent.clone();
-        intent.manifest.insert("resource_refs".into(), json!([{"kind":"network_endpoint","host":host,"port":port,"is_private_or_loopback":true}]));
+        intent.manifest.insert("resource_refs".into(), json!([{"kind":"network_endpoint","value":{"host":host,"port":port,"is_private_or_loopback":true}}]));
         intent.intent_digest = canonical_sha256(&intent.manifest).unwrap();
         assert!(matches!(
             store.commit_provider_probe_connect_phase(
@@ -931,5 +931,41 @@ fn t_f012_013_admission_unresolved_server_capacity_is_shared_across_profiles() {
     assert_eq!(after.source_revision, snapshot.source_revision);
     assert_eq!(after.fairness, snapshot.fairness);
     assert!(matches!(listener.accept(),Err(error) if error.kind()==std::io::ErrorKind::WouldBlock));
+    assert_no_model(&store);
+}
+
+#[test]
+fn t_f012_013_admission_rejects_flattened_resource_even_with_fresh_claim() {
+    let (store, _directory, mandate, pool) = fixture(Arc::new(NoopCutpointObserver));
+    let ready = ready(&store, mandate, 0xf012_0410);
+    let mut forged = ready.intent.clone();
+    forged.manifest.insert("resource_refs".into(),json!([{"kind":"network_endpoint","host":"127.0.0.1","port":1234,"is_private_or_loopback":true}]));
+    forged.intent_digest = canonical_sha256(&forged.manifest).unwrap();
+    let before = counts(&store);
+    let result = store.commit_provider_probe_connect_phase(
+        &ready.claim,
+        phase(&ready, 0, BrokerPhase::Authorizing { intent: forged }),
+    );
+    assert!(
+        matches!(result, Err(StoreError::InvalidArgument { .. })),
+        "only the broker's closed kind/value resource is canonical: {result:?}"
+    );
+    assert_eq!(counts(&store), before);
+    assert_eq!(held_capacity(&store), 0);
+    // Refusal did not consume the original owner; the actual encoded union works.
+    authorizing(&store, &ready);
+    assert!(
+        store
+            .inspect_broker_action(ready.intent.action_id)
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        store
+            .execution_admission_snapshot(pool)
+            .unwrap()
+            .active
+            .is_empty()
+    );
     assert_no_model(&store);
 }

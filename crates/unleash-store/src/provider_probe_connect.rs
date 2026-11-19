@@ -514,8 +514,8 @@ fn validate_bound_destination(
             message: "fence de contrôle connect différente du contexte".to_owned(),
         });
     }
-    let resources = serde_json::json!([{"kind":"network_endpoint","host":destination.host(),
-        "port":destination.port(),"is_private_or_loopback":destination.is_loopback_literal()}]);
+    let resources = serde_json::json!([{"kind":"network_endpoint","value":{"host":destination.host(),
+        "port":destination.port(),"is_private_or_loopback":destination.is_loopback_literal()}}]);
     if intent.action_id != context.action_id
         || intent.origin
             != (ActionOrigin::ControlPlane {
