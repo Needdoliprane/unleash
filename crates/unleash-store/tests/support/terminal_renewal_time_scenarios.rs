@@ -253,3 +253,56 @@ fn t_f011_renewal_observation_rechecks_expiry_after_barrier() {
 fn t_f011_renewal_observation_rechecks_uncertainty_after_barrier() {
     check(ClockStep::Uncertain);
 }
+
+#[test]
+fn t_f011_renewal_generic_success_without_typed_proof_is_refused() {
+    let (store, clock, _fault, allocation, _root) = observed(false);
+    store
+        .commit_command(registered_request(&store, &allocation, CONTROL))
+        .unwrap();
+    let renewal = store
+        .inspect_terminal_renewal_request(
+            &allocation.context.actor_id,
+            unleash_domain::CommandId::from_u128(CONTROL),
+        )
+        .unwrap()
+        .value
+        .unwrap();
+    let (_, mut phase) = dispatch_authorizing(&store, authorizing(&renewal));
+    let BrokerPhase::Observation { receipt, .. } = &phase.phase else {
+        unreachable!()
+    };
+    let resolved = store
+        .resolve_terminal_renewal(ResolveTerminalRenewalRequest {
+            action_id: renewal.context.action_id,
+            dispatch_id: receipt.dispatch_id,
+            context_digest: renewal.context_digest,
+            expected_revision: renewal.revision,
+            caller: CallerAuthority {
+                actor_id: renewal.context.actor_id.clone(),
+                role: CallerRole::HumanOperator,
+            },
+        })
+        .unwrap();
+    // A published object and a claimed success do not replace the typed
+    // producer port used by the daemon journal's observation slot.
+    publish(&store, &renewal, &mut phase);
+    clock.set_utc_ms(10000);
+    assert!(matches!(store.commit_broker_phase(phase),
+        Err(StoreError::InvalidArgument {message,..}) if message=="terminal renewal observation producer not qualified"));
+    let after = store
+        .inspect_terminal_renewal_request(
+            &allocation.context.actor_id,
+            unleash_domain::CommandId::from_u128(CONTROL),
+        )
+        .unwrap()
+        .value
+        .unwrap();
+    assert_eq!(after, resolved);
+    store.read_snapshot(|conn,_| {
+        let expiry:i64=conn.query_row("SELECT expires_at_ms FROM resource_leases WHERE lease_id=?1",[renewal.context.lease_id.to_string()],|row|row.get(0))?;
+        assert_eq!(expiry,renewal.context.previous_expires_at_ms.as_i64());
+        assert!(!conn.prepare("SELECT 1 FROM broker_phase_records WHERE action_id=?1 AND phase_key LIKE 'observation:%'")?.exists([renewal.context.action_id.to_string()])?);
+        Ok(())
+    }).unwrap();
+}
