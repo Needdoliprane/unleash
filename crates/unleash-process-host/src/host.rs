@@ -638,7 +638,7 @@ fn handle_connection(mut stream: UnixStream, shared: &Arc<ServerShared>) {
             let response = {
                 let _operation = lock_operation(shared);
                 let response = match process_control_transfer(&request, shared) {
-                    Ok(ack) => crate::ControlTransferResponse::Ack { ack },
+                    Ok(ack) => crate::ControlTransferResponse::Ack { ack: Box::new(ack) },
                     Err(error) => crate::ControlTransferResponse::Refused {
                         error: error.to_ipc_error(Some(request.header.command_id)),
                     },
@@ -720,37 +720,10 @@ fn lock_operation(shared: &ServerShared) -> std::sync::MutexGuard<'_, ()> {
     }
 }
 
-fn process_control_transfer(
+fn validate_new_transfer(
     request: &crate::ControlTransferRequest,
     shared: &ServerShared,
-) -> Result<crate::ControlTransferAck, ProcessHostError> {
-    verify_secret(shared, &request.current_secret)?;
-    {
-        let previous = shared
-            .last_transfer
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Some(previous) = previous.as_ref() {
-            if previous.header == request.header
-                && previous.dispatch_id == request.dispatch_id
-                && previous.initial_context_digest == request.initial_context_digest
-            {
-                // After an ACK is lost only the currently active capability
-                // can inspect the same transfer; no second rotation occurs.
-                verify_secret(shared, &request.next_secret)?;
-                return previous.ack.clone().ok_or_else(|| {
-                    ProcessHostError::LaunchOutcomeUnknown {
-                        reason: "control transfer requires inspection; no repeat permit".into(),
-                    }
-                });
-            }
-            if previous.ack.is_none() {
-                return Err(ProcessHostError::LaunchOutcomeUnknown {
-                    reason: "a control transfer is unresolved".into(),
-                });
-            }
-        }
-    }
+) -> Result<(), ProcessHostError> {
     if verify_secret(shared, &request.next_secret).is_ok() {
         return Err(ProcessHostError::InvalidArgument {
             reason: "control transfer requires a different capability".into(),
@@ -785,6 +758,41 @@ fn process_control_transfer(
         });
     }
     candidate.check_recovery_handshake(&request.header, true)?;
+    Ok(())
+}
+
+fn process_control_transfer(
+    request: &crate::ControlTransferRequest,
+    shared: &ServerShared,
+) -> Result<crate::ControlTransferAck, ProcessHostError> {
+    verify_secret(shared, &request.current_secret)?;
+    {
+        let previous = shared
+            .last_transfer
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(previous) = previous.as_ref() {
+            if previous.header == request.header
+                && previous.dispatch_id == request.dispatch_id
+                && previous.initial_context_digest == request.initial_context_digest
+            {
+                // After an ACK is lost only the currently active capability
+                // can inspect the same transfer; no second rotation occurs.
+                verify_secret(shared, &request.next_secret)?;
+                return previous.ack.clone().ok_or_else(|| {
+                    ProcessHostError::LaunchOutcomeUnknown {
+                        reason: "control transfer requires inspection; no repeat permit".into(),
+                    }
+                });
+            }
+            if previous.ack.is_none() {
+                return Err(ProcessHostError::LaunchOutcomeUnknown {
+                    reason: "a control transfer is unresolved".into(),
+                });
+            }
+        }
+    }
+    validate_new_transfer(request, shared)?;
     *shared
         .last_transfer
         .lock()

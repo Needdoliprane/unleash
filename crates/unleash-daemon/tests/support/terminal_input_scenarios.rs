@@ -54,7 +54,7 @@ async fn t_f011_005_acquisition_result_is_opt_in_exact_and_causal() {
     let expected = ledger_result(&fixture, command, &reference);
     assert_eq!(
         fixture.host_manifest().last_confirmed_input_seq,
-        expected["input_seq"].as_u64().unwrap(),
+        expected.get("input_seq").and_then(Value::as_u64).unwrap(),
         "input_seq is the last host-receipted durable input, not a fabricated next slot"
     );
     let query = result_query(&fixture, command, &reference, 0xf011_5102);
@@ -71,7 +71,7 @@ async fn t_f011_005_acquisition_result_is_opt_in_exact_and_causal() {
         .watermark
         .expect("qualified result carries its transaction watermark");
     let cause: unleash_protocol::EventCursor =
-        serde_json::from_value(expected["cursor"].clone()).unwrap();
+        serde_json::from_value(expected.get("cursor").unwrap().clone()).unwrap();
     assert_eq!(watermark.stream_id, cause.stream_id);
     assert!(watermark.sequence >= cause.sequence);
     assert_eq!(
@@ -177,6 +177,10 @@ async fn t_f011_005_acquisition_result_payload_is_closed_without_mutating_contro
 async fn t_f011_005_acquisition_result_tracks_observed_successor_not_the_former_receipt() {
     let mut fixture = LiveFixture::new(true).await;
     let original = fixture.start_terminal().await;
+    let terminal_id = original.get("terminal_id").expect("observed terminal id");
+    let process_run_uuid = original
+        .get("process_run_uuid")
+        .expect("observed process run id");
     let initial_command = unleash_domain::CommandId::from_u128(0xf011_4105);
     let initial = fixture
         .client
@@ -191,21 +195,22 @@ async fn t_f011_005_acquisition_result_tracks_observed_successor_not_the_former_
         Uuid::from_u128(0xf011_4003),
         0,
         "AcquireTerminal",
-        json!({"terminal_id":original["terminal_id"],"process_run_uuid":original["process_run_uuid"],"scope_revision":2,"control_mode":"exclusive"}),
+        json!({"terminal_id":terminal_id,"process_run_uuid":process_run_uuid,"scope_revision":2,"control_mode":"exclusive"}),
     );
     let accepted = fixture.client.send_command(&transfer).await.unwrap();
     let reference = accepted.result_ref.as_ref().unwrap();
     let deadline = Instant::now() + DEADLINE;
     loop {
         let snapshot = fixture.snapshot().await;
-        if snapshot["terminals"]["items"]
-            .as_array()
+        if snapshot
+            .pointer("/terminals/items")
+            .and_then(Value::as_array)
             .unwrap()
             .iter()
             .any(|item| {
-                item["terminal_id"] == original["terminal_id"]
-                    && item["control_revision"] == 1
-                    && item["lease_state"] == "held"
+                item.get("terminal_id") == Some(terminal_id)
+                    && item.get("control_revision").and_then(Value::as_u64) == Some(1)
+                    && item.get("lease_state").and_then(Value::as_str) == Some("held")
             })
         {
             break;
@@ -220,8 +225,17 @@ async fn t_f011_005_acquisition_result_tracks_observed_successor_not_the_former_
     let query = result_query(&fixture, transfer.command_id, reference, 0xf011_5803);
     let result = fixture.client.query(&query).await.unwrap();
     assert_eq!(result.result, expected);
-    assert_eq!(result.result["reused"], true);
-    assert_eq!(result.result["control_revision"], 1);
+    assert_eq!(
+        result.result.get("reused").and_then(Value::as_bool),
+        Some(true)
+    );
+    assert_eq!(
+        result
+            .result
+            .get("control_revision")
+            .and_then(Value::as_u64),
+        Some(1)
+    );
     let old = result_query(
         &fixture,
         initial_command,
@@ -242,7 +256,7 @@ async fn t_f011_005_acquisition_result_tracks_observed_successor_not_the_former_
 async fn short_lease_fixture() -> LiveFixture {
     let mut fixture = LiveFixture::new(false).await;
     let mut runtime = terminal_configuration();
-    runtime["lease_ttl_ms"] = json!(5000);
+    *runtime.get_mut("lease_ttl_ms").expect("fixture lease TTL") = json!(5000);
     let mut settings = command(
         fixture.authority,
         0xf011_4104,
@@ -284,8 +298,10 @@ async fn short_lease_fixture() -> LiveFixture {
             })
             .await;
         if response.as_ref().is_ok_and(|reply| {
-            reply.result["text"]
-                .as_str()
+            reply
+                .result
+                .get("text")
+                .and_then(Value::as_str)
                 .is_some_and(|text| text.contains("live-terminal-ready"))
         }) {
             return fixture;
@@ -325,7 +341,10 @@ async fn t_f011_005_acquisition_result_does_not_release_expired_lease_assertions
             .result,
         expected
     );
-    let expiry = expected["lease_expires_at"].as_i64().unwrap();
+    let expiry = expected
+        .get("lease_expires_at")
+        .and_then(Value::as_i64)
+        .unwrap();
     let now = i64::try_from(
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)

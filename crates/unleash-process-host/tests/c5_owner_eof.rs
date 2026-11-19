@@ -4,8 +4,6 @@
 
 #![expect(
     clippy::unwrap_used,
-    clippy::expect_used,
-    clippy::panic,
     reason = "Assertions in exclusively owned local subprocess fixtures"
 )]
 

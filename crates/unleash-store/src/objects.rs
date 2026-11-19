@@ -106,6 +106,19 @@ pub struct PublishObjectReferenceRequest {
     pub source_field: String,
 }
 
+/// Poignée de référence exacte rendue au producteur interne après publication.
+/// Les champs privés empêchent de fabriquer une poignée depuis un payload client.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PublishedObjectReference {
+    reference_id: String,
+    object_hash: Sha256Digest,
+    object_generation: i64,
+    owner_kind: String,
+    owner_id: String,
+    source_field: String,
+    authority_generation: AuthorityGeneration,
+}
+
 /// Enregistrement lu depuis `object_records`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ObjectRecordView {
@@ -478,13 +491,55 @@ pub(crate) fn tx_publish_object_reference(
 
     tx.execute(
         "UPDATE object_pins SET state = 'released', released_at_ms = ?1
-         WHERE pin_id = ?2
-            OR (pin_kind = 'preparation' AND object_hash = ?3 AND object_generation = ?4 AND state IN ('held', 'reconciling'))",
+         WHERE pin_id = ?2 AND object_hash = ?3 AND object_generation = ?4
+           AND state IN ('held', 'reconciling')",
         rusqlite::params![now_ms.as_i64(), req.pin_id, hash_str, req.object_generation],
     )
     .map_err(StoreError::from_rusqlite)?;
 
     Ok(())
+}
+
+pub(crate) fn tx_publish_owned_reference(
+    tx: &Transaction<'_>,
+    id_generator: &dyn unleash_domain::IdGeneratorPort,
+    now_ms: TimestampMs,
+    req: &PublishObjectReferenceRequest,
+    authority: AuthorityGeneration,
+) -> Result<PublishedObjectReference, StoreError> {
+    let current: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM object_pins WHERE pin_id=?1 AND authority_generation=?2 AND object_hash=?3 AND object_generation=?4 AND state IN ('held','reconciling'))",rusqlite::params![req.pin_id,authority.to_string(),req.object_hash.to_string(),req.object_generation],|row|row.get(0))?;
+    if !current {
+        return Err(StoreError::InvariantViolation(
+            "pin du producteur absent de la lignée active".to_owned(),
+        ));
+    }
+    tx_publish_object_reference(tx, id_generator, now_ms, req)?;
+    let reference_id = tx.query_row("SELECT reference_id FROM object_references WHERE object_hash=?1 AND owner_kind=?2 AND owner_id=?3 AND source_field=?4 AND state='live'",rusqlite::params![req.object_hash.to_string(),req.owner_kind,req.owner_id,req.source_field],|row|row.get(0))?;
+    Ok(PublishedObjectReference {
+        reference_id,
+        object_hash: req.object_hash,
+        object_generation: req.object_generation,
+        owner_kind: req.owner_kind.clone(),
+        owner_id: req.owner_id.clone(),
+        source_field: req.source_field.clone(),
+        authority_generation: authority,
+    })
+}
+
+pub(crate) fn tx_retire_owned_reference(
+    tx: &Transaction<'_>,
+    handle: &PublishedObjectReference,
+    authority: AuthorityGeneration,
+    reason: &str,
+) -> Result<usize, StoreError> {
+    if authority != handle.authority_generation {
+        return Err(StoreError::StaleAuthorityGeneration {
+            expected: authority,
+            actual: handle.authority_generation,
+            command_id: None,
+        });
+    }
+    tx.execute("UPDATE object_references SET state='tombstone',tombstone_reason=?1 WHERE reference_id=?2 AND object_hash=?3 AND owner_kind=?4 AND owner_id=?5 AND source_field=?6 AND state='live' AND EXISTS(SELECT 1 FROM object_records o WHERE o.object_hash=object_references.object_hash AND o.object_generation=?7)",rusqlite::params![reason,handle.reference_id,handle.object_hash.to_string(),handle.owner_kind,handle.owner_id,handle.source_field,handle.object_generation]).map_err(StoreError::from_rusqlite)
 }
 
 /// Acquiert un pin de lecture sur un objet `live`.

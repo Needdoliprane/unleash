@@ -494,6 +494,14 @@ async fn dispatch_query(
         "GetCommandReceipt" => query_command_receipt(state, session, query).await,
         "GetBackupManifest" => query_backup_manifest(state, session, query).await,
         "ReadTerminalLog" => crate::terminal_service::read_log(state, session, query).await,
+        "GetProviderProfile" => {
+            crate::provider_profile_validation_service::query(
+                Arc::clone(&state.store),
+                session.clone(),
+                query,
+            )
+            .await
+        }
         "ListProjects" | "GetProject" | "ReadSettings" | "ReadPolicySummary"
         | "ReadGuardHealth" | "InspectRecovery" => query_m1_projection(state, session, query).await,
         other => Err(IpcError::new(
@@ -1044,6 +1052,13 @@ fn validate_command_mode(mode: DaemonMode, cmd: &CommandEnvelope) -> Result<(), 
     Ok(())
 }
 
+fn is_provider_profile_command(command: &CommandEnvelope) -> bool {
+    matches!(
+        command.command_type.as_str(),
+        "SetProviderProfile" | "TestProviderProfile"
+    )
+}
+
 /// Retourne `true` si le hook `PostCommitAction::DropConnection` demande de couper la connexion sans réponse.
 #[expect(
     clippy::too_many_lines,
@@ -1080,67 +1095,103 @@ async fn handle_command_frame(
         return false;
     };
 
-    let mut prepared = match prepare_command_request(state, session, cmd.clone()).await {
-        Ok(p) => p,
-        Err(ipc) => {
-            let _ = write_json_frame_timeout(stream, &ipc, RESPONSE_WRITE_TIMEOUT).await;
-            return false;
-        }
-    };
-
-    if matches!(
-        prepared.req.mutation,
-        CommandMutation::CreateMission { .. }
-            | CommandMutation::RequestBackup { .. }
-            | CommandMutation::PrepareTerminalAllocation { .. }
-            | CommandMutation::PrepareTerminalControl { .. }
-    ) && let Err(ipc) = ensure_principal_registered(&state.store, session).await
-    {
-        let _ = write_json_frame_timeout(stream, &ipc, RESPONSE_WRITE_TIMEOUT).await;
-        return false;
-    }
-
-    let num_events = prepared.req.events.len();
-    let store_ref = Arc::clone(&state.store);
-    let req_to_commit = prepared.req;
-    let outcome =
-        match tokio::task::spawn_blocking(move || store_ref.commit_command(req_to_commit)).await {
-            Ok(Ok(o)) => o,
-            Ok(Err(err)) => {
-                let mut ipc = store_error_to_ipc_error(&err, Some(cmd.command_id));
-                if matches!(cmd.command_type.as_str(), "PurgeHistory" | "RequestBackup")
-                    && matches!(
-                        err,
-                        StoreError::StorageBusy(_)
-                            | StoreError::StorageFull(_)
-                            | StoreError::StorageUnavailable(_)
-                            | StoreError::StorageCorrupt(_)
-                            | StoreError::Io(_)
-                            | StoreError::CutpointInjected { .. }
-                    )
-                {
-                    // Le Store peut avoir committé avant une erreur de finalisation physique.
-                    // La recherche ci-dessous ne change pas la réponse en succès.
-                    publish_existing_receipt_cursor(state, session, cmd.command_id).await;
-                    if cmd.command_type == "RequestBackup" {
-                        reconcile_accepted_backup(state, session, &cmd).await;
-                    }
-                    ipc.retry_class = RetryClass::AfterReconciliation;
-                    ipc.message = String::from(
-                        "Issue de commande indéterminée ; inspecter le reçu et la récupération",
-                    );
+    let (outcome, num_events, mut stop_reason, mut stop_drain_timeout) =
+        if is_provider_profile_command(&cmd) {
+            let committed = if cmd.command_type == "SetProviderProfile" {
+                crate::provider_profile_service::commit(
+                    Arc::clone(&state.store),
+                    session.clone(),
+                    cmd.clone(),
+                )
+                .await
+            } else {
+                crate::provider_profile_validation_service::commit(
+                    Arc::clone(&state.store),
+                    session.clone(),
+                    cmd.clone(),
+                )
+                .await
+            };
+            let outcome = match committed {
+                Ok(outcome) => outcome,
+                Err(error) => {
+                    let _ = write_json_frame_timeout(stream, &error, RESPONSE_WRITE_TIMEOUT).await;
+                    return false;
                 }
+            };
+            (outcome, 1, None, None)
+        } else {
+            let mut prepared = match prepare_command_request(state, session, cmd.clone()).await {
+                Ok(p) => p,
+                Err(ipc) => {
+                    let _ = write_json_frame_timeout(stream, &ipc, RESPONSE_WRITE_TIMEOUT).await;
+                    return false;
+                }
+            };
+
+            if matches!(
+                prepared.req.mutation,
+                CommandMutation::CreateMission { .. }
+                    | CommandMutation::RequestBackup { .. }
+                    | CommandMutation::PrepareTerminalAllocation { .. }
+                    | CommandMutation::PrepareTerminalControl { .. }
+            ) && let Err(ipc) = ensure_principal_registered(&state.store, session).await
+            {
                 let _ = write_json_frame_timeout(stream, &ipc, RESPONSE_WRITE_TIMEOUT).await;
                 return false;
             }
-            Err(join_err) => {
-                let ipc = internal_ipc_error(
-                    &format!("Join error commit_command: {join_err}"),
-                    Some(cmd.command_id),
-                );
-                let _ = write_json_frame_timeout(stream, &ipc, RESPONSE_WRITE_TIMEOUT).await;
-                return false;
-            }
+
+            let num_events = prepared.req.events.len();
+            let store_ref = Arc::clone(&state.store);
+            let req_to_commit = prepared.req;
+            let outcome = match tokio::task::spawn_blocking(move || {
+                store_ref.commit_command(req_to_commit)
+            })
+            .await
+            {
+                Ok(Ok(o)) => o,
+                Ok(Err(err)) => {
+                    let mut ipc = store_error_to_ipc_error(&err, Some(cmd.command_id));
+                    if matches!(cmd.command_type.as_str(), "PurgeHistory" | "RequestBackup")
+                        && matches!(
+                            err,
+                            StoreError::StorageBusy(_)
+                                | StoreError::StorageFull(_)
+                                | StoreError::StorageUnavailable(_)
+                                | StoreError::StorageCorrupt(_)
+                                | StoreError::Io(_)
+                                | StoreError::CutpointInjected { .. }
+                        )
+                    {
+                        // Le Store peut avoir committé avant une erreur de finalisation physique.
+                        // La recherche ci-dessous ne change pas la réponse en succès.
+                        publish_existing_receipt_cursor(state, session, cmd.command_id).await;
+                        if cmd.command_type == "RequestBackup" {
+                            reconcile_accepted_backup(state, session, &cmd).await;
+                        }
+                        ipc.retry_class = RetryClass::AfterReconciliation;
+                        ipc.message = String::from(
+                            "Issue de commande indéterminée ; inspecter le reçu et la récupération",
+                        );
+                    }
+                    let _ = write_json_frame_timeout(stream, &ipc, RESPONSE_WRITE_TIMEOUT).await;
+                    return false;
+                }
+                Err(join_err) => {
+                    let ipc = internal_ipc_error(
+                        &format!("Join error commit_command: {join_err}"),
+                        Some(cmd.command_id),
+                    );
+                    let _ = write_json_frame_timeout(stream, &ipc, RESPONSE_WRITE_TIMEOUT).await;
+                    return false;
+                }
+            };
+            (
+                outcome,
+                num_events,
+                prepared.stop_reason.take(),
+                prepared.stop_drain_timeout.take(),
+            )
         };
 
     let (receipt, newly_committed) = match outcome {
@@ -1148,7 +1199,7 @@ async fn handle_command_frame(
         CommitOutcome::IdempotentReplay(r) => (r, false),
     };
 
-    if newly_committed {
+    if newly_committed || is_provider_profile_command(&cmd) {
         publish_committed_events_for_command(state, &receipt, num_events).await;
     }
 
@@ -1172,11 +1223,11 @@ async fn handle_command_frame(
         }
     }
 
-    if newly_committed && let Some(stop_reason) = prepared.stop_reason.take() {
+    if newly_committed && let Some(stop_reason) = stop_reason.take() {
         state.mark_draining();
         let _ = state.stop_tx.try_send(StopRequest {
             reason: stop_reason,
-            drain_timeout_override: prepared.stop_drain_timeout.take(),
+            drain_timeout_override: stop_drain_timeout.take(),
             ack: None,
         });
     }
@@ -1301,7 +1352,7 @@ struct PreparedCommand {
     stop_drain_timeout: Option<Duration>,
 }
 
-async fn ensure_principal_registered(
+pub(crate) async fn ensure_principal_registered(
     store: &Arc<UnleashStore>,
     session: &AuthenticatedSession,
 ) -> Result<(), IpcError> {
@@ -1569,6 +1620,8 @@ struct SetPolicyPayload {
     isolation_mode: unleash_store::PolicyIsolationMode,
     policy_version: String,
     reason: String,
+    #[serde(default)]
+    provider_probe_mandate: Option<unleash_store::ProviderProbeMandateChange>,
 }
 
 #[derive(Deserialize)]
@@ -1717,21 +1770,73 @@ fn prepare_guard_mutation(
     ))
 }
 
+fn invalid_admin_command(command_id: CommandId) -> IpcError {
+    IpcError::new(
+        ErrorCode::InvalidArgument,
+        None,
+        "Commande administrative invalide ou non prise en charge",
+        RetryClass::Never,
+    )
+    .with_command_id(command_id)
+}
+
+fn prepare_policy_mutation(
+    cmd: &CommandEnvelope,
+    raw: Value,
+    caller: unleash_store::CallerAuthority,
+    generation: unleash_domain::AuthorityGeneration,
+) -> Result<(AggregateKind, CommandMutation), IpcError> {
+    let invalid = || invalid_admin_command(cmd.command_id);
+    if raw
+        .get("provider_probe_mandate")
+        .is_some_and(Value::is_null)
+    {
+        return Err(invalid());
+    }
+    let payload: SetPolicyPayload = serde_json::from_value(raw).map_err(|_| invalid())?;
+    match payload.scope_kind {
+        unleash_store::PolicyScopeKind::Global
+            if payload.scope_id == "global"
+                && cmd.project_id.is_none()
+                && cmd.aggregate_id == generation.as_uuid() => {}
+        unleash_store::PolicyScopeKind::Project
+            if cmd.project_id.is_some_and(|id| {
+                id.to_string() == payload.scope_id && id.as_uuid() == cmd.aggregate_id
+            }) => {}
+        _ => return Err(invalid()),
+    }
+    if payload.reason.len() > 1024 || payload.policy_version.len() > 128 {
+        return Err(invalid());
+    }
+    let mutation = if let Some(mandate) = payload.provider_probe_mandate {
+        CommandMutation::SetPolicyWithProviderProbeMandate {
+            scope_kind: payload.scope_kind,
+            scope_id: payload.scope_id,
+            isolation_mode: payload.isolation_mode,
+            policy_version: payload.policy_version,
+            reason: payload.reason,
+            caller,
+            mandate,
+        }
+    } else {
+        CommandMutation::SetPolicy {
+            scope_kind: payload.scope_kind,
+            scope_id: payload.scope_id,
+            isolation_mode: payload.isolation_mode,
+            policy_version: payload.policy_version,
+            reason: payload.reason,
+            caller,
+        }
+    };
+    Ok((AggregateKind::SecurityPolicy, mutation))
+}
+
 fn prepare_admin_command(
     state: &DaemonRuntimeState,
     session: &AuthenticatedSession,
     cmd: CommandEnvelope,
 ) -> Result<PreparedCommand, IpcError> {
-    let cid = cmd.command_id;
-    let invalid = || {
-        IpcError::new(
-            ErrorCode::InvalidArgument,
-            None,
-            "Commande administrative invalide ou non prise en charge",
-            RetryClass::Never,
-        )
-        .with_command_id(cid)
-    };
+    let invalid = || invalid_admin_command(cmd.command_id);
     let caller = unleash_store::CallerAuthority {
         actor_id: session.actor_id.clone(),
         role: unleash_store::CallerRole::PolicyAdmin,
@@ -1762,34 +1867,7 @@ fn prepare_admin_command(
                 },
             )
         }
-        "SetPolicy" => {
-            let payload: SetPolicyPayload = serde_json::from_value(raw).map_err(|_| invalid())?;
-            match payload.scope_kind {
-                unleash_store::PolicyScopeKind::Global
-                    if payload.scope_id == "global"
-                        && cmd.project_id.is_none()
-                        && cmd.aggregate_id == state.authority_generation.as_uuid() => {}
-                unleash_store::PolicyScopeKind::Project
-                    if cmd.project_id.is_some_and(|id| {
-                        id.to_string() == payload.scope_id && id.as_uuid() == cmd.aggregate_id
-                    }) => {}
-                _ => return Err(invalid()),
-            }
-            if payload.reason.len() > 1024 || payload.policy_version.len() > 128 {
-                return Err(invalid());
-            }
-            (
-                AggregateKind::SecurityPolicy,
-                CommandMutation::SetPolicy {
-                    scope_kind: payload.scope_kind,
-                    scope_id: payload.scope_id,
-                    isolation_mode: payload.isolation_mode,
-                    policy_version: payload.policy_version,
-                    reason: payload.reason,
-                    caller,
-                },
-            )
-        }
+        "SetPolicy" => prepare_policy_mutation(&cmd, raw, caller, state.authority_generation)?,
         "ConfigureGuard" => prepare_guard_mutation(state, &cmd, raw, caller)?,
         _ => return Err(invalid()),
     };

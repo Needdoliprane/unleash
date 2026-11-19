@@ -1,12 +1,7 @@
 //! T-F011-003: real host and child, explicit environment; allocation digest is synthetic here.
-#![expect(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    clippy::panic,
-    reason = "Local owned host fixture assertions"
-)]
+#![expect(clippy::unwrap_used, reason = "Local owned host fixture assertions")]
 use std::collections::BTreeMap;
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
@@ -160,7 +155,7 @@ fn child_environment_fixture() {
     assert!(std::env::var_os("LANG").is_none());
     assert!(std::env::var_os("LC_ALL").is_none());
     assert_eq!(std::env::var("TERM").unwrap(), "vt100");
-    println!("EXPLICIT_ENV_OK");
+    writeln!(std::io::stdout().lock(), "EXPLICIT_ENV_OK").unwrap();
     let mut line = String::new();
     let _ = std::io::stdin().read_line(&mut line);
 }

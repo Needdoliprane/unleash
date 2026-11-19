@@ -148,7 +148,12 @@ fn read_result(
     }
     let binding = binding(conn, reference, receipt, actor, command, project)?;
     let base = &binding.allocation.context;
-    let metadata = terminal_allocations::read_terminal_metadata(conn, actor, Some(project), None)?;
+    let metadata = terminal_allocations::read_terminal_metadata(
+        conn,
+        actor,
+        Some(project),
+        None::<&std::collections::HashSet<ProjectId>>,
+    )?;
     if !metadata
         .items
         .iter()

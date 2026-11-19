@@ -149,12 +149,12 @@ fn t_f011_001_stale_cas_cannot_reserve_profile_version_and_history_survives_omis
             .is_err()
     );
     let mut newer = configuration("C.UTF-8");
-    newer.profiles[0].version = 2;
+    newer.profiles.first_mut().unwrap().version = 2;
     store
         .commit_command(request(&store, 14, 2, Some(newer)))
         .unwrap();
     let mut other = configuration("C");
-    other.profiles[0].profile_id = "another".into();
+    other.profiles.first_mut().unwrap().profile_id = "another".into();
     store
         .commit_command(request(&store, 15, 3, Some(other)))
         .unwrap();

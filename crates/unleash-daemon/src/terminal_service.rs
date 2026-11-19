@@ -116,7 +116,7 @@ pub(crate) async fn read_log(
     let ids = state.store.config().id_generator.clone();
     let run = record.context.process_run_uuid;
     let result = tokio::task::spawn_blocking(move || {
-        read_host_log(&root, ids.as_ref(), &record, binding, &raw)
+        read_host_log(&root, ids.as_ref(), &record, &binding, &raw)
     })
     .await
     .map_err(|_| hidden())?
@@ -165,7 +165,7 @@ fn read_host_log(
     root: &std::path::Path,
     ids: &dyn unleash_domain::IdGeneratorPort,
     record: &unleash_store::TerminalAllocationRecord,
-    binding: LogReadBinding,
+    binding: &LogReadBinding,
     raw: &LogQuery,
 ) -> Result<unleash_process_host::LogReadResult, TerminalError> {
     let c = &record.context;

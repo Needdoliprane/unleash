@@ -174,20 +174,30 @@ pub(crate) fn validate_identity(request: &CommitCommandRequest) -> Result<bool, 
         }
         return Ok(false);
     };
-    require_security_admin(caller, "SetProviderProfile")?;
     if caller.actor_id != request.actor_id
-        || request
-            .envelope
-            .actor_ref
-            .as_ref()
-            .is_some_and(|actor| actor != request.actor_id.as_str())
-        || request.envelope.command_type != "SetProviderProfile"
         || request.target_aggregate != AggregateKind::ProviderProfile
-        || request.envelope.aggregate_id.is_nil()
     {
         return Err(invalid("identité de configuration profil incohérente"));
     }
+    validate_envelope_identity(&request.envelope, caller)?;
     Ok(true)
+}
+
+pub(crate) fn validate_envelope_identity(
+    envelope: &unleash_protocol::CommandEnvelope,
+    caller: &crate::CallerAuthority,
+) -> Result<(), StoreError> {
+    require_security_admin(caller, "SetProviderProfile")?;
+    if envelope.command_type != "SetProviderProfile"
+        || envelope.aggregate_id.is_nil()
+        || envelope
+            .actor_ref
+            .as_ref()
+            .is_some_and(|actor| actor != caller.actor_id.as_str())
+    {
+        return Err(invalid("identité de configuration profil incohérente"));
+    }
+    Ok(())
 }
 
 /// La préparation n'est validée qu'après absence attestée de reçu dans le writer.
@@ -212,7 +222,10 @@ pub(crate) fn validate_new_command(request: &CommitCommandRequest) -> Result<(),
                 .as_u64()
                 .checked_add(1)
                 .ok_or_else(|| invalid("version maximale atteinte"))?
-        || wire != config.payload
+        || wire
+            .with_normalized_endpoint()
+            .map_err(|_| invalid("endpoint de profil invalide"))?
+            != config.payload
         || !request.events.is_empty()
         || !request.capacity_reservations.is_empty()
         || !request.budget_reservations.is_empty()
@@ -232,11 +245,23 @@ pub(crate) fn verify_published(
     let CommandMutation::SetProviderProfile { preparation, .. } = &request.mutation else {
         return Ok(());
     };
-    let bytes = store.read_verified_object_bytes(preparation.content_object_hash)?;
-    if bytes != unleash_protocol::canonicalize_to_vec(&preparation.configuration)? {
+    verify_configuration_objects(
+        store,
+        &preparation.configuration,
+        preparation.content_object_hash,
+    )
+}
+
+pub(crate) fn verify_configuration_objects(
+    store: &crate::UnleashStore,
+    configuration: &ProviderProfileConfiguration,
+    content_object_hash: Sha256Digest,
+) -> Result<(), StoreError> {
+    let bytes = store.read_verified_object_bytes(content_object_hash)?;
+    if bytes != unleash_protocol::canonicalize_to_vec(configuration)? {
         return Err(invalid("objet de configuration divergent"));
     }
-    if let Some(binding) = &preparation.configuration.catalog_binding {
+    if let Some(binding) = &configuration.catalog_binding {
         let bytes = store.read_verified_object_bytes(binding.content_object_hash)?;
         let catalog: serde_json::Value = serde_json::from_slice(&bytes)?;
         let ProviderPricing::Catalog {
@@ -245,7 +270,7 @@ pub(crate) fn verify_published(
             catalog_digest,
             entry_digest,
             ..
-        } = preparation.configuration.payload.pricing()
+        } = configuration.payload.pricing()
         else {
             return Err(invalid("provenance catalogue sans tarif catalogue"));
         };
@@ -266,7 +291,7 @@ pub(crate) fn verify_published(
     Ok(())
 }
 
-fn verify_secret(
+pub(crate) fn verify_secret(
     tx: &Transaction<'_>,
     config: &ProviderProfileConfiguration,
 ) -> Result<(), StoreError> {

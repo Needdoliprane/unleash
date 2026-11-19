@@ -10,10 +10,11 @@
   "excluded_prefixes": [
     "state/",
     "worktrees/",
-    "evidence/"
+    "evidence/",
+    "cache/"
   ],
   "hash_algorithm": "sha256",
-  "source_tree_digest": "3d7719c836d7ecc316a3a25c88163906fe5844518334651ee2806f55694c8094",
+  "source_tree_digest": "d85218c033a22c52214ee290b0de95a4e2106d443a7d7cd2aeb77bef65342efa",
   "files": [
     {
       "path": "INDEX.md",
@@ -311,8 +312,8 @@
     },
     {
       "path": "architecture/client-operation-catalog.md",
-      "sha256": "4c40a680fb8e39f466f3a74b3ddbfd85ba7b2e5801aa5fbcfb9de3d1a7e71d59",
-      "bytes": 38762,
+      "sha256": "eb3aa4ac913acd47fdac4f072fbff59b68169d9b22d95c1ffb66fe0ed6ff3954",
+      "bytes": 38971,
       "media_type": "text/markdown"
     },
     {
@@ -347,8 +348,8 @@
     },
     {
       "path": "architecture/ipc-and-apis.md",
-      "sha256": "92d1eb9ff65b9b19acb304cc595885c5678b4dc940f128c45c383da7b2ba7e95",
-      "bytes": 31348,
+      "sha256": "0c7badeb2a781198110070b07ad3379e2b480dda844f7d1ade5e1f9f23639b3e",
+      "bytes": 32018,
       "media_type": "text/markdown"
     },
     {
@@ -395,8 +396,8 @@
     },
     {
       "path": "architecture/sqlite-design.md",
-      "sha256": "60d5f2cc02d3e0b6e9f8c5d3671a9209acf73e046205ca8d5b332c4ed76e8cd0",
-      "bytes": 63016,
+      "sha256": "91389642556adda9774bd4d200ec050623fd0a704702e7dba2c504963c5c2a0e",
+      "bytes": 66158,
       "media_type": "text/markdown"
     },
     {
@@ -988,6 +989,12 @@
       "media_type": "application/json"
     },
     {
+      "path": "examples/ipc-set-policy-probe-mandate.json",
+      "sha256": "111b4390c53e3605f6b27cba6cd233ca0da124ac0a0c16b6aaed6daae2c11a7e",
+      "bytes": 1047,
+      "media_type": "application/json"
+    },
+    {
       "path": "examples/leader-role.json",
       "sha256": "4be15a1b1cb4dd4faa284e10b57aaed186cdd2e2f85ed00bdd1b7360bb8a9221",
       "bytes": 1916,
@@ -1487,8 +1494,8 @@
     },
     {
       "path": "features/F011-terminal-pool/interfaces.md",
-      "sha256": "e702ca44e6663b1a16445347cefb8114f694f116df77f3d77d4eda675a831392",
-      "bytes": 10774,
+      "sha256": "64ac63b0f6999700664d94f49dfcc9240ce7b79ee32abd7732583a8a8c3e0151",
+      "bytes": 13729,
       "media_type": "text/markdown"
     },
     {
@@ -1505,8 +1512,8 @@
     },
     {
       "path": "features/F011-terminal-pool/tests.md",
-      "sha256": "cf52b1508a5271ab51f6052b4f19de4843632d53b7f3e9c3bfaca5eeaca3902c",
-      "bytes": 3516,
+      "sha256": "50c5bdf053058b51de2b8744a35976e5dc08fcf3fa7a23a22e6bb5b4b2858000",
+      "bytes": 4066,
       "media_type": "text/markdown"
     },
     {
@@ -1529,8 +1536,8 @@
     },
     {
       "path": "features/F012-model-api-router/interfaces.md",
-      "sha256": "907a19d8bf4e3925222b04c2e114e155dd117857bb45a9c4984a3ca0423d8e0c",
-      "bytes": 24622,
+      "sha256": "1fd467d2698212871127404eb1e5c834f0ee59d866e1296f2c01d4d4075b0c32",
+      "bytes": 28503,
       "media_type": "text/markdown"
     },
     {
@@ -1547,8 +1554,8 @@
     },
     {
       "path": "features/F012-model-api-router/tests.md",
-      "sha256": "e2146ec63b46d3dcede90adff99933348ddf1784d091c2878ee138d3849522f6",
-      "bytes": 10577,
+      "sha256": "12e176e9d0479e503ede656c13a29db5594207a9c74344d74c4cb03860499b1a",
+      "bytes": 11673,
       "media_type": "text/markdown"
     },
     {
@@ -1739,8 +1746,8 @@
     },
     {
       "path": "features/F017-ai-guard-integration/interfaces.md",
-      "sha256": "1be80fece72d593150416056ea0697eab4ca945416d7d3f328e1ac1dbcbaac92",
-      "bytes": 6649,
+      "sha256": "4d48956eba03414eb9f84a1e8c3883b124894c2e34a36fc9d3f97edd5ebabb0b",
+      "bytes": 9812,
       "media_type": "text/markdown"
     },
     {
@@ -1757,8 +1764,8 @@
     },
     {
       "path": "features/F017-ai-guard-integration/tests.md",
-      "sha256": "832a90407256ec6c68059e8326c491f516cb23421e4c90c16e0186abf107b10d",
-      "bytes": 4309,
+      "sha256": "1749f87659d63b7dde7b2dfb0e69b7961a753d1bb36f488eb1d72024aac5434a",
+      "bytes": 4626,
       "media_type": "text/markdown"
     },
     {
@@ -1943,8 +1950,8 @@
     },
     {
       "path": "rules/design-dossier.md",
-      "sha256": "688c83fc7f3c187bc331d5ef3a35bfa0b765003cacc384054478bf349084857a",
-      "bytes": 2363,
+      "sha256": "b41f106d15eef4c23af4134f36c4e8ccf07ef9f9361d2dfd22070e8aaea520a9",
+      "bytes": 2395,
       "media_type": "text/markdown"
     },
     {
@@ -1973,8 +1980,8 @@
     },
     {
       "path": "schemas/README.md",
-      "sha256": "f4177afb5438f444aba34502c9f33b6ac0ddcea9c4fca32a5efbb2b1e1956946",
-      "bytes": 6535,
+      "sha256": "a7a9e87505ef245baa706774edd430e82eda75deac844c0a7e3b342e1c29afcf",
+      "bytes": 6679,
       "media_type": "text/markdown"
     },
     {
@@ -2015,8 +2022,8 @@
     },
     {
       "path": "schemas/design-package-manifest.schema.json",
-      "sha256": "1bb0ee70bb35189dd4f96c5f124389e3041621e5ba0b14f14ea66928d7ac45e3",
-      "bytes": 1888,
+      "sha256": "4e9dd328413176a1a8c7ec575e4112a1775e8784f46a54ca7824d4a2a8c6654e",
+      "bytes": 1976,
       "media_type": "application/json"
     },
     {
@@ -2057,8 +2064,8 @@
     },
     {
       "path": "schemas/ipc-command.schema.json",
-      "sha256": "5ff33428527f7e1fd9ac893fb33fb1a8ec53c8360811c7c3a1f1e612e5f13e12",
-      "bytes": 18473,
+      "sha256": "64cf9b97906288b12d37795eb4af5d0974c6eed0d64265929134ff812df02b26",
+      "bytes": 20829,
       "media_type": "application/json"
     },
     {
@@ -2075,14 +2082,14 @@
     },
     {
       "path": "schemas/ipc-query-response.schema.json",
-      "sha256": "9ef2117c5d9f73ca462aa3be37130dab87699c5e3699f1bf588940506248ce71",
-      "bytes": 982,
+      "sha256": "a31be38f04b1f49125bedcff5f66c9eab04608894441177a9f5956bfd6047ad2",
+      "bytes": 3175,
       "media_type": "application/json"
     },
     {
       "path": "schemas/ipc-query.schema.json",
-      "sha256": "70750a3ad83bd20d5a567470e307e0605e6fdefa71f1e6b37362ee4514b1f478",
-      "bytes": 911,
+      "sha256": "6b67103dd272a237a3a154bbdf8ff91812e28e5e2d06ca637e67c1bb56afa203",
+      "bytes": 1830,
       "media_type": "application/json"
     },
     {

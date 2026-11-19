@@ -7,14 +7,14 @@ use std::{
 use unleash_action_broker::{
     ActionBroker, ActionExecutionFailure, ActionExecutionResult, ActionExecutorPort, ActionIntent,
     ActionProvenance, ActionSubject, AuthorityLayer, AuthorizationDecision, AuthorizationOutcome,
-    BoxFuture, BrokerConfig, EffectsClass, HostIsolationProbe, IsolationMode,
+    BoxFuture, BrokerConfig, EffectiveAuthority, EffectsClass, HostIsolationProbe, IsolationMode,
     IsolationRequirements, LocalAuthorityFallbackPolicy, NormalizedResourceRef,
     PlatformKeyringSecretStore, ResolvedSecret, ScopeKind, StrictNoneAcceptedObligationChecker,
     SystemClockAndTimer, compute_effective_authority,
 };
 use unleash_domain::{
     ActorId, CommandId, DataLocality, DispatchId, Fence, LineageFence, ModelPolicy,
-    ReconcileStrategy,
+    ReconcileStrategy, Sha256Digest,
 };
 use unleash_process_host::{
     CONTROL_SECRET_FILENAME, ControlTransferRequest, ControlTransferResponse,
@@ -25,9 +25,9 @@ use unleash_process_host::{
 use unleash_store::{
     CallerAuthority, CallerRole, PrepareObjectRequest, PublishObjectReferenceRequest,
     terminal_allocations::{
-        ResolveTerminalControlRequest, TERMINAL_CONTROL_VERB, TerminalControlObservation,
-        TerminalControlRecord, TerminalControlState, TerminalIdentityBackend,
-        TerminalProcessIdentity,
+        ResolveTerminalControlRequest, TERMINAL_CONTROL_VERB, TerminalControlContext,
+        TerminalControlObservation, TerminalControlRecord, TerminalControlState,
+        TerminalIdentityBackend, TerminalProcessIdentity,
     },
 };
 
@@ -38,10 +38,10 @@ pub(super) fn start(state: &Arc<DaemonRuntimeState>, actor: ActorId, command: Co
     let Some(activity) = state.broker_activity.admit() else {
         return;
     };
-    let state = state.clone();
+    let state = Arc::clone(state);
     tokio::spawn(async move {
         let activity = Arc::new(activity);
-        let store = state.store.clone();
+        let store = Arc::clone(&state.store);
         let found = tokio::task::spawn_blocking(move || {
             store.inspect_terminal_control_request(&actor, command)
         })
@@ -64,34 +64,9 @@ pub(super) fn start(state: &Arc<DaemonRuntimeState>, actor: ActorId, command: Co
     });
 }
 
-async fn run(
-    state: Arc<DaemonRuntimeState>,
-    record: TerminalControlRecord,
-    activity: Arc<crate::broker_activity::BrokerActivityGuard>,
-) -> Result<(), ()> {
-    let c = &record.context;
-    if c.authority_generation != state.authority_generation || c.daemon_epoch != state.daemon_epoch
-    {
-        return Err(());
-    }
-    let store = state.store.clone();
-    let project = c.project_id;
-    let policy =
-        tokio::task::spawn_blocking(move || store.read_policy_summary_snapshot(Some(project)))
-            .await
-            .map_err(|_| ())?
-            .map_err(|_| ())?
-            .value;
-    if policy.effective_isolation_mode != unleash_store::PolicyIsolationMode::Standard
-        || policy
-            .guard_config
-            .as_ref()
-            .is_some_and(|guard| guard.guard_mode != unleash_store::GuardPolicyMode::BrokerOnly)
-    {
-        return Err(());
-    }
-    let authority = compute_effective_authority(
-        Some(project),
+fn control_authority(c: &TerminalControlContext) -> EffectiveAuthority {
+    compute_effective_authority(
+        Some(c.project_id),
         c.policy_revision,
         c.scope_revision,
         &[AuthorityLayer {
@@ -111,16 +86,23 @@ async fn run(
             allow_delegation: false,
             allow_cross_repository: false,
         }],
-    );
-    let fence = LineageFence::new(c.authority_generation, c.daemon_epoch, Fence::new(0));
-    let intent = ActionIntent {
+    )
+}
+
+fn control_intent(
+    record: &TerminalControlRecord,
+    authority: &EffectiveAuthority,
+    fence: LineageFence,
+) -> Result<ActionIntent, ()> {
+    let c = &record.context;
+    Ok(ActionIntent {
         action_id: c.action_id,
         subject: ActionSubject::new_control_plane(
             c.principal_id.clone(),
             format!("receipt:{}", c.receipt_id),
         )
         .map_err(|_| ())?,
-        project_id: Some(project),
+        project_id: Some(c.project_id),
         verb: TERMINAL_CONTROL_VERB.into(),
         resource_refs: vec![NormalizedResourceRef::Terminal(c.terminal_id)],
         payload_digest: record.context_digest,
@@ -130,17 +112,49 @@ async fn run(
         policy_revision: c.policy_revision,
         lineage_fence: fence,
         action_deadline: c.expires_at_ms,
-        isolation_requirements: IsolationRequirements::from_authority(&authority),
+        isolation_requirements: IsolationRequirements::from_authority(authority),
         secret_refs: vec![],
         provenance: ActionProvenance::EngineInternal,
-    };
+    })
+}
+
+async fn run(
+    state: Arc<DaemonRuntimeState>,
+    record: TerminalControlRecord,
+    activity: Arc<crate::broker_activity::BrokerActivityGuard>,
+) -> Result<(), ()> {
+    let c = &record.context;
+    if c.authority_generation != state.authority_generation || c.daemon_epoch != state.daemon_epoch
+    {
+        return Err(());
+    }
+    let store = Arc::clone(&state.store);
+    let project = c.project_id;
+    let policy =
+        tokio::task::spawn_blocking(move || store.read_policy_summary_snapshot(Some(project)))
+            .await
+            .map_err(|_| ())?
+            .map_err(|_| ())?
+            .value;
+    if policy.effective_isolation_mode != unleash_store::PolicyIsolationMode::Standard
+        || policy
+            .guard_config
+            .as_ref()
+            .is_some_and(|guard| guard.guard_mode != unleash_store::GuardPolicyMode::BrokerOnly)
+    {
+        return Err(());
+    }
+    let authority = control_authority(c);
+    let fence = LineageFence::new(c.authority_generation, c.daemon_epoch, Fence::new(0));
+    let intent = control_intent(&record, &authority, fence)?;
     let slot = Arc::new(Mutex::new(None));
     let timer = Arc::new(SystemClockAndTimer::new());
+    let wait_timer = Arc::clone(&timer);
     let broker = ActionBroker::new(
-        state.store.config().clock.clone(),
-        timer.clone(),
+        Arc::clone(&state.store.config().clock),
+        wait_timer,
         timer,
-        state.store.config().id_generator.clone(),
+        Arc::clone(&state.store.config().id_generator),
         Arc::new(HostIsolationProbe),
         Arc::new(StrictNoneAcceptedObligationChecker),
         Arc::new(LocalAuthorityFallbackPolicy::default()),
@@ -155,7 +169,7 @@ async fn run(
         Arc::new(
             crate::broker_journal::SqliteBrokerJournal::with_terminal_control_observation(
                 &state,
-                slot.clone(),
+                Arc::clone(&slot),
             ),
         ),
     );
@@ -169,7 +183,7 @@ async fn run(
     };
     let action = c.action_id;
     let executor = ControlExecutor {
-        state: state.clone(),
+        state: Arc::clone(&state),
         record,
         slot,
         activity,
@@ -220,9 +234,9 @@ impl ActionExecutorPort for ControlExecutor {
             {
                 return Err(unknown());
             }
-            let state = self.state.clone();
+            let state = Arc::clone(&self.state);
             let record = self.record.clone();
-            let activity = self.activity.clone();
+            let activity = Arc::clone(&self.activity);
             let observation = tokio::task::spawn_blocking(move || {
                 let _activity = activity;
                 transfer_and_observe(&state, &record, dispatch)
@@ -263,26 +277,11 @@ fn identity(
     })
 }
 
-fn transfer_and_observe(
-    state: &Arc<DaemonRuntimeState>,
+fn validate_initial_rendezvous(
+    state: &DaemonRuntimeState,
     record: &TerminalControlRecord,
-    dispatch: DispatchId,
-) -> Result<TerminalControlObservation, ControlError> {
+) -> Result<(std::path::PathBuf, Sha256Digest), ControlError> {
     let c = &record.context;
-    // One-use permit. A missing ACK never authorizes another call or spawn.
-    state
-        .store
-        .resolve_terminal_control(ResolveTerminalControlRequest {
-            action_id: c.action_id,
-            dispatch_id: dispatch,
-            authority_generation: c.authority_generation,
-            expected_revision: record.revision,
-            context_digest: record.context_digest,
-            caller: CallerAuthority {
-                actor_id: c.actor_id.clone(),
-                role: CallerRole::PolicyAdmin,
-            },
-        })?;
     let allocation = state
         .store
         .inspect_terminal_allocation_snapshot(c.terminal_id)?
@@ -351,6 +350,30 @@ fn transfer_and_observe(
     if before.effective_environment_digest != Some(expected) {
         return Err("terminal host applied environment differs".into());
     }
+    Ok((runtime, expected))
+}
+
+fn transfer_and_observe(
+    state: &DaemonRuntimeState,
+    record: &TerminalControlRecord,
+    dispatch: DispatchId,
+) -> Result<TerminalControlObservation, ControlError> {
+    let c = &record.context;
+    // One-use permit. A missing ACK never authorizes another call or spawn.
+    state
+        .store
+        .resolve_terminal_control(ResolveTerminalControlRequest {
+            action_id: c.action_id,
+            dispatch_id: dispatch,
+            authority_generation: c.authority_generation,
+            expected_revision: record.revision,
+            context_digest: record.context_digest,
+            caller: CallerAuthority {
+                actor_id: c.actor_id.clone(),
+                role: CallerRole::PolicyAdmin,
+            },
+        })?;
+    let (runtime, expected) = validate_initial_rendezvous(state, record)?;
     let secret = load_control_secret(&runtime.join(CONTROL_SECRET_FILENAME))?;
     let next_path = runtime.join(format!("control-transfer-{}.secret", c.action_id));
     if std::fs::symlink_metadata(&next_path).is_ok() {
@@ -448,14 +471,14 @@ fn validate_manifest(
 }
 
 fn publish(
-    state: &Arc<DaemonRuntimeState>,
+    state: &DaemonRuntimeState,
     observation: &TerminalControlObservation,
 ) -> Result<(), ControlError> {
     let bytes = unleash_protocol::canonicalize_to_vec(observation)?;
     let hash = unleash_protocol::canonical_sha256(observation)?;
     let object = state.store.prepare_object(PrepareObjectRequest {
         object_hash: hash,
-        byte_length: bytes.len() as u64,
+        byte_length: u64::try_from(bytes.len())?,
         media_type: "application/json".into(),
         owner_kind: "terminal_control_observation".into(),
         owner_id: observation.action_id.to_string(),

@@ -521,6 +521,9 @@ pub struct PolicySummary {
     pub active_suspensions_count: u64,
     /// Nombre de sujets révoqués.
     pub active_revocations_count: u64,
+    /// Mandats fournisseur visibles dans les mêmes portées que les politiques.
+    #[serde(default)]
+    pub provider_probe_mandates: Vec<crate::ProviderProbeMandateView>,
 }
 
 /// État courant d'une référence secrète opaque (`secret_references.status`).
@@ -946,7 +949,7 @@ pub(crate) fn tx_set_policy(
     Ok(Revision::new(u64::try_from(next_rev).unwrap_or(1)))
 }
 
-fn read_policy_row(
+pub(crate) fn read_policy_row(
     conn: &Connection,
     scope_kind: PolicyScopeKind,
     scope_id: &str,
@@ -1136,6 +1139,7 @@ pub(crate) fn read_policy_summary_conn(
         guard_config,
         active_suspensions_count: u64::try_from(susp_cnt).unwrap_or(0),
         active_revocations_count: u64::try_from(rev_cnt).unwrap_or(0),
+        provider_probe_mandates: Vec::new(),
     })
 }
 

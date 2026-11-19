@@ -526,7 +526,7 @@ mod tests {
     #[test]
     fn t_f011_control_input_replay_requires_the_original_action() {
         let dir = local_test_dir("ph-action-binding").unwrap();
-        let tracker = PtyInputTracker::open(&dir.path().join("host"), None).unwrap();
+        let tracker = PtyInputTracker::open(dir.path().join("host"), None).unwrap();
         let mut sink = Vec::new();
         let command = CommandId::from_u128(1);
         let action = ActionId::from_u128(2);

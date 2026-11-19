@@ -465,6 +465,98 @@ impl UnleashStore {
             crate::provider_profiles::resolve(conn, profile_id, profile_version)
         })
     }
+
+    /// Recherche le reçu actif d'une commande F012 authentifiée, sans préparation.
+    /// Un résultat absent n'accorde aucune autorité : le writer répète le lookup.
+    /// # Errors
+    /// Refuse acteur/rôle/enveloppe incohérents, lignée périmée, digest divergent ou tombstone.
+    pub fn lookup_provider_profile_command(
+        &self,
+        envelope: &unleash_protocol::CommandEnvelope,
+        caller: &crate::CallerAuthority,
+    ) -> Result<Option<unleash_protocol::CommandReceipt>, StoreError> {
+        crate::provider_profiles::validate_envelope_identity(envelope, caller)?;
+        let digest = unleash_protocol::compute_command_digest_v2(envelope)?;
+        self.read_snapshot(|conn, _| {
+            let daemon = read_daemon_state_conn(conn)?;
+            crate::commands::classify_command_replay(
+                conn,
+                &daemon,
+                &caller.actor_id,
+                envelope,
+                digest,
+            )
+        })
+    }
+
+    /// Recherche le reçu d'une validation locale avant toute préparation dynamique.
+    /// # Errors
+    /// Refuse acteur/rôle/lignée incohérents, autre digest et réponse tombstonée.
+    pub fn lookup_provider_validation_command(
+        &self,
+        envelope: &unleash_protocol::CommandEnvelope,
+        caller: &crate::CallerAuthority,
+    ) -> Result<Option<unleash_protocol::CommandReceipt>, StoreError> {
+        crate::provider_profile_validation::validate_envelope_identity(envelope, caller)?;
+        let digest = unleash_protocol::compute_command_digest_v2(envelope)?;
+        self.read_snapshot(|conn, _| {
+            let daemon = read_daemon_state_conn(conn)?;
+            crate::commands::classify_command_replay(
+                conn,
+                &daemon,
+                &caller.actor_id,
+                envelope,
+                digest,
+            )
+        })
+    }
+
+    /// Vérifie les liaisons puis les octets réels d'une configuration exacte, sans réseau/coffre.
+    /// Cette lecture ne crée aucun reçu ni résultat ; le commit revalide les mêmes faits.
+    /// # Errors
+    /// Refuse causalité, autorité, portée, liaison ou contenu insuffisamment attestés.
+    pub fn prepare_provider_profile_validation(
+        &self,
+        envelope: &unleash_protocol::CommandEnvelope,
+        caller: &crate::CallerAuthority,
+    ) -> Result<crate::provider_profile_validation::LocalProviderValidation, StoreError> {
+        let envelope = envelope.clone();
+        let caller = caller.clone();
+        let (mut observation, profile) =
+            self.execute_in_writer_tx(WriteCriticality::Normal, move |tx, now| {
+                let daemon = read_daemon_state_conn(tx)?;
+                crate::provider_profile_validation::prepare_tx(tx, &daemon, now, &envelope, &caller)
+            })?;
+        crate::provider_profile_validation::verify_configuration_bytes(self, &profile)?;
+        observation.observed_at_ms = self.config.clock.now_ms();
+        Ok(observation)
+    }
+
+    /// Projette une version exacte et ses observations locales avec watermark commun.
+    /// Aucun champ privé de liaison ou valeur de coffre n'est exposé.
+    /// # Errors
+    /// Refuse une version hors plage ou une projection durable incohérente.
+    pub fn get_provider_profile_snapshot(
+        &self,
+        profile_id: uuid::Uuid,
+        version: u64,
+        project: Option<ProjectId>,
+    ) -> Result<
+        SnapshotProjection<Option<crate::provider_profile_validation::ProviderProfileView>>,
+        StoreError,
+    > {
+        let projection = self.project_snapshot(|conn| {
+            crate::provider_profile_validation::read_projection(conn, profile_id, version, project)
+        })?;
+        let value = projection
+            .value
+            .map(|value| crate::provider_profile_validation::finish_view(self, value))
+            .transpose()?;
+        Ok(SnapshotProjection {
+            value,
+            cursor: projection.cursor,
+        })
+    }
     /// Ouvre ou initialise la base `SQLite` qualifiée avec vérification de build, PRAGMAs et migrations.
     ///
     /// # Errors
@@ -724,19 +816,32 @@ impl UnleashStore {
         request: &CommitCommandRequest,
         digest: Sha256Digest,
     ) -> Result<Option<CommitOutcome>, StoreError> {
-        if !crate::provider_profiles::validate_identity(request)? {
+        let configuration = crate::provider_profiles::validate_identity(request)?;
+        let validation = crate::provider_profile_validation::validate_identity(request)?;
+        if !configuration && !validation {
             return Ok(None);
         }
         let lookup = || {
             self.read_snapshot(|conn, _| {
                 let daemon = read_daemon_state_conn(conn)?;
-                crate::commands::classify_command_replay(conn, &daemon, request, digest)
+                crate::commands::classify_command_replay(
+                    conn,
+                    &daemon,
+                    &request.actor_id,
+                    &request.envelope,
+                    digest,
+                )
             })
         };
         if let Some(receipt) = lookup()? {
             return Ok(Some(CommitOutcome::IdempotentReplay(receipt)));
         }
-        if let Err(error) = crate::provider_profiles::verify_published(self, request) {
+        let verified = if validation {
+            crate::provider_profile_validation::verify_published(self, request)
+        } else {
+            crate::provider_profiles::verify_published(self, request)
+        };
+        if let Err(error) = verified {
             // A concurrent writer may have committed while object verification failed.
             if let Some(receipt) = lookup()? {
                 return Ok(Some(CommitOutcome::IdempotentReplay(receipt)));
@@ -1181,6 +1286,34 @@ impl UnleashStore {
             + Send
             + 'static,
     {
+        self.commit_execution_admission_with_report(pool_id, source_revision, move |snapshot| {
+            decide(snapshot).map(|decision| (decision, ()))
+        })
+        .map(|(outcome, ())| outcome)
+    }
+
+    /// Engage une décision d'admission et restitue son résultat de politique.
+    ///
+    /// La closure travaille sur le snapshot relu sous le writer, sans I/O et sans
+    /// rappel au Store. Le rapport n'est rendu qu'en cas de succès du writer.
+    ///
+    /// # Errors
+    ///
+    /// Refuse un snapshot périmé, une précondition absente, un fence ou des deltas invalides.
+    pub fn commit_execution_admission_with_report<F, R>(
+        &self,
+        pool_id: PoolId,
+        source_revision: crate::AdmissionSnapshotToken,
+        decide: F,
+    ) -> Result<(crate::AdmissionOutcome, R), StoreError>
+    where
+        F: FnOnce(
+                &crate::ExecutionAdmissionSnapshot,
+            ) -> Result<(crate::AdmissionDecision, R), StoreError>
+            + Send
+            + 'static,
+        R: Send + 'static,
+    {
         let config = self.config.clone();
         self.execute_in_writer_tx(WriteCriticality::Normal, move |tx, now| {
             crate::admission::commit(tx, &config, now, pool_id, source_revision, decide)
@@ -1444,6 +1577,57 @@ impl UnleashStore {
         self.writer
             .submit_immediate_blocking(WriteCriticality::Normal, false, move |tx, now_ms| {
                 tx_publish_object_reference(tx, id_gen.as_ref(), now_ms, &req)
+            })
+    }
+
+    /// Publie une référence et rend sa poignée exacte pour le retrait du seul owner.
+    /// Le producteur fournit une identité de tentative distincte ; aucune référence
+    /// partageant seulement le hash ne sera retirée par cette poignée.
+    /// # Errors
+    /// Refuse octets, pin, génération ou lignée incohérents.
+    pub fn publish_owned_object_reference(
+        &self,
+        request: PublishObjectReferenceRequest,
+    ) -> Result<crate::objects::PublishedObjectReference, StoreError> {
+        let record = self.object_record(request.object_hash)?;
+        verify_object_file_before_publish(
+            &self.config,
+            &record.relative_path,
+            request.object_hash,
+        )?;
+        let ids = Arc::clone(&self.config.id_generator);
+        self.writer
+            .submit_immediate_blocking(WriteCriticality::Normal, false, move |tx, now| {
+                let daemon = read_daemon_state_tx(tx)?;
+                crate::objects::tx_publish_owned_reference(
+                    tx,
+                    ids.as_ref(),
+                    now,
+                    &request,
+                    daemon.authority_generation,
+                )
+            })
+    }
+
+    /// Retire uniquement la référence identifiée par la poignée de son producteur.
+    /// Ne supprime aucun octet et ne touche pas les autres références du même hash.
+    /// # Errors
+    /// Refuse une poignée d'ancienne lignée ou une erreur du writer.
+    pub fn retire_owned_object_reference(
+        &self,
+        handle: crate::objects::PublishedObjectReference,
+        reason: &str,
+    ) -> Result<usize, StoreError> {
+        let reason = reason.to_owned();
+        self.writer
+            .submit_immediate_blocking(WriteCriticality::Critical, false, move |tx, _| {
+                let daemon = read_daemon_state_tx(tx)?;
+                crate::objects::tx_retire_owned_reference(
+                    tx,
+                    &handle,
+                    daemon.authority_generation,
+                    &reason,
+                )
             })
     }
 
@@ -2004,7 +2188,13 @@ impl UnleashStore {
         &self,
         project_id: Option<ProjectId>,
     ) -> Result<SnapshotProjection<PolicySummary>, StoreError> {
-        self.project_snapshot(|conn| read_policy_summary_conn(conn, project_id))
+        self.project_snapshot(|conn| {
+            let now = self.config.clock.now_ms();
+            let mut summary = read_policy_summary_conn(conn, project_id)?;
+            summary.provider_probe_mandates =
+                crate::provider_probe_mandates::read_visible(conn, project_id, now)?;
+            Ok(summary)
+        })
     }
 
     /// Lit récupération et watermark dans une seule transaction lectrice.
@@ -2053,7 +2243,8 @@ impl UnleashStore {
         &self,
         project_id: Option<ProjectId>,
     ) -> Result<PolicySummary, StoreError> {
-        self.read_snapshot(|conn, _ctx| read_policy_summary_conn(conn, project_id))
+        self.read_policy_summary_snapshot(project_id)
+            .map(|snapshot| snapshot.value)
     }
 
     /// Lit une configuration AI-Guard par identifiant (`"default"`, etc.).

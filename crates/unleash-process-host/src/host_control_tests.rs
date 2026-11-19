@@ -1,10 +1,5 @@
 //! Component regression: actual Unix control socket and owned PTY child.
 //! The host runs in this test process; this is not the daemon crash E2E proof.
-#![expect(
-    clippy::unwrap_used,
-    clippy::panic,
-    reason = "Local owned process and socket fixture assertions"
-)]
 use super::*;
 use crate::{EnvironmentMode, IsolationMode, OsIsolationBackendProbe, OsProcessInspector};
 use unleash_domain::{
@@ -101,14 +96,33 @@ fn fixture_with_observer(
         )
         .unwrap(),
     );
-    let served = server.clone();
-    let thread = std::thread::spawn(move || served.serve_until_shutdown());
+    let listener = Arc::clone(&server);
+    let thread = std::thread::spawn(move || listener.serve_until_shutdown());
     Fixture {
         server,
         thread: Some(thread),
         spec,
         _directory: directory,
     }
+}
+
+fn wait_for_transfer_contention(
+    shared: &ServerShared,
+    observed: &std::sync::mpsc::Receiver<HostResponse>,
+) -> Option<HostResponse> {
+    // The writer remains unavailable until the transfer actually reaches its gate.
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    while shared.operation_contentions.load(Ordering::SeqCst) == 0 {
+        if let Ok(response) = observed.try_recv() {
+            return Some(response);
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "transfer reaches server operation gate"
+        );
+        std::thread::yield_now();
+    }
+    observed.recv_timeout(Duration::from_millis(150)).ok()
 }
 
 #[test]
@@ -181,30 +195,7 @@ fn t_f011_control_rotation_waits_for_previously_admitted_input() {
             .unwrap();
         sent.send(response).unwrap();
     });
-    // Observe the server actually contend for the operation gate. A delayed
-    // client/server thread cannot produce a false green by never arriving.
-    let deadline = std::time::Instant::now() + Duration::from_secs(2);
-    let mut premature = None;
-    while fixture
-        .server
-        .shared
-        .operation_contentions
-        .load(Ordering::SeqCst)
-        == 0
-    {
-        if let Ok(response) = observed.try_recv() {
-            premature = Some(response);
-            break;
-        }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "transfer reaches server operation gate"
-        );
-        std::thread::yield_now();
-    }
-    // The old PTY writer is deliberately still unavailable. An ACK at this
-    // point would let a superseded input write after transfer confirmation.
-    let premature = premature.or_else(|| observed.recv_timeout(Duration::from_millis(150)).ok());
+    let premature = wait_for_transfer_contention(&fixture.server.shared, &observed);
     drop(writer);
     assert!(matches!(
         input.join().unwrap(),

@@ -1,16 +1,11 @@
 //! SQLite/broker fixture only. The executor spy never launches an OS process.
-#![expect(
-    clippy::unwrap_used,
-    clippy::panic,
-    reason = "Bounded local fixtures and contract assertions"
-)]
 
 use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex};
 use unleash_action_broker::*;
 use unleash_domain::{
-    ActorId, CommandId, DataLocality, Fence, LineageFence, MissionId, ModelPolicy, ProjectId,
-    ReconcileStrategy, RequestId, Revision, TerminalId,
+    ActionId, ActorId, CommandId, DataLocality, Fence, LineageFence, MissionId, ModelPolicy,
+    ProjectId, ReconcileStrategy, RequestId, Revision, TerminalId,
 };
 use unleash_protocol::{CommandEnvelope, ProtocolVersion, ReceiptState};
 use unleash_store::terminal_allocations::TerminalRuntimeSettings;
@@ -41,13 +36,15 @@ fn request(
     store: &UnleashStore,
     actor: &ActorId,
     id: u128,
-    aggregate: uuid::Uuid,
-    project: Option<ProjectId>,
-    kind: AggregateKind,
+    target: (AggregateKind, uuid::Uuid, Option<ProjectId>),
     name: &str,
     payload: serde_json::Value,
     mutation: CommandMutation,
 ) -> CommitCommandRequest {
+    let (kind, aggregate, project) = target;
+    let serde_json::Value::Object(payload) = payload else {
+        panic!("fixture command payload must be an object");
+    };
     CommitCommandRequest {
         actor_id: actor.clone(),
         envelope: CommandEnvelope {
@@ -60,7 +57,7 @@ fn request(
             aggregate_id: aggregate,
             expected_revision: Revision::INITIAL,
             command_type: name.into(),
-            payload: payload.as_object().unwrap().clone(),
+            payload,
         },
         target_aggregate: kind,
         operation_id: None,
@@ -75,21 +72,7 @@ fn request(
     }
 }
 
-fn fixture() -> Fixture {
-    let directory = local_test_dir("terminal-unknown").unwrap();
-    let root = directory.path().canonicalize().unwrap();
-    let clock = Arc::new(ManualClock::new(1000));
-    let mut cfg = StoreConfig::new(directory.path());
-    cfg.clock = clock.clone();
-    cfg.id_generator = Arc::new(DeterministicIdGenerator::new(0xf011_aa00));
-    let store = Arc::new(UnleashStore::open(cfg).unwrap());
-    let actor = ActorId::new("uid:terminal-journal-fixture").unwrap();
-    store
-        .register_principal("human-terminal-journal", "user", actor.as_str())
-        .unwrap();
-    store
-        .configure_execution_pool(ExecutionPoolParams::default())
-        .unwrap();
+fn configure_runtime(store: &UnleashStore, actor: &ActorId) -> TerminalRuntimeSettings {
     let configured:TerminalRuntimeSettings=serde_json::from_value(serde_json::json!({"schema_version":1,"profiles":[{"profile_id":"journal-terminal","version":1,"variables":{"LANG":"C"}}],"max_hosts":2,"max_processes":2,"max_ptys":2,"lease_ttl_ms":60000})).unwrap();
     let prepared = configured
         .profiles
@@ -109,7 +92,26 @@ fn fixture() -> Fixture {
         ),
         ..SettingsPatch::default()
     };
-    store.commit_command(request(&store,&actor,1,store.active_authority_generation().unwrap().as_uuid(),None,AggregateKind::Settings,"SetSettings",serde_json::json!({"scope_kind":"user","scope_id":"default","patch":{"terminal_runtime":configured}}),CommandMutation::SetSettings {scope_kind:SettingsScopeKind::User,scope_id:"default".into(),caller:CallerAuthority {actor_id:actor.clone(),role:CallerRole::PolicyAdmin},patch})).unwrap();
+    store.commit_command(request(store,actor,1,(AggregateKind::Settings,store.active_authority_generation().unwrap().as_uuid(),None),"SetSettings",serde_json::json!({"scope_kind":"user","scope_id":"default","patch":{"terminal_runtime":configured}}),CommandMutation::SetSettings {scope_kind:SettingsScopeKind::User,scope_id:"default".into(),caller:CallerAuthority {actor_id:actor.clone(),role:CallerRole::PolicyAdmin},patch})).unwrap();
+    configured
+}
+
+fn fixture() -> Fixture {
+    let directory = local_test_dir("terminal-unknown").unwrap();
+    let root = directory.path().canonicalize().unwrap();
+    let clock = Arc::new(ManualClock::new(1000));
+    let mut cfg = StoreConfig::new(directory.path());
+    cfg.clock = clock.clone();
+    cfg.id_generator = Arc::new(DeterministicIdGenerator::new(0xf011_aa00));
+    let store = Arc::new(UnleashStore::open(cfg).unwrap());
+    let actor = ActorId::new("uid:terminal-journal-fixture").unwrap();
+    store
+        .register_principal("human-terminal-journal", "user", actor.as_str())
+        .unwrap();
+    store
+        .configure_execution_pool(ExecutionPoolParams::default())
+        .unwrap();
+    let configured = configure_runtime(&store, &actor);
     let project = ProjectId::from_u128(11);
     let mission = MissionId::from_u128(12);
     let root_string = root.to_str().unwrap().to_owned();
@@ -151,9 +153,11 @@ fn fixture() -> Fixture {
             &store,
             &actor,
             2,
-            terminal.as_uuid(),
-            Some(project),
-            AggregateKind::TerminalAllocation,
+            (
+                AggregateKind::TerminalAllocation,
+                terminal.as_uuid(),
+                Some(project),
+            ),
             "AcquireTerminal",
             preparation.command_payload(),
             CommandMutation::PrepareTerminalAllocation {
@@ -183,6 +187,24 @@ struct RecordingJournal {
     inner: super::SqliteBrokerJournal,
     entries: Mutex<Vec<BrokerJournalEntry>>,
 }
+impl RecordingJournal {
+    fn capture_effect(&self) -> (BrokerJournalEntry, BrokerJournalEntry) {
+        let entries = self.entries.lock().unwrap();
+        (
+            entries
+                .iter()
+                .find(|e| matches!(e, BrokerJournalEntry::Observation { .. }))
+                .unwrap()
+                .clone(),
+            entries
+                .iter()
+                .find(|e| matches!(e, BrokerJournalEntry::Dispatch { .. }))
+                .unwrap()
+                .clone(),
+        )
+    }
+}
+
 impl BrokerJournalPort for RecordingJournal {
     fn append<'a>(
         &'a self,
@@ -193,17 +215,12 @@ impl BrokerJournalPort for RecordingJournal {
     }
 }
 
-#[tokio::test]
-async fn terminal_unknown_sqlite_preserves_receipt_and_one_dispatch_on_replay() {
-    let fixture = tokio::task::spawn_blocking(fixture).await.unwrap();
-    let store = fixture.store.as_ref().unwrap().clone();
-    let clock = fixture.clock.clone();
-    let c = &fixture.record.context;
-    let TerminalAllocationScope::ProjectConfiguration {
-        project_id,
-        revision,
-    } = c.preparation.scope;
-    let authority = compute_effective_authority(
+fn fixture_authority(
+    c: &TerminalAllocationContext,
+    project_id: ProjectId,
+    revision: Revision,
+) -> EffectiveAuthority {
+    compute_effective_authority(
         Some(project_id),
         c.policy_revision,
         revision,
@@ -226,7 +243,53 @@ async fn terminal_unknown_sqlite_preserves_receipt_and_one_dispatch_on_replay() 
             allow_delegation: false,
             allow_cross_repository: false,
         }],
-    );
+    )
+}
+
+fn fixture_intent(
+    record: &TerminalAllocationRecord,
+    authority: &EffectiveAuthority,
+    fence: LineageFence,
+) -> ActionIntent {
+    let c = &record.context;
+    let TerminalAllocationScope::ProjectConfiguration {
+        project_id,
+        revision,
+    } = c.preparation.scope;
+    ActionIntent {
+        action_id: c.action_id,
+        subject: ActionSubject::new_control_plane(
+            c.principal_id.clone(),
+            format!("receipt:{}", c.receipt_id),
+        )
+        .unwrap(),
+        project_id: Some(project_id),
+        verb: TERMINAL_ALLOCATION_VERB.into(),
+        resource_refs: vec![NormalizedResourceRef::Terminal(c.terminal_id)],
+        payload_digest: record.payload_digest(),
+        reconcile_strategy: ReconcileStrategy::ObserveThenDecide,
+        effects_class: EffectsClass::ProcessExec,
+        scope_revision: revision,
+        policy_revision: c.policy_revision,
+        lineage_fence: fence,
+        action_deadline: c.lease_expires_at,
+        isolation_requirements: IsolationRequirements::from_authority(authority),
+        secret_refs: vec![],
+        provenance: ActionProvenance::EngineInternal,
+    }
+}
+
+#[tokio::test]
+async fn terminal_unknown_sqlite_preserves_receipt_and_one_dispatch_on_replay() {
+    let fixture = tokio::task::spawn_blocking(fixture).await.unwrap();
+    let store = fixture.store.as_ref().unwrap().clone();
+    let clock = fixture.clock.clone();
+    let c = &fixture.record.context;
+    let TerminalAllocationScope::ProjectConfiguration {
+        project_id,
+        revision,
+    } = c.preparation.scope;
+    let authority = fixture_authority(c, project_id, revision);
     let fence = LineageFence::new(c.authority_generation, c.daemon_epoch, Fence::ZERO);
     let mut inner = super::SqliteBrokerJournal::for_store_test(store.clone());
     inner.terminal_observation = Some(Arc::new(Mutex::new(None)));
@@ -250,27 +313,7 @@ async fn terminal_unknown_sqlite_preserves_receipt_and_one_dispatch_on_replay() 
         journal.clone(),
     );
     broker.bump_scope_revision(Some(project_id), revision);
-    let intent = ActionIntent {
-        action_id: c.action_id,
-        subject: ActionSubject::new_control_plane(
-            c.principal_id.clone(),
-            format!("receipt:{}", c.receipt_id),
-        )
-        .unwrap(),
-        project_id: Some(project_id),
-        verb: TERMINAL_ALLOCATION_VERB.into(),
-        resource_refs: vec![NormalizedResourceRef::Terminal(c.terminal_id)],
-        payload_digest: fixture.record.payload_digest(),
-        reconcile_strategy: ReconcileStrategy::ObserveThenDecide,
-        effects_class: EffectsClass::ProcessExec,
-        scope_revision: revision,
-        policy_revision: c.policy_revision,
-        lineage_fence: fence,
-        action_deadline: c.lease_expires_at,
-        isolation_requirements: IsolationRequirements::from_authority(&authority),
-        secret_refs: vec![],
-        provenance: ActionProvenance::EngineInternal,
-    };
+    let intent = fixture_intent(&fixture.record, &authority, fence);
     let AuthorizationOutcome::Authorized(decision) =
         broker.authorize_action(intent, &authority).await.unwrap()
     else {
@@ -292,21 +335,7 @@ async fn terminal_unknown_sqlite_preserves_receipt_and_one_dispatch_on_replay() 
         Err(ActionBrokerError::OutcomeUnknown { .. })
     ));
     assert_eq!(executor.dispatch_count(), 1);
-    let (observation, dispatch) = {
-        let entries = journal.entries.lock().unwrap();
-        (
-            entries
-                .iter()
-                .find(|e| matches!(e, BrokerJournalEntry::Observation { .. }))
-                .unwrap()
-                .clone(),
-            entries
-                .iter()
-                .find(|e| matches!(e, BrokerJournalEntry::Dispatch { .. }))
-                .unwrap()
-                .clone(),
-        )
-    };
+    let (observation, dispatch) = journal.capture_effect();
     let BrokerJournalEntry::Observation {
         receipt: result, ..
     } = &observation
@@ -334,7 +363,14 @@ async fn terminal_unknown_sqlite_preserves_receipt_and_one_dispatch_on_replay() 
             .is_err()
     );
     assert_eq!(executor.dispatch_count(), 1);
-    let action = c.action_id;
+    assert_durable_outcome_unknown(store, c.action_id, result).await;
+}
+
+async fn assert_durable_outcome_unknown(
+    store: Arc<UnleashStore>,
+    action: ActionId,
+    result: &ActionReceipt,
+) {
     let inspected=tokio::task::spawn_blocking(move||store.read_snapshot(|conn,_| {
         let key=action.to_string();
         let state=conn.query_row("SELECT state FROM actions WHERE action_id=?1",[&key],|r|r.get::<_,String>(0))?;
@@ -359,9 +395,10 @@ async fn terminal_unknown_sqlite_preserves_receipt_and_one_dispatch_on_replay() 
     );
     assert!(!inspected.4.contains("EXECUTOR-CANARY"));
     let stored: serde_json::Value = serde_json::from_str(&inspected.4).unwrap();
+    let phase = stored.get("phase").unwrap();
     assert_eq!(
-        stored["phase"]["receipt"],
-        serde_json::to_value(super::receipt(&result)).unwrap()
+        phase.get("receipt").unwrap(),
+        &serde_json::to_value(super::receipt(result)).unwrap()
     );
-    assert!(stored["phase"]["reason"].is_null());
+    assert!(phase.get("reason").is_none_or(serde_json::Value::is_null));
 }

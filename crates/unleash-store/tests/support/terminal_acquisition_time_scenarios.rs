@@ -1,4 +1,4 @@
-//! Deterministic UTC cutover during a query over synthetic SQLite observations.
+//! Deterministic UTC cutover during a query over synthetic `SQLite` observations.
 //! No sleep, host, PTY or operating system identity claim is involved.
 use super::*;
 
@@ -87,7 +87,7 @@ fn assert_query_cutover_refused(expire: bool) {
         store.inspect_command_receipt(&actor, command).unwrap(),
         ordinary
     );
-    let expiry: i64 = store
+    let persisted_deadline_ms: i64 = store
         .read_snapshot(|conn, _| {
             Ok(conn.query_row(
                 "SELECT expires_at_ms FROM resource_leases WHERE lease_id=?1",
@@ -97,7 +97,7 @@ fn assert_query_cutover_refused(expire: bool) {
         })
         .unwrap();
     assert_eq!(
-        expiry,
+        persisted_deadline_ms,
         allocation.context.lease_expires_at.as_i64(),
         "inspection never renews the deadline"
     );

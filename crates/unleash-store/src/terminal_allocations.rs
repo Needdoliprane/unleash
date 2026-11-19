@@ -161,7 +161,7 @@ pub enum TerminalControlState {
     Disposed,
 }
 impl TerminalControlState {
-    /// Closed SQLite spelling.
+    /// Closed `SQLite` spelling.
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
@@ -392,7 +392,7 @@ impl crate::UnleashStore {
                 || observation.os_identity!=c.expected_os_identity
                 || observation.daemon_epoch!=c.daemon_epoch || observation.resource_fence!=c.next_fence
                 || observation.unknown_input_seqs.len()>65536
-                || observation.unknown_input_seqs.iter().any(|seq|*seq==0)
+                || observation.unknown_input_seqs.contains(&0)
             {return Err(invalid("terminal control observation differs from accepted transfer"));}
             if record.state==TerminalControlState::Observed {
                 if record.observation_object_hash!=Some(digest) {return Err(invalid("terminal control proof replay differs"));}
@@ -590,6 +590,86 @@ fn control_runtime(
     Ok(runtime)
 }
 
+struct ValidatedControlTarget {
+    runtime: TerminalRuntimeSettings,
+    mission_revision: Revision,
+    identity: TerminalProcessIdentity,
+    previous: ControlLease,
+    next_fence: Fence,
+}
+
+fn validate_control_target(
+    tx: &Transaction<'_>,
+    d: &DaemonStateRow,
+    now: TimestampMs,
+    request: &RegisteredTerminalControl,
+    allocation: &TerminalAllocationRecord,
+    lease_id: &str,
+) -> Result<ValidatedControlTarget, StoreError> {
+    let original = &allocation.context;
+    let principal = &original.principal_id;
+    let TerminalAllocationScope::ProjectConfiguration { project_id, .. } =
+        original.preparation.scope;
+    let runtime = control_runtime(tx, now, allocation)?;
+    let mission_revision:i64=tx.query_row("SELECT revision FROM missions WHERE mission_id=?1 AND project_id=?2 AND owner_kind='user' AND owner_user_id=?3 AND state IN ('ready','active')",params![original.preparation.mission_id.to_string(),project_id.to_string(),principal.as_str()],|row|row.get(0))?;
+    let mut scoped = original.preparation.clone();
+    scoped.scope = TerminalAllocationScope::ProjectConfiguration {
+        project_id,
+        revision: request.scope_revision,
+    };
+    scoped.mission_revision = Revision::new(
+        u64::try_from(mission_revision)
+            .map_err(|_| invalid("terminal mission revision invalid"))?,
+    );
+    scoped.lease_ttl_ms = runtime.lease_ttl_ms;
+    validate_preparation(tx, now, &scoped, &original.actor_id, principal)?;
+    control_holds(tx, d, allocation)?;
+    let identity = control_identity(tx, d, allocation)?;
+    let previous = control_lease(tx, lease_id.parse()?)?;
+    if previous.daemon_epoch == d.daemon_epoch {
+        return Err(stale(
+            "registered terminal transfer requires a successor daemon epoch",
+        ));
+    }
+    let resource_key = key(&original.preparation)?;
+    if previous.authority_generation != d.authority_generation
+        || previous.boot_identity != d.boot_identity
+        || previous.resource_kind != "terminal"
+        || previous.resource_key != resource_key
+        || previous.owner_type != "principal"
+        || previous.owner_id != principal.as_str()
+        || previous.daemon_epoch > d.daemon_epoch
+        || !["held", "suspect", "reconciling", "released", "revoked"]
+            .contains(&previous.state.as_str())
+    {
+        return Err(invalid("terminal previous lease is not attributable"));
+    }
+    let active:Option<String>=tx.query_row("SELECT lease_id FROM resource_leases WHERE authority_generation=?1 AND resource_kind='terminal' AND resource_key=?2 AND state IN ('held','suspect','reconciling')",params![d.authority_generation.to_string(),resource_key],|row|row.get(0)).optional()?;
+    if active.is_some_and(|id| id != previous.lease_id.to_string()) {
+        return Err(StoreError::CapacityBlocked(
+            "terminal lease belongs to another controller".into(),
+        ));
+    }
+    let last:i64=tx.query_row("SELECT last_fence FROM resource_fences WHERE authority_generation=?1 AND resource_kind='terminal' AND resource_key=?2",params![d.authority_generation.to_string(),resource_key],|row|row.get(0))?;
+    let next_fence = Fence::new(
+        u64::try_from(
+            last.checked_add(1)
+                .ok_or_else(|| invalid("terminal fence exhausted"))?,
+        )
+        .map_err(|_| invalid("terminal fence invalid"))?,
+    );
+    if next_fence <= previous.fence {
+        return Err(stale("terminal resource fence is inconsistent"));
+    }
+    Ok(ValidatedControlTarget {
+        runtime,
+        mission_revision: scoped.mission_revision,
+        identity,
+        previous,
+        next_fence,
+    })
+}
+
 #[expect(
     clippy::too_many_arguments,
     reason = "Authenticated command identities and one transfer transaction"
@@ -653,57 +733,13 @@ pub(crate) fn prepare_control_tx(
             "terminal control transfer requires observation or disposition".into(),
         ));
     }
-    let runtime = control_runtime(tx, now, &allocation)?;
-    let mission_revision:i64=tx.query_row("SELECT revision FROM missions WHERE mission_id=?1 AND project_id=?2 AND owner_kind='user' AND owner_user_id=?3 AND state IN ('ready','active')",params![original.preparation.mission_id.to_string(),project_id.to_string(),principal.as_str()],|row|row.get(0))?;
-    let mut scoped = original.preparation.clone();
-    scoped.scope = TerminalAllocationScope::ProjectConfiguration {
-        project_id,
-        revision: request.scope_revision,
-    };
-    scoped.mission_revision = Revision::new(
-        u64::try_from(mission_revision)
-            .map_err(|_| invalid("terminal mission revision invalid"))?,
-    );
-    scoped.lease_ttl_ms = runtime.lease_ttl_ms;
-    validate_preparation(tx, now, &scoped, actor, &principal)?;
-    control_holds(tx, d, &allocation)?;
-    let identity = control_identity(tx, d, &allocation)?;
-    let previous = control_lease(tx, lease_id.parse()?)?;
-    if previous.daemon_epoch == d.daemon_epoch {
-        return Err(stale(
-            "registered terminal transfer requires a successor daemon epoch",
-        ));
-    }
-    let resource_key = key(&original.preparation)?;
-    if previous.authority_generation != d.authority_generation
-        || previous.boot_identity != d.boot_identity
-        || previous.resource_kind != "terminal"
-        || previous.resource_key != resource_key
-        || previous.owner_type != "principal"
-        || previous.owner_id != principal.as_str()
-        || previous.daemon_epoch > d.daemon_epoch
-        || !["held", "suspect", "reconciling", "released", "revoked"]
-            .contains(&previous.state.as_str())
-    {
-        return Err(invalid("terminal previous lease is not attributable"));
-    }
-    let active:Option<String>=tx.query_row("SELECT lease_id FROM resource_leases WHERE authority_generation=?1 AND resource_kind='terminal' AND resource_key=?2 AND state IN ('held','suspect','reconciling')",params![d.authority_generation.to_string(),resource_key],|row|row.get(0)).optional()?;
-    if active.is_some_and(|id| id != previous.lease_id.to_string()) {
-        return Err(StoreError::CapacityBlocked(
-            "terminal lease belongs to another controller".into(),
-        ));
-    }
-    let last:i64=tx.query_row("SELECT last_fence FROM resource_fences WHERE authority_generation=?1 AND resource_kind='terminal' AND resource_key=?2",params![d.authority_generation.to_string(),resource_key],|row|row.get(0))?;
-    let next_fence = Fence::new(
-        u64::try_from(
-            last.checked_add(1)
-                .ok_or_else(|| invalid("terminal fence exhausted"))?,
-        )
-        .map_err(|_| invalid("terminal fence invalid"))?,
-    );
-    if next_fence <= previous.fence {
-        return Err(stale("terminal resource fence is inconsistent"));
-    }
+    let ValidatedControlTarget {
+        runtime,
+        mission_revision,
+        identity,
+        previous,
+        next_fence,
+    } = validate_control_target(tx, d, now, request, &allocation, &lease_id)?;
     let (policy_revision, security_policy_digest) = policy(tx, project_id)?;
     let context = TerminalControlContext {
         schema_version: 1,
@@ -724,7 +760,7 @@ pub(crate) fn prepare_control_tx(
         project_id,
         scope_revision: request.scope_revision,
         mission_id: original.preparation.mission_id,
-        mission_revision: scoped.mission_revision,
+        mission_revision,
         policy_revision,
         security_policy_digest,
         runtime_settings_digest: canonical_sha256(&runtime)?,
@@ -775,7 +811,7 @@ impl TerminalEnvironmentProfile {
     }
 }
 
-/// Version-one global terminal settings, persisted by the existing SetSettings CAS.
+/// Version-one global terminal settings, persisted by the existing `SetSettings` CAS.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TerminalRuntimeSettings {
@@ -906,7 +942,7 @@ pub(crate) fn configure_runtime_tx(
                     && v.digest.to_string() == digest
             })
             .ok_or_else(|| invalid("terminal prepared bytes differ from configuration"))?;
-        let owner:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM object_pins WHERE pin_id=?1 AND object_hash=?2 AND owner_kind='terminal_configuration_candidate' AND owner_id=?3 AND state='held')",params![pin.pin_id.to_string(),digest,command_id.to_string()],|r|r.get(0))?;
+        let owner:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM object_pins WHERE pin_id=?1 AND object_hash=?2 AND owner_kind='terminal_configuration_candidate' AND owner_id=?3 AND state='held')",params![pin.pin_id.as_str(),digest,command_id.to_string()],|r|r.get(0))?;
         if !owner {
             return Err(invalid(
                 "terminal prepared pin is not owned by this command",
@@ -956,7 +992,7 @@ impl crate::UnleashStore {
     }
     /// Prepare explicit profile bytes without reserving the immutable version.
     /// # Errors
-    /// Refuses invalid bytes. Publication belongs exclusively to the accepted SetSettings transaction.
+    /// Refuses invalid bytes. Publication belongs exclusively to the accepted `SetSettings` transaction.
     pub fn prepare_terminal_environment(
         &self,
         p: &TerminalEnvironmentProfile,
@@ -2182,9 +2218,8 @@ fn append_resolution_event(
     Ok(())
 }
 
-/// Snapshot-only terminal projections, also used by the daemon combined snapshot.
+/// Bounded `SQLite` projection for the daemon snapshot, without host contact or lease renewal.
 mod metadata_projection {
-    //! Pure bounded `SQLite` projection. No host connection, capability or lease renewal.
     use crate::StoreError;
     use serde::Serialize;
     use std::collections::HashSet;
@@ -2232,11 +2267,11 @@ mod metadata_projection {
     /// Project persisted control facts within the caller existing read transaction.
     /// # Errors
     /// Rejects malformed identities, context digests, watermarks or pending dispatch bindings.
-    pub fn read_terminal_metadata(
+    pub fn read_terminal_metadata<S: std::hash::BuildHasher>(
         conn: &rusqlite::Connection,
         actor: &ActorId,
         project_filter: Option<ProjectId>,
-        allowed_projects: Option<&HashSet<ProjectId>>,
+        allowed_projects: Option<&HashSet<ProjectId, S>>,
     ) -> Result<TerminalMetadataPage, StoreError> {
         if super::read_daemon_state_conn(conn)?.schema_version < 12 {
             return Ok(TerminalMetadataPage {

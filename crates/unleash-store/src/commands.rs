@@ -134,6 +134,13 @@ pub enum CommandMutation {
         /// Configuration et provenance déjà validées côté service.
         preparation: Box<crate::ProviderProfilePreparation>,
     },
+    /// Engage une observation de configuration locale, sans admission ni effet fournisseur.
+    ValidateProviderProfile {
+        /// Autorité administrative dérivée de la session authentifiée.
+        caller: CallerAuthority,
+        /// Observation réelle et objet publié avant la transaction.
+        preparation: Box<crate::ProviderValidationPreparation>,
+    },
     /// Prépare un terminal sans action OS ni action broker préinsérée.
     PrepareTerminalAllocation {
         /// Identité égale à l'agrégat de commande.
@@ -344,6 +351,23 @@ pub enum CommandMutation {
         reason: String,
         /// Autorité appelante.
         caller: CallerAuthority,
+    },
+    /// Voie `SetPolicy` avec émission ou révocation de permission fournisseur.
+    SetPolicyWithProviderProbeMandate {
+        /// Portée de politique authentifiée.
+        scope_kind: PolicyScopeKind,
+        /// Identité de portée canonique.
+        scope_id: String,
+        /// Mode d'isolation demandé.
+        isolation_mode: PolicyIsolationMode,
+        /// Version logique de politique.
+        policy_version: String,
+        /// Motif de la commande administrative.
+        reason: String,
+        /// Autorité issue de la session.
+        caller: CallerAuthority,
+        /// Permission fermée, sans exécution ni observation implicite.
+        mandate: crate::ProviderProbeMandateChange,
     },
     /// Configure l'intégration AI-Guard (`ConfigureGuard`).
     ConfigureGuard {
@@ -806,37 +830,40 @@ impl CommandReplayRow {
 pub(crate) fn classify_command_replay(
     conn: &Connection,
     daemon: &DaemonStateRow,
-    req: &CommitCommandRequest,
+    actor: &ActorId,
+    envelope: &CommandEnvelope,
     digest: Sha256Digest,
 ) -> Result<Option<CommandReceipt>, StoreError> {
-    if req.envelope.authority_generation != daemon.authority_generation {
+    if envelope.authority_generation != daemon.authority_generation {
         return Err(StoreError::StaleAuthorityGeneration {
             expected: daemon.authority_generation,
-            actual: req.envelope.authority_generation,
-            command_id: Some(req.envelope.command_id),
+            actual: envelope.authority_generation,
+            command_id: Some(envelope.command_id),
         });
     }
     let existing = conn.query_row(
         "SELECT receipt_id,command_digest,response_state,response_json,authority_generation FROM command_receipts WHERE actor_id=?1 AND command_id=?2",
-        rusqlite::params![req.actor_id.as_str(),req.envelope.command_id.to_string()],
+        rusqlite::params![actor.as_str(),envelope.command_id.to_string()],
         CommandReplayRow::read,
     ).optional()?;
     let Some(row) = existing else {
         return Ok(None);
     };
-    let historical_profile = matches!(
-        req.mutation,
-        CommandMutation::SetProviderProfile { .. } | CommandMutation::PrepareTerminalControl { .. }
-    ) && row.authority_generation
-        != daemon.authority_generation.to_string();
-    if historical_profile || row.digest != digest.as_prefixed_str() {
+    let lineage_bound = matches!(
+        envelope.command_type.as_str(),
+        "SetProviderProfile" | "TestProviderProfile"
+    ) || (envelope.command_type == "AcquireTerminal"
+        && envelope.payload.contains_key("terminal_id"));
+    let historical_command =
+        lineage_bound && row.authority_generation != daemon.authority_generation.to_string();
+    if historical_command || row.digest != digest.as_prefixed_str() {
         return Err(StoreError::IdempotencyConflict {
-            command_id: req.envelope.command_id,
+            command_id: envelope.command_id,
         });
     }
     if row.state == "tombstone" {
         return Err(StoreError::IdempotencyWindowExpired {
-            command_id: req.envelope.command_id,
+            command_id: envelope.command_id,
             receipt_id: row.receipt_id.parse()?,
         });
     }
@@ -871,17 +898,23 @@ pub(crate) fn tx_commit_command(
         });
     }
     crate::backup_requests::validate_request_backup_envelope(req)?;
-    crate::provider_probes::validate_command(tx, req)?;
+    let local_validation = crate::provider_profile_validation::validate_identity(req)?;
+    if !local_validation {
+        crate::provider_probes::validate_command(tx, req)?;
+    }
     crate::provider_profiles::validate_identity(req)?;
     crate::terminal_allocations::validate_command(tx, req)?;
 
     // Étape 2 : Rechercher `(actor_id, command_id)` dans `command_receipts`
     let actor_str = req.actor_id.as_str();
     let cmd_str = req.envelope.command_id.to_string();
-    if let Some(receipt) = classify_command_replay(tx, &daemon, req, command_digest)? {
+    if let Some(receipt) =
+        classify_command_replay(tx, &daemon, &req.actor_id, &req.envelope, command_digest)?
+    {
         return Ok(CommitOutcome::IdempotentReplay(receipt));
     }
     crate::provider_profiles::validate_new_command(req)?;
+    crate::provider_profile_validation::validate_new_command(req)?;
 
     // Mode `read_only_recovery` refuse les nouvelles écritures métier ordinaires tout en
     // autorisant les opérations d'urgence / réconciliation / arrêt / purge.
@@ -1335,6 +1368,22 @@ fn apply_command_mutation(
                 generated_events,
             )
         }
+        CommandMutation::ValidateProviderProfile {
+            caller,
+            preparation,
+        } => crate::provider_profile_validation::commit_tx(
+            tx,
+            config,
+            daemon,
+            now_ms,
+            crate::provider_profile_validation::ValidationCommand {
+                envelope,
+                caller,
+                preparation,
+            },
+            receipt_id,
+            generated_events,
+        ),
         CommandMutation::PrepareTerminalAllocation {
             terminal_id,
             preparation,
@@ -1903,6 +1952,57 @@ fn apply_command_mutation(
                 payload,
                 sensitivity: Sensitivity::Project,
                 outbox_destinations: vec![],
+            });
+            Ok(new_rev)
+        }
+        CommandMutation::SetPolicyWithProviderProbeMandate {
+            scope_kind,
+            scope_id,
+            isolation_mode,
+            policy_version,
+            reason,
+            caller,
+            mandate,
+        } => {
+            let (new_rev, audit) = crate::provider_probe_mandates::apply_policy_change_tx(
+                tx,
+                &crate::provider_probe_mandates::PolicyMandateCommand {
+                    daemon,
+                    envelope,
+                    actor_id,
+                    caller,
+                    receipt_id,
+                    now: now_ms,
+                    scope_kind: *scope_kind,
+                    scope_id,
+                    isolation_mode: *isolation_mode,
+                    policy_version,
+                    reason,
+                },
+                mandate,
+            )?;
+            let mut payload = Map::new();
+            payload.insert(
+                "isolation_mode".to_owned(),
+                Value::String(isolation_mode.as_str().to_owned()),
+            );
+            payload.insert("reason".to_owned(), Value::String(reason.clone()));
+            payload.insert(
+                "provider_probe_mandate".to_owned(),
+                serde_json::to_value(audit)?,
+            );
+            generated_events.push(EventAppendSpec {
+                event_type: "SecurityPolicyUpdated".to_owned(),
+                aggregate_type: AggregateKind::SecurityPolicy,
+                aggregate_id: envelope.aggregate_id,
+                aggregate_revision: new_rev,
+                project_id: envelope.project_id,
+                correlation_id: cmd_id.as_uuid(),
+                causation_kind: EventCausationKind::Command,
+                causation_id: None,
+                payload,
+                sensitivity: Sensitivity::Project,
+                outbox_destinations: vec!["clients".to_owned()],
             });
             Ok(new_rev)
         }

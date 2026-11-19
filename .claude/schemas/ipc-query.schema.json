@@ -42,5 +42,33 @@
     "payload": {
       "type": "object"
     }
-  }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": { "query_type": { "const": "GetCommandReceipt" } }
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["command_id"],
+            "properties": {
+              "command_id": { "type": "string", "format": "uuid" },
+              "result_ref": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128,
+                "not": { "pattern": "[\\u0000-\\u001f\\u007f-\\u009f]" },
+                "description": "La limite de 128 octets UTF-8 est également vérifiée par le daemon."
+              }
+            }
+          }
+        },
+        "if": { "properties": { "payload": { "required": ["result_ref"] } } },
+        "then": { "properties": { "project_id": { "type": "string" } } }
+      }
+    }
+  ]
 }

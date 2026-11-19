@@ -69,7 +69,7 @@ impl FixtureDaemon {
             .expect("daemon readiness deadline")
             .expect("read daemon readiness");
         let ready: Value = serde_json::from_str(&line).expect("daemon readiness JSON");
-        assert_eq!(ready["status"], "ready");
+        assert_eq!(ready.get("status").and_then(Value::as_str), Some("ready"));
         ready
     }
 
@@ -157,7 +157,10 @@ fn stop_fixture_host(runtime: &Path) -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn object(value: Value) -> Map<String, Value> {
-    value.as_object().expect("fixture payload object").clone()
+    let Value::Object(object) = value else {
+        panic!("fixture payload object expected");
+    };
+    object
 }
 
 fn terminal_diagnostic(data: &Path) -> String {
@@ -298,7 +301,7 @@ async fn t_f011_001_configuration_is_durable_idempotent_and_legacy_compatible() 
     conflicting.command_id = CommandId::from_u128(0xf011_0102);
     conflicting.expected_revision = Revision::new(2);
     let mut changed = terminal_configuration();
-    changed["profiles"][0]["variables"]["LANG"] = json!("C.UTF-8");
+    *changed.pointer_mut("/profiles/0/variables/LANG").unwrap() = json!("C.UTF-8");
     conflicting.payload = object(
         json!({"scope_kind":"user","scope_id":"default","patch":{"terminal_runtime":changed}}),
     );
@@ -338,34 +341,18 @@ async fn t_f011_001_configuration_is_durable_idempotent_and_legacy_compatible() 
         .await
         .unwrap();
     assert_eq!(
-        snapshot.result["extra_typed"]["terminal_runtime"],
-        terminal_configuration()
+        snapshot.result.pointer("/extra_typed/terminal_runtime"),
+        Some(&terminal_configuration())
     );
 }
 
-#[tokio::test]
-async fn t_f011_003_real_daemon_accepts_authenticated_terminal_acquisition() {
-    let data = local_test_dir("f011-data").unwrap();
-    let rendezvous = local_test_dir("f011-rdv").unwrap();
-    let project_root = local_test_dir("f011-project").unwrap();
-    std::fs::set_permissions(rendezvous.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
-    let daemon = FixtureDaemon::spawn(data.path(), rendezvous.path());
-    let ready = daemon.readiness();
-    let socket: PathBuf = rendezvous.path().join("daemon.sock");
-    let mut client = tokio::time::timeout(
-        DEADLINE,
-        UnleashClient::connect(ClientConfig::new(socket, ClientKind::Cli, "f011-e2e")),
-    )
-    .await
-    .expect("IPC connect deadline")
-    .expect("authenticated IPC hello");
+async fn configure_nominal_fixture(
+    client: &mut UnleashClient,
+    project: ProjectId,
+    mission: Uuid,
+    project_path: &str,
+) {
     let authority = client.hello().authority_generation;
-    assert_eq!(ready["authority_generation"], authority.to_string());
-
-    let project = ProjectId::from_u128(0xf011_0001);
-    let mission = Uuid::from_u128(0xf011_0002);
-    let canonical_project_root = project_root.path().canonicalize().unwrap();
-    let project_path = canonical_project_root.to_str().unwrap();
     let setup = [
         command(
             authority,
@@ -419,7 +406,13 @@ async fn t_f011_003_real_daemon_accepts_authenticated_terminal_acquisition() {
     .await
     .expect("project query deadline")
     .expect("read created project");
-    assert_eq!(project_snapshot.result["primary_root_path"], project_path);
+    assert_eq!(
+        project_snapshot
+            .result
+            .get("primary_root_path")
+            .and_then(Value::as_str),
+        Some(project_path)
+    );
 
     let mut configuration = command(
         authority,
@@ -440,6 +433,35 @@ async fn t_f011_003_real_daemon_accepts_authenticated_terminal_acquisition() {
         .expect("configuration deadline")
         .expect("authenticated terminal configuration");
     assert_eq!(configured.state, ReceiptState::Accepted);
+}
+
+#[tokio::test]
+async fn t_f011_003_real_daemon_accepts_authenticated_terminal_acquisition() {
+    let data = local_test_dir("f011-data").unwrap();
+    let rendezvous = local_test_dir("f011-rdv").unwrap();
+    let project_root = local_test_dir("f011-project").unwrap();
+    std::fs::set_permissions(rendezvous.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let daemon = FixtureDaemon::spawn(data.path(), rendezvous.path());
+    let ready = daemon.readiness();
+    let socket: PathBuf = rendezvous.path().join("daemon.sock");
+    let mut client = tokio::time::timeout(
+        DEADLINE,
+        UnleashClient::connect(ClientConfig::new(socket, ClientKind::Cli, "f011-e2e")),
+    )
+    .await
+    .expect("IPC connect deadline")
+    .expect("authenticated IPC hello");
+    let authority = client.hello().authority_generation;
+    assert_eq!(
+        ready.get("authority_generation"),
+        Some(&json!(authority.to_string()))
+    );
+
+    let project = ProjectId::from_u128(0xf011_0001);
+    let mission = Uuid::from_u128(0xf011_0002);
+    let canonical_project_root = project_root.path().canonicalize().unwrap();
+    let project_path = canonical_project_root.to_str().unwrap();
+    configure_nominal_fixture(&mut client, project, mission, project_path).await;
 
     let acquire = command(
         authority,
@@ -462,6 +484,15 @@ async fn t_f011_003_real_daemon_accepts_authenticated_terminal_acquisition() {
     assert_eq!(receipt.state, ReceiptState::Accepted);
     assert_eq!(receipt.command_id, acquire.command_id);
     assert_eq!(receipt.aggregate_id, acquire.aggregate_id);
+    wait_for_nominal_terminal_output(&mut client, project, acquire.aggregate_id, data.path()).await;
+}
+
+async fn wait_for_nominal_terminal_output(
+    client: &mut UnleashClient,
+    project: ProjectId,
+    terminal: Uuid,
+    data: &Path,
+) {
     let deadline = Instant::now() + DEADLINE;
     loop {
         let queried = client
@@ -470,9 +501,7 @@ async fn t_f011_003_real_daemon_accepts_authenticated_terminal_acquisition() {
                 request_id: RequestId::from_u128(0xf011_0017),
                 query_type: "ReadTerminalLog".into(),
                 project_id: Some(project),
-                payload: object(
-                    json!({"terminal_id":acquire.aggregate_id,"after_offset":0,"max_bytes":65536}),
-                ),
+                payload: object(json!({"terminal_id":terminal,"after_offset":0,"max_bytes":65536})),
             })
             .await;
         let output = match queried {
@@ -484,14 +513,14 @@ async fn t_f011_003_real_daemon_accepts_authenticated_terminal_acquisition() {
                 assert!(
                     Instant::now() < deadline,
                     "durable launch observation deadline: {}",
-                    terminal_diagnostic(data.path())
+                    terminal_diagnostic(data)
                 );
                 tokio::time::sleep(Duration::from_millis(10)).await;
                 continue;
             }
             Err(error) => panic!(
                 "real terminal log query failed: {error:?}; {}",
-                terminal_diagnostic(data.path())
+                terminal_diagnostic(data)
             ),
         };
         if output

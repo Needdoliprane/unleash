@@ -11,7 +11,7 @@ Ces JSON Schema 2020-12 décrivent des **contrats Unleash de conception**, à im
 - skill / role / contract-profile : bundles, entrée principale et profils exacts ; aucune compilation de prose en preuve.
 - discovery-receipt : decision reuse/create distincte de strategy ; identité, fraîcheur et provenance vérifiées par le domaine.
 - context-manifest : manifeste immuable d'un appel API précis, lié au bundle d'invocation. Le statut de transmission appartient à ModelCallRecord, pas à une mutation du manifeste.
-- ipc-query / ipc-query-response : enveloppe de lecture et réponse avec watermark transactionnel optionnel (livrable M0).
+- ipc-query / ipc-query-response : enveloppe de lecture et réponse avec watermark transactionnel optionnel. La variante `terminal_acquisition_response` décrit le [résultat causal F011](../features/F011-terminal-pool/interfaces.md#lecture-causale-de-lacquisition).
 - ipc-hello : trames de négociation Hello client-serveur (HelloRequest et HelloResponse, livrable M0).
 - ipc-subscribe-events : abonnement aux événements et trames de flux/reprise (SubscribeEventsRequest et SubscribeEventsFrame, livrable M0).
 - ipc-client-upload-segment : trame de segment pour l'import de données client_upload (ClientUploadSegment, livrable M0).

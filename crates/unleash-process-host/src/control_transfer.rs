@@ -63,7 +63,7 @@ pub enum ControlTransferResponse {
     /// Correlated facts; exact replay returns these same facts.
     Ack {
         /// Actual immutable acknowledgement.
-        ack: ControlTransferAck,
+        ack: Box<ControlTransferAck>,
     },
     /// No usable acknowledgement, including an uncertain intermediate result.
     Refused {

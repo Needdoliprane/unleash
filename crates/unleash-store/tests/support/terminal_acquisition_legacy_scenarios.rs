@@ -1,4 +1,4 @@
-//! Legacy observation compatibility, using explicitly synthetic SQLite facts.
+//! Legacy observation compatibility, using explicitly synthetic `SQLite` facts.
 //! This fixture makes no operating system identity or PTY claim.
 use super::*;
 

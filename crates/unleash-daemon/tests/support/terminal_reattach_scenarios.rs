@@ -127,7 +127,7 @@ impl LiveFixture {
         let deadline = Instant::now() + DEADLINE;
         loop {
             match self.client.query(&QueryEnvelope {protocol_version:ProtocolVersion,request_id:RequestId::from_u128(0xf011_4106),query_type:"ReadTerminalLog".into(),project_id:Some(self.project),payload:object(json!({"terminal_id":request.aggregate_id,"after_offset":0,"max_bytes":65536}))}).await {
-                Ok(reply) if reply.result["text"].as_str().is_some_and(|text|text.contains("live-terminal-ready"))=>return reply.result,
+                Ok(reply) if reply.result.get("text").and_then(Value::as_str).is_some_and(|text|text.contains("live-terminal-ready"))=>return reply.result,
                 Ok(_)=>{},
                 Err(unleash_client::ClientError::Remote(error)) if error.code==unleash_protocol::ErrorCode::ResourceBusy && error.retry_class==unleash_protocol::RetryClass::AfterRefresh=>{},
                 Err(error)=>panic!("initial real PTY observation failed: {error:?}; {}",terminal_diagnostic(self.data.path())),
@@ -269,11 +269,11 @@ fn terminal_worker_entrypoint() {
         .unwrap();
     starts.write_all(b"started\n").unwrap();
     starts.sync_all().unwrap();
-    println!("live-terminal-ready");
+    writeln!(std::io::stdout().lock(), "live-terminal-ready").unwrap();
     std::io::stdout().flush().unwrap();
     std::thread::spawn(|| {
         loop {
-            println!("live-terminal-output");
+            writeln!(std::io::stdout().lock(), "live-terminal-output").unwrap();
             let _ = std::io::stdout().flush();
             std::thread::sleep(Duration::from_millis(25));
         }
@@ -287,7 +287,7 @@ fn terminal_worker_entrypoint() {
                 .unwrap();
             effects.write_all(b"effect\n").unwrap();
             effects.sync_all().unwrap();
-            println!("effect-recorded");
+            writeln!(std::io::stdout().lock(), "effect-recorded").unwrap();
             std::io::stdout().flush().unwrap();
         }
     }
@@ -302,15 +302,26 @@ async fn t_f011_003_successor_reads_control_revision_without_taking_control() {
     fixture.restart_daemon_only().await;
     assert!(fixture.client.hello().daemon_epoch > old_epoch);
     let snapshot = fixture.snapshot().await;
-    let item = snapshot["terminals"]["items"]
-        .as_array()
+    let terminal_id = original.get("terminal_id").unwrap();
+    let item = snapshot
+        .pointer("/terminals/items")
+        .and_then(Value::as_array)
         .unwrap()
         .iter()
-        .find(|item| item["terminal_id"] == original["terminal_id"])
+        .find(|item| item.get("terminal_id") == Some(terminal_id))
         .expect("owner sees the existing terminal even under a suspect lease");
-    assert_eq!(item["control_revision"], 0);
-    assert_eq!(item["lease_state"], "suspect");
-    assert_eq!(item["process_run_uuid"], original["process_run_uuid"]);
+    assert_eq!(
+        item.get("control_revision").and_then(Value::as_u64),
+        Some(0)
+    );
+    assert_eq!(
+        item.get("lease_state").and_then(Value::as_str),
+        Some("suspect")
+    );
+    assert_eq!(
+        item.get("process_run_uuid"),
+        Some(original.get("process_run_uuid").unwrap())
+    );
     assert!(item.get("lease_id").is_none() && item.get("fence").is_none());
     let after = fixture.host_manifest();
     assert_eq!(after.process_run_uuid, before.process_run_uuid);
@@ -349,8 +360,11 @@ async fn t_f011_003_snapshot_hides_incomplete_identity_without_contacting_host()
         }
         fixture.start_successor().await;
         assert!(
-            fixture.snapshot().await["terminals"]["items"]
-                .as_array()
+            fixture
+                .snapshot()
+                .await
+                .pointer("/terminals/items")
+                .and_then(Value::as_array)
                 .unwrap()
                 .is_empty(),
             "inadmissible registration is excluded: {injection}"
@@ -366,6 +380,10 @@ async fn t_f011_003_snapshot_hides_incomplete_identity_without_contacting_host()
 async fn t_f011_003_registered_acquisition_after_real_daemon_crash_reuses_the_same_pty() {
     let mut fixture = LiveFixture::new(true).await;
     let original = fixture.start_terminal().await;
+    let terminal_id = original.get("terminal_id").expect("observed terminal id");
+    let process_run_uuid = original
+        .get("process_run_uuid")
+        .expect("observed process run id");
     let before = fixture.host_manifest();
     let (old_secret, mut old_channel) = open_controller(&before);
     fixture.restart_daemon_only().await;
@@ -376,7 +394,7 @@ async fn t_f011_003_registered_acquisition_after_real_daemon_crash_reuses_the_sa
         Uuid::from_u128(0xf011_4003),
         0,
         "AcquireTerminal",
-        json!({"terminal_id":original["terminal_id"],"process_run_uuid":original["process_run_uuid"],"scope_revision":2,"control_mode":"exclusive"}),
+        json!({"terminal_id":terminal_id,"process_run_uuid":process_run_uuid,"scope_revision":2,"control_mode":"exclusive"}),
     );
     let accepted = fixture
         .client
@@ -387,16 +405,17 @@ async fn t_f011_003_registered_acquisition_after_real_daemon_crash_reuses_the_sa
     let deadline = Instant::now() + DEADLINE;
     loop {
         let snapshot = fixture.snapshot().await;
-        let observed = snapshot["terminals"]["items"].as_array().and_then(|items| {
-            items
-                .iter()
-                .find(|item| item["terminal_id"] == original["terminal_id"])
-        });
+        let observed = snapshot
+            .pointer("/terminals/items")
+            .and_then(Value::as_array)
+            .and_then(|items| {
+                items
+                    .iter()
+                    .find(|item| item.get("terminal_id") == Some(terminal_id))
+            });
         if observed.is_some_and(|item| {
-            item["lease_state"] == "held"
-                && item["control_revision"]
-                    .as_u64()
-                    .is_some_and(|revision| revision == 1)
+            item.get("lease_state").and_then(Value::as_str) == Some("held")
+                && item.get("control_revision").and_then(Value::as_u64) == Some(1)
         }) {
             break;
         }
@@ -519,6 +538,7 @@ fn assert_closed_old_controller(
 }
 
 async fn assert_preserved_output(fixture: &mut LiveFixture, original: &Value) {
+    let terminal_id = original.get("terminal_id").expect("observed terminal id");
     let response = fixture
         .client
         .query(&QueryEnvelope {
@@ -526,16 +546,20 @@ async fn assert_preserved_output(fixture: &mut LiveFixture, original: &Value) {
             request_id: RequestId::from_u128(0xf011_4405),
             query_type: "ReadTerminalLog".into(),
             project_id: Some(fixture.project),
-            payload: object(
-                json!({"terminal_id":original["terminal_id"],"after_offset":0,"max_bytes":65536}),
-            ),
+            payload: object(json!({"terminal_id":terminal_id,"after_offset":0,"max_bytes":65536})),
         })
         .await
         .expect("the successor reads the same PTY through its committed controller");
     let old: unleash_process_host::LogReadResult =
-        serde_json::from_value(original["log"].clone()).unwrap();
-    let new: unleash_process_host::LogReadResult =
-        serde_json::from_value(response.result["log"].clone()).unwrap();
+        serde_json::from_value(original.get("log").expect("original PTY log").clone()).unwrap();
+    let new: unleash_process_host::LogReadResult = serde_json::from_value(
+        response
+            .result
+            .get("log")
+            .expect("successor PTY log")
+            .clone(),
+    )
+    .unwrap();
     let bytes = |log: &unleash_process_host::LogReadResult| {
         log.segments
             .iter()

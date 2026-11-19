@@ -166,7 +166,7 @@ fn metadata(store: &UnleashStore, control: &TerminalControlRecord) -> serde_json
                     conn,
                     &control.context.actor_id,
                     Some(PROJECT),
-                    None,
+                    None::<&std::collections::HashSet<ProjectId>>,
                 )
             })
             .unwrap(),
