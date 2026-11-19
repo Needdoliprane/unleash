@@ -122,7 +122,7 @@ pub(crate) fn spawn_accept_loop(
             }
             tokio::select! {
                 biased;
-                () = state.shutdown_notify.notified() => {
+                () = wait_for_shutdown(&state.accepting, &state.shutdown_notify) => {
                     if !state.is_accepting() {
                         break;
                     }
@@ -182,26 +182,48 @@ async fn handle_client_connection(mut stream: UnixStream, state: Arc<DaemonRunti
     };
 
     loop {
-        let frame = tokio::select! {
-            biased;
-            () = state.shutdown_notify.notified(), if !state.is_accepting() => {
-                break;
-            }
-            read_res = read_raw_frame_no_timeout(&mut stream, MAX_FRAME_BYTES) => {
-                match read_res {
-                    Ok(Some(bytes)) => bytes,
-                    Ok(None) => break,
-                    Err(ipc_err) => {
-                        let _ = write_json_frame_timeout(&mut stream, &ipc_err, RESPONSE_WRITE_TIMEOUT).await;
-                        break;
-                    }
+        let frame =
+            match read_frame_until_shutdown(&mut stream, &state.accepting, &state.shutdown_notify)
+                .await
+            {
+                Ok(Some(bytes)) => bytes,
+                Ok(None) => break,
+                Err(ipc_err) => {
+                    let _ = write_json_frame_timeout(&mut stream, &ipc_err, RESPONSE_WRITE_TIMEOUT)
+                        .await;
+                    break;
                 }
-            }
-        };
+            };
 
         if !dispatch_incoming_frame(&mut stream, &state, &session, &frame).await {
             return;
         }
+    }
+}
+
+async fn read_frame_until_shutdown(
+    stream: &mut UnixStream,
+    accepting: &AtomicBool,
+    shutdown: &Notify,
+) -> Result<Option<Vec<u8>>, IpcError> {
+    tokio::select! {
+        biased;
+        () = wait_for_shutdown(accepting, shutdown) => Ok(None),
+        result = read_raw_frame_no_timeout(stream, MAX_FRAME_BYTES) => result,
+    }
+}
+
+async fn wait_for_shutdown(accepting: &AtomicBool, shutdown: &Notify) {
+    loop {
+        let notified = shutdown.notified();
+        tokio::pin!(notified);
+        // Register before checking: notify_waiters does not store a permit for
+        // a future waiter. Both a stop before this check and one after it wake us.
+        notified.as_mut().enable();
+        if !accepting.load(Ordering::Acquire) {
+            return;
+        }
+        notified.await;
     }
 }
 
@@ -2803,6 +2825,37 @@ mod tests {
     use unleash_domain::RequestId;
 
     use super::*;
+
+    // REQ-CORE-007 / T-F001-007: establish an already-pending real UDS read
+    // before stopping; neither a frozen select guard nor a lost wake may hang it.
+    #[tokio::test]
+    async fn already_idle_connection_closes_when_shutdown_is_notified() {
+        let (_client, mut server) = UnixStream::pair().unwrap();
+        let accepting = AtomicBool::new(true);
+        let shutdown = Notify::new();
+        {
+            let read = read_frame_until_shutdown(&mut server, &accepting, &shutdown);
+            tokio::pin!(read);
+            let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+            assert!(std::future::Future::poll(read.as_mut(), &mut context).is_pending());
+            accepting.store(false, Ordering::Release);
+            shutdown.notify_waiters();
+            assert!(matches!(
+                tokio::time::timeout(Duration::from_secs(1), read).await,
+                Ok(Ok(None))
+            ));
+        }
+        // A notification before the future is armed must also be harmless.
+        shutdown.notify_waiters();
+        assert!(matches!(
+            tokio::time::timeout(
+                Duration::from_secs(1),
+                read_frame_until_shutdown(&mut server, &accepting, &shutdown)
+            )
+            .await,
+            Ok(Ok(None))
+        ));
+    }
 
     #[test]
     fn detect_v1_protocol_error_rejects_v1_and_allows_v2() {

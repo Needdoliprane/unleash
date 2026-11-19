@@ -285,6 +285,34 @@ fn apply_startup_state(
 }
 
 impl UnleashStore {
+    /// Lit la préparation terminal et le watermark dans la même vue.
+    /// # Errors
+    /// Retourne les erreurs de lecture du Store.
+    pub fn inspect_terminal_allocation_snapshot(
+        &self,
+        terminal: unleash_domain::TerminalId,
+    ) -> Result<SnapshotProjection<Option<crate::TerminalAllocationRecord>>, StoreError> {
+        self.project_snapshot(|conn| crate::terminal_allocations::read_conn(conn, terminal))
+    }
+
+    /// Consomme une seule fois le dispatch courant sans lancer de processus.
+    /// # Errors
+    /// Refuse toute divergence, lease expirée ou résolution déjà engagée.
+    pub fn resolve_terminal_launch(
+        &self,
+        request: crate::ResolveTerminalLaunchRequest,
+    ) -> Result<crate::ResolvedTerminalLaunch, StoreError> {
+        let cfg = self.config.clone();
+        let result = self.writer.submit_immediate_blocking(
+            WriteCriticality::Normal,
+            true,
+            move |tx, now| crate::terminal_allocations::resolve_tx(tx, &cfg, now, &request),
+        )?;
+        self.config
+            .cutpoints
+            .hit(StoreCutpoint::C2AfterCommandCommit)?;
+        Ok(result)
+    }
     /// Lit la demande réservée et l'état réel de son job dans le même snapshot.
     ///
     /// # Errors
@@ -412,6 +440,16 @@ impl UnleashStore {
         self.read_snapshot(move |conn, _| {
             crate::broker_writer::inspect_action_conn(conn, action_id)
         })
+    }
+
+    /// Lit le contexte réel de préparation d'un probe, sans accès réseau ni secret.
+    /// # Errors
+    /// Refuse un document durable illisible ou un digest divergent.
+    pub fn inspect_provider_probe(
+        &self,
+        probe_id: unleash_domain::ProviderProbeId,
+    ) -> Result<Option<crate::PreparedProviderProbe>, StoreError> {
+        self.read_snapshot(|conn, _| crate::provider_probes::read_context(conn, probe_id))
     }
     /// Ouvre ou initialise la base `SQLite` qualifiée avec vérification de build, PRAGMAs et migrations.
     ///

@@ -70,12 +70,200 @@
           }
         }
       }
+    },
+    "provider_positive_integer": {
+      "$ref": "#/$defs/wire_unsigned_integer",
+      "minimum": 1
+    },
+    "provider_endpoint": {
+      "type": "string",
+      "maxLength": 2048,
+      "pattern": "^https?://[^/?#@]+(?:/(?:[^%?#]|%[0-9A-Fa-f]{2})*)?$",
+      "not": { "pattern": "[^!-~]|\\\\" },
+      "description": "URL ASCII sans identifiants, requête ni fragment. Le décodeur vérifie l'hôte et le port et restreint HTTP au loopback."
+    },
+    "provider_digest": {
+      "oneOf": [
+        { "type": "string", "pattern": "^[a-f0-9]{64}$", "minLength": 64, "maxLength": 64 },
+        { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$", "minLength": 71, "maxLength": 71 },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["algorithm", "hex"],
+          "properties": {
+            "algorithm": { "const": "sha256" },
+            "hex": { "type": "string", "pattern": "^[a-f0-9]{64}$", "minLength": 64, "maxLength": 64 }
+          }
+        }
+      ]
+    },
+    "provider_optional_amount": {
+      "anyOf": [{ "$ref": "#/$defs/wire_unsigned_integer" }, { "type": "null" }]
+    },
+    "provider_inline_price": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "currency", "input_micros_per_million", "cached_input_micros_per_million",
+        "cache_write_micros_per_million", "output_micros_per_million", "observed_at_ms",
+        "valid_until_ms", "source_url"
+      ],
+      "properties": {
+        "currency": { "type": "string", "pattern": "^[A-Z]{3}$", "minLength": 3, "maxLength": 3 },
+        "input_micros_per_million": { "$ref": "#/$defs/provider_optional_amount" },
+        "cached_input_micros_per_million": { "$ref": "#/$defs/provider_optional_amount" },
+        "cache_write_micros_per_million": { "$ref": "#/$defs/provider_optional_amount" },
+        "output_micros_per_million": { "$ref": "#/$defs/provider_optional_amount" },
+        "observed_at_ms": { "$ref": "#/$defs/wire_unsigned_integer" },
+        "valid_until_ms": { "$ref": "#/$defs/wire_unsigned_integer" },
+        "source_url": { "anyOf": [{ "$ref": "#/$defs/provider_endpoint" }, { "type": "null" }] }
+      },
+      "description": "Tarif inline sans paliers. Le décodeur compare la date du constat à la date limite."
+    },
+    "set_provider_profile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "provider_kind", "dialect", "endpoint", "model", "locality", "server_management",
+        "auth", "limits", "declared_capabilities", "pricing"
+      ],
+      "properties": {
+        "provider_kind": { "enum": ["openai", "anthropic", "lmstudio", "ollama", "llama_cpp", "openai_compatible"] },
+        "dialect": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "version"],
+          "properties": {
+            "kind": { "enum": ["openai_responses", "anthropic_messages", "openai_chat_completions", "ollama_chat"] },
+            "version": { "$ref": "#/$defs/provider_positive_integer" }
+          }
+        },
+        "endpoint": { "$ref": "#/$defs/provider_endpoint" },
+        "model": { "$ref": "#/$defs/probe_reference" },
+        "locality": { "enum": ["local_only", "approved_remote"] },
+        "server_management": { "enum": ["user_managed", "unleash_managed"] },
+        "auth": {
+          "oneOf": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["kind"],
+              "properties": { "kind": { "const": "none" } }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["kind", "secret_ref"],
+              "properties": {
+                "kind": { "const": "secret_ref" },
+                "secret_ref": { "$ref": "#/$defs/probe_reference" }
+              }
+            }
+          ]
+        },
+        "limits": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "max_inflight", "connect_timeout_ms", "queue_timeout_ms", "load_timeout_ms",
+            "first_token_timeout_ms", "generation_timeout_ms"
+          ],
+          "properties": {
+            "max_inflight": { "$ref": "#/$defs/provider_positive_integer" },
+            "connect_timeout_ms": { "$ref": "#/$defs/provider_positive_integer" },
+            "queue_timeout_ms": { "$ref": "#/$defs/provider_positive_integer" },
+            "load_timeout_ms": { "$ref": "#/$defs/provider_positive_integer" },
+            "first_token_timeout_ms": { "$ref": "#/$defs/provider_positive_integer" },
+            "generation_timeout_ms": { "$ref": "#/$defs/provider_positive_integer" }
+          }
+        },
+        "declared_capabilities": {
+          "type": "array",
+          "maxItems": 64,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/probe_reference" }
+        },
+        "pricing": {
+          "oneOf": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["kind"],
+              "properties": { "kind": { "const": "none_local" } }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["kind", "catalog_id", "catalog_version", "catalog_digest", "entry_digest", "stale_policy"],
+              "properties": {
+                "kind": { "const": "catalog" },
+                "catalog_id": { "$ref": "#/$defs/probe_reference" },
+                "catalog_version": { "$ref": "#/$defs/probe_reference" },
+                "catalog_digest": { "$ref": "#/$defs/provider_digest" },
+                "entry_digest": { "$ref": "#/$defs/provider_digest" },
+                "stale_policy": { "enum": ["block", "warn"] }
+              }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["kind", "entry", "stale_policy"],
+              "properties": {
+                "kind": { "enum": ["user_import", "user_declared"] },
+                "entry": { "$ref": "#/$defs/provider_inline_price" },
+                "stale_policy": { "enum": ["block", "warn"] }
+              }
+            }
+          ]
+        }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "provider_kind": { "const": "openai" } } },
+          "then": { "properties": { "dialect": { "properties": { "kind": { "const": "openai_responses" } } } } }
+        },
+        {
+          "if": { "properties": { "provider_kind": { "const": "anthropic" } } },
+          "then": { "properties": { "dialect": { "properties": { "kind": { "const": "anthropic_messages" } } } } }
+        },
+        {
+          "if": { "properties": { "provider_kind": { "enum": ["lmstudio", "llama_cpp"] } } },
+          "then": { "properties": { "dialect": { "properties": { "kind": { "const": "openai_chat_completions" } } } } }
+        },
+        {
+          "if": { "properties": { "provider_kind": { "const": "ollama" } } },
+          "then": { "properties": { "dialect": { "properties": { "kind": { "const": "ollama_chat" } } } } }
+        },
+        {
+          "if": { "properties": { "provider_kind": { "const": "openai_compatible" } } },
+          "then": {
+            "properties": {
+              "dialect": { "properties": { "kind": { "enum": ["openai_responses", "openai_chat_completions"] } } }
+            }
+          }
+        },
+        {
+          "if": { "properties": { "provider_kind": { "enum": ["openai", "anthropic"] } } },
+          "then": {
+            "properties": {
+              "auth": { "properties": { "kind": { "const": "secret_ref" } } },
+              "pricing": { "properties": { "kind": { "not": { "const": "none_local" } } } }
+            }
+          }
+        }
+      ]
     }
   },
-  "if": { "properties": { "command_type": { "const": "TestProviderProfile" } } },
-  "then": {
-    "properties": { "payload": { "$ref": "#/$defs/test_provider_profile" } }
-  },
+  "allOf": [
+    {
+      "if": { "properties": { "command_type": { "const": "TestProviderProfile" } } },
+      "then": { "properties": { "payload": { "$ref": "#/$defs/test_provider_profile" } } }
+    },
+    {
+      "if": { "properties": { "command_type": { "const": "SetProviderProfile" } } },
+      "then": { "properties": { "payload": { "$ref": "#/$defs/set_provider_profile" } } }
+    }
+  ],
   "properties": {
     "protocol_version": {
       "const": "unleash.ipc.v2"

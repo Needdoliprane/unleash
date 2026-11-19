@@ -124,14 +124,14 @@ fn openssl(command: &mut Command) -> Result<(), Box<dyn Error>> {
     }
 }
 
-struct TlsFixture {
+pub(crate) struct TlsFixture {
     _dir: tempfile::TempDir,
-    ca: reqwest::Certificate,
-    server: Arc<ServerConfig>,
+    pub(crate) ca: reqwest::Certificate,
+    pub(crate) server: Arc<ServerConfig>,
 }
 
 impl TlsFixture {
-    fn new() -> Result<Self, Box<dyn Error>> {
+    pub(crate) fn new() -> Result<Self, Box<dyn Error>> {
         // Ephemeral keys only: never a provider credential or installed trust root.
         let dir = local_test_dir("model-http-tls-fixture")?;
         let root = dir.path();

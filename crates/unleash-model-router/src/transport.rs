@@ -64,9 +64,22 @@ impl fmt::Debug for FrozenRequest {
 
 /// Immutable identity supplied by the owner of the resolved provider profile.
 pub struct ProfileRef {
-    id: String,
-    version: u64,
-    digest: Sha256Digest,
+    pub(crate) id: String,
+    pub(crate) version: u64,
+    pub(crate) digest: Sha256Digest,
+}
+
+// Shared security policy only; native request bodies, credentials and parsers stay distinct.
+pub(crate) fn https_client_builder(remaining_ms: u64) -> reqwest::ClientBuilder {
+    reqwest::Client::builder()
+        .tls_backend_rustls()
+        .https_only(true)
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
+        .retry(reqwest::retry::never())
+        .connect_timeout(Duration::from_secs(2))
+        .read_timeout(Duration::from_secs(10))
+        .timeout(Duration::from_millis(remaining_ms.min(60_000)))
 }
 
 impl fmt::Debug for ProfileRef {
@@ -454,15 +467,7 @@ impl ModelExecutor {
             .and_then(|n| u64::try_from(n).ok())
             .filter(|n| *n > 0)
             .ok_or_else(denied)?;
-        let builder = reqwest::Client::builder()
-            .tls_backend_rustls()
-            .https_only(true)
-            .no_proxy()
-            .redirect(reqwest::redirect::Policy::none())
-            .retry(reqwest::retry::never())
-            .connect_timeout(Duration::from_secs(2))
-            .read_timeout(Duration::from_secs(10))
-            .timeout(Duration::from_millis(remaining.min(60_000)));
+        let builder = https_client_builder(remaining);
         #[cfg(test)]
         let builder = if let Some(ca) = &self.fixture_ca {
             builder.tls_certs_only([ca.clone()])

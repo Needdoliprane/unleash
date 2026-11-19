@@ -411,6 +411,12 @@ pub(crate) fn read_snapshot(
     })?;
     let mut queued = Vec::new();
     let sql = "SELECT 'invocation',i.invocation_id,i.revision,a.project_id,i.admission_class,COALESCE(i.queued_at_ms,i.created_at_ms) FROM invocations i JOIN agents a ON a.agent_id=i.agent_id WHERE i.state='queued' AND i.wait_reason IS NULL UNION ALL SELECT 'replay',w.replay_worker_id,w.revision,m.project_id,w.admission_class,w.queued_at_ms FROM replay_workers w JOIN workflow_runs r ON r.run_id=w.run_id JOIN missions m ON m.mission_id=r.mission_id WHERE w.state='queued' AND w.wait_reason IS NULL UNION ALL SELECT 'probe',p.probe_id,p.revision,m.project_id,p.admission_class,p.queued_at_ms FROM provider_probes p LEFT JOIN workflow_runs r ON r.run_id=p.source_run_id LEFT JOIN missions m ON m.mission_id=r.mission_id WHERE p.state='queued' AND p.wait_reason IS NULL ORDER BY 1,2";
+    let sql_v009 = sql.replace("m.project_id,p.admission_class", "CASE WHEN pc.probe_id IS NOT NULL THEN pc.project_id ELSE m.project_id END,p.admission_class").replace("FROM provider_probes p LEFT JOIN", "FROM provider_probes p LEFT JOIN provider_probe_contexts pc ON pc.probe_id=p.probe_id LEFT JOIN");
+    let sql = if daemon.schema_version >= 9 {
+        sql_v009.as_str()
+    } else {
+        sql
+    };
     let mut stmt = conn.prepare(sql)?;
     let mut rows = stmt.query([])?;
     while let Some(row) = rows.next()? {
@@ -580,7 +586,11 @@ fn project_for(conn: &Connection, unit: AdmissionUnit) -> Result<Option<ProjectI
             "SELECT m.project_id FROM replay_workers w JOIN workflow_runs r ON r.run_id=w.run_id JOIN missions m ON m.mission_id=r.mission_id WHERE w.replay_worker_id=?1"
         }
         AdmissionUnit::Probe(_) => {
-            "SELECT m.project_id FROM provider_probes p LEFT JOIN workflow_runs r ON r.run_id=p.source_run_id LEFT JOIN missions m ON m.mission_id=r.mission_id WHERE p.probe_id=?1"
+            if read_daemon_state_conn(conn)?.schema_version >= 9 {
+                "SELECT CASE WHEN pc.probe_id IS NOT NULL THEN pc.project_id ELSE m.project_id END FROM provider_probes p LEFT JOIN provider_probe_contexts pc ON pc.probe_id=p.probe_id LEFT JOIN workflow_runs r ON r.run_id=p.source_run_id LEFT JOIN missions m ON m.mission_id=r.mission_id WHERE p.probe_id=?1"
+            } else {
+                "SELECT m.project_id FROM provider_probes p LEFT JOIN workflow_runs r ON r.run_id=p.source_run_id LEFT JOIN missions m ON m.mission_id=r.mission_id WHERE p.probe_id=?1"
+            }
         }
     };
     conn.query_row(sql, [unit.id().to_string()], |row| {
@@ -771,7 +781,10 @@ where
     if candidate.queued_at.is_none() {
         return Err(invalid("date de mise en file non attestée"));
     }
-    validate_candidate(tx, candidate, &daemon)?;
+    validate_candidate(tx, candidate, &daemon, now)?;
+    if let AdmissionUnit::Probe(probe) = unit {
+        crate::provider_probes::validate_admission_budgets(tx, probe, &budgets)?;
+    }
     validate_scope_and_subjects(tx, candidate)?;
     validate_deltas(&snapshot, candidate, &deficit_deltas, consecutive_controls)?;
     let lease = tx_acquire_lease(
@@ -890,6 +903,7 @@ fn validate_candidate(
     tx: &Transaction<'_>,
     candidate: &AdmissionCandidate,
     daemon: &DaemonStateRow,
+    now: TimestampMs,
 ) -> Result<(), StoreError> {
     if let Some(project) = candidate.project_id {
         let active: bool = tx.query_row(
@@ -917,6 +931,7 @@ fn validate_candidate(
             }
         }
         AdmissionUnit::Probe(id) => {
+            crate::provider_probes::validate_admission(tx, id, now)?;
             let valid:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM provider_probes p JOIN principals s ON s.principal_id=p.principal_id JOIN command_receipts c ON c.receipt_id=p.command_receipt_id JOIN provider_profiles f ON f.profile_version_ref=p.profile_version_ref WHERE p.probe_id=?1 AND s.state='active' AND c.actor_id=s.actor_id AND c.authority_generation=?2 AND c.state IN ('accepted','completed') AND p.authority_generation=?2 AND p.daemon_epoch=?3 AND p.admission_class='work' AND p.context_hash!='')",params![id.to_string(),daemon.authority_generation.to_string(),integer(daemon.daemon_epoch.as_u64())?],|row|row.get(0))?;
             if !valid {
                 return Err(invalid("cause, sujet ou incarnation probe non valides"));

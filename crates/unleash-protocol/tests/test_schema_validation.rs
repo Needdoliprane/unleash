@@ -50,15 +50,18 @@ fn build_validator(rel_path: &str) -> jsonschema::Validator {
         .unwrap_or_else(|e| panic!("Validateur {rel_path}: {e}"))
 }
 
+fn ipc_command_fixture() -> String {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    fs::read_to_string(root.join(".claude/examples/ipc-command.json"))
+        .expect("Lecture fixture ipc-command.json")
+}
+
 #[test]
 fn test_validate_ipc_command_schema() {
     let validator = build_validator("ipc-command.schema.json");
 
     // 1. Valider la fixture `.claude/examples/ipc-command.json`
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    let fixture_path = root.join(".claude/examples/ipc-command.json");
-    let fixture_content =
-        fs::read_to_string(&fixture_path).expect("Lecture fixture ipc-command.json");
+    let fixture_content = ipc_command_fixture();
     let fixture_val: Value = serde_json::from_str(&fixture_content).expect("JSON fixture");
 
     let eval = validator.validate(&fixture_val);
@@ -219,6 +222,91 @@ fn test_validate_ipc_command_schema() {
 
     probe["payload"]["limits"]["max_calls"] = json!(4);
     assert!(!validator.is_valid(&probe));
+}
+
+#[test]
+fn test_validate_set_provider_profile_payload_schema() {
+    let validator = build_validator("ipc-command.schema.json");
+    let mut command: Value = serde_json::from_str(&ipc_command_fixture()).unwrap();
+    command["command_type"] = json!("SetProviderProfile");
+    command["payload"] = json!({
+        "provider_kind": "openai",
+        "dialect": {"kind": "openai_responses", "version": 1},
+        "endpoint": "https://fixture.invalid/a%20b",
+        "model": "fixture-model",
+        "locality": "approved_remote",
+        "server_management": "user_managed",
+        "auth": {"kind": "secret_ref", "secret_ref": "fixture:opaque"},
+        "limits": {"max_inflight": 1, "connect_timeout_ms": 2000, "queue_timeout_ms": 10000,
+            "load_timeout_ms": 180_000, "first_token_timeout_ms": 60_000, "generation_timeout_ms": 300_000},
+        "declared_capabilities": ["text", "stream"],
+        "pricing": {"kind": "catalog", "catalog_id": "fixture-catalog", "catalog_version": "1",
+            "catalog_digest": format!("sha256:{}", "a".repeat(64)),
+            "entry_digest": {"algorithm": "sha256", "hex": "b".repeat(64)}, "stale_policy": "block"}
+    });
+    assert!(validator.is_valid(&command));
+
+    let mut bare_digest = command.clone();
+    let hex = "b".repeat(64);
+    bare_digest["payload"]["pricing"]["entry_digest"] = json!(hex);
+    assert!(validator.is_valid(&bare_digest));
+    bare_digest["payload"]["pricing"]["entry_digest"] = json!(format!("{hex}\n"));
+    assert!(
+        !validator.is_valid(&bare_digest),
+        "empreinte avec fin de ligne"
+    );
+
+    let mut forged = command.clone();
+    forged["payload"]["principal_id"] = json!("fixture:principal");
+    assert!(
+        !validator.is_valid(&forged),
+        "SetProviderProfile refuse une autorité déclarée"
+    );
+
+    for (field, invalid) in [
+        (
+            "dialect",
+            json!({"kind": "anthropic_messages", "version": 1}),
+        ),
+        ("endpoint", json!("https://fixture-user@fixture.invalid/")),
+        ("auth", json!({"kind": "none"})),
+        ("pricing", json!({"kind": "none_local"})),
+        ("declared_capabilities", json!(["text", "text"])),
+    ] {
+        let mut invalid_command = command.clone();
+        invalid_command["payload"][field] = invalid;
+        assert!(!validator.is_valid(&invalid_command), "payload.{field}");
+    }
+
+    let mut local = command.clone();
+    local["payload"]["provider_kind"] = json!("ollama");
+    local["payload"]["dialect"] = json!({"kind": "ollama_chat", "version": 1});
+    local["payload"]["endpoint"] = json!("http://[::1]:11434/api/chat");
+    local["payload"]["locality"] = json!("local_only");
+    local["payload"]["auth"] = json!({"kind": "none"});
+    local["payload"]["pricing"] = json!({"kind": "none_local"});
+    assert!(validator.is_valid(&local));
+
+    for kind in ["user_import", "user_declared"] {
+        command["payload"]["pricing"] = json!({
+            "kind": kind, "stale_policy": "warn", "entry": {
+                "currency": "USD", "input_micros_per_million": 123,
+                "cached_input_micros_per_million": null, "cache_write_micros_per_million": null,
+                "output_micros_per_million": 456, "observed_at_ms": 1, "valid_until_ms": 2,
+                "source_url": null
+            }
+        });
+        assert!(validator.is_valid(&command));
+        let mut tiered_command = command.clone();
+        tiered_command["payload"]["pricing"]["entry"]["tiers"] = json!([]);
+        assert!(
+            !validator.is_valid(&tiered_command),
+            "tarif inline avec paliers"
+        );
+        command["payload"]["pricing"]["entry"]["output_micros_per_million"] =
+            json!(9_007_199_254_740_992_u64);
+        assert!(!validator.is_valid(&command), "entier hors domaine exact");
+    }
 }
 
 #[test]

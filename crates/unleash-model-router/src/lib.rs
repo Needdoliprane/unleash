@@ -1,7 +1,8 @@
 //! Bounded SSE framing and normalization of a synthetic, closed fixture dialect.
 //!
-//! This crate performs no transport, provider qualification, authorization, or
-//! tool execution. The limits below bound a single chunk, line, event, tool
+//! Native HTTPS transports run through the caller's action broker; this crate owns
+//! no admission, durable ledger, provider qualification, or tool execution.
+//! The limits below bound a single chunk, line, event, tool
 //! list and argument buffer; they are local implementation limits, not provider
 //! capabilities. A real adapter must translate its qualified dialect explicitly.
 
@@ -13,6 +14,8 @@ use thiserror::Error;
 
 /// Bounded, explicitly restricted Anthropic Messages SSE dialect.
 pub mod anthropic;
+/// One-attempt Anthropic Messages HTTPS executor using the existing broker port.
+pub mod anthropic_transport;
 /// Bounded, explicitly restricted OpenAI Responses SSE dialect.
 pub mod openai;
 /// One-attempt Responses executor for the action-broker port.
@@ -20,6 +23,8 @@ pub mod transport;
 
 #[cfg(test)]
 mod anthropic_tests;
+#[cfg(test)]
+mod anthropic_transport_tests;
 #[cfg(test)]
 mod http_fixture_tests;
 #[cfg(test)]

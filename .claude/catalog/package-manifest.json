@@ -13,7 +13,7 @@
     "evidence/"
   ],
   "hash_algorithm": "sha256",
-  "source_tree_digest": "38950a72b6410e864d8be5b89dd4a633ebe719e95966f14358e206257d4851d5",
+  "source_tree_digest": "f00215f6e373b6548e521e4697c053eceb30f9a2da6bf9ced148c24ad4fecc45",
   "files": [
     {
       "path": "INDEX.md",
@@ -395,8 +395,8 @@
     },
     {
       "path": "architecture/sqlite-design.md",
-      "sha256": "b05392d2241ec01b8ae6e05f5129ef55f3ee494e88a1dc5eda9a8fb15128e463",
-      "bytes": 58387,
+      "sha256": "2f2d8e8a6e0896c9f2c68b186c7146654aa19f677b1bbc55c45c40e4e7a0510f",
+      "bytes": 61674,
       "media_type": "text/markdown"
     },
     {
@@ -1487,8 +1487,8 @@
     },
     {
       "path": "features/F011-terminal-pool/interfaces.md",
-      "sha256": "73d1c77ab31f7ac9b43dbdd2b4d33baf97e98827373533c9196743c2ed5c6ac0",
-      "bytes": 5558,
+      "sha256": "def808da63477e90c1e893b1486f65482a133e4570fef7692f594607fb19129b",
+      "bytes": 7733,
       "media_type": "text/markdown"
     },
     {
@@ -1529,8 +1529,8 @@
     },
     {
       "path": "features/F012-model-api-router/interfaces.md",
-      "sha256": "2bd29296a9ade338b94adb558bbe8fc8ef751d125fa72e31edab449129ff526d",
-      "bytes": 19520,
+      "sha256": "114c094dd45ff6a3df8681d7fdee108e45e6f6963ad84eb33c3c8aef90d0858d",
+      "bytes": 22904,
       "media_type": "text/markdown"
     },
     {
@@ -2057,8 +2057,8 @@
     },
     {
       "path": "schemas/ipc-command.schema.json",
-      "sha256": "800f109890b03a95a92465001843f992ac2df5260fda1139dccde36da3101d14",
-      "bytes": 4486,
+      "sha256": "f83b01a657ff90ad1932328585b54affe1532f57201c50d812be6fb20b09063e",
+      "bytes": 12575,
       "media_type": "application/json"
     },
     {

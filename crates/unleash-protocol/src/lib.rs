@@ -21,6 +21,7 @@ pub mod envelopes;
 pub mod errors;
 pub mod operations;
 pub mod provider_probe;
+pub mod provider_profile;
 pub mod strict_json;
 pub mod ts_export;
 
@@ -42,6 +43,11 @@ pub use errors::{
 pub use operations::{OperationKind, OperationName, UnknownOperationError};
 pub use provider_probe::{
     ProviderTestLimits, ProviderTestPayloadError, ProviderTestPhase, TestProviderProfilePayload,
+};
+pub use provider_profile::{
+    InlineProviderPrice, ProviderAuthentication, ProviderDialect, ProviderDialectKind,
+    ProviderKind, ProviderPricing, ProviderPricingStalePolicy, ProviderProfileLimits,
+    ProviderProfilePayloadError, ProviderServerManagement, SetProviderProfilePayload,
 };
 pub use strict_json::{from_json_str_strict, parse_json_value_strict};
 pub use ts_export::{generate_all_ts_files, write_ts_bindings};

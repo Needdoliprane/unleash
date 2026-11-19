@@ -23,10 +23,12 @@ pub mod migrations;
 pub mod objects;
 pub mod policies_secrets;
 pub mod projects_settings;
+pub mod provider_probes;
 pub mod qualification;
 pub mod recovery_ops;
 pub mod restore;
 pub mod store;
+pub mod terminal_allocations;
 pub mod writer;
 
 pub use admission::{
@@ -87,6 +89,10 @@ pub use projects_settings::{
     ProjectSourceSpec, RETENTION_SHORTENING_NOTICE_MS, RetentionClass, RetentionPolicySettings,
     RetentionShorteningNotice, SettingsPatch, SettingsRecord, SettingsScopeKind,
 };
+pub use provider_probes::{
+    ModelContextRef, ModelOrigin, PROVIDER_PROBE_VERB, PreparedProviderProbe,
+    ProbeGenerationLimits, ProbeProfileSnapshot, ProviderProbeContext, ProviderProbePreparation,
+};
 pub use qualification::{
     APPROVED_BACKPORT_VERSIONS, EffectivePragmaProfile, MIN_QUALIFIED_SQLITE_VERSION,
     SqliteBuildPolicy, SqliteRuntimeManifest, WITHDRAWN_SQLITE_VERSIONS, compiled_sqlite_source_id,
@@ -105,6 +111,12 @@ pub use restore::{
     RestoreActivationResult, RestoreBackupRequest, RestoreCapsule, RestoreRequestState,
 };
 pub use store::{SnapshotProjection, StoreOpenFailure, StoreOpenStage, UnleashStore};
+pub use terminal_allocations::{
+    NormalizedTerminalProcessSpec, ResolveTerminalLaunchRequest, ResolvedTerminalLaunch,
+    TERMINAL_ALLOCATION_VERB, TerminalAllocationContext, TerminalAllocationPreparation,
+    TerminalAllocationRecord, TerminalAllocationScope, TerminalAllocationState,
+    TerminalAuxiliaryPools, TerminalEnvironmentRef,
+};
 pub use unleash_domain::ReconcileOutcome;
 pub use writer::{HeldReaderSession, ReaderContext, ReaderControl, WalTelemetry};
 

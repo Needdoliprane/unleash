@@ -9,7 +9,7 @@ use crate::config::{CutpointObserver, StoreCutpoint};
 use crate::error::StoreError;
 
 /// Version courante maximale du schéma gérée par cette version de `unleash-store`.
-pub const CURRENT_SCHEMA_VERSION: i64 = 8;
+pub const CURRENT_SCHEMA_VERSION: i64 = 10;
 
 /// État persisté d'une migration dans `schema_migrations`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -109,7 +109,171 @@ const MIGRATIONS: &[MigrationDef] = &[
         name: "v008_transactional_execution_admission",
         sql: V008_SQL,
     },
+    MigrationDef {
+        version: 9,
+        name: "v009_provider_probe_context_union",
+        sql: V009_SQL,
+    },
+    MigrationDef {
+        version: 10,
+        name: "v010_terminal_allocation_preparation",
+        sql: V010_SQL,
+    },
 ];
+
+const V010_SQL: &str = r"
+CREATE TABLE terminal_allocations (
+ terminal_id TEXT PRIMARY KEY,
+ receipt_id TEXT NOT NULL UNIQUE REFERENCES command_receipts(receipt_id) DEFERRABLE INITIALLY DEFERRED,
+ action_id TEXT NOT NULL UNIQUE,
+ process_id TEXT NOT NULL UNIQUE,
+ process_run_uuid TEXT NOT NULL UNIQUE,
+ principal_id TEXT NOT NULL REFERENCES principals(principal_id),
+ mission_id TEXT NOT NULL REFERENCES missions(mission_id),
+ project_id TEXT NOT NULL REFERENCES projects(project_id),
+ purpose_key TEXT NOT NULL,
+ lease_id TEXT NOT NULL UNIQUE REFERENCES resource_leases(lease_id),
+ preparation_digest TEXT NOT NULL,
+ context_digest TEXT NOT NULL UNIQUE,
+ context_json TEXT NOT NULL,
+ state TEXT NOT NULL CHECK(state IN ('allocated','launch_resolved','retired')),
+ revision INTEGER NOT NULL CHECK(revision>=1),
+ dispatch_id TEXT UNIQUE REFERENCES action_dispatches(dispatch_id),
+ resolved_at_ms INTEGER,
+ retirement_evidence_id TEXT REFERENCES evidence(evidence_id),
+ retired_at_ms INTEGER,
+ CHECK((state='allocated' AND revision=1 AND dispatch_id IS NULL AND resolved_at_ms IS NULL AND retirement_evidence_id IS NULL AND retired_at_ms IS NULL)
+    OR (state='launch_resolved' AND revision=2 AND dispatch_id IS NOT NULL AND resolved_at_ms IS NOT NULL AND retirement_evidence_id IS NULL AND retired_at_ms IS NULL)
+    OR (state='retired' AND revision IN (2,3) AND retirement_evidence_id IS NOT NULL AND retired_at_ms IS NOT NULL AND ((dispatch_id IS NULL AND resolved_at_ms IS NULL) OR (dispatch_id IS NOT NULL AND resolved_at_ms IS NOT NULL))))
+) STRICT;
+CREATE UNIQUE INDEX terminal_allocations_active_property ON terminal_allocations(mission_id,purpose_key) WHERE state IN ('allocated','launch_resolved');
+CREATE TRIGGER terminal_allocation_initial_state BEFORE INSERT ON terminal_allocations
+WHEN NEW.state!='allocated' OR NEW.revision!=1 BEGIN SELECT RAISE(ABORT,'terminal preparation must start allocated'); END;
+CREATE TRIGGER terminal_allocation_immutable BEFORE UPDATE ON terminal_allocations
+WHEN NEW.terminal_id IS NOT OLD.terminal_id OR NEW.receipt_id IS NOT OLD.receipt_id OR NEW.action_id IS NOT OLD.action_id OR NEW.process_id IS NOT OLD.process_id OR NEW.process_run_uuid IS NOT OLD.process_run_uuid OR NEW.principal_id IS NOT OLD.principal_id OR NEW.mission_id IS NOT OLD.mission_id OR NEW.project_id IS NOT OLD.project_id OR NEW.purpose_key IS NOT OLD.purpose_key OR NEW.lease_id IS NOT OLD.lease_id OR NEW.preparation_digest IS NOT OLD.preparation_digest OR NEW.context_digest IS NOT OLD.context_digest OR NEW.context_json IS NOT OLD.context_json
+BEGIN SELECT RAISE(ABORT,'terminal preparation immutable'); END;
+CREATE TRIGGER terminal_allocation_transition BEFORE UPDATE ON terminal_allocations
+WHEN NOT((OLD.state='allocated' AND NEW.state='launch_resolved' AND NEW.revision=OLD.revision+1) OR (OLD.state IN ('allocated','launch_resolved') AND NEW.state='retired' AND NEW.revision=OLD.revision+1 AND NEW.dispatch_id IS OLD.dispatch_id AND NEW.resolved_at_ms IS OLD.resolved_at_ms))
+BEGIN SELECT RAISE(ABORT,'terminal preparation transition invalid'); END;
+CREATE TABLE terminal_disposition_observations (
+ evidence_id TEXT PRIMARY KEY REFERENCES evidence(evidence_id) DEFERRABLE INITIALLY DEFERRED,
+ terminal_id TEXT NOT NULL REFERENCES terminal_allocations(terminal_id),
+ context_digest TEXT NOT NULL,
+ observation_object_hash TEXT NOT NULL REFERENCES object_records(object_hash),
+ dispatch_id TEXT REFERENCES action_dispatches(dispatch_id)
+) STRICT;
+CREATE TRIGGER terminal_disposition_causality BEFORE INSERT ON terminal_disposition_observations
+WHEN EXISTS(SELECT 1 FROM evidence WHERE evidence_id=NEW.evidence_id) OR NOT EXISTS(
+ SELECT 1 FROM terminal_allocations t WHERE t.terminal_id=NEW.terminal_id AND t.context_digest=NEW.context_digest
+ AND ((NEW.dispatch_id IS NULL AND t.state='allocated' AND NOT EXISTS(SELECT 1 FROM action_dispatches WHERE action_id=t.action_id))
+ OR (NEW.dispatch_id IS NOT NULL AND t.state='launch_resolved' AND t.dispatch_id=NEW.dispatch_id
+ AND EXISTS(SELECT 1 FROM action_dispatches d WHERE d.dispatch_id=NEW.dispatch_id AND d.action_id=t.action_id))))
+BEGIN SELECT RAISE(ABORT,'terminal disposition must precede its new evidence after the exact marker'); END;
+CREATE TRIGGER terminal_disposition_evidence BEFORE INSERT ON evidence
+WHEN EXISTS(SELECT 1 FROM terminal_disposition_observations o WHERE o.evidence_id=NEW.evidence_id) AND NOT EXISTS(
+ SELECT 1 FROM terminal_disposition_observations o JOIN terminal_allocations t ON t.terminal_id=o.terminal_id
+ JOIN principals p ON p.principal_id=NEW.producer_id JOIN object_records r ON r.object_hash=NEW.object_hash
+ WHERE o.evidence_id=NEW.evidence_id AND NEW.kind='observation' AND NEW.schema_version=1 AND NEW.availability='available'
+ AND p.state='active' AND p.principal_kind IN ('service','system') AND r.state='live' AND NEW.object_hash=o.observation_object_hash
+ AND (o.dispatch_id IS NULL OR EXISTS(SELECT 1 FROM action_dispatches d WHERE d.dispatch_id=o.dispatch_id AND NEW.observed_at_ms>=d.started_at_ms))
+ AND NEW.snapshot_ref='terminal-disposition:v1:'||o.context_digest
+ AND (NEW.action_id=t.action_id OR (NEW.action_id IS NULL AND NOT EXISTS(SELECT 1 FROM actions WHERE action_id=t.action_id))))
+BEGIN SELECT RAISE(ABORT,'terminal disposition evidence is not an attributable observation'); END;
+CREATE TRIGGER terminal_disposition_immutable BEFORE UPDATE ON terminal_disposition_observations BEGIN SELECT RAISE(ABORT,'terminal disposition immutable'); END;
+CREATE TRIGGER terminal_disposition_durable BEFORE DELETE ON terminal_disposition_observations BEGIN SELECT RAISE(ABORT,'terminal disposition durable'); END;
+CREATE TRIGGER terminal_disposition_evidence_immutable BEFORE UPDATE ON evidence
+WHEN EXISTS(SELECT 1 FROM terminal_disposition_observations WHERE evidence_id=OLD.evidence_id)
+AND (NEW.evidence_id IS NOT OLD.evidence_id OR NEW.kind IS NOT OLD.kind OR NEW.action_id IS NOT OLD.action_id OR NEW.snapshot_ref IS NOT OLD.snapshot_ref OR NEW.object_hash IS NOT OLD.object_hash OR NEW.producer_id IS NOT OLD.producer_id OR NEW.observed_at_ms IS NOT OLD.observed_at_ms OR NEW.schema_version IS NOT OLD.schema_version)
+BEGIN SELECT RAISE(ABORT,'terminal disposition evidence binding immutable'); END;
+CREATE TRIGGER terminal_allocation_retirement_proof BEFORE UPDATE ON terminal_allocations
+WHEN NEW.state='retired' AND NOT EXISTS(
+ SELECT 1 FROM evidence e JOIN object_records r ON r.object_hash=e.object_hash JOIN principals p ON p.principal_id=e.producer_id
+ JOIN terminal_disposition_observations o ON o.evidence_id=e.evidence_id
+ WHERE e.evidence_id=NEW.retirement_evidence_id AND o.terminal_id=OLD.terminal_id AND o.context_digest=OLD.context_digest
+ AND o.dispatch_id IS OLD.dispatch_id AND e.object_hash=o.observation_object_hash AND e.kind='observation' AND e.schema_version=1 AND e.availability='available'
+ AND r.state='live' AND p.state='active' AND p.principal_kind IN ('service','system')
+ AND e.snapshot_ref='terminal-disposition:v1:'||OLD.context_digest
+ AND (e.action_id=OLD.action_id OR (e.action_id IS NULL AND NOT EXISTS(SELECT 1 FROM actions WHERE action_id=OLD.action_id)))
+ AND (o.dispatch_id IS NOT NULL OR NOT EXISTS(SELECT 1 FROM action_dispatches WHERE action_id=OLD.action_id))
+ AND NOT EXISTS(SELECT 1 FROM actions a WHERE a.action_id=OLD.action_id AND (a.authority_generation IS NOT json_extract(OLD.context_json,'$.authority_generation') OR a.daemon_epoch IS NOT json_extract(OLD.context_json,'$.daemon_epoch') OR a.fence!=0 OR a.origin_kind!='control_plane' OR a.control_principal_id IS NOT OLD.principal_id))
+ AND NOT EXISTS(SELECT 1 FROM terminal_sessions s WHERE s.terminal_id=OLD.terminal_id AND NOT EXISTS(
+ SELECT 1 FROM processes q WHERE q.process_id=s.process_id AND q.process_id=OLD.process_id AND q.process_run_uuid=OLD.process_run_uuid
+ AND q.action_id=OLD.action_id AND q.authority_generation=json_extract(OLD.context_json,'$.authority_generation') AND q.state='exited' AND s.state='exited' AND s.mission_id=OLD.mission_id
+ AND s.purpose_key=OLD.purpose_key AND s.lease_id=OLD.lease_id AND s.owner_agent_id IS NULL))
+ AND NOT EXISTS(SELECT 1 FROM processes q WHERE (q.process_id=OLD.process_id OR q.process_run_uuid=OLD.process_run_uuid)
+ AND (q.process_id!=OLD.process_id OR q.process_run_uuid!=OLD.process_run_uuid OR q.action_id!=OLD.action_id OR q.authority_generation IS NOT json_extract(OLD.context_json,'$.authority_generation') OR q.state!='exited')))
+BEGIN SELECT RAISE(ABORT,'terminal retirement requires exact causal internal observation'); END;
+CREATE TRIGGER terminal_allocation_durable BEFORE DELETE ON terminal_allocations BEGIN SELECT RAISE(ABORT,'terminal preparation durable'); END;
+";
+
+const V009_SQL: &str = r"
+PRAGMA defer_foreign_keys=ON;
+CREATE TABLE provider_probe_contexts (
+    probe_id TEXT PRIMARY KEY REFERENCES provider_probes(probe_id),
+    receipt_id TEXT NOT NULL UNIQUE REFERENCES command_receipts(receipt_id) DEFERRABLE INITIALLY DEFERRED,
+    actor_id TEXT NOT NULL,
+    principal_id TEXT NOT NULL REFERENCES principals(principal_id),
+    project_id TEXT REFERENCES projects(project_id),
+    profile_version_ref TEXT NOT NULL REFERENCES provider_profiles(profile_version_ref),
+    authority_generation TEXT NOT NULL,
+    daemon_epoch INTEGER NOT NULL CHECK(daemon_epoch>=0),
+    action_id TEXT NOT NULL UNIQUE,
+    model_call_id TEXT NOT NULL UNIQUE,
+    manifest_id TEXT NOT NULL UNIQUE,
+    preparation_digest TEXT NOT NULL,
+    context_digest TEXT NOT NULL UNIQUE,
+    context_json TEXT NOT NULL,
+    created_at_ms INTEGER NOT NULL
+) STRICT;
+CREATE TRIGGER provider_probe_contexts_no_update BEFORE UPDATE ON provider_probe_contexts BEGIN SELECT RAISE(ABORT,'provider probe context immutable'); END;
+CREATE TRIGGER provider_probe_contexts_no_delete BEFORE DELETE ON provider_probe_contexts BEGIN SELECT RAISE(ABORT,'provider probe context durable'); END;
+CREATE TRIGGER admission_source_probe_context_insert AFTER INSERT ON provider_probe_contexts BEGIN UPDATE admission_source_clock SET revision=revision+1 WHERE singleton=1; END;
+CREATE TRIGGER admission_source_probe_context_update AFTER UPDATE ON provider_probe_contexts BEGIN UPDATE admission_source_clock SET revision=revision+1 WHERE singleton=1; END;
+CREATE TRIGGER admission_source_probe_context_delete AFTER DELETE ON provider_probe_contexts BEGIN UPDATE admission_source_clock SET revision=revision+1 WHERE singleton=1; END;
+
+CREATE TABLE model_call_manifests_v009 (
+    manifest_id TEXT PRIMARY KEY,
+    model_call_id TEXT NOT NULL REFERENCES model_calls(model_call_id),
+    manifest_kind TEXT NOT NULL CHECK(manifest_kind IN ('request','result')),
+    ordinal INTEGER NOT NULL CHECK(ordinal>=1),
+    parent_manifest_id TEXT REFERENCES model_call_manifests_v009(manifest_id),
+    context_manifest_id TEXT REFERENCES context_manifests(manifest_id),
+    provider_id TEXT NOT NULL,
+    resolved_model_id TEXT NOT NULL,
+    capabilities_hash TEXT NOT NULL,
+    allowed_model_policy_hash TEXT NOT NULL,
+    request_payload_hash TEXT NOT NULL,
+    usage_object_hash TEXT,
+    result_object_hash TEXT,
+    content_object_hash TEXT NOT NULL REFERENCES object_records(object_hash),
+    created_at_ms INTEGER NOT NULL,
+    context_kind TEXT NOT NULL DEFAULT 'invocation_context' CHECK(context_kind IN ('invocation_context','provider_probe_context')),
+    provider_probe_context_id TEXT REFERENCES provider_probe_contexts(probe_id),
+    UNIQUE(model_call_id,manifest_kind,ordinal),
+    CHECK((context_kind='invocation_context' AND context_manifest_id IS NOT NULL AND provider_probe_context_id IS NULL)
+       OR (context_kind='provider_probe_context' AND context_manifest_id IS NULL AND provider_probe_context_id IS NOT NULL))
+) STRICT;
+INSERT INTO model_call_manifests_v009
+ (manifest_id,model_call_id,manifest_kind,ordinal,parent_manifest_id,context_manifest_id,provider_id,resolved_model_id,capabilities_hash,allowed_model_policy_hash,request_payload_hash,usage_object_hash,result_object_hash,content_object_hash,created_at_ms,context_kind,provider_probe_context_id)
+ SELECT manifest_id,model_call_id,manifest_kind,ordinal,parent_manifest_id,context_manifest_id,provider_id,resolved_model_id,capabilities_hash,allowed_model_policy_hash,request_payload_hash,usage_object_hash,result_object_hash,content_object_hash,created_at_ms,'invocation_context',NULL FROM model_call_manifests;
+DROP TABLE model_call_manifests;
+ALTER TABLE model_call_manifests_v009 RENAME TO model_call_manifests;
+CREATE TRIGGER model_call_context_owner BEFORE INSERT ON model_call_manifests
+WHEN NOT EXISTS (
+ SELECT 1 FROM model_calls c
+ LEFT JOIN invocations i ON i.invocation_id=c.invocation_id
+ LEFT JOIN context_manifests x ON x.manifest_id=NEW.context_manifest_id
+ LEFT JOIN provider_probe_contexts p ON p.probe_id=NEW.provider_probe_context_id
+ WHERE c.model_call_id=NEW.model_call_id AND
+ ((NEW.context_kind='invocation_context' AND c.owner_kind='invocation' AND x.session_id=i.session_id)
+ OR (NEW.context_kind='provider_probe_context' AND c.owner_kind='provider_probe' AND p.probe_id=c.provider_probe_id)))
+BEGIN SELECT RAISE(ABORT,'model context does not belong to model origin'); END;
+CREATE TRIGGER model_call_manifests_no_update BEFORE UPDATE ON model_call_manifests BEGIN SELECT RAISE(ABORT,'model call manifest immutable'); END;
+CREATE TRIGGER model_call_manifests_no_delete BEFORE DELETE ON model_call_manifests BEGIN SELECT RAISE(ABORT,'model call manifest durable'); END;
+CREATE TRIGGER admission_source_model_call_manifests_insert AFTER INSERT ON model_call_manifests BEGIN UPDATE admission_source_clock SET revision=revision+1 WHERE singleton=1; END;
+CREATE TRIGGER admission_source_model_call_manifests_update AFTER UPDATE ON model_call_manifests BEGIN UPDATE admission_source_clock SET revision=revision+1 WHERE singleton=1; END;
+CREATE TRIGGER admission_source_model_call_manifests_delete AFTER DELETE ON model_call_manifests BEGIN UPDATE admission_source_clock SET revision=revision+1 WHERE singleton=1; END;
+";
 
 // REQ-AGENT-003/005: conservative CAS over every durable admission input.
 // Proof rows are checked separately in the writer and never become a queue.
@@ -619,8 +783,31 @@ fn apply_pending_migrations_inner(
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(StoreError::from_rusqlite)?;
 
+        if def.version == 9 {
+            // Every legacy row will become invocation_context. Check the same
+            // ownership relation as model_call_context_owner before any copy;
+            // NOT EXISTS also rejects missing parents instead of ignoring NULL.
+            let invalid_owner: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM model_call_manifests m WHERE NOT EXISTS(SELECT 1 FROM model_calls c JOIN invocations i ON i.invocation_id=c.invocation_id JOIN context_manifests x ON x.manifest_id=m.context_manifest_id WHERE c.model_call_id=m.model_call_id AND c.owner_kind='invocation' AND x.session_id=i.session_id))", [], |row| row.get(0)).map_err(StoreError::from_rusqlite)?;
+            if invalid_owner {
+                return Err(StoreError::InvariantViolation("V008 model context does not belong to its invocation origin; explicit reconciliation required before V009".to_owned()));
+            }
+        }
+
         tx.execute_batch(def.sql)
             .map_err(StoreError::from_rusqlite)?;
+
+        if def.version == 9 {
+            let violations: i64 = tx
+                .query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |row| {
+                    row.get(0)
+                })
+                .map_err(StoreError::from_rusqlite)?;
+            if violations != 0 {
+                return Err(StoreError::InvariantViolation(
+                    "V009 context migration foreign key violation".to_owned(),
+                ));
+            }
+        }
 
         let bkp_str = pre_migration_backup_id.map(|id| id.to_string());
         tx.execute(
