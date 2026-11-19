@@ -86,6 +86,20 @@ impl SqliteBrokerJournal {
         journal.terminal_input_observation = Some(slot);
         journal
     }
+
+    fn project_entry(
+        &self,
+        entry: &BrokerJournalEntry,
+    ) -> Result<(BrokerEvaluation, BrokerIntent, BrokerPhase), BrokerJournalError> {
+        if self.terminal_observation.is_some()
+            || self.terminal_control_observation.is_some()
+            || self.terminal_input_observation.is_some()
+        {
+            project_terminal(entry)
+        } else {
+            project(entry)
+        }
+    }
 }
 
 fn intention(intent: &ActionIntent) -> Result<BrokerIntent, BrokerJournalError> {
@@ -375,14 +389,7 @@ impl BrokerJournalPort for SqliteBrokerJournal {
         entry: &'a BrokerJournalEntry,
     ) -> BoxFuture<'a, Result<(), BrokerJournalError>> {
         Box::pin(async move {
-            let (evaluation, intent, phase) = if self.terminal_observation.is_some()
-                || self.terminal_control_observation.is_some()
-                || self.terminal_input_observation.is_some()
-            {
-                project_terminal(entry)?
-            } else {
-                project(entry)?
-            };
+            let (evaluation, intent, phase) = self.project_entry(entry)?;
             let store = Arc::clone(&self.store);
             let runtime = self.runtime.clone();
             let terminal_slot = self.terminal_observation.clone();
