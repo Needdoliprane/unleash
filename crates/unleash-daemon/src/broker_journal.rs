@@ -23,6 +23,9 @@ type TerminalLaunchObservationSlot =
     std::sync::Mutex<Option<unleash_store::terminal_allocations::TerminalLaunchObservation>>;
 type TerminalControlObservationSlot =
     std::sync::Mutex<Option<unleash_store::terminal_allocations::TerminalControlObservation>>;
+type TerminalInputObservationSlot = std::sync::Mutex<
+    Option<unleash_store::terminal_allocations::terminal_input_types::TerminalInputObservation>,
+>;
 
 /// Broker journal backed by a durable Store port.
 pub(crate) struct SqliteBrokerJournal {
@@ -30,6 +33,7 @@ pub(crate) struct SqliteBrokerJournal {
     runtime: Option<Weak<DaemonRuntimeState>>,
     terminal_observation: Option<Arc<TerminalLaunchObservationSlot>>,
     terminal_control_observation: Option<Arc<TerminalControlObservationSlot>>,
+    terminal_input_observation: Option<Arc<TerminalInputObservationSlot>>,
 }
 
 impl SqliteBrokerJournal {
@@ -41,6 +45,7 @@ impl SqliteBrokerJournal {
             runtime: Some(Arc::downgrade(runtime)),
             terminal_observation: None,
             terminal_control_observation: None,
+            terminal_input_observation: None,
         }
     }
 
@@ -51,6 +56,7 @@ impl SqliteBrokerJournal {
             runtime: None,
             terminal_observation: None,
             terminal_control_observation: None,
+            terminal_input_observation: None,
         }
     }
 
@@ -69,6 +75,15 @@ impl SqliteBrokerJournal {
     ) -> Self {
         let mut journal = Self::new(runtime);
         journal.terminal_control_observation = Some(slot);
+        journal
+    }
+
+    pub(crate) fn with_terminal_input_observation(
+        runtime: &Arc<DaemonRuntimeState>,
+        slot: Arc<TerminalInputObservationSlot>,
+    ) -> Self {
+        let mut journal = Self::new(runtime);
+        journal.terminal_input_observation = Some(slot);
         journal
     }
 }
@@ -311,6 +326,7 @@ fn commit_journal_phase(
     request: BrokerPhaseRequest,
     terminal_slot: Option<&TerminalLaunchObservationSlot>,
     control_slot: Option<&TerminalControlObservationSlot>,
+    input_slot: Option<&TerminalInputObservationSlot>,
 ) -> Result<unleash_store::BrokerPhaseCommit, BrokerJournalError> {
     let phase_name = match &request.phase {
         BrokerPhase::Authorizing { .. } => "authorizing",
@@ -323,16 +339,19 @@ fn commit_journal_phase(
         BrokerPhase::Observation { receipt, .. }
             if receipt.state == unleash_domain::ActionState::ObservedSuccess
     );
-    let (terminal_observation, control_observation) = if successful_observation {
+    let (terminal_observation, control_observation, input_observation) = if successful_observation {
         // Keep the exact proof after precommit errors or a lost ACK.
         // Re-appending the observation never invokes the executor.
         let terminal = terminal_slot.and_then(|slot| slot.lock().ok()?.clone());
         let control = control_slot.and_then(|slot| slot.lock().ok()?.clone());
-        (terminal, control)
+        let input = input_slot.and_then(|slot| slot.lock().ok()?.clone());
+        (terminal, control, input)
     } else {
-        (None, None)
+        (None, None, None)
     };
-    let committed = if let Some(observation) = control_observation {
+    let committed = if let Some(observation) = input_observation {
+        store.commit_terminal_input_observation(observation, request)
+    } else if let Some(observation) = control_observation {
         store.commit_terminal_control_observation(observation, request)
     } else if let Some(observation) = terminal_observation {
         store.commit_terminal_launch_observation(observation, request)
@@ -358,6 +377,7 @@ impl BrokerJournalPort for SqliteBrokerJournal {
         Box::pin(async move {
             let (evaluation, intent, phase) = if self.terminal_observation.is_some()
                 || self.terminal_control_observation.is_some()
+                || self.terminal_input_observation.is_some()
             {
                 project_terminal(entry)?
             } else {
@@ -367,6 +387,7 @@ impl BrokerJournalPort for SqliteBrokerJournal {
             let runtime = self.runtime.clone();
             let terminal_slot = self.terminal_observation.clone();
             let control_slot = self.terminal_control_observation.clone();
+            let input_slot = self.terminal_input_observation.clone();
             let activity = match &runtime {
                 Some(runtime) => Some(Arc::new(
                     runtime
@@ -403,6 +424,7 @@ impl BrokerJournalPort for SqliteBrokerJournal {
                         request,
                         terminal_slot.as_deref(),
                         control_slot.as_deref(),
+                        input_slot.as_deref(),
                     )?;
                     Ok::<_, BrokerJournalError>((commit, dispatch, intent.action_id))
                 })
@@ -473,7 +495,9 @@ fn project_terminal(
         ..
     } = entry
         && (intent.verb == unleash_store::TERMINAL_ALLOCATION_VERB
-            || intent.verb == unleash_store::terminal_allocations::TERMINAL_CONTROL_VERB)
+            || intent.verb == unleash_store::terminal_allocations::TERMINAL_CONTROL_VERB
+            || intent.verb
+                == unleash_store::terminal_allocations::terminal_input_types::TERMINAL_INPUT_VERB)
         && matches!(
             &intent.resource_refs[..],
             [unleash_action_broker::NormalizedResourceRef::Terminal(_)]

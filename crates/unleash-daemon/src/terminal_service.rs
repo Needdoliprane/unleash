@@ -27,6 +27,9 @@ mod metadata;
 pub(crate) use metadata::read_terminal_metadata;
 #[path = "terminal_control.rs"]
 mod control;
+#[path = "terminal_input.rs"]
+mod input;
+pub(crate) use input::{decode as decode_input, prepare as prepare_input, start as start_input};
 
 pub(crate) fn start_registered(
     state: &Arc<DaemonRuntimeState>,

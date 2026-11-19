@@ -64,9 +64,7 @@ impl unleash_daemon::terminal_host_launcher::TerminalHostLauncher for C5FixtureL
                     // Notify only after this marker is durably written. The
                     // worker independently notifies after effect.sync_all().
                     unleash_platform::write_private_file_atomic(&marker, MARKER_SIGNAL).unwrap();
-                    let mut stream = std::os::unix::net::UnixStream::connect(&notify).unwrap();
-                    stream.write_all(MARKER_SIGNAL).unwrap();
-                    stream.flush().unwrap();
+                    send_signal(&notify, MARKER_SIGNAL);
                 }
             }
         });
@@ -159,6 +157,19 @@ fn signal_listener(path: &Path) -> tokio::net::UnixListener {
     tokio::net::UnixListener::from_std(listener).unwrap()
 }
 
+fn send_signal(path: &Path, message: &[u8]) {
+    let mut stream = std::os::unix::net::UnixStream::connect(path).unwrap();
+    stream.set_read_timeout(Some(DEADLINE)).unwrap();
+    stream.set_write_timeout(Some(DEADLINE)).unwrap();
+    stream.write_all(message).unwrap();
+    stream.flush().unwrap();
+    // Keep the socket connected until the receiver checked kernel peer UID
+    // and the entire expected message. macOS can reject peer_cred after EOF.
+    let mut ack = [0];
+    stream.read_exact(&mut ack).unwrap();
+    assert_eq!(ack, [1]);
+}
+
 async fn wait_signal(listener: &tokio::net::UnixListener, expected: &[u8]) {
     let (mut stream, _) = tokio::time::timeout(DEADLINE, listener.accept())
         .await
@@ -174,6 +185,9 @@ async fn wait_signal(listener: &tokio::net::UnixListener, expected: &[u8]) {
         .unwrap()
         .unwrap();
     assert_eq!(message, expected);
+    tokio::io::AsyncWriteExt::write_all(&mut stream, &[1])
+        .await
+        .unwrap();
 }
 
 async fn prepare_c5_authority() -> (
@@ -315,17 +329,28 @@ async fn transfer_after_c5(fixture: &mut LiveFixture, acquired: &Value) {
     assert_eq!(accepted.state, ReceiptState::Accepted);
     let deadline = Instant::now() + DEADLINE;
     loop {
-        let snapshot = fixture.snapshot().await;
-        if snapshot["terminals"]["items"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|item| {
-                item["terminal_id"] == acquired["terminal_id"]
-                    && item["control_revision"] == 1
-                    && item["lease_state"] == "held"
-            })
-        {
+        let conn = rusqlite::Connection::open_with_flags(
+            fixture.data.path().join("unleash-authority.db"),
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .unwrap();
+        let observations: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM terminal_control_intents c \
+             JOIN actions a ON a.action_id=c.action_id \
+             JOIN action_dispatches d ON d.dispatch_id=c.dispatch_id AND d.action_id=c.action_id \
+             JOIN broker_dispatches b ON b.dispatch_id=d.dispatch_id AND b.action_id=c.action_id \
+             JOIN object_references r ON r.owner_kind='terminal_control_observation' AND r.owner_id=c.action_id AND r.source_field=c.dispatch_id AND r.object_hash=c.observation_object_hash AND r.state='live' \
+             JOIN object_records o ON o.object_hash=r.object_hash AND o.state='live' \
+             WHERE c.command_id=?1 AND c.receipt_id=?2 AND c.terminal_id=?3 \
+               AND json_extract(c.context_json,'$.process_run_uuid')=?4 \
+               AND c.state='observed' AND a.state='observed_success' \
+               AND b.authority_generation=c.authority_generation AND b.daemon_epoch=c.daemon_epoch",
+            rusqlite::params![request.command_id.to_string(), accepted.receipt_id.to_string(),
+                acquired["terminal_id"].as_str().unwrap(), acquired["process_run_uuid"].as_str().unwrap()],
+            |row| row.get(0),
+        ).unwrap();
+        assert!(observations <= 1, "one exact transfer observation");
+        if observations == 1 {
             break;
         }
         assert!(
@@ -344,7 +369,7 @@ async fn transfer_after_c5(fixture: &mut LiveFixture, acquired: &Value) {
     );
     let refused = fixture.client.query(&query).await.unwrap_err();
     assert!(
-        matches!(refused,unleash_client::ClientError::Remote(ref error) if error.code==unleash_protocol::ErrorCode::StaleFence)
+        matches!(refused,unleash_client::ClientError::Remote(ref error) if error.code==unleash_protocol::ErrorCode::OutcomeUnknown)
     );
 }
 
@@ -559,9 +584,7 @@ fn terminal_c5_worker_fixture() {
                 .unwrap();
             effects.write_all(b"effect\n").unwrap();
             effects.sync_all().unwrap();
-            let mut signal = std::os::unix::net::UnixStream::connect("e.sock").unwrap();
-            signal.write_all(EFFECT_SIGNAL).unwrap();
-            signal.flush().unwrap();
+            send_signal(Path::new("e.sock"), EFFECT_SIGNAL);
         }
     }
 }
