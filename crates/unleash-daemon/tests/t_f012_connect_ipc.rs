@@ -8,18 +8,21 @@
 
 use rusqlite::{Connection, OpenFlags};
 use serde_json::{Value, json};
+use std::future::Future;
 use std::io::ErrorKind;
 use std::net::TcpListener;
+use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::io::AsyncReadExt;
-use unleash_client::{ClientConfig, ClientError, UnleashClient};
-use unleash_daemon::{DaemonConfig, DaemonStartOutcome, UnleashDaemon};
+use unleash_client::{ClientConfig, ClientError, EventStreamReader, UnleashClient};
+use unleash_daemon::{DaemonConfig, DaemonStartOutcome, StoreOverrides, UnleashDaemon};
 use unleash_domain::{AuthorityGeneration, CommandId, ProjectId, RequestId, Revision};
 use unleash_protocol::{
     ClientKind, CommandEnvelope, CommandReceipt, ErrorCode, ProtocolVersion, QueryEnvelope,
-    ReasonCode, ReceiptState,
+    ReasonCode, ReceiptState, SubscribeEventsRequest,
 };
-use unleash_testkit::local_test_dir;
+use unleash_store::{CutpointObserver, StoreCutpoint, StoreError};
+use unleash_testkit::{Cutpoint, CutpointBarrier, CutpointController, local_test_dir};
 use uuid::Uuid;
 
 struct ConnectFixture {
@@ -29,8 +32,67 @@ struct ConnectFixture {
     endpoint: TcpListener,
 }
 
+struct DispatchPause {
+    controller: CutpointController,
+    barrier: Arc<CutpointBarrier>,
+    entered: tokio::sync::Notify,
+}
+
+impl DispatchPause {
+    fn new() -> Arc<Self> {
+        let controller = CutpointController::new();
+        let barrier = controller.arm_barrier(Cutpoint::C4, Duration::from_secs(10));
+        Arc::new(Self {
+            controller,
+            barrier,
+            entered: tokio::sync::Notify::new(),
+        })
+    }
+}
+
+impl CutpointObserver for DispatchPause {
+    fn hit(&self, cutpoint: StoreCutpoint) -> Result<(), StoreError> {
+        if cutpoint == StoreCutpoint::C4AfterBrokerDispatchCommit {
+            self.entered.notify_one();
+            self.controller
+                .hit(Cutpoint::C4)
+                .map_err(|error| StoreError::CutpointInjected {
+                    cutpoint: "C4".to_owned(),
+                    message: error.to_string(),
+                })?;
+        }
+        Ok(())
+    }
+}
+
+struct DispatchGuard {
+    barrier: Arc<CutpointBarrier>,
+    armed: bool,
+}
+
+impl DispatchGuard {
+    fn release(&mut self) {
+        self.barrier.release();
+        self.armed = false;
+    }
+}
+
+impl Drop for DispatchGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            self.barrier.abort();
+        }
+    }
+}
+
 impl ConnectFixture {
     async fn start() -> (Self, UnleashClient) {
+        Self::start_with_cutpoints(None).await
+    }
+
+    async fn start_with_cutpoints(
+        cutpoints: Option<Arc<dyn CutpointObserver>>,
+    ) -> (Self, UnleashClient) {
         use std::os::unix::fs::PermissionsExt;
         let rendezvous = local_test_dir("f012-connect-rdv").unwrap();
         std::fs::set_permissions(rendezvous.path(), std::fs::Permissions::from_mode(0o700))
@@ -41,6 +103,10 @@ impl ConnectFixture {
         let DaemonStartOutcome::Started(handle) = UnleashDaemon::start(DaemonConfig {
             data_root: Some(data.path().to_path_buf()),
             rendezvous_dir: Some(rendezvous.path().to_path_buf()),
+            store_overrides: StoreOverrides {
+                cutpoints,
+                ..StoreOverrides::default()
+            },
             ..DaemonConfig::default()
         })
         .await
@@ -230,49 +296,101 @@ fn policy_command(
     request
 }
 
-struct ConnectedTransport {
-    bytes: Vec<u8>,
-    dispatches: i64,
-    reservations: i64,
-}
-
-fn capture_authorized_connect(
-    fixture: &ConnectFixture,
-    probe: Uuid,
-) -> tokio::task::JoinHandle<ConnectedTransport> {
+fn capture_authorized_connect(fixture: &ConnectFixture) -> tokio::task::JoinHandle<Vec<u8>> {
     let listener =
         tokio::net::TcpListener::from_std(fixture.endpoint.try_clone().unwrap()).unwrap();
-    let database = fixture.data.path().join("unleash-authority.db");
     tokio::spawn(async move {
         let (mut socket, _) = tokio::time::timeout(Duration::from_secs(3), listener.accept())
             .await
             .unwrap()
             .unwrap();
-        let db = Connection::open_with_flags(database, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
-        let dispatches = db
-            .query_row("SELECT COUNT(*) FROM action_dispatches", [], |row| {
-                row.get(0)
-            })
-            .unwrap();
-        let reservations = db
-            .query_row(
-                "SELECT COUNT(*) FROM execution_reservation_owners WHERE provider_probe_id=?1",
-                [probe.to_string()],
-                |row| row.get(0),
-            )
-            .unwrap();
-        drop(db);
         let mut bytes = Vec::new();
         tokio::time::timeout(Duration::from_secs(3), socket.read_to_end(&mut bytes))
             .await
             .unwrap()
             .unwrap();
-        ConnectedTransport {
-            bytes,
-            dispatches,
-            reservations,
-        }
+        bytes
     })
+}
+
+async fn wait_for_dispatch_or_reply<F>(
+    fixture: &ConnectFixture,
+    pause: &DispatchPause,
+    command: &mut F,
+) -> Option<CommandReceipt>
+where
+    F: Future<Output = Result<CommandReceipt, ClientError>> + Unpin,
+{
+    tokio::select! {
+        response = command => {
+            match response {
+                Ok(receipt) => {
+                    tokio::time::timeout(Duration::from_secs(3), pause.entered.notified()).await.unwrap();
+                    Some(receipt)
+                }
+                Err(error) => {
+                    pause.barrier.abort();
+                    fixture.handle.shutdown_graceful("connect-red").await.unwrap();
+                    fixture.assert_no_dispatch_or_active_unit();
+                    assert!(matches!(&error, ClientError::Remote(remote) if remote.code==ErrorCode::NotFoundOrHidden), "rupture de fixture inattendue : {error:?}");
+                    panic!("route connect fermée malgré un vrai mandat actif : {error:?}");
+                }
+            }
+        }
+        entered = tokio::time::timeout(Duration::from_secs(3), pause.entered.notified()) => {
+            entered.unwrap();
+            None
+        }
+    }
+}
+
+fn assert_held_dispatch_before_socket(fixture: &ConnectFixture, probe: Uuid) {
+    // C4 blocks after the marker's commit and before its ACK authorizes any I/O.
+    assert!(matches!(fixture.endpoint.accept(), Err(error) if error.kind()==ErrorKind::WouldBlock));
+    let now = i64::try_from(
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis(),
+    )
+    .unwrap();
+    let held: i64 = fixture.db().query_row(r"
+SELECT COUNT(*) FROM provider_probes p
+JOIN command_receipts c ON c.receipt_id=p.command_receipt_id
+JOIN broker_intents i ON json_extract(i.intent_json,'$.cause.kind')='command_receipt'
+ AND json_extract(i.intent_json,'$.cause.receipt_id')=p.command_receipt_id
+JOIN actions a ON a.action_id=i.action_id
+JOIN action_dispatches d ON d.action_id=a.action_id
+JOIN broker_phase_records dispatch ON dispatch.action_id=a.action_id AND dispatch.phase_key='dispatch'
+JOIN events dispatched ON dispatched.sequence=dispatch.event_sequence AND dispatched.event_type='ActionDispatchCommitted'
+JOIN execution_reservation_owners o ON o.provider_probe_id=p.probe_id
+JOIN capacity_reservations r ON r.reservation_id=o.reservation_id
+JOIN capacity_pools pool ON pool.pool_id=r.pool_id
+JOIN resource_leases l ON l.resource_kind='execution' AND l.resource_key='provider_probe:'||p.probe_id
+WHERE p.probe_id=?1 AND p.phase='connect' AND p.state IN ('admitted','running')
+ AND c.command_type='TestProviderProfile' AND c.aggregate_id=p.probe_id
+ AND c.authority_generation=p.authority_generation
+ AND a.origin_kind='control_plane' AND a.control_principal_id=p.principal_id AND a.state='dispatching'
+ AND a.authority_generation=p.authority_generation AND a.daemon_epoch=p.daemon_epoch
+ AND r.owner_type='provider_probe' AND r.owner_id=p.probe_id AND r.admission_class='work'
+ AND r.amount=1 AND r.state='held' AND r.authority_generation=p.authority_generation AND r.daemon_epoch=p.daemon_epoch
+ AND pool.pool_kind='execution' AND pool.scope_key='global' AND pool.unit='slot'
+ AND l.owner_type='provider_probe' AND l.owner_id=p.probe_id AND l.state='held'
+ AND l.authority_generation=p.authority_generation AND l.daemon_epoch=p.daemon_epoch
+ AND l.fence=p.fence AND l.expires_at_ms>?2
+ AND l.boot_identity=(SELECT boot_identity FROM daemon_state WHERE singleton=1)
+ AND p.fence>0 AND json_extract(dispatched.payload_json,'$.dispatch_id')=d.dispatch_id
+ AND EXISTS(SELECT 1 FROM events admitted WHERE admitted.aggregate_id=p.probe_id
+  AND admitted.event_type='ProviderProbeAdmitted' AND admitted.stream_id=dispatched.stream_id
+  AND admitted.sequence<dispatched.sequence
+  AND json_extract(admitted.payload_json,'$.reservation_id')=r.reservation_id
+  AND json_extract(admitted.payload_json,'$.lease_id')=l.lease_id
+  AND json_extract(admitted.payload_json,'$.fence')=p.fence)
+", rusqlite::params![probe.to_string(),now], |row|row.get(0)).unwrap();
+    assert_eq!(
+        held, 1,
+        "le dispatch exact exige la place held et la lease vivante du vrai probe"
+    );
 }
 
 async fn assert_connect_observation(
@@ -280,20 +398,39 @@ async fn assert_connect_observation(
     profile: Uuid,
     probe: Uuid,
     receipt: &CommandReceipt,
+    events: &mut EventStreamReader,
 ) {
-    let result = client
-        .query(&QueryEnvelope {
-            protocol_version: ProtocolVersion,
-            request_id: RequestId::from_u128(32),
-            query_type: "GetProviderProfile".to_owned(),
-            project_id: None,
-            payload: json!({"profile_id":profile,"profile_version":1})
-                .as_object()
+    let result = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let result = client
+                .query(&QueryEnvelope {
+                    protocol_version: ProtocolVersion,
+                    request_id: RequestId::from_u128(32),
+                    query_type: "GetProviderProfile".to_owned(),
+                    project_id: None,
+                    payload: json!({"profile_id":profile,"profile_version":1})
+                        .as_object()
+                        .unwrap()
+                        .clone(),
+                })
+                .await
+                .unwrap();
+            if result.result["observations"]
+                .as_array()
                 .unwrap()
-                .clone(),
-        })
-        .await
-        .unwrap();
+                .iter()
+                .any(|entry| entry["phase"] == "connect")
+            {
+                break result;
+            }
+            assert!(
+                events.next_frame().await.unwrap().is_some(),
+                "flux fermé avant observation durable"
+            );
+        }
+    })
+    .await
+    .unwrap();
     assert_eq!(
         result.result["qualification"], "required",
         "TCP ne prouve pas une capacité de génération"
@@ -344,46 +481,59 @@ fn assert_completed_probe_without_model(
 
 #[tokio::test]
 async fn t_f012_013_connect_active_mandate_uses_durable_dispatch_once() {
-    let (fixture, mut admin) = ConnectFixture::start().await;
+    let pause = DispatchPause::new();
+    let mut dispatch_guard = DispatchGuard {
+        barrier: Arc::clone(&pause.barrier),
+        armed: true,
+    };
+    let (fixture, mut admin) = ConnectFixture::start_with_cutpoints(Some(pause.clone())).await;
     let profile = Uuid::from_u128(0xf012_c101);
     let configured = fixture.configure(&mut admin, profile).await;
     let mandate = fixture
         .issue_connect_mandate(&mut admin, profile, &configured, 30)
         .await;
     fixture.assert_no_dispatch_or_active_unit();
+    let mut events = admin
+        .subscribe_events(&SubscribeEventsRequest {
+            stream_id: mandate.event_cursor.stream_id,
+            after_sequence: mandate.event_cursor.sequence,
+            project_id: None,
+            aggregate_id: None,
+            batch_limit: 64,
+        })
+        .await
+        .unwrap();
     let request = connect(&admin, profile, 31, &mandate);
-    let capture = capture_authorized_connect(&fixture, request.aggregate_id);
-    let response = admin.send_command(&request).await;
-    if response.is_err() {
-        fixture
-            .handle
-            .shutdown_graceful("connect-red")
-            .await
-            .unwrap();
-        capture.abort();
-    }
-    assert!(
-        response.is_ok(),
-        "un vrai mandat actif doit atteindre le connect autorisé : {response:?}"
-    );
-    let receipt = response.unwrap();
+    let (capture, receipt) = {
+        let mut pending = Box::pin(admin.send_command(&request));
+        let early = wait_for_dispatch_or_reply(&fixture, &pause, &mut pending).await;
+        assert_held_dispatch_before_socket(&fixture, request.aggregate_id);
+        let capture = capture_authorized_connect(&fixture);
+        dispatch_guard.release();
+        let receipt = if let Some(receipt) = early {
+            receipt
+        } else {
+            pending.await.unwrap()
+        };
+        (capture, receipt)
+    };
     assert_eq!(receipt.state, ReceiptState::Accepted);
     assert_eq!(
         receipt.result_ref,
         Some(format!("provider-probe:{}", request.aggregate_id))
     );
     let captured = capture.await.unwrap();
-    assert!(
-        captured.bytes.is_empty(),
-        "connect n'envoie aucun octet HTTP"
-    );
-    assert_eq!(captured.dispatches, 1, "le marqueur précède la connexion");
-    assert_eq!(
-        captured.reservations, 1,
-        "l'unité du pool commun précède la connexion"
-    );
+    assert!(captured.is_empty(), "connect n'envoie aucun octet HTTP");
     assert_eq!(admin.send_command(&request).await.unwrap(), receipt);
-    assert_connect_observation(&mut admin, profile, request.aggregate_id, &receipt).await;
+    assert_connect_observation(
+        &mut admin,
+        profile,
+        request.aggregate_id,
+        &receipt,
+        &mut events,
+    )
+    .await;
+    drop(events);
     fixture
         .handle
         .shutdown_graceful("connect-test")
