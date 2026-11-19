@@ -1,4 +1,4 @@
-//! SQLite admission oracle only. No TCP/TLS or provider executor is invoked.
+//! `SQLite` admission oracle only. No TCP/TLS or provider executor is invoked.
 //! The privileged eligibility observer is explicitly synthetic; the product
 //! composition must supply its real preflight producer and existing scheduler.
 #![expect(
@@ -111,8 +111,9 @@ fn fixture_with_clock(
         .configuration;
     configuration.profile_version = 2;
     let mut payload = serde_json::to_value(&configuration.payload).unwrap();
-    payload["limits"]["max_inflight"] = json!(6);
-    payload["limits"]["connect_timeout_ms"] = json!(30_000);
+    let limits = payload.get_mut("limits").unwrap().as_object_mut().unwrap();
+    limits.insert("max_inflight".into(), json!(6));
+    limits.insert("connect_timeout_ms".into(), json!(30_000));
     configuration.payload = serde_json::from_value(payload).unwrap();
     let hash = publish(&store, &configuration);
     let mut wire = envelope(
@@ -290,12 +291,13 @@ fn admit(
 fn assert_no_model(store: &UnleashStore) {
     let values = counts(store);
     assert_eq!(
-        &values[4..6],
+        values.get(4..6).unwrap(),
         &[0, 0],
         "a transport probe has no ModelCall or manifest"
     );
     assert_eq!(
-        values[7], 0,
+        values.get(7).copied().unwrap(),
+        0,
         "this local passive phase invents no monetary reservation"
     );
 }
@@ -363,7 +365,7 @@ fn t_f012_013_admission_current_claim_authorizing_then_real_v008_reservation() {
         ),
     );
     assert_eq!(
-        counts(&store)[6],
+        counts(&store).get(6).copied().unwrap(),
         0,
         "Authorizing is not a capacity reservation"
     );
@@ -571,7 +573,7 @@ fn t_f012_013_admission_c4_uncertainty_and_restart_keep_the_real_reservation() {
         store.commit_provider_probe_connect_phase(&ready.claim, dispatch.clone()),
         Err(StoreError::CutpointInjected { .. })
     ));
-    assert_eq!(counts(&store)[6], 1);
+    assert_eq!(counts(&store).get(6).copied().unwrap(), 1);
     assert_eq!(held_capacity(&store), 1);
     assert_generic_phase_refused(&store, dispatch.clone());
     assert!(
@@ -603,7 +605,11 @@ fn t_f012_013_admission_c4_uncertainty_and_restart_keep_the_real_reservation() {
             .len(),
         1
     );
-    assert_eq!(counts(&store)[6], 1, "unknown is not capacity release");
+    assert_eq!(
+        counts(&store).get(6).copied().unwrap(),
+        1,
+        "unknown is not capacity release"
+    );
     assert_eq!(held_capacity(&store), 1);
     assert!(
         store

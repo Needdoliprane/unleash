@@ -1,5 +1,5 @@
 //! T-F012-013 : préparation réseau authentifiée, sans effet OS/fournisseur.
-//! Les profils et mandats de ce banc passent par le vrai CommitCommand.
+//! Les profils et mandats de ce banc passent par le vrai `CommitCommand`.
 #![expect(clippy::unwrap_used, reason = "Fixtures SQLite locales et assertions")]
 
 use serde_json::{Value, json};
@@ -62,6 +62,7 @@ fn envelope(
     kind: &str,
     payload: Value,
 ) -> CommandEnvelope {
+    let payload = serde_json::from_value(payload).unwrap();
     CommandEnvelope {
         protocol_version: ProtocolVersion,
         request_id: RequestId::from_u128(id),
@@ -72,7 +73,7 @@ fn envelope(
         aggregate_id: aggregate,
         expected_revision: Revision::INITIAL,
         command_type: kind.into(),
-        payload: payload.as_object().unwrap().clone(),
+        payload,
     }
 }
 
@@ -104,7 +105,7 @@ fn configure(store: &UnleashStore) {
 fn configure_profile(store: &UnleashStore, profile: Uuid, command_id: u128) {
     let configuration = ProviderProfileConfiguration {
         schema_version:1, profile_id:profile, profile_version:1, project_id:None,
-        payload:serde_json::from_value(json!({"provider_kind":"lmstudio","dialect":{"kind":"openai_chat_completions","version":1},"endpoint":"http://127.0.0.1:1234/v1","model":"synthetic-connect-store","locality":"local_only","server_management":"user_managed","auth":{"kind":"none"},"limits":{"max_inflight":1,"connect_timeout_ms":2000,"queue_timeout_ms":1000,"load_timeout_ms":180000,"first_token_timeout_ms":60000,"generation_timeout_ms":60000},"declared_capabilities":["text"],"pricing":{"kind":"none_local"}})).unwrap(),
+        payload:serde_json::from_value(json!({"provider_kind":"lmstudio","dialect":{"kind":"openai_chat_completions","version":1},"endpoint":"http://127.0.0.1:1234/v1","model":"synthetic-connect-store","locality":"local_only","server_management":"user_managed","auth":{"kind":"none"},"limits":{"max_inflight":1,"connect_timeout_ms":2000,"queue_timeout_ms":1000,"load_timeout_ms":180_000,"first_token_timeout_ms":60000,"generation_timeout_ms":60000},"declared_capabilities":["text"],"pricing":{"kind":"none_local"}})).unwrap(),
         secret_binding:None, catalog_binding:None,
     };
     let bytes = canonicalize_to_vec(&configuration).unwrap();
@@ -297,7 +298,7 @@ fn t_f012_013_connect_receipt_context_and_replay_have_no_effect() {
     assert_eq!(record.context.destination, "http://127.0.0.1:1234/v1");
     let after = counts(&store);
     assert_eq!(
-        &after[3..8],
+        after.get(3..8).unwrap(),
         &[0, 0, 0, 0, 0],
         "aucune action, ModelCall ou réservation avant Authorizing/admission"
     );

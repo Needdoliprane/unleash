@@ -797,10 +797,10 @@ where
         return Err(invalid("date de mise en file non attestée"));
     }
     validate_candidate(tx, candidate, &daemon, now)?;
-    if let AdmissionUnit::Probe(probe) = unit {
-        if !crate::provider_probe_connect::validate_admission_budgets(tx, probe, &budgets)? {
-            crate::provider_probes::validate_admission_budgets(tx, probe, &budgets)?;
-        }
+    if let AdmissionUnit::Probe(probe) = unit
+        && !crate::provider_probe_connect::validate_admission_budgets(tx, probe, &budgets)?
+    {
+        crate::provider_probes::validate_admission_budgets(tx, probe, &budgets)?;
     }
     validate_scope_and_subjects(tx, candidate)?;
     validate_deltas(&snapshot, candidate, &deficit_deltas, consecutive_controls)?;

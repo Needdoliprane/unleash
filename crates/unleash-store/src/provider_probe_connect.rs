@@ -19,7 +19,7 @@ use unleash_protocol::{CommandEnvelope, ProviderTestLimits, ProviderTestPhase};
 pub struct ProviderProbeConnectContext {
     /// Version du document fermé.
     pub schema_version: u32,
-    /// Agrégat stable de TestProviderProfile.
+    /// Agrégat stable de `TestProviderProfile`.
     pub probe_id: ProviderProbeId,
     /// Nouveau reçu de cette préparation, distinct du mandat et de la configuration.
     pub receipt_id: ReceiptId,
@@ -188,7 +188,7 @@ impl ProviderProbeConnectClaim {
     }
 }
 
-/// Seul FreshClaim permet au service de commencer l'orchestration broker.
+/// Seul `FreshClaim` permet au service de commencer l'orchestration broker.
 #[derive(Debug)]
 pub enum ProviderProbeConnectClaimOutcome {
     /// Nouveau propriétaire connu comme acquitté ; token consommable une fois.
@@ -629,11 +629,11 @@ pub(crate) fn commit_tx(
     config: &crate::StoreConfig,
     daemon: &crate::DaemonStateRow,
     now: TimestampMs,
-    command: ConnectCommand<'_>,
+    command: &ConnectCommand<'_>,
     receipt: ReceiptId,
     events: &mut Vec<crate::EventAppendSpec>,
 ) -> Result<Revision, StoreError> {
-    let deadline = validate_preparation(tx, daemon, now, &command)?;
+    let deadline = validate_preparation(tx, daemon, now, command)?;
     let occupied: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM provider_probes WHERE probe_id=?1) OR EXISTS(SELECT 1 FROM command_receipts WHERE aggregate_id=?1)", [command.envelope.aggregate_id.to_string()], |row| row.get(0))?;
     if occupied {
         return Err(StoreError::RevisionConflict {
@@ -642,7 +642,7 @@ pub(crate) fn commit_tx(
             command_id: Some(command.envelope.command_id),
         });
     }
-    let context = context(config, &command, receipt, deadline)?;
+    let context = context(config, command, receipt, deadline)?;
     let digest = unleash_protocol::canonical_sha256(&context)?;
     tx.pragma_update(None, "defer_foreign_keys", "ON")?;
     tx.execute("INSERT INTO provider_probes(probe_id,command_receipt_id,principal_id,source_run_id,profile_version_ref,context_hash,phase,state,wait_reason,admission_class,authority_generation,daemon_epoch,fence,revision,queued_at_ms) VALUES(?1,?2,?3,NULL,?4,?5,'connect','queued',NULL,'work',?6,?7,0,1,?8)", params![context.probe_id.to_string(),receipt.to_string(),context.principal_id.as_str(),context.profile_version_ref,digest.to_string(),context.authority_generation.to_string(),integer(context.daemon_epoch.as_u64())?,now.as_i64()])?;
@@ -749,7 +749,7 @@ fn current_profile(
     Ok(profile)
 }
 
-/// Transport admission uses the existing Probe unit, without a ModelCall parent.
+/// Transport admission uses the existing Probe unit, without a `ModelCall` parent.
 pub(crate) fn validate_admission(
     tx: &Transaction<'_>,
     probe: ProviderProbeId,

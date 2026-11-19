@@ -1,9 +1,5 @@
 //! Pending declaration after the ten preparation oracles have been replayed.
 //! Uses a real receipt/context; the future claim API alone changes ownership.
-#![expect(
-    clippy::panic,
-    reason = "The exact result variant is the ownership oracle"
-)]
 
 use super::{PRINCIPAL, PROFILE, caller, change, configure, connect, counts, policy, prepare};
 use std::sync::{
@@ -100,7 +96,7 @@ fn t_f012_013_connect_claim_is_fresh_once_and_replay_is_inspection() {
     assert_eq!(first.claim_revision(), unleash_domain::Revision::new(1));
     let committed = counts(&store);
     assert_eq!(
-        &committed[3..8],
+        committed.get(3..8).unwrap(),
         &[0, 0, 0, 0, 0],
         "claim alone creates no action, ModelCall or reservation"
     );

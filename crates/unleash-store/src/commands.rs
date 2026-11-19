@@ -151,7 +151,7 @@ pub enum CommandMutation {
         /// Observation réelle et objet publié avant la transaction.
         preparation: Box<crate::ProviderValidationPreparation>,
     },
-    /// Prépare un contexte réseau authentifié sans action, ModelCall ou réservation.
+    /// Prépare un contexte réseau authentifié sans action, `ModelCall` ou réservation.
     PrepareProviderProbeConnect {
         /// Autorité issue de la session, sans délégation d'un payload client.
         caller: CallerAuthority,
@@ -1439,7 +1439,7 @@ fn apply_command_mutation(
             config,
             daemon,
             now_ms,
-            crate::provider_probe_connect::ConnectCommand {
+            &crate::provider_probe_connect::ConnectCommand {
                 envelope,
                 caller,
                 preparation,

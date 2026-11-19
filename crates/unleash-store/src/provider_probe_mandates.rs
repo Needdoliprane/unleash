@@ -423,7 +423,7 @@ pub(crate) struct ResolvedConnectGrant {
 }
 
 /// Relit les octets immuables, leur reçu et la révocation dans la transaction writer.
-/// Une projection ReadPolicySummary ou une chaîne mandate_ref ne confère aucun droit.
+/// Une projection `ReadPolicySummary` ou une chaîne `mandate_ref` ne confère aucun droit.
 pub(crate) fn resolve_connect_grant(
     tx: &Transaction<'_>,
     daemon: &DaemonStateRow,
