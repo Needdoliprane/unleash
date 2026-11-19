@@ -1,6 +1,6 @@
 # Index intégral du dossier OVPT Unleash
 
-Révision consolidée R7 — 16 novembre 2026. Le manifest inventorie 389 fichiers, plus lui-même ; state/, worktrees/ et settings.local.json sont exclus. Les tests produit et preuves EV sont spécifiés, non exécutés. Résultats documentaires : [document-validation](testing/document-validation.md).
+Révision consolidée R7 — 16 novembre 2026. Le [manifest courant](catalog/package-manifest.json) inventorie les fichiers du dossier de conception. Les validations propres au dossier sont documentées dans le [rapport de validation](testing/document-validation.md).
 
 ## Parcours conseillés
 
@@ -9,6 +9,7 @@ Révision consolidée R7 — 16 novembre 2026. Le manifest inventorie 389 fichie
 - Examiner les objections et corrections historiques : [14 expertises R6](audits/r6/README.md), [verdict](audits/consolidated-verdict.md), [contrelecture](audits/r6/release-readthrough.md).
 - Brancher une application documentaire : [catalogue](catalog/README.md), [ingestion](specs/document-package-ingestion.md), [opérations](catalog/operations.json), [manifest](catalog/package-manifest.json).
 - Concevoir une procédure accessible : [usages](brief/general-purpose-scope.md), [guidage](design/guided-automation-experience.md), [itération de données](architecture/workflow-data-iteration.md), [modèles locaux](specs/local-models.md).
+- Réaliser une interface OVPT Unleash avec le [design system](design/visual-design-system.md) et la [parité GUI/TUI](design/gui-tui-parity.md).
 - Réaliser et vérifier : [architecture](architecture/system-overview.md), [IPC](architecture/ipc-and-apis.md), [ADR](architecture/adr/README.md), [règles](rules/design-dossier.md), [traçabilité](testing/traceability.md), [plan complet](plans/v1-implementation-plan.md).
 
 ## Accueil
@@ -165,10 +166,11 @@ Révision consolidée R7 — 16 novembre 2026. Le manifest inventorie 389 fichie
 - [design/gui-tui-parity.md](design/gui-tui-parity.md) — Matrice de parité GUI / TUI / CLI
 - [design/guided-automation-experience.md](design/guided-automation-experience.md) — Expérience guidée d’automatisation — proposition R3
 - [design/interaction-flows.md](design/interaction-flows.md) — Parcours d’interaction et points de vérité
+- [design/ovpt-aifm-historical-guide.md](design/ovpt-aifm-historical-guide.md) — Annexe A — Guide historique complet (29/10/2026)
 - [design/reports-and-history.md](design/reports-and-history.md) — Rapports et historique
 - [design/skill-studio.md](design/skill-studio.md) — Skill Studio et Role Registry
 - [design/terminal-inspector.md](design/terminal-inspector.md) — Inspecteur de terminaux et processus
-- [design/visual-design-system.md](design/visual-design-system.md) — Design system proposé — OVPT Unleash
+- [design/visual-design-system.md](design/visual-design-system.md) — Design system OVPT — application à Unleash
 - [design/workflow-editor.md](design/workflow-editor.md) — Éditeur de workflows
 
 ## dev
@@ -201,6 +203,7 @@ Révision consolidée R7 — 16 novembre 2026. Le manifest inventorie 389 fichie
 - [examples/integration-role.json](examples/integration-role.json)
 - [examples/integration-skill.json](examples/integration-skill.json)
 - [examples/ipc-command.json](examples/ipc-command.json)
+- [examples/ipc-set-policy-probe-mandate.json](examples/ipc-set-policy-probe-mandate.json)
 - [examples/leader-role.json](examples/leader-role.json)
 - [examples/leader-skill.json](examples/leader-skill.json)
 - [examples/merge-only-workflow.json](examples/merge-only-workflow.json)

@@ -55,6 +55,7 @@ tools/design-package/    sync.py, regen.py, validate.py (outillage du dossier)
 - **Worktrees** : uniquement sous `.claude/worktrees/<goal-id>-<task-id>`, nulle part ailleurs ([règle](.claude/rules/worktrees.md)). Un worktree = une tâche = un seul agent écrivain.
 - **Tests d'abord** pour chaque exigence `REQ-…` : écrire le test `T-…` du dossier, le voir échouer, implémenter ([règles de test](.claude/rules/testing.md)).
 - **Règles de code** : [Rust](.claude/rules/rust.md), [renderer GUI](.claude/rules/gui-renderer.md). Commits au format Conventional Commits citant les `REQ-…`.
+- **Interfaces**. Lire et appliquer le [design system OVPT d’Unleash](.claude/design/visual-design-system.md) avant tout changement GUI ou TUI. Inventorier le rendu et les composants existants, puis vérifier l’accessibilité et les dimensions applicables.
 - **Git** : `main` = releases (jamais modifiée ni poussée sans demande de l'utilisateur) ; `dev` = intégration, poussée sur `origin` (GitHub) après chaque goal intégré et vert, jamais en force ; `goal/…` et `task/…` restent locales. Vérifier la CI de `dev` après chaque push.
 - **Tests payants** : uniquement des tests live marqués `#[ignore]`, lancés avec `UNLEASH_LIVE_TESTS=1`, sur les seuls modèles `claude-haiku-5-5` et `gpt-6-luna`, dans le plafond `UNLEASH_LIVE_TEST_BUDGET_USD` ; clés `UNLEASH_DEV_*` lues dans `.env` par le testkit (`dotenvy`), jamais affichées ni committées ; jamais en CI ; aucun test avec un modèle intelligent (sol, astra, fable, opus, sonnet).
 

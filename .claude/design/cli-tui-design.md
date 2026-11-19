@@ -19,6 +19,8 @@ La TUI doit se percevoir comme un outil de travail complet : hiérarchie visuell
 
 Tableaux et arbres rendent la partie visible et indiquent filtres/pagination. Les longs noms se dévoilent dans l’inspecteur ; leur troncature n’altère ni l’identité ni la cible. Toute couleur a un équivalent textuel, focus et sélection sont distincts, transitions et messages restent compréhensibles sans animation.
 
+Adapter le [design system OVPT d’Unleash](visual-design-system.md) au terminal. Reprendre la hiérarchie, la sobriété et l’accent des actions prioritaires. Adapter les couleurs à la palette effectivement disponible et conserver la navigation, les statuts et le focus en mode sans couleur. Les dimensions ci-dessous sont données en cellules.
+
 ### Matrice terminal qualifiée V1
 
 Cette matrice fait foi pour la TUI et la CLI (Q-11, [ADR-14](../architecture/adr/ADR-14-local-data-oss.md), amendement R7). Terminaux : Terminal.app sur macOS 15, 26 et 27 ; iTerm2 et Ghostty sur macOS 27 ; terminal par défaut d’Ubuntu 24.04 et 26.04 ; tmux ≥ 3.4 en local et via SSH. Tailles : 80×24 minimum et 120×40 de référence. Environnement : TERM `xterm-256color` ou `tmux-256color` ; truecolor seulement s’il est annoncé ; `NO_COLOR` respecté. Lecteurs d’écran : VoiceOver sur macOS, recetté avec Terminal.app, et Orca sur Ubuntu, recetté avec le terminal par défaut ; leurs limites sont consignées. Un terminal hors de cette matrice n’est pas qualifié et ne reçoit aucune promesse de support.

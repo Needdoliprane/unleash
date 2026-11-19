@@ -14,18 +14,18 @@
     "cache/"
   ],
   "hash_algorithm": "sha256",
-  "source_tree_digest": "05d074e7e5e349de77bbbe21fbb10641a9d0d221b436fd34fc03dca009361894",
+  "source_tree_digest": "9d0946e5420c7902ca33a61e8f4356532e214837877c80e8ef0f0c72e44f958b",
   "files": [
     {
       "path": "INDEX.md",
-      "sha256": "8a5a3af27c67ba52b647e9cd1d5c2bd43628d35a8bb215b66ebeedda15e6dd57",
-      "bytes": 46331,
+      "sha256": "000f8b010946929f0bbf38aecbb9a1e21d3d89edc4c504cf76255751cf8842de",
+      "bytes": 46672,
       "media_type": "text/markdown"
     },
     {
       "path": "README.md",
-      "sha256": "6368a279d87a30da6b5394a0b3ab7d0f3e1144646a2f1b6cb20273a681be06a7",
-      "bytes": 11440,
+      "sha256": "fc8e97fdeb38bf4bff5140021dfaefc11d6be40f79ec34a04b8181db999567c6",
+      "bytes": 11530,
       "media_type": "text/markdown"
     },
     {
@@ -90,8 +90,8 @@
     },
     {
       "path": "agents/dev/ui-implementer.md",
-      "sha256": "0531ce3a5a987d61de25369baab7a9f28aadd9bbbcaa158f2e08fb4f319a2d22",
-      "bytes": 1732,
+      "sha256": "597aaddad26de17a8c9fa92163a66cb6829137374eb7f7cad16c77e37a15f7b0",
+      "bytes": 1999,
       "media_type": "text/markdown"
     },
     {
@@ -756,8 +756,8 @@
     },
     {
       "path": "design/cli-tui-design.md",
-      "sha256": "1783877dac336d47efaae65896fdffc5d5ce84616c1c4cf9ed0e411cc39614c4",
-      "bytes": 15664,
+      "sha256": "1558c901b73b4ce6ca5963a1b2a1c06864afc92f61b4f9ed1950ff841669c6ed",
+      "bytes": 16014,
       "media_type": "text/markdown"
     },
     {
@@ -809,6 +809,12 @@
       "media_type": "text/markdown"
     },
     {
+      "path": "design/ovpt-aifm-historical-guide.md",
+      "sha256": "4ee1571bc8c4a294fb6bb52af212c28bbad88b099f33961ff85325e2dee3ff24",
+      "bytes": 22772,
+      "media_type": "text/markdown"
+    },
+    {
       "path": "design/reports-and-history.md",
       "sha256": "3fe0089787f869329b23ddb40b7da930fa8db4fa3f041f91dce4edb85b637ea4",
       "bytes": 1705,
@@ -828,8 +834,8 @@
     },
     {
       "path": "design/visual-design-system.md",
-      "sha256": "5541674917186f8259f28a8de691e71a370acfe8af2a23443be80dce17e48e69",
-      "bytes": 5345,
+      "sha256": "11de7cf9688ff06ab8ce0ee0c488dd3910fa732db06676318e5b84d5c3d7e390",
+      "bytes": 11291,
       "media_type": "text/markdown"
     },
     {
@@ -1956,8 +1962,8 @@
     },
     {
       "path": "rules/gui-renderer.md",
-      "sha256": "9b4f635eb788309c66afb550b66e50ed96abb004a29bfd78302188876c296bab",
-      "bytes": 2013,
+      "sha256": "123f7c808a97339e520ce15dd3135194a5492b9a232c610b1be266f42a279caa",
+      "bytes": 2357,
       "media_type": "text/markdown"
     },
     {
