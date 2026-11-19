@@ -757,10 +757,18 @@ where
         });
     }
     let (decision, report) = decide(&snapshot)?;
-    if expected
-        .valid_until
-        .is_some_and(|deadline| deadline.as_i64() <= config.clock.now_ms().as_i64())
+    let decided_at = config.clock.now_ms();
+    if decided_at < now
+        || config
+            .clock_uncertain
+            .load(std::sync::atomic::Ordering::Acquire)
     {
+        return Err(invalid("horloge admission inconnue après la décision"));
+    }
+    // The callback can consume time without changing any SQLite input revision.
+    // All following deadlines, leases and journal timestamps use this fresh time.
+    let now = decided_at;
+    if expected.valid_until.is_some_and(|deadline| deadline <= now) {
         return Err(invalid("snapshot admission expiré pendant la décision"));
     }
     let AdmissionDecision::Admit {
