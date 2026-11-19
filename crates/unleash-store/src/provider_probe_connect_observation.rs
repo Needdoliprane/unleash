@@ -213,7 +213,7 @@ fn validate_document(
     Ok(())
 }
 
-fn validate_continuation(
+pub(crate) fn validate_continuation(
     tx: &Transaction<'_>,
     daemon: &crate::DaemonStateRow,
     now: TimestampMs,
@@ -635,7 +635,7 @@ pub(crate) fn finish_completion(
     Ok(())
 }
 
-fn transition_probe(
+pub(crate) fn transition_probe(
     tx: &Transaction<'_>,
     context: &crate::ProviderProbeConnectContext,
     continuation: &ExecutionContinuation,

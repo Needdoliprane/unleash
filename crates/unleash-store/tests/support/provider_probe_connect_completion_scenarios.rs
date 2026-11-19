@@ -274,3 +274,107 @@ fn t_f012_013_completion_rollback_retains_fact_and_restart_keeps_capacity() {
     assert_eq!(disposition_count(&store), 0);
     assert_no_model(&store);
 }
+
+fn pre_dispatch_dispositions(store: &UnleashStore) -> i64 {
+    store.read_snapshot(|conn,_|Ok(conn.query_row("SELECT COUNT(*) FROM evidence WHERE snapshot_ref LIKE 'provider-connect-pre-dispatch:v1:%'",[],|row|row.get(0))?)).unwrap()
+}
+
+#[test]
+fn t_f012_013_pre_dispatch_disposal_refuses_active_marker_and_unknown() {
+    let (store, _directory, mandate, pool) = fixture(Arc::new(NoopCutpointObserver));
+    let execution = dispatched(&store, mandate, pool);
+    let before = counts(&store);
+    assert!(
+        store
+            .dispose_provider_probe_connect_without_dispatch(
+                &execution.ready.claim,
+                &execution.continuation
+            )
+            .is_err()
+    );
+    assert_eq!(counts(&store), before);
+    assert_eq!(held_capacity(&store), 1);
+    assert_eq!(pre_dispatch_dispositions(&store), 0);
+    let mut unknown = final_request(&store, &execution, None);
+    let BrokerPhase::Observation { receipt, .. } = &mut unknown.request.phase else {
+        panic!("observation fixture");
+    };
+    receipt.state = ActionState::OutcomeUnknown;
+    store
+        .commit_provider_probe_connect_observation(&execution.ready.claim, unknown)
+        .unwrap();
+    let before = counts(&store);
+    assert!(
+        store
+            .dispose_provider_probe_connect_without_dispatch(
+                &execution.ready.claim,
+                &execution.continuation
+            )
+            .is_err()
+    );
+    assert_eq!(counts(&store), before);
+    assert_eq!(held_capacity(&store), 1);
+    assert_eq!(pre_dispatch_dispositions(&store), 0);
+    assert_eq!(
+        store
+            .inspect_broker_action(execution.ready.intent.action_id)
+            .unwrap()
+            .unwrap()
+            .state,
+        ActionState::OutcomeUnknown
+    );
+}
+
+#[test]
+fn t_f012_013_pre_dispatch_disposal_replays_after_release_and_rejects_other_fence() {
+    let (store, _directory, mandate, pool) = fixture(Arc::new(NoopCutpointObserver));
+    let ready = ready(&store, mandate, 0xf012_0401);
+    authorizing(&store, &ready);
+    observe_eligibility(&store, &ready, pool);
+    let AdmissionOutcome::Admitted(commit) = admit(&store, &ready, pool).unwrap() else {
+        panic!("actual V008 admission required");
+    };
+    let continuation = ExecutionContinuation {
+        reservation_id: commit.reservation_id,
+        unit: commit.unit,
+        unit_revision: commit.revision,
+        lease_id: commit.lease.lease_id,
+        authority_generation: commit.lease.authority_generation,
+        daemon_epoch: commit.lease.daemon_epoch,
+        fence: commit.lease.fence,
+        boot_identity: commit.lease.boot_identity.clone(),
+    };
+    authorize(&store, &ready);
+    let mut changed = change(&store);
+    if let ProviderProbeMandateChange::Issue(issue) = &mut changed {
+        issue.profile_version = 2;
+        issue.limits = ProviderTestLimits::new(30_000, 0, 0, MicrosAmount::ZERO);
+    }
+    store
+        .commit_command(policy(&store, 202, 1, changed))
+        .unwrap();
+    let committed = store
+        .dispose_provider_probe_connect_without_dispatch(&ready.claim, &continuation)
+        .unwrap();
+    assert!(!committed.replayed);
+    assert_eq!(held_capacity(&store), 0);
+    assert_eq!(pre_dispatch_dispositions(&store), 1);
+    let before = counts(&store);
+    let replay = store
+        .dispose_provider_probe_connect_without_dispatch(&ready.claim, &continuation)
+        .unwrap();
+    assert!(replay.replayed);
+    assert_eq!(replay.event_cursor, committed.event_cursor);
+    assert_eq!(replay.revision, committed.revision);
+    assert_eq!(counts(&store), before);
+    let mut other = continuation;
+    other.fence = unleash_domain::Fence::new(other.fence.as_u64() + 1);
+    assert!(
+        store
+            .dispose_provider_probe_connect_without_dispatch(&ready.claim, &other)
+            .is_err()
+    );
+    assert_eq!(counts(&store), before);
+    assert_eq!(pre_dispatch_dispositions(&store), 1);
+    assert_no_model(&store);
+}

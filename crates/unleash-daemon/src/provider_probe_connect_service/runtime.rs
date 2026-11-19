@@ -159,6 +159,7 @@ async fn run(
         Arc::clone(&claim),
         Arc::clone(&activity),
     ));
+    let outcome = async {
     let timer = Arc::new(SystemClockAndTimer::new());
     let broker = ActionBroker::new_with_policy_snapshot(
         state.store.config().clock.clone(),
@@ -213,7 +214,12 @@ async fn run(
     .await
     .map_err(|_| ())?;
     result.receipt.map_err(|_| ())?;
-    Ok(())
+        Ok(())
+    }.await;
+    if outcome.is_err() {
+        journal.dispose_known_refusal(state).await;
+    }
+    outcome
 }
 
 fn failed(stage: &'static str) {

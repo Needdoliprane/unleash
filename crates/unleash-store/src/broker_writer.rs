@@ -1028,7 +1028,7 @@ pub(crate) fn validate_execution_dispatch_tx(
     clippy::too_many_arguments,
     reason = "Contexte explicite de l’événement interne atomique, sans commande fictive"
 )]
-fn append_phase_event_tx(
+pub(crate) fn append_phase_event_tx(
     tx: &Transaction<'_>,
     config: &StoreConfig,
     daemon: &DaemonStateRow,

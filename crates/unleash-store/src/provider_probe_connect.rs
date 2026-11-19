@@ -633,7 +633,7 @@ fn scope_revision(
     })?))
 }
 
-fn policy(
+pub(crate) fn policy(
     tx: &Transaction<'_>,
     project: Option<ProjectId>,
 ) -> Result<(Revision, Sha256Digest), StoreError> {

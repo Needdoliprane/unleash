@@ -24,6 +24,7 @@ pub mod objects;
 pub mod policies_secrets;
 pub mod projects_settings;
 pub mod provider_probe_connect;
+mod provider_probe_connect_disposition;
 mod provider_probe_connect_observation;
 mod provider_probe_mandates;
 pub mod provider_probes;
@@ -99,6 +100,7 @@ pub use provider_probe_connect::{
     ProviderProbeConnectClaimOutcome, ProviderProbeConnectClaimRecord, ProviderProbeConnectContext,
     ProviderProbeConnectPreparation, ProviderProbeConnectRecord,
 };
+pub use provider_probe_connect_disposition::ProviderConnectDispositionCommit;
 pub use provider_probe_connect_observation::{
     AdoptProviderConnectObservation, AdoptedProviderConnectObservation, CONNECT_OBSERVER_PRINCIPAL,
     CommitProviderConnectObservation, ConnectCertificateValidation, ProviderConnectObservation,

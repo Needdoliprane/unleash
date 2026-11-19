@@ -40,6 +40,34 @@ impl ConnectJournal {
         }
     }
 
+    pub(super) async fn dispose_known_refusal(&self, state: &Arc<DaemonRuntimeState>) {
+        let Ok(slot) = self.continuation.lock().map(|slot| slot.clone()) else {
+            return;
+        };
+        let Some(continuation) = slot else {
+            return;
+        };
+        let store = Arc::clone(&state.store);
+        let claim = Arc::clone(&self.claim);
+        let activity = Arc::clone(&self.activity);
+        let result = tokio::task::spawn_blocking(move || {
+            let _activity = activity;
+            store.dispose_provider_probe_connect_without_dispatch(&claim, &continuation)
+        })
+        .await;
+        if let Ok(Ok(committed)) = result {
+            publish_committed_events_ordered(
+                state,
+                committed.event_cursor.stream_id,
+                committed.event_cursor.sequence.as_u64(),
+                1,
+                &[],
+            )
+            .await;
+        }
+        // Any unproven condition, task error or marker keeps the durable slot.
+    }
+
     async fn await_admission(
         &self,
         state: &Arc<DaemonRuntimeState>,
