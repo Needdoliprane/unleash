@@ -1,6 +1,6 @@
 //! One original claim, one broker and one native execution; never restart I/O.
 
-use crate::executors::BrokerActivityGuard;
+use crate::broker_activity::BrokerActivityGuard;
 use crate::ipc::DaemonRuntimeState;
 use std::collections::BTreeSet;
 use std::sync::Arc;
@@ -141,7 +141,7 @@ async fn run(
         verb: connect_transport::CONNECT_VERB.into(),
         resource_refs: vec![NormalizedResourceRef::NetworkEndpoint {
             host: endpoint.host().into(),
-            port: endpoint.port(),
+            port: Some(endpoint.port()),
             is_private_or_loopback: true,
         }],
         payload_digest: c.request_digest,

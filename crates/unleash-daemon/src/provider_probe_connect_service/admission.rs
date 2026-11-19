@@ -1,7 +1,7 @@
 //! The original claim gates durable broker phases and the existing V008 scheduler.
 
+use crate::broker_activity::BrokerActivityGuard;
 use crate::execution_scheduler::{ExecutionSchedulingInputs, schedule_execution};
-use crate::executors::BrokerActivityGuard;
 use crate::ipc::{DaemonRuntimeState, publish_committed_events_ordered};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;

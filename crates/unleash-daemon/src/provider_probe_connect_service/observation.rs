@@ -1,7 +1,7 @@
 //! Native transport adoption after channel closure, before broker completion.
 
 use super::admission::FactSlot;
-use crate::executors::BrokerActivityGuard;
+use crate::broker_activity::BrokerActivityGuard;
 use std::sync::{Arc, Mutex};
 use unleash_action_broker::BoxFuture;
 use unleash_domain::Sha256Digest;

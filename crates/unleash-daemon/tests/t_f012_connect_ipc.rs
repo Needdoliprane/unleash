@@ -316,6 +316,24 @@ fn capture_authorized_connect(fixture: &ConnectFixture) -> tokio::task::JoinHand
     })
 }
 
+fn connect_diagnostic(fixture: &ConnectFixture) -> Value {
+    let db = fixture.db();
+    let rows = |query: &str| {
+        db.prepare(query)
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(0))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap()
+    };
+    json!({"claims":rows("SELECT claim_state FROM provider_probe_transport_contexts"),
+        "probes":rows("SELECT state||':'||COALESCE(wait_reason,'none') FROM provider_probes"),
+        "actions":rows("SELECT state FROM actions"),
+        "capacity":rows("SELECT state FROM capacity_reservations"),
+        "pools":rows("SELECT pool_kind||':'||scope_key||':'||effective_limit FROM capacity_pools"),
+        "events":rows("SELECT event_type FROM events ORDER BY sequence")})
+}
+
 async fn wait_for_dispatch_or_reply<F>(
     fixture: &ConnectFixture,
     pause: &DispatchPause,
@@ -328,7 +346,8 @@ where
         response = command => {
             match response {
                 Ok(receipt) => {
-                    tokio::time::timeout(Duration::from_secs(3), pause.entered.notified()).await.unwrap();
+                    let reached=tokio::time::timeout(Duration::from_secs(3), pause.entered.notified()).await;
+                    assert!(reached.is_ok(),"C4 not reached after accepted receipt; durable states: {}",connect_diagnostic(fixture));
                     Some(receipt)
                 }
                 Err(error) => {
