@@ -216,6 +216,8 @@ La transaction `Authorizing` vérifie le lien du contexte avec le reçu et l’i
 
 Cette préparation n’autorise aucun dispatch à elle seule. Le service doit encore apporter le producteur du profil, la preuve de placement, le coffre applicable et le transport réconciliable. Les phases passives conservent les contrats d’effet décrits par [F012](../features/F012-model-api-router/interfaces.md).
 
+Pour `validate_config` au plan de contrôle indépendant, `provider_probes` conserve un résultat local en `ended` avec `admission_class=NULL`. Il ne passe pas en file ou en admission. Le writer contrôle le profil exact et son reçu de configuration de la lignée active ainsi que le principal et la portée courants. `context_hash` référence ici l’objet d’observation locale versionné et publié, sans ligne `provider_probe_contexts`. Le résultat, sa référence, le reçu de validation et son événement sont liés dans la même transaction. Cette phase ne crée ni action, ni appel modèle ou manifeste, ni réserve. Les invariants de contexte et d’admission ci-dessus continuent de s’appliquer à la génération.
+
 ## Registres versionnés R7
 
 Skill Registry et Role Registry restent distincts dans le domaine, les commandes, les événements et les écrans ; ils partagent ce stockage versionné adressé par contenu ([ADR-06](adr/ADR-06-skill-role-registry.md)). Une entrée est identifiée par `(entry_kind, scope_kind, scope_owner_key, entry_id)` ; les tables filles la référencent par cette FK composite.
