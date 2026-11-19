@@ -2,8 +2,8 @@
 //! digest-only intention are committed together, before broker authorization.
 
 use super::terminal_input_types::{
-    MAX_TERMINAL_INPUT_BYTES, MAX_TERMINAL_INPUT_WIRE_INTEGER, TerminalInputContext,
-    TerminalInputRecord, TerminalInputRequest, TerminalInputState,
+    MAX_TERMINAL_INPUT_BYTES, MAX_TERMINAL_INPUT_WIRE_INTEGER, TERMINAL_INPUT_VERB,
+    TerminalInputContext, TerminalInputRecord, TerminalInputRequest, TerminalInputState,
 };
 use super::{
     control_holds, control_identity, control_lease, control_runtime, integer, invalid, key, policy,
@@ -286,6 +286,9 @@ pub(crate) fn read_input_conn(
     conn: &Connection,
     action: ActionId,
 ) -> Result<Option<TerminalInputRecord>, StoreError> {
+    if read_daemon_state_conn(conn)?.schema_version < 14 {
+        return Ok(None);
+    }
     let row: Option<String> = conn.query_row(
         "SELECT json_object('context_json',context_json,'context_digest',context_digest,'state',state,'revision',revision,'dispatch_id',dispatch_id,'observation_object_hash',observation_object_hash,'renewal',renewal,'renewed_lease_expires_at',renewed_lease_expires_at) FROM terminal_input_intents WHERE action_id=?1",
         [action.to_string()], |row| row.get(0),
@@ -311,6 +314,148 @@ pub(crate) fn read_input_conn(
         })
     })
     .transpose()
+}
+
+pub(crate) fn validate_incarnation(
+    tx: &Transaction<'_>,
+    daemon: &DaemonStateRow,
+    action: ActionId,
+) -> Result<(), StoreError> {
+    if let Some(record) = read_input_conn(tx, action)? {
+        let c = record.context;
+        if c.authority_generation != daemon.authority_generation {
+            return Err(StoreError::StaleAuthorityGeneration {
+                expected: daemon.authority_generation,
+                actual: c.authority_generation,
+                command_id: None,
+            });
+        }
+        if c.daemon_epoch != daemon.daemon_epoch || c.daemon_boot_identity != daemon.boot_identity {
+            return Err(stale("terminal input belongs to an old incarnation"));
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_intent(
+    tx: &Transaction<'_>,
+    daemon: &DaemonStateRow,
+    now: TimestampMs,
+    intent: &crate::BrokerIntent,
+) -> Result<(), StoreError> {
+    let record = read_input_conn(tx, intent.action_id)?;
+    let cause_type: Option<String> =
+        if let crate::BrokerCause::CommandReceipt { receipt_id } = intent.cause {
+            tx.query_row(
+                "SELECT command_type FROM command_receipts WHERE receipt_id=?1",
+                [receipt_id.to_string()],
+                |row| row.get(0),
+            )
+            .optional()?
+        } else {
+            None
+        };
+    if record.is_none()
+        && cause_type.as_deref() != Some("SendTerminalInput")
+        && intent.manifest.get("verb") != Some(&json!(TERMINAL_INPUT_VERB))
+    {
+        return Ok(());
+    }
+    let record = record.ok_or_else(|| invalid("terminal input preparation missing"))?;
+    let c = &record.context;
+    if record.state != TerminalInputState::Prepared
+        || intent.principal_id != c.principal_id
+        || intent.cause
+            != (crate::BrokerCause::CommandReceipt {
+                receipt_id: c.receipt_id,
+            })
+        || intent.project_id != Some(c.project_id)
+        || intent.scope_revision != c.scope_revision
+        || intent.policy_revision != c.policy_revision
+        || intent.payload_digest != record.context_digest
+        || intent.action_deadline != c.previous_lease_expires_at
+        || intent.manifest.get("verb") != Some(&json!(TERMINAL_INPUT_VERB))
+        || intent.manifest.get("effects_class") != Some(&json!("process_exec"))
+        || intent.manifest.get("resource_refs")
+            != Some(&json!([{"kind":"terminal","value":c.terminal_id}]))
+        || intent.manifest.get("secret_refs") != Some(&json!([]))
+        || intent.manifest.get("provenance") != Some(&json!({"origin":"engine_internal"}))
+    {
+        return Err(invalid(
+            "terminal input intent differs from accepted request",
+        ));
+    }
+    validate_live_context(tx, daemon, now, &record)
+}
+
+pub(crate) fn validate_live_context(
+    tx: &Transaction<'_>,
+    daemon: &DaemonStateRow,
+    now: TimestampMs,
+    record: &TerminalInputRecord,
+) -> Result<(), StoreError> {
+    let c = &record.context;
+    validate_incarnation(tx, daemon, c.action_id)?;
+    if daemon.mode != DaemonMode::Ready
+        || now >= c.previous_lease_expires_at
+        || principal(tx, &c.actor_id)? != c.principal_id
+    {
+        return Err(stale("terminal input controller expired or unavailable"));
+    }
+    let allocation =
+        read_conn(tx, c.terminal_id)?.ok_or_else(|| invalid("terminal input launch missing"))?;
+    let original = &allocation.context;
+    if original.action_id != c.initial_action_id
+        || allocation.context_digest != c.initial_context_digest
+        || original.process_id != c.process_id
+        || original.host_id != c.host_id
+        || original.process_run_uuid != c.process_run_uuid
+        || original.actor_id != c.actor_id
+        || original.principal_id != c.principal_id
+        || original.authority_generation != c.authority_generation
+    {
+        return Err(invalid("terminal input initial registration differs"));
+    }
+    let runtime = control_runtime(tx, now, &allocation)?;
+    if canonical_sha256(&runtime)? != c.runtime_settings_digest
+        || policy(tx, c.project_id)? != (c.policy_revision, c.security_policy_digest)
+    {
+        return Err(invalid("terminal input settings or policy changed"));
+    }
+    let mut scoped = original.preparation.clone();
+    scoped.scope = super::TerminalAllocationScope::ProjectConfiguration {
+        project_id: c.project_id,
+        revision: c.scope_revision,
+    };
+    scoped.mission_revision = c.mission_revision;
+    scoped.lease_ttl_ms = runtime.lease_ttl_ms;
+    validate_preparation(tx, now, &scoped, &c.actor_id, &c.principal_id)?;
+    control_holds(tx, daemon, &allocation)?;
+    control_identity(tx, daemon, &allocation)?;
+    let exact: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM terminal_sessions s JOIN processes p ON p.process_id=s.process_id JOIN resource_leases l ON l.lease_id=s.lease_id WHERE s.terminal_id=?1 AND s.process_id=?2 AND s.lease_id=?3 AND s.control_revision=?4 AND s.input_seq=?5 AND s.state IN ('ready','busy','detached') AND p.state='live' AND l.boot_identity=?6 AND l.resource_kind='terminal' AND l.resource_key=?7 AND l.owner_type='principal' AND l.owner_id=?8 AND l.expires_at_ms>=?9 AND l.authority_generation=?10)",
+        params![c.terminal_id.to_string(),c.process_id.to_string(),c.lease_id.to_string(),integer(c.control_revision.as_u64())?,integer(c.input_seq.checked_sub(1).ok_or_else(||invalid("terminal input sequence invalid"))?)?,c.daemon_boot_identity,key(&original.preparation)?,c.principal_id.as_str(),c.previous_lease_expires_at.as_i64(),c.authority_generation.to_string()],
+        |row| row.get(0),
+    )?;
+    let receipt: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM command_receipts WHERE receipt_id=?1 AND actor_id=?2 AND command_id=?3 AND command_type='SendTerminalInput' AND aggregate_id=?4 AND authority_generation=?5 AND state='accepted' AND response_state='full')",
+        params![c.receipt_id.to_string(),c.actor_id.as_str(),c.command_id.to_string(),c.terminal_id.to_string(),c.authority_generation.to_string()], |row| row.get(0),
+    )?;
+    if !exact || !receipt {
+        return Err(stale("terminal input session or accepted receipt differs"));
+    }
+    tx_validate_lease_fence(
+        tx,
+        daemon.authority_generation,
+        daemon.daemon_epoch,
+        &FenceAssertion {
+            lease_id: c.lease_id,
+            authority_generation: c.authority_generation,
+            daemon_epoch: c.daemon_epoch,
+            fence: c.resource_fence,
+            owner_id: c.principal_id.to_string(),
+        },
+    )
 }
 
 impl UnleashStore {

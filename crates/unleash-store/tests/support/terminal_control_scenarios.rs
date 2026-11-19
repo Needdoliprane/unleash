@@ -77,9 +77,22 @@ fn observed(
     TerminalAllocationRecord,
     impl std::fmt::Debug,
 ) {
+    observed_with_cutpoint(successor, StoreCutpoint::C1BeforeCommandCommit)
+}
+
+fn observed_with_cutpoint(
+    successor: bool,
+    point: StoreCutpoint,
+) -> (
+    UnleashStore,
+    Arc<ManualClock>,
+    Arc<FailAt>,
+    TerminalAllocationRecord,
+    impl std::fmt::Debug,
+) {
     let fault = Arc::new(FailAt {
         armed: AtomicBool::new(false),
-        point: StoreCutpoint::C1BeforeCommandCommit,
+        point,
     });
     let (store, _cfg, clock, preparation, directory) = fixture(fault.clone());
     store
