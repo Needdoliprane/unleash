@@ -2,6 +2,10 @@
 
 use crate::ipc::DaemonRuntimeState;
 
+#[path = "terminal_metadata.rs"]
+mod metadata;
+pub(crate) use metadata::read_terminal_metadata;
+
 type ObservationSlot =
     Arc<std::sync::Mutex<Option<unleash_store::terminal_allocations::TerminalLaunchObservation>>>;
 

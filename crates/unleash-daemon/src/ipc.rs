@@ -850,12 +850,19 @@ async fn query_state_snapshot(
     let store = Arc::clone(&state.store);
     let proj_filter = query.project_id;
     let allowed_projects = session.allowed_projects.clone();
+    let terminal_actor = session.actor_id.clone();
     let (snapshot_val, watermark) = tokio::task::spawn_blocking(move || {
         store.read_snapshot(|conn, _ctx| {
             let daemon_row = read_daemon_row_conn(conn)?;
             let wm = read_watermark_conn(conn, daemon_row.stream_id)?;
             let projects = read_projects_conn(conn, proj_filter, allowed_projects.as_ref())?;
             let missions = read_missions_conn(conn, proj_filter, allowed_projects.as_ref())?;
+            let terminals = crate::terminal_service::read_terminal_metadata(
+                conn,
+                &terminal_actor,
+                proj_filter,
+                allowed_projects.as_ref(),
+            )?;
             let val = json!({
                 "daemon": {
                     "authority_generation": daemon_row.authority_generation,
@@ -867,6 +874,7 @@ async fn query_state_snapshot(
                 },
                 "projects": projects,
                 "missions": missions,
+                "terminals": terminals,
             });
             Ok((val, wm))
         })

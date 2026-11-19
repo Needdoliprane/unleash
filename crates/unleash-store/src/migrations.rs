@@ -9,7 +9,7 @@ use crate::config::{CutpointObserver, StoreCutpoint};
 use crate::error::StoreError;
 
 /// Version courante maximale du schéma gérée par cette version de `unleash-store`.
-pub const CURRENT_SCHEMA_VERSION: i64 = 11;
+pub const CURRENT_SCHEMA_VERSION: i64 = 12;
 
 /// État persisté d'une migration dans `schema_migrations`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -124,7 +124,79 @@ const MIGRATIONS: &[MigrationDef] = &[
         name: "v011_immutable_configured_provider_profiles",
         sql: V011_SQL,
     },
+    MigrationDef {
+        version: 12,
+        name: "v012_terminal_control_transfer_intentions",
+        sql: V012_SQL,
+    },
 ];
+
+const V012_SQL: &str = r"
+ALTER TABLE terminal_sessions ADD COLUMN control_revision INTEGER NOT NULL DEFAULT 0 CHECK(control_revision>=0);
+CREATE TRIGGER terminal_control_revision_monotone BEFORE UPDATE OF control_revision ON terminal_sessions
+WHEN NEW.control_revision!=OLD.control_revision AND NEW.control_revision!=OLD.control_revision+1
+BEGIN SELECT RAISE(ABORT,'terminal control revision must advance once'); END;
+CREATE TABLE terminal_control_intents (
+ action_id TEXT PRIMARY KEY,
+ terminal_id TEXT NOT NULL REFERENCES terminal_sessions(terminal_id),
+ receipt_id TEXT NOT NULL UNIQUE REFERENCES command_receipts(receipt_id) DEFERRABLE INITIALLY DEFERRED,
+ command_id TEXT NOT NULL,
+ actor_id TEXT NOT NULL,
+ principal_id TEXT NOT NULL REFERENCES principals(principal_id),
+ authority_generation TEXT NOT NULL,
+ daemon_epoch INTEGER NOT NULL CHECK(daemon_epoch>=0),
+ context_digest TEXT NOT NULL,
+ context_json TEXT NOT NULL CHECK(json_valid(context_json)),
+ previous_lease_id TEXT NOT NULL REFERENCES resource_leases(lease_id),
+ next_lease_id TEXT NOT NULL UNIQUE CHECK(next_lease_id!=previous_lease_id),
+ next_fence INTEGER NOT NULL CHECK(next_fence>0),
+ state TEXT NOT NULL CHECK(state IN ('prepared','handshake_resolved','observed','outcome_unknown','disposed')),
+ revision INTEGER NOT NULL CHECK(revision>=1),
+ dispatch_id TEXT UNIQUE REFERENCES action_dispatches(dispatch_id),
+ observation_object_hash TEXT REFERENCES object_records(object_hash),
+ CHECK(COALESCE(json_extract(context_json,'$.schema_version')=1
+   AND json_extract(context_json,'$.action_id')=action_id
+   AND json_extract(context_json,'$.initial_action_id')!=action_id
+   AND json_extract(context_json,'$.terminal_id')=terminal_id
+   AND json_extract(context_json,'$.receipt_id')=receipt_id
+   AND json_extract(context_json,'$.command_id')=command_id
+   AND json_extract(context_json,'$.actor_id')=actor_id
+   AND json_extract(context_json,'$.principal_id')=principal_id
+   AND json_extract(context_json,'$.authority_generation')=authority_generation
+   AND json_extract(context_json,'$.daemon_epoch')=daemon_epoch
+   AND json_extract(context_json,'$.previous_lease_id')=previous_lease_id
+   AND json_extract(context_json,'$.next_lease_id')=next_lease_id
+   AND json_extract(context_json,'$.next_fence')=next_fence
+   AND json_extract(context_json,'$.previous_fence')<next_fence,0)),
+ CHECK((state='prepared' AND dispatch_id IS NULL AND observation_object_hash IS NULL)
+    OR (state IN ('handshake_resolved','outcome_unknown') AND dispatch_id IS NOT NULL AND observation_object_hash IS NULL)
+    OR (state='observed' AND dispatch_id IS NOT NULL AND observation_object_hash IS NOT NULL)
+    OR (state='disposed' AND observation_object_hash IS NOT NULL))
+) STRICT;
+CREATE UNIQUE INDEX terminal_control_one_pending ON terminal_control_intents(terminal_id)
+WHERE state IN ('prepared','handshake_resolved','outcome_unknown');
+CREATE TRIGGER terminal_control_initial BEFORE INSERT ON terminal_control_intents
+WHEN NEW.state!='prepared' OR NEW.revision!=1
+BEGIN SELECT RAISE(ABORT,'terminal control must start prepared'); END;
+CREATE TRIGGER terminal_control_immutable BEFORE UPDATE ON terminal_control_intents
+WHEN NEW.action_id IS NOT OLD.action_id OR NEW.terminal_id IS NOT OLD.terminal_id
+ OR NEW.receipt_id IS NOT OLD.receipt_id OR NEW.command_id IS NOT OLD.command_id
+ OR NEW.actor_id IS NOT OLD.actor_id OR NEW.principal_id IS NOT OLD.principal_id
+ OR NEW.authority_generation IS NOT OLD.authority_generation OR NEW.daemon_epoch IS NOT OLD.daemon_epoch
+ OR NEW.context_digest IS NOT OLD.context_digest OR NEW.context_json IS NOT OLD.context_json
+ OR NEW.previous_lease_id IS NOT OLD.previous_lease_id OR NEW.next_lease_id IS NOT OLD.next_lease_id
+ OR NEW.next_fence IS NOT OLD.next_fence
+BEGIN SELECT RAISE(ABORT,'terminal control intention immutable'); END;
+CREATE TRIGGER terminal_control_transition BEFORE UPDATE ON terminal_control_intents
+WHEN NOT(NEW.revision=OLD.revision+1 AND (
+ (OLD.state='prepared' AND NEW.state='handshake_resolved' AND NEW.dispatch_id IS NOT NULL)
+ OR (OLD.state='handshake_resolved' AND NEW.state IN ('observed','outcome_unknown') AND NEW.dispatch_id IS OLD.dispatch_id)
+ OR (OLD.state='outcome_unknown' AND NEW.state='observed' AND NEW.dispatch_id IS OLD.dispatch_id)
+ OR (OLD.state IN ('prepared','handshake_resolved','outcome_unknown') AND NEW.state='disposed' AND NEW.dispatch_id IS OLD.dispatch_id)))
+BEGIN SELECT RAISE(ABORT,'terminal control transition invalid'); END;
+CREATE TRIGGER terminal_control_durable BEFORE DELETE ON terminal_control_intents
+BEGIN SELECT RAISE(ABORT,'terminal control intention durable'); END;
+";
 
 const V011_SQL: &str = r"
 ALTER TABLE provider_profiles ADD COLUMN profile_id TEXT;

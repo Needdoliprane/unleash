@@ -14,6 +14,13 @@ use unleash_domain::{
 /// Verbe fermé du producteur d'allocation humaine.
 pub const TERMINAL_ALLOCATION_VERB: &str = "terminal.acquire";
 
+/// Identity of the explicitly configured user/default host pool; not a grant.
+pub const TERMINAL_HOST_POOL_ID: PoolId = PoolId::from_u128(0xf011_1001);
+/// Identity of the explicitly configured user/default child pool; not a grant.
+pub const TERMINAL_CHILD_POOL_ID: PoolId = PoolId::from_u128(0xf011_1002);
+/// Identity of the explicitly configured user/default PTY pool; not a grant.
+pub const TERMINAL_PTY_POOL_ID: PoolId = PoolId::from_u128(0xf011_1003);
+
 /// Non-secret environment explicitly configured by an authenticated administrator.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -111,9 +118,9 @@ impl TerminalRuntimeSettings {
     #[must_use]
     pub const fn pools(&self) -> TerminalAuxiliaryPools {
         TerminalAuxiliaryPools {
-            host: PoolId::from_u128(0xf011_1001),
-            child: PoolId::from_u128(0xf011_1002),
-            pty: PoolId::from_u128(0xf011_1003),
+            host: TERMINAL_HOST_POOL_ID,
+            child: TERMINAL_CHILD_POOL_ID,
+            pty: TERMINAL_PTY_POOL_ID,
         }
     }
 }

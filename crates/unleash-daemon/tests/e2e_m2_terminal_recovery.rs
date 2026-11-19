@@ -31,6 +31,7 @@ struct FixtureDaemon {
     child: Child,
     ready: mpsc::Receiver<std::io::Result<String>>,
     data_root: PathBuf,
+    cleanup_hosts: bool,
 }
 
 impl FixtureDaemon {
@@ -57,6 +58,7 @@ impl FixtureDaemon {
             child,
             ready,
             data_root: data.to_path_buf(),
+            cleanup_hosts: true,
         }
     }
 
@@ -70,13 +72,21 @@ impl FixtureDaemon {
         assert_eq!(ready["status"], "ready");
         ready
     }
+
+    fn kill_for_restart(&mut self) {
+        self.child.kill().expect("SIGKILL the owned daemon only");
+        self.child.wait().expect("reap the owned daemon");
+        self.cleanup_hosts = false;
+    }
 }
 
 impl Drop for FixtureDaemon {
     fn drop(&mut self) {
         // Only this fixture's private hosts, authenticated by their actual capability.
         // Never signal a guessed/reused PID as cleanup.
-        if let Ok(entries) = std::fs::read_dir(self.data_root.join("process-hosts")) {
+        if self.cleanup_hosts
+            && let Ok(entries) = std::fs::read_dir(self.data_root.join("process-hosts"))
+        {
             for entry in entries.flatten() {
                 let _ = stop_fixture_host(&entry.path());
             }
@@ -93,6 +103,9 @@ impl Drop for FixtureDaemon {
         }
     }
 }
+
+#[path = "support/terminal_reattach_scenarios.rs"]
+mod reattach_scenarios;
 
 fn stop_fixture_host(runtime: &Path) -> Result<(), Box<dyn std::error::Error>> {
     use unleash_process_host::*;
