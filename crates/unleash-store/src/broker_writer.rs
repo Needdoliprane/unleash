@@ -223,7 +223,9 @@ fn validate_live_intent(
     intent: &BrokerIntent,
 ) -> Result<(), StoreError> {
     crate::backup_requests::validate_backup_intent_tx(tx, daemon, intent)?;
-    crate::provider_probes::validate_intent(tx, daemon, intent)?;
+    if !crate::provider_probe_connect::validate_intent(tx, daemon, intent)? {
+        crate::provider_probes::validate_intent(tx, daemon, intent)?;
+    }
     crate::terminal_allocations::validate_intent(tx, daemon, now, intent)?;
     if daemon.mode != DaemonMode::Ready {
         return Err(StoreError::RecoveryInProgress(

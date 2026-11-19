@@ -222,6 +222,61 @@ pub(crate) fn validate_new_command(
     Ok(())
 }
 
+/// Reuses the exact profile's existing object verifier outside the writer.
+/// The common preflight classifies replay before this dynamic access.
+pub(crate) fn verify_published(
+    store: &UnleashStore,
+    request: &crate::CommitCommandRequest,
+) -> Result<(), StoreError> {
+    let crate::CommandMutation::PrepareProviderProbeConnect { preparation, .. } = &request.mutation
+    else {
+        return Ok(());
+    };
+    crate::provider_profiles::verify_configuration_objects(
+        store,
+        &preparation.profile.configuration,
+        preparation.profile.configuration_digest,
+    )
+}
+
+/// Dispatch only to a positively validated transport variant. An absent context
+/// never falls through as permission for the connect verb. Generation retains
+/// its own verifier. The first preparation tranche has no qualified claim yet.
+pub(crate) fn validate_intent(
+    tx: &Transaction<'_>,
+    daemon: &crate::DaemonStateRow,
+    intent: &crate::BrokerIntent,
+) -> Result<bool, StoreError> {
+    let connect = intent
+        .manifest
+        .get("verb")
+        .and_then(serde_json::Value::as_str)
+        == Some("model.provider.connect");
+    let probe: Option<String> = if daemon.schema_version >= 15 {
+        tx.query_row(
+            "SELECT probe_id FROM provider_probe_transport_contexts WHERE action_id=?1",
+            [intent.action_id.to_string()],
+            |row| row.get(0),
+        )
+        .optional()?
+    } else {
+        None
+    };
+    if let Some(probe) = probe {
+        let _record = read_context(tx, probe.parse()?)?.ok_or_else(hidden)?;
+        if !connect {
+            return Err(invalid("verbe divergent du contexte transport"));
+        }
+        return Err(StoreError::EvidenceUnavailable(
+            "claim et exécuteur connect non qualifiés".to_owned(),
+        ));
+    }
+    if connect {
+        return Err(hidden());
+    }
+    Ok(false)
+}
+
 fn invalid(message: &'static str) -> StoreError {
     StoreError::InvalidArgument {
         reason: None,

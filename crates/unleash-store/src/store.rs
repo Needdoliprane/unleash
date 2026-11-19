@@ -818,7 +818,8 @@ impl UnleashStore {
     ) -> Result<Option<CommitOutcome>, StoreError> {
         let configuration = crate::provider_profiles::validate_identity(request)?;
         let validation = crate::provider_profile_validation::validate_identity(request)?;
-        if !configuration && !validation {
+        let connect = crate::provider_probe_connect::validate_identity(request)?;
+        if !configuration && !validation && !connect {
             return Ok(None);
         }
         let lookup = || {
@@ -836,7 +837,9 @@ impl UnleashStore {
         if let Some(receipt) = lookup()? {
             return Ok(Some(CommitOutcome::IdempotentReplay(receipt)));
         }
-        let verified = if validation {
+        let verified = if connect {
+            crate::provider_probe_connect::verify_published(self, request)
+        } else if validation {
             crate::provider_profile_validation::verify_published(self, request)
         } else {
             crate::provider_profiles::verify_published(self, request)
