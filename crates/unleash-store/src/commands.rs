@@ -183,7 +183,7 @@ pub enum CommandMutation {
         /// Poids d'équité (1..=10).
         weight: i64,
     },
-    /// Crée un nouvel agent logique.
+    /// Crée un nouvel agent logique et sa session primaire.
     CreateAgent {
         /// Identifiant de l'agent.
         agent_id: AgentId,
@@ -1530,6 +1530,16 @@ fn apply_command_mutation(
                     created_by_agent_id.map(|a| a.to_string()),
                     project_id.map(|p| p.to_string()),
                     state.to_string()
+                ],
+            )
+            .map_err(StoreError::from_rusqlite)?;
+            tx.execute(
+                "INSERT INTO sessions (session_id, agent_id, revision, state, created_at_ms)
+                 VALUES (?1, ?2, 0, 'open', ?3)",
+                rusqlite::params![
+                    config.id_generator.new_session_id().to_string(),
+                    agent_id.to_string(),
+                    now_ms.as_i64(),
                 ],
             )
             .map_err(StoreError::from_rusqlite)?;

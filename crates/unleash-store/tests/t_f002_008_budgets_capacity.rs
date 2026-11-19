@@ -325,10 +325,14 @@ fn test_t_f002_008_atomic_multi_account_budgets_unknown_and_capacity_pool() {
         })
         .unwrap();
 
-    // Créer les lignes parentes session/context_manifest/effective_bundle/event nécessaires à invocations
+    // Préparer le contexte d'invocation sur la session créée avec l'agent.
     store
         .execute_in_writer_tx(WriteCriticality::Normal, move |tx, now| {
-            let sid = unleash_domain::SessionId::from_u128(7001).to_string();
+            let sid: String = tx.query_row(
+                "SELECT session_id FROM sessions WHERE agent_id = ?1 AND state = 'open'",
+                [agent_id.to_string()],
+                |row| row.get(0),
+            )?;
             let mid = unleash_domain::ManifestId::from_u128(7002).to_string();
             let obj_hash = Sha256Digest::from_bytes(b"ctx").to_string();
             let b_hash = Sha256Digest::from_bytes(b"bundle").to_string();
@@ -337,10 +341,6 @@ fn test_t_f002_008_atomic_multi_account_budgets_unknown_and_capacity_pool() {
             tx.execute(
                 "INSERT INTO object_records(object_hash, object_generation, relative_path, byte_length, media_type, state, created_at_ms) VALUES (?1, 1, 'blobs/ctx', 3, 'application/json', 'live', ?2)",
                 rusqlite::params![obj_hash, now.as_i64()],
-            )?;
-            tx.execute(
-                "INSERT INTO sessions(session_id, agent_id, revision, state, created_at_ms) VALUES (?1, ?2, 0, 'open', ?3)",
-                rusqlite::params![sid, agent_id.to_string(), now.as_i64()],
             )?;
             tx.execute(
                 "INSERT INTO context_manifests(manifest_id, session_id, base_session_revision, content_hash, schema_version, created_at_ms) VALUES (?1, ?2, 0, ?3, 1, ?4)",
