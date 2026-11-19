@@ -303,23 +303,45 @@ fn held_capacity(store: &UnleashStore) -> i64 {
         .unwrap()
 }
 
+fn assert_generic_phase_refused(store: &UnleashStore, request: BrokerPhaseRequest) {
+    let before = counts(store);
+    let dispatches = || {
+        store
+            .read_snapshot(|db, _| {
+                Ok(
+                    db.query_row("SELECT COUNT(*) FROM action_dispatches", [], |row| {
+                        row.get::<_, i64>(0)
+                    })?,
+                )
+            })
+            .unwrap()
+    };
+    let markers = dispatches();
+    assert!(
+        matches!(
+            store.commit_broker_phase(request),
+            Err(StoreError::EvidenceUnavailable(_))
+        ),
+        "the generic port cannot acknowledge connect, including an exact replay"
+    );
+    assert_eq!(counts(store), before);
+    assert_eq!(dispatches(), markers);
+}
+
 #[test]
 fn t_f012_013_admission_current_claim_authorizing_then_real_v008_reservation() {
     let (store, _directory, mandate, pool) = fixture(Arc::new(NoopCutpointObserver));
     let ready = ready(&store, mandate, 300);
     authorizing(&store, &ready);
-    assert!(
-        matches!(
-            store.commit_broker_phase(phase(
-                &ready,
-                0,
-                BrokerPhase::Authorizing {
-                    intent: ready.intent.clone()
-                }
-            )),
-            Err(StoreError::EvidenceUnavailable(_))
+    assert_generic_phase_refused(
+        &store,
+        phase(
+            &ready,
+            0,
+            BrokerPhase::Authorizing {
+                intent: ready.intent.clone(),
+            },
         ),
-        "a generic cached replay cannot mint an owner acknowledgement"
     );
     assert_eq!(
         counts(&store)[6],
@@ -532,6 +554,7 @@ fn t_f012_013_admission_c4_uncertainty_and_restart_keep_the_real_reservation() {
     ));
     assert_eq!(counts(&store)[6], 1);
     assert_eq!(held_capacity(&store), 1);
+    assert_generic_phase_refused(&store, dispatch.clone());
     assert!(
         store
             .commit_provider_probe_connect_phase(&ready.claim, dispatch.clone())
