@@ -231,7 +231,7 @@ fn assert_released_after_finish(fixture: &ConnectFixture, probe: Uuid) {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn t_f012_013_connect_closes_before_adoption_and_finishes_atomically() {
     let before_adoption = ObservationPause::new(
         StoreCutpoint::C1BeforeProviderProbeConnectFactAdoption,
@@ -383,7 +383,7 @@ where
     receipt
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn t_f012_013_connect_alias_profiles_serialize_native_effects() {
     let after_adoption = ObservationPause::new(
         StoreCutpoint::C2AfterProviderProbeConnectFactAdoption,
@@ -407,7 +407,7 @@ async fn t_f012_013_connect_alias_profiles_serialize_native_effects() {
             permanent_fact_count(&fixture, first_request.aggregate_id),
             1
         );
-        assert_retained_after_adoption(&fixture, first_request.aggregate_id);
+        assert_retained_before_finish(&fixture, first_request.aggregate_id);
         let mut second_pending = Box::pin(second_client.send_command(&second_request));
         let second_receipt = accepted_while_paused(&mut second_pending).await;
         assert_alias_retained(
@@ -472,7 +472,7 @@ async fn t_f012_013_connect_alias_profiles_serialize_native_effects() {
     }
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn t_f012_013_connect_adoption_ack_loss_keeps_alias_capacity_unknown() {
     let after_adoption = ObservationPause::new(
         StoreCutpoint::C2AfterProviderProbeConnectFactAdoption,
