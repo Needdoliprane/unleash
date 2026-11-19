@@ -12,8 +12,10 @@ use std::io::ErrorKind;
 use std::net::TcpListener;
 use unleash_client::{ClientConfig, ClientError, UnleashClient};
 use unleash_daemon::{DaemonConfig, DaemonStartOutcome, UnleashDaemon};
-use unleash_domain::{CommandId, RequestId, Revision};
-use unleash_protocol::{ClientKind, CommandEnvelope, CommandReceipt, ErrorCode, ProtocolVersion};
+use unleash_domain::{AuthorityGeneration, CommandId, RequestId, Revision};
+use unleash_protocol::{
+    ClientKind, CommandEnvelope, CommandReceipt, ErrorCode, ProtocolVersion, ReasonCode,
+};
 use unleash_testkit::local_test_dir;
 use uuid::Uuid;
 
@@ -102,6 +104,25 @@ impl ConnectFixture {
                 .unwrap();
             assert_eq!(count, 0, "un mandat absent ne permet aucune ligne {table}");
         }
+        let receipts: i64 = db
+            .query_row(
+                "SELECT COUNT(*) FROM command_receipts WHERE command_type='TestProviderProfile'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(receipts, 0, "aucun reçu de probe ne doit être fabriqué");
+        let references: i64 = db
+            .query_row(
+                "SELECT COUNT(*) FROM object_references WHERE owner_kind LIKE 'provider_probe%'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            references, 0,
+            "aucune référence de probe ne doit être préparée"
+        );
     }
 }
 
@@ -189,5 +210,48 @@ async fn t_f012_013_connect_configuration_receipt_does_not_elevate_current_calle
     fixture.assert_no_dispatch_or_active_unit();
     assert!(
         matches!(response, Err(ClientError::Remote(error)) if error.code == ErrorCode::CapabilityDenied)
+    );
+}
+
+#[tokio::test]
+async fn t_f012_013_connect_unknown_mandate_has_no_preparation() {
+    let (fixture, mut admin) = ConnectFixture::start().await;
+    let profile = Uuid::from_u128(0xf012_c003);
+    let configured = fixture.configure(&mut admin, profile).await;
+    let mut request = connect(&admin, profile, 13, &configured);
+    request.payload.insert(
+        "mandate_ref".to_owned(),
+        json!(Uuid::from_u128(0xf012_ffff)),
+    );
+    let response = admin.send_command(&request).await;
+    fixture
+        .handle
+        .shutdown_graceful("connect-test")
+        .await
+        .unwrap();
+    fixture.assert_no_dispatch_or_active_unit();
+    assert!(
+        matches!(&response, Err(ClientError::Remote(error)) if error.code == ErrorCode::NotFoundOrHidden),
+        "un mandat inexistant doit rester introuvable : {response:?}"
+    );
+}
+
+#[tokio::test]
+async fn t_f012_013_connect_old_lineage_is_rejected_before_mandate_resolution() {
+    let (fixture, mut admin) = ConnectFixture::start().await;
+    let profile = Uuid::from_u128(0xf012_c004);
+    let configured = fixture.configure(&mut admin, profile).await;
+    let mut request = connect(&admin, profile, 14, &configured);
+    request.authority_generation = AuthorityGeneration::from_u128(0xf012_dead);
+    let response = admin.send_command(&request).await;
+    fixture
+        .handle
+        .shutdown_graceful("connect-test")
+        .await
+        .unwrap();
+    fixture.assert_no_dispatch_or_active_unit();
+    assert!(
+        matches!(&response, Err(ClientError::Remote(error)) if error.reason_code == Some(ReasonCode::StaleAuthorityGeneration)),
+        "l'ancienne lignée doit être refusée avant le lookup de mandat : {response:?}"
     );
 }
