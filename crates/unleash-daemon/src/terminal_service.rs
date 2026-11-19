@@ -750,6 +750,8 @@ fn observe_spawned_host(
     let HostResponse::ReconcileState {
         exit_status,
         durable_log_seq,
+        last_confirmed_input_seq,
+        unknown_input_seqs,
         ..
     } = client.call(&HostRequest::Reconcile {
         header,
@@ -759,6 +761,13 @@ fn observe_spawned_host(
         return Err("host launch observation unavailable".into());
     };
     let manifest = HostManifest::load_private(&runtime.join(HOST_MANIFEST_FILENAME))?;
+    if last_confirmed_input_seq != 0
+        || !unknown_input_seqs.is_empty()
+        || manifest.last_confirmed_input_seq != last_confirmed_input_seq
+        || manifest.in_flight_input_seq.is_some()
+    {
+        return Err("new terminal has no qualified initial native input state".into());
+    }
     let observation = unleash_store::terminal_allocations::TerminalLaunchObservation {
         terminal_id: c.terminal_id,
         action_id: c.action_id,
@@ -780,6 +789,10 @@ fn observe_spawned_host(
         manifest_digest: unleash_protocol::canonical_sha256(&manifest)?,
         effective_environment_digest: expected,
         durable_log_seq,
+        input_state: Some(unleash_store::terminal_allocations::terminal_acquisition_query::TerminalObservedInputState {
+            last_confirmed_input_seq,
+            unknown_input_seqs,
+        }),
         observed_at_ms: state.store.config().clock.now_ms(),
         exit_code: exit_status.and_then(|s| s.exit_code),
         exit_signal: exit_status.and_then(|s| s.exit_signal),

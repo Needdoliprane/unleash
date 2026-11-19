@@ -1,6 +1,9 @@
 //! `SQLite` control-port oracles only. The OS identity below is synthetic;
 //! no running host, PTY or actual capability rotation is claimed by this fixture.
 use super::*;
+
+#[path = "terminal_acquisition_legacy_scenarios.rs"]
+mod legacy_query_scenarios;
 use unleash_domain::{ActionState, TimestampMs};
 use unleash_store::terminal_allocations::{
     RegisteredTerminalControl, ResolveTerminalControlRequest, TERMINAL_CONTROL_VERB,

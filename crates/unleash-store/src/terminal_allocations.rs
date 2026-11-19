@@ -2,6 +2,8 @@
 //! Le resolver serveur qualifie chemins et environnement. Les fixtures de tests
 //! n'attestent ni ce resolver ni un rattachement réel de PTY.
 
+pub mod terminal_acquisition_query;
+
 use crate::{CallerAuthority, FenceAssertion, StoreError};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -194,7 +196,7 @@ pub struct TerminalControlRecord {
     pub broker_dispatch_id: Option<DispatchId>,
 }
 
-fn control_read_conn(
+pub(crate) fn control_read_conn(
     conn: &Connection,
     action: ActionId,
 ) -> Result<Option<TerminalControlRecord>, StoreError> {
@@ -2012,6 +2014,10 @@ pub struct TerminalLaunchObservation {
     pub effective_environment_digest: Sha256Digest,
     /// Last durable output watermark.
     pub durable_log_seq: u64,
+    /// Native facts captured with this observation. Older objects omit the field
+    /// and preserve their original digest; absence is never inferred as zero.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_state: Option<terminal_acquisition_query::TerminalObservedInputState>,
     /// Time the authenticated host facts were captured, before proof publication.
     pub observed_at_ms: TimestampMs,
     /// Exit code, only when observed.
@@ -2041,6 +2047,10 @@ impl crate::UnleashStore {
             let r=read_conn(tx,observation.terminal_id)?.ok_or_else(||invalid("terminal observation has no allocation"))?;
             let c=&r.context;
             let digest=canonical_sha256(&observation)?;
+            if observation.input_state.as_ref().is_some_and(|state|
+                state.last_confirmed_input_seq != 0 || !state.unknown_input_seqs.is_empty()) {
+                return Err(invalid("new terminal input state differs from its native initial observation"));
+            }
             let crate::BrokerPhase::Observation {action_id,receipt,..}=&phase.phase else {return Err(invalid("terminal observation requires observation phase"));};
             if *action_id!=c.action_id || observation.action_id!=c.action_id || observation.host_id!=c.host_id
                 || observation.process_run_uuid!=c.process_run_uuid || observation.context_digest!=r.context_digest
@@ -2202,6 +2212,21 @@ mod metadata_projection {
         process_state: String,
         lease_state: String,
         control_state: Option<String>,
+    }
+
+    impl TerminalMetadata {
+        pub(crate) fn allows_control_result(
+            &self,
+            terminal: TerminalId,
+            run: ProcessRunUuid,
+        ) -> bool {
+            self.terminal_id == terminal
+                && self.process_run_uuid == run
+                && self.process_state == "live"
+                && ["ready", "busy", "detached"].contains(&self.terminal_state.as_str())
+                && self.lease_state == "held"
+                && self.control_state.is_none()
+        }
     }
 
     /// Project persisted control facts within the caller existing read transaction.

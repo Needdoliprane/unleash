@@ -108,6 +108,137 @@ async fn t_f011_005_acquisition_result_cannot_be_borrowed_by_another_receipt() {
     );
 }
 
+#[tokio::test]
+async fn t_f011_005_acquisition_result_payload_is_closed_without_mutating_control() {
+    let mut fixture = LiveFixture::new(true).await;
+    fixture.start_terminal().await;
+    let command = unleash_domain::CommandId::from_u128(0xf011_4105);
+    let ordinary = fixture
+        .client
+        .get_command_receipt(RequestId::from_u128(0xf011_5401), command)
+        .await
+        .unwrap();
+    let reference = ordinary.receipt.result_ref.as_ref().unwrap();
+    let before = fixture.host_manifest();
+    for (index, payload) in [
+        json!({"command_id":command,"result_ref":null}),
+        json!({"command_id":command,"result_ref":""}),
+        json!({"command_id":command,"result_ref":"x".repeat(129)}),
+        json!({"command_id":command,"result_ref":reference,"principal_id":"foreign"}),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let mut query = result_query(
+            &fixture,
+            command,
+            reference,
+            0xf011_5410 + u128::try_from(index).unwrap(),
+        );
+        query.payload = object(payload);
+        let error = fixture.client.query(&query).await.unwrap_err();
+        assert!(
+            matches!(error,unleash_client::ClientError::Remote(ref error)
+            if error.code==unleash_protocol::ErrorCode::InvalidArgument)
+        );
+    }
+    let mut missing_project = result_query(&fixture, command, reference, 0xf011_5420);
+    missing_project.project_id = None;
+    let error = fixture.client.query(&missing_project).await.unwrap_err();
+    assert!(
+        matches!(error,unleash_client::ClientError::Remote(ref error)
+        if error.code==unleash_protocol::ErrorCode::InvalidArgument)
+    );
+    let mut foreign_project = result_query(&fixture, command, reference, 0xf011_5421);
+    foreign_project.project_id = Some(ProjectId::from_u128(0xf011_ffff));
+    let error = fixture.client.query(&foreign_project).await.unwrap_err();
+    assert!(
+        matches!(error,unleash_client::ClientError::Remote(ref error)
+        if error.code==unleash_protocol::ErrorCode::NotFoundOrHidden)
+    );
+    assert_eq!(
+        fixture
+            .client
+            .get_command_receipt(RequestId::from_u128(0xf011_5422), command)
+            .await
+            .unwrap(),
+        ordinary
+    );
+    let after = fixture.host_manifest();
+    assert_eq!(after.daemon_epoch, before.daemon_epoch);
+    assert_eq!(after.highest_fence, before.highest_fence);
+    assert_eq!(
+        after.last_confirmed_input_seq,
+        before.last_confirmed_input_seq
+    );
+}
+
+#[tokio::test]
+async fn t_f011_005_acquisition_result_tracks_observed_successor_not_the_former_receipt() {
+    let mut fixture = LiveFixture::new(true).await;
+    let original = fixture.start_terminal().await;
+    let initial_command = unleash_domain::CommandId::from_u128(0xf011_4105);
+    let initial = fixture
+        .client
+        .get_command_receipt(RequestId::from_u128(0xf011_5801), initial_command)
+        .await
+        .unwrap();
+    fixture.restart_daemon_only().await;
+    let transfer = command(
+        fixture.authority,
+        0xf011_5802,
+        fixture.project,
+        Uuid::from_u128(0xf011_4003),
+        0,
+        "AcquireTerminal",
+        json!({"terminal_id":original["terminal_id"],"process_run_uuid":original["process_run_uuid"],"scope_revision":2,"control_mode":"exclusive"}),
+    );
+    let accepted = fixture.client.send_command(&transfer).await.unwrap();
+    let reference = accepted.result_ref.as_ref().unwrap();
+    let deadline = Instant::now() + DEADLINE;
+    loop {
+        let snapshot = fixture.snapshot().await;
+        if snapshot["terminals"]["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| {
+                item["terminal_id"] == original["terminal_id"]
+                    && item["control_revision"] == 1
+                    && item["lease_state"] == "held"
+            })
+        {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "observed successor activation before result lookup"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let expected = ledger_result(&fixture, transfer.command_id, reference);
+    let query = result_query(&fixture, transfer.command_id, reference, 0xf011_5803);
+    let result = fixture.client.query(&query).await.unwrap();
+    assert_eq!(result.result, expected);
+    assert_eq!(result.result["reused"], true);
+    assert_eq!(result.result["control_revision"], 1);
+    let old = result_query(
+        &fixture,
+        initial_command,
+        initial.receipt.result_ref.as_ref().unwrap(),
+        0xf011_5804,
+    );
+    let refused = fixture.client.query(&old).await.unwrap_err();
+    assert!(
+        matches!(refused,unleash_client::ClientError::Remote(ref error)
+        if error.code==unleash_protocol::ErrorCode::StaleFence)
+    );
+    assert_eq!(
+        std::fs::read_to_string(fixture.project_root.path().join("worker-starts")).unwrap(),
+        "started\n"
+    );
+}
+
 async fn short_lease_fixture() -> LiveFixture {
     let mut fixture = LiveFixture::new(false).await;
     let mut runtime = terminal_configuration();

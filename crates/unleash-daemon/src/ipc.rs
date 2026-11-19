@@ -894,6 +894,55 @@ async fn query_state_snapshot(
 #[serde(deny_unknown_fields)]
 struct ReceiptQueryPayload {
     command_id: CommandId,
+    #[serde(default, deserialize_with = "deserialize_acquisition_reference")]
+    result_ref: Option<String>,
+}
+
+fn deserialize_acquisition_reference<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let reference = String::deserialize(deserializer)?;
+    if reference.is_empty() || reference.len() > 128 || reference.chars().any(char::is_control) {
+        return Err(serde::de::Error::custom(
+            "invalid acquisition result reference",
+        ));
+    }
+    Ok(Some(reference))
+}
+
+async fn query_terminal_acquisition_result(
+    state: &Arc<DaemonRuntimeState>,
+    session: &AuthenticatedSession,
+    request_id: unleash_domain::RequestId,
+    project_id: Option<unleash_domain::ProjectId>,
+    command: CommandId,
+    reference: String,
+) -> Result<QueryResponse, IpcError> {
+    let project = project_id.ok_or_else(|| {
+        IpcError::new(
+            ErrorCode::InvalidArgument,
+            None,
+            "Acquisition result requires its exact project",
+            RetryClass::Never,
+        )
+    })?;
+    let store = Arc::clone(&state.store);
+    let actor = session.actor_id.clone();
+    let snapshot = tokio::task::spawn_blocking(move || {
+        store.inspect_terminal_acquisition_result(&actor, command, &reference, project)
+    })
+    .await
+    .map_err(|_| internal_ipc_error("Acquisition result inspection task failed", Some(command)))?
+    .map_err(|error| store_error_to_ipc_error(&error, Some(command)))?;
+    let result = serde_json::to_value(snapshot.value).map_err(|_| {
+        internal_ipc_error("Acquisition result serialization failed", Some(command))
+    })?;
+    Ok(QueryResponse {
+        request_id,
+        watermark: Some(snapshot.cursor),
+        result,
+    })
 }
 
 async fn query_command_receipt(
@@ -919,6 +968,17 @@ async fn query_command_receipt(
             )
         })?;
     let cmd_id = payload.command_id;
+    if let Some(reference) = payload.result_ref {
+        return query_terminal_acquisition_result(
+            state,
+            session,
+            query.request_id,
+            query.project_id,
+            cmd_id,
+            reference,
+        )
+        .await;
+    }
     let store = Arc::clone(&state.store);
     let actor_id = session.actor_id.clone();
 

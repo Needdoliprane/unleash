@@ -891,6 +891,36 @@ fn launch_observation_state_fixture(
     terminal_allocations::TerminalLaunchObservation,
     BrokerPhaseRequest,
 ) {
+    launch_observation_with_input_state_fixture(
+        s,
+        r,
+        dispatch_id,
+        captured,
+        received,
+        exited,
+        Some(
+            terminal_allocations::terminal_acquisition_query::TerminalObservedInputState {
+                last_confirmed_input_seq: 0,
+                unknown_input_seqs: vec![],
+            },
+        ),
+    )
+}
+
+fn launch_observation_with_input_state_fixture(
+    s: &UnleashStore,
+    r: &TerminalAllocationRecord,
+    dispatch_id: DispatchId,
+    captured: i64,
+    received: i64,
+    exited: bool,
+    input_state: Option<
+        terminal_allocations::terminal_acquisition_query::TerminalObservedInputState,
+    >,
+) -> (
+    terminal_allocations::TerminalLaunchObservation,
+    BrokerPhaseRequest,
+) {
     let c = &r.context;
     let d = s.daemon_state().unwrap();
     let observation = terminal_allocations::TerminalLaunchObservation {
@@ -909,6 +939,7 @@ fn launch_observation_state_fixture(
         manifest_digest: Sha256Digest::from_bytes(b"synthetic manifest"),
         effective_environment_digest: c.preparation.process_spec.environment.digest,
         durable_log_seq: 0,
+        input_state,
         observed_at_ms: unleash_domain::TimestampMs::new(captured),
         exit_code: exited.then_some(0),
         exit_signal: None,
