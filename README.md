@@ -87,6 +87,15 @@ cargo run --locked -p unleash-cli -- --json receipt "$COMMAND_ID" \
   --project-id "$PROJECT_ID" --result-ref "$RESULT_REF"
 ```
 
+Copier `result.terminal_id` dans `TERMINAL_ID` pour lire la sortie du processus.
+
+```sh
+cargo run --locked -p unleash-cli -- --json process log \
+  --project-id "$PROJECT_ID" --terminal-id "$TERMINAL_ID" --max-bytes 4096
+```
+
+Pour lire la page suivante, passer l’`end_offset` du dernier segment dans `--after-offset`. La réponse distingue les segments durables et volatils. Si la rétention a supprimé l’offset demandé, le daemon renvoie `ResyncRequired` avec la raison `CURSOR_EXPIRED`.
+
 Pour rejouer une révision ou une configuration, conserver le fichier, la révision, le `--command-id` et l’`--authority-generation` d’origine. La saisie interactive reste en développement.
 
 ## Sauvegarder les données locales

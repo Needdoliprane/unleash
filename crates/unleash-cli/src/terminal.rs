@@ -9,11 +9,26 @@ use unleash_protocol::{CommandEnvelope, ProtocolVersion};
 use uuid::Uuid;
 
 use crate::configuration::{ConfigurationArgs, ConfigurationTarget};
-use crate::{CliError, next_uuid};
+use crate::{CliError, next_uuid, query_simple};
 
 /// Commandes de `unleash process`.
 #[derive(Debug, Subcommand)]
 pub enum ProcessCommand {
+    /// Lit une page de sortie du terminal à partir d'un offset en octets.
+    Log {
+        /// Projet propriétaire du terminal.
+        #[arg(long)]
+        project_id: Uuid,
+        /// Identifiant du terminal renvoyé par l'acquisition.
+        #[arg(long)]
+        terminal_id: Uuid,
+        /// Reprendre à l'offset de fin du dernier segment lu.
+        #[arg(long, default_value_t = 0)]
+        after_offset: u64,
+        /// Nombre maximal d'octets à lire, entre 1 et 65 536.
+        #[arg(long, default_value_t = 65_536)]
+        max_bytes: u32,
+    },
     /// Lit le profil terminal et la révision des réglages utilisateur.
     Settings,
     /// Enregistre la configuration complète des profils, limites et baux du terminal.
@@ -212,6 +227,26 @@ pub(super) async fn run_process_command(
     action: &ProcessCommand,
 ) -> Result<Value, CliError> {
     match action {
+        ProcessCommand::Log {
+            project_id,
+            terminal_id,
+            after_offset,
+            max_bytes,
+        } => {
+            let payload = Map::from_iter([
+                ("terminal_id".to_owned(), json!(terminal_id)),
+                ("after_offset".to_owned(), json!(after_offset)),
+                ("max_bytes".to_owned(), json!(max_bytes)),
+            ]);
+            let response = query_simple(
+                client,
+                "ReadTerminalLog",
+                Some(ProjectId::from_uuid(*project_id)),
+                payload,
+            )
+            .await?;
+            Ok(json!({"watermark": response.watermark, "result": response.result}))
+        }
         ProcessCommand::Settings => crate::configuration::read_terminal_settings(client).await,
         ProcessCommand::Configure { configuration } => {
             configuration

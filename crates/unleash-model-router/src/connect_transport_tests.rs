@@ -1,9 +1,9 @@
-//! T-F012-007/013/015: real loopback sockets, synthetic resolver/CA and memory broker.
+//! T-F012-007/013/015: loopback sockets, synthetic resolver/CA, memory broker/publisher.
 //! This bench does not qualify `SQLite` admission, mandate issuance or a provider.
 
 use crate::connect_transport::{
-    CONNECT_VERB, CertificateValidation, ConnectError, FixtureOptions, FrozenConnectRequest,
-    NameResolver, execute_fixture,
+    CONNECT_VERB, CertificateValidation, ConnectError, ConnectObservation, ConnectObservationPort,
+    FixtureOptions, FrozenConnectRequest, NameResolver, execute_fixture,
 };
 use crate::transport::{BrokerDispatch, ProfileRef};
 use crate::transport_tests::TlsFixture;
@@ -14,8 +14,8 @@ use std::{
     io::ErrorKind,
     net::{IpAddr, Ipv4Addr, SocketAddr},
     sync::{
-        Arc,
-        atomic::{AtomicUsize, Ordering},
+        Arc, Mutex,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     time::Duration,
 };
@@ -24,7 +24,7 @@ use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
 use tokio_rustls::{TlsAcceptor, rustls::ServerConfig};
 use unleash_action_broker::{
-    ActionBroker, ActionIntent, ActionProvenance, ActionSubject, AuthorityLayer,
+    ActionBroker, ActionBrokerError, ActionIntent, ActionProvenance, ActionSubject, AuthorityLayer,
     AuthorizationDecision, AuthorizationOutcome, BoxFuture, BrokerConfig, BrokerJournalEntry,
     BrokerJournalError, BrokerJournalPort, EffectiveAuthority, EffectsClass, IsolationMode,
     IsolationRequirements, LocalAuthorityFallbackPolicy, ScopeKind, SecretStore,
@@ -40,6 +40,68 @@ use unleash_testkit::{
 };
 
 type TestResult = Result<(), Box<dyn Error>>;
+
+struct ObservationPublisher {
+    attempted: AtomicUsize,
+    acknowledged: Arc<AtomicUsize>,
+    records: Mutex<Vec<ConnectObservation>>,
+    fail: bool,
+    closed: Option<Arc<tokio::sync::Notify>>,
+    closed_probe: Option<Arc<AtomicBool>>,
+}
+
+impl ObservationPublisher {
+    fn new(
+        fail: bool,
+        closed: Option<Arc<tokio::sync::Notify>>,
+        closed_probe: Option<Arc<AtomicBool>>,
+    ) -> Self {
+        Self {
+            attempted: AtomicUsize::new(0),
+            acknowledged: Arc::new(AtomicUsize::new(0)),
+            records: Mutex::new(Vec::new()),
+            fail,
+            closed,
+            closed_probe,
+        }
+    }
+}
+
+impl ConnectObservationPort for ObservationPublisher {
+    fn persist<'a>(
+        &'a self,
+        observation: &'a ConnectObservation,
+    ) -> BoxFuture<'a, Result<(), ConnectError>> {
+        Box::pin(async move {
+            self.attempted.fetch_add(1, Ordering::SeqCst);
+            if self
+                .closed_probe
+                .as_ref()
+                .is_some_and(|probe| !probe.load(Ordering::SeqCst))
+            {
+                return Err(ConnectError::ObservationUnavailable);
+            }
+            if let Some(closed) = &self.closed {
+                tokio::time::timeout(Duration::from_secs(2), closed.notified())
+                    .await
+                    .map_err(|_| ConnectError::ObservationUnavailable)?;
+            }
+            self.records
+                .lock()
+                .map_err(|_| ConnectError::ObservationUnavailable)?
+                .push(observation.clone());
+            if self.fail {
+                return Err(ConnectError::ObservationUnavailable);
+            }
+            self.acknowledged.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        })
+    }
+}
+
+fn memory_observation() -> Arc<dyn ConnectObservationPort> {
+    Arc::new(ObservationPublisher::new(false, None, None))
+}
 
 struct Resolver {
     addresses: Vec<SocketAddr>,
@@ -75,6 +137,7 @@ impl NameResolver for Resolver {
 struct Journal {
     dispatches: Arc<AtomicUsize>,
     observations: Arc<AtomicUsize>,
+    required_publication: Option<Arc<AtomicUsize>>,
 }
 impl BrokerJournalPort for Journal {
     fn append<'a>(
@@ -82,6 +145,15 @@ impl BrokerJournalPort for Journal {
         entry: &'a BrokerJournalEntry,
     ) -> BoxFuture<'a, Result<(), BrokerJournalError>> {
         Box::pin(async move {
+            if let BrokerJournalEntry::Observation { receipt, .. } = entry
+                && receipt.state == ActionState::ObservedSuccess
+                && self
+                    .required_publication
+                    .as_ref()
+                    .is_some_and(|count| count.load(Ordering::SeqCst) != 1)
+            {
+                return Err(BrokerJournalError);
+            }
             if matches!(entry, BrokerJournalEntry::Dispatch { .. }) {
                 self.dispatches.fetch_add(1, Ordering::SeqCst);
             }
@@ -102,6 +174,10 @@ struct ConnectHarness {
 }
 impl ConnectHarness {
     fn new() -> Self {
+        Self::with_required_publication(None)
+    }
+
+    fn with_required_publication(required_publication: Option<Arc<AtomicUsize>>) -> Self {
         let clock = Arc::new(ManualClock::new(1_767_225_600_000));
         let fence = LineageFence::new(
             AuthorityGeneration::from_u128(2),
@@ -121,6 +197,7 @@ impl ConnectHarness {
             Arc::new(Journal {
                 dispatches: Arc::clone(&dispatches),
                 observations: Arc::new(AtomicUsize::new(0)),
+                required_publication,
             }),
         );
         Self {
@@ -243,6 +320,14 @@ fn serve(
     listener: TcpListener,
     tls: Option<Arc<ServerConfig>>,
 ) -> JoinHandle<Result<Capture, Box<dyn Error + Send + Sync>>> {
+    serve_with_closure(listener, tls, None)
+}
+
+fn serve_with_closure(
+    listener: TcpListener,
+    tls: Option<Arc<ServerConfig>>,
+    closed: Option<Arc<tokio::sync::Notify>>,
+) -> JoinHandle<Result<Capture, Box<dyn Error + Send + Sync>>> {
     tokio::spawn(async move {
         let (mut socket, _) =
             tokio::time::timeout(Duration::from_secs(2), listener.accept()).await??;
@@ -274,6 +359,9 @@ fn serve(
             tokio::time::timeout(Duration::from_secs(2), socket.read_to_end(&mut bytes)).await??;
             (false, None)
         };
+        if let Some(closed) = closed {
+            closed.notify_one();
+        }
         let extra_connection = tokio::time::timeout(Duration::from_millis(50), listener.accept())
             .await
             .is_ok();
@@ -311,6 +399,8 @@ async fn t_f012_013_connect_rejects_secret_ref_before_broker_resolution() -> Tes
         FixtureOptions {
             resolver: resolver.clone(),
             ca_der: None,
+            observation_port: memory_observation(),
+            closed_probe: None,
         },
     )
     .await;
@@ -369,6 +459,8 @@ async fn t_f012_013_connect_rejects_unknown_action_or_different_request_before_d
             FixtureOptions {
                 resolver: resolver.clone(),
                 ca_der: None,
+                observation_port: memory_observation(),
+                closed_probe: None,
             },
         )
         .await;
@@ -402,6 +494,8 @@ async fn t_f012_013_connect_tcp_pins_one_resolution_and_sends_no_http() -> TestR
         FixtureOptions {
             resolver: resolver.clone(),
             ca_der: None,
+            observation_port: memory_observation(),
+            closed_probe: None,
         },
     )
     .await?;
@@ -440,6 +534,8 @@ async fn t_f012_013_connect_tls_uses_profile_name_with_fixture_ca_and_no_http() 
         FixtureOptions {
             resolver: resolver.clone(),
             ca_der: Some(tls.ca_der.clone()),
+            observation_port: memory_observation(),
+            closed_probe: None,
         },
     )
     .await?;
@@ -489,6 +585,8 @@ async fn t_f012_015_connect_checks_every_address_before_first_socket() -> TestRe
         FixtureOptions {
             resolver: resolver.clone(),
             ca_der: None,
+            observation_port: memory_observation(),
+            closed_probe: None,
         },
     )
     .await?;
@@ -538,6 +636,8 @@ async fn t_f012_013_connect_rejects_unknown_fixture_ca_and_wrong_name_without_ht
             FixtureOptions {
                 resolver,
                 ca_der: Some(ca),
+                observation_port: memory_observation(),
+                closed_probe: None,
             },
         )
         .await?;
@@ -584,6 +684,8 @@ async fn t_f012_007_connect_tls_deadline_closes_without_http_or_retry() -> TestR
         FixtureOptions {
             resolver,
             ca_der: Some(tls.ca_der.clone()),
+            observation_port: memory_observation(),
+            closed_probe: None,
         },
     )
     .await?;
@@ -601,6 +703,133 @@ async fn t_f012_007_connect_tls_deadline_closes_without_http_or_retry() -> TestR
         "only TLS handshake was attempted"
     );
     assert!(!extra);
+    Ok(())
+}
+
+#[tokio::test]
+async fn t_f012_013_connect_durable_observation_ack_precedes_success() -> TestResult {
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let peer = listener.local_addr()?;
+    let closed = Arc::new(tokio::sync::Notify::new());
+    let server = serve_with_closure(listener, None, Some(Arc::clone(&closed)));
+    let closed_probe = Arc::new(AtomicBool::new(false));
+    let publisher = Arc::new(ObservationPublisher::new(
+        false,
+        Some(closed),
+        Some(Arc::clone(&closed_probe)),
+    ));
+    let broker =
+        ConnectHarness::with_required_publication(Some(Arc::clone(&publisher.acknowledged)));
+    let authority = authority();
+    let request = request("http", "127.0.0.1", peer.port(), 1000)?;
+    let request_digest = request.payload_digest()?;
+    let action = intent(&request, &broker, &authority)?;
+    let decision = authorize(&broker, action.clone(), &authority).await?;
+    let execution = execute_fixture(
+        request,
+        broker.dispatch(&action, &decision, &authority),
+        FixtureOptions {
+            resolver: Resolver::pinned(peer.port()),
+            ca_der: None,
+            observation_port: publisher.clone(),
+            closed_probe: Some(closed_probe),
+        },
+    )
+    .await?;
+    assert_eq!(
+        publisher.attempted.load(Ordering::SeqCst),
+        1,
+        "le corps réel doit être publié avant le succès broker"
+    );
+    assert_eq!(publisher.acknowledged.load(Ordering::SeqCst), 1);
+    let receipt = execution.receipt?;
+    assert_eq!(receipt.state, ActionState::ObservedSuccess);
+    let document = publisher
+        .records
+        .lock()
+        .map_err(|_| "fixture publisher mutex")?
+        .first()
+        .cloned()
+        .ok_or("missing published observation")?;
+    assert_eq!(document.action_id, action.action_id);
+    assert_eq!(document.dispatch_id, receipt.dispatch_id);
+    assert_eq!(document.request_digest, request_digest);
+    assert_eq!(document.peer, peer);
+    assert_eq!(document.http_application_bytes_sent, 0);
+    assert_eq!(
+        receipt.output_digest,
+        Some(unleash_protocol::canonical_sha256(&document)?)
+    );
+    let exposed = execution
+        .observation?
+        .ok_or("missing acknowledged observation")?;
+    assert_eq!(
+        unleash_protocol::canonical_sha256(&exposed)?,
+        unleash_protocol::canonical_sha256(&document)?
+    );
+    assert_eq!(broker.dispatches.load(Ordering::SeqCst), 1);
+    broker.secrets.assert_zero_secret_resolutions();
+    let capture = server.await?.map_err(|error| error.to_string())?;
+    assert!(capture.bytes.is_empty());
+    assert!(!capture.extra_connection);
+    Ok(())
+}
+
+#[tokio::test]
+async fn t_f012_013_connect_durable_observation_failure_keeps_unknown() -> TestResult {
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let peer = listener.local_addr()?;
+    let closed = Arc::new(tokio::sync::Notify::new());
+    let server = serve_with_closure(listener, None, Some(Arc::clone(&closed)));
+    let closed_probe = Arc::new(AtomicBool::new(false));
+    let publisher = Arc::new(ObservationPublisher::new(
+        true,
+        Some(closed),
+        Some(Arc::clone(&closed_probe)),
+    ));
+    let broker = ConnectHarness::new();
+    let authority = authority();
+    let request = request("http", "127.0.0.1", peer.port(), 1000)?;
+    let action = intent(&request, &broker, &authority)?;
+    let decision = authorize(&broker, action.clone(), &authority).await?;
+    let execution = execute_fixture(
+        request,
+        broker.dispatch(&action, &decision, &authority),
+        FixtureOptions {
+            resolver: Resolver::pinned(peer.port()),
+            ca_der: None,
+            observation_port: publisher.clone(),
+            closed_probe: Some(closed_probe),
+        },
+    )
+    .await?;
+    assert!(
+        matches!(
+            execution.receipt,
+            Err(ActionBrokerError::OutcomeUnknown { .. })
+        ),
+        "une publication non acquittée après I/O ne fabrique aucun succès"
+    );
+    assert_eq!(publisher.attempted.load(Ordering::SeqCst), 1);
+    assert_eq!(publisher.acknowledged.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        publisher
+            .records
+            .lock()
+            .map_err(|_| "fixture publisher mutex")?
+            .len(),
+        1
+    );
+    assert!(execution.observation?.is_none());
+    assert_eq!(
+        broker.broker.action_state(action.action_id),
+        Some(ActionState::OutcomeUnknown)
+    );
+    assert_eq!(broker.dispatches.load(Ordering::SeqCst), 1);
+    broker.secrets.assert_zero_secret_resolutions();
+    let capture = server.await?.map_err(|error| error.to_string())?;
+    assert!(capture.bytes.is_empty());
+    assert!(!capture.extra_connection);
     Ok(())
 }
 

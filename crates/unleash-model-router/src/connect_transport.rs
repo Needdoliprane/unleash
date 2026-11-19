@@ -186,6 +186,20 @@ impl fmt::Debug for ConnectObservation {
     }
 }
 
+/// Durable acknowledgement of the actual local transport observation.
+/// The implementation is trusted server code, never a provider receipt or client claim.
+pub trait ConnectObservationPort: Send + Sync {
+    /// Persist these exact facts and their action/dispatch binding after channel
+    /// closure and before the broker may commit a successful observation.
+    ///
+    /// # Errors
+    /// Any failure or uncertain acknowledgement keeps the dispatched effect unknown.
+    fn persist<'a>(
+        &'a self,
+        observation: &'a ConnectObservation,
+    ) -> BoxFuture<'a, Result<(), ConnectError>>;
+}
+
 /// Broker result and separately correlated, non-durable local observation.
 pub struct ConnectExecution {
     /// The actual broker result, including uncertain commit outcomes.
@@ -238,6 +252,8 @@ impl NameResolver for SystemResolver {
 pub(crate) struct FixtureOptions {
     pub resolver: Arc<dyn NameResolver>,
     pub ca_der: Option<Vec<u8>>,
+    pub observation_port: Arc<dyn ConnectObservationPort>,
+    pub closed_probe: Option<Arc<AtomicBool>>,
 }
 
 struct Staged {
@@ -253,10 +269,13 @@ struct ConnectExecutor {
     digest: Sha256Digest,
     clock: Arc<dyn ClockPort>,
     resolver: Arc<dyn NameResolver>,
+    observation_port: Arc<dyn ConnectObservationPort>,
     consumed: AtomicBool,
     staged: Arc<Mutex<Option<Staged>>>,
     #[cfg(test)]
     ca_der: Option<Vec<u8>>,
+    #[cfg(test)]
+    closed_probe: Option<Arc<AtomicBool>>,
 }
 
 struct TlsValidation {
@@ -429,18 +448,25 @@ impl ConnectExecutor {
                 .shutdown()
                 .await
                 .map_err(|_| ConnectError::TransportUnavailable)?;
+            drop(stream);
             tls.source
         } else {
             drop(socket);
             CertificateValidation::NotTls
         };
+        // Instrument the actual drop boundary only in the fixture. No product
+        // authorization, durable proof or observation depends on this probe.
+        #[cfg(test)]
+        if let Some(probe) = &self.closed_probe {
+            probe.store(true, Ordering::SeqCst);
+        }
         if !self.live(intent, decision) {
             return Err(ConnectError::DeadlineExpired);
         }
         Ok((peer, source))
     }
 
-    fn observe(
+    async fn observe(
         &self,
         dispatch_id: DispatchId,
         peer: SocketAddr,
@@ -459,6 +485,9 @@ impl ConnectExecutor {
             observed_at_ms,
         };
         let digest = canonical_sha256(&observation).map_err(|_| ConnectError::Digest)?;
+        // No execution result or staged success exists until the exact local
+        // document and its dispatch binding have been durably acknowledged.
+        self.observation_port.persist(&observation).await?;
         let mut stage = self
             .staged
             .lock()
@@ -504,31 +533,36 @@ impl ActionExecutorPort for ConnectExecutor {
                 return Err(unknown());
             }
             let remaining = self.remaining_ms(intent, decision).map_err(|_| unknown())?;
-            let (peer, source) = tokio::time::timeout(
-                Duration::from_millis(remaining),
-                self.connect(intent, decision),
-            )
+            let result = tokio::time::timeout(Duration::from_millis(remaining), async {
+                let (peer, source) = self.connect(intent, decision).await?;
+                self.observe(dispatch_id, peer, source).await
+            })
             .await
             .map_err(|_| unknown())?
             .map_err(|_| unknown())?;
-            self.observe(dispatch_id, peer, source)
-                .map_err(|_| unknown())
+            if !self.live(intent, decision) {
+                return Err(unknown());
+            }
+            Ok(result)
         })
     }
 }
 
-/// Execute exclusively through the existing broker. Real durable journaling,
-/// mandate/admission/fence proof and result persistence remain caller obligations.
+/// Execute through the broker and a required durable local observation port.
+/// The port is awaited after channel closure and before a successful result.
+/// Real journaling and mandate/admission/fence proof remain caller obligations.
 ///
 /// # Errors
 /// Reports local digest/staging failures; broker failures remain in `receipt`.
 pub async fn execute(
     request: FrozenConnectRequest,
     dispatch: BrokerDispatch<'_>,
+    observation_port: Arc<dyn ConnectObservationPort>,
 ) -> Result<ConnectExecution, ConnectError> {
     execute_inner(
         request,
         dispatch,
+        observation_port,
         #[cfg(test)]
         None,
     )
@@ -538,6 +572,7 @@ pub async fn execute(
 async fn execute_inner(
     request: FrozenConnectRequest,
     dispatch: BrokerDispatch<'_>,
+    observation_port: Arc<dyn ConnectObservationPort>,
     #[cfg(test)] fixture: Option<FixtureOptions>,
 ) -> Result<ConnectExecution, ConnectError> {
     let digest = request.payload_digest()?;
@@ -558,9 +593,15 @@ async fn execute_inner(
     }
     let staged = Arc::new(Mutex::new(None));
     #[cfg(test)]
-    let (resolver, ca_der) = fixture.map_or_else(
-        || (Arc::new(SystemResolver) as Arc<dyn NameResolver>, None),
-        |options| (options.resolver, options.ca_der),
+    let (resolver, ca_der, closed_probe) = fixture.map_or_else(
+        || {
+            (
+                Arc::new(SystemResolver) as Arc<dyn NameResolver>,
+                None,
+                None,
+            )
+        },
+        |options| (options.resolver, options.ca_der, options.closed_probe),
     );
     #[cfg(not(test))]
     let resolver = Arc::new(SystemResolver) as Arc<dyn NameResolver>;
@@ -570,10 +611,13 @@ async fn execute_inner(
         digest,
         clock: dispatch.clock,
         resolver,
+        observation_port,
         consumed: AtomicBool::new(false),
         staged: Arc::clone(&staged),
         #[cfg(test)]
         ca_der,
+        #[cfg(test)]
+        closed_probe,
     };
     let receipt = dispatch
         .broker
@@ -617,5 +661,6 @@ pub(crate) async fn execute_fixture(
     dispatch: BrokerDispatch<'_>,
     fixture: FixtureOptions,
 ) -> Result<ConnectExecution, ConnectError> {
-    execute_inner(request, dispatch, Some(fixture)).await
+    let observation_port = Arc::clone(&fixture.observation_port);
+    execute_inner(request, dispatch, observation_port, Some(fixture)).await
 }

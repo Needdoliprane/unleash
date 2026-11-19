@@ -90,6 +90,19 @@ impl TerminalCli<'_> {
         );
         response.get("result").expect("causal result").clone()
     }
+
+    fn log(&self, options: &[&str]) -> Value {
+        let mut args = vec![
+            "process",
+            "log",
+            "--project-id",
+            &self.project,
+            "--terminal-id",
+            &self.terminal,
+        ];
+        args.extend_from_slice(options);
+        self.run(&args)
+    }
 }
 
 fn configure_project(cli: &TerminalCli<'_>, fixture: &LiveFixture) {
@@ -246,6 +259,78 @@ async fn wait_for_control(fixture: &mut LiveFixture, terminal: &str, revision: u
     }
 }
 
+async fn wait_for_log_marker(cli: &TerminalCli<'_>) -> String {
+    let deadline = Instant::now() + DEADLINE;
+    loop {
+        let reply = cli.log(&[]);
+        assert!(reply.get("watermark").is_some_and(|value| !value.is_null()));
+        let text = reply
+            .pointer("/result/text")
+            .and_then(Value::as_str)
+            .unwrap();
+        if let Some(offset) = text.find("live-terminal-ready") {
+            assert!(text.is_ascii(), "owned fixture writes only ASCII");
+            assert_eq!(
+                reply.pointer("/result/log/segments/0/start_offset"),
+                Some(&json!(0))
+            );
+            return offset.to_string();
+        }
+        assert!(Instant::now() < deadline, "owned PTY startup output");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
+fn assert_log_pagination(cli: &TerminalCli<'_>, offset: &str) {
+    let page = cli.log(&["--after-offset", offset, "--max-bytes", "4"]);
+    assert_eq!(page.pointer("/result/text"), Some(&json!("live")));
+    assert_eq!(
+        page.pointer("/result/log/segments/0/start_offset")
+            .and_then(Value::as_u64),
+        Some(offset.parse().unwrap())
+    );
+    let next_offset = page
+        .pointer("/result/log/segments")
+        .and_then(Value::as_array)
+        .and_then(|segments| segments.last())
+        .and_then(|last| last.get("end_offset"))
+        .and_then(Value::as_u64)
+        .expect("byte offset of the last returned segment");
+    let next = cli.log(&[
+        "--after-offset",
+        &next_offset.to_string(),
+        "--max-bytes",
+        "4",
+    ]);
+    assert_eq!(next.pointer("/result/text"), Some(&json!("-ter")));
+}
+
+fn assert_log_scope_and_limits(cli: &TerminalCli<'_>) {
+    let wrong_project = Uuid::from_u128(0xf011_47ff).to_string();
+    for (project, max_bytes) in [
+        (&wrong_project, "4"),
+        (&cli.project, "0"),
+        (&cli.project, "65537"),
+    ] {
+        cli.assert_refused(
+            &[
+                "process",
+                "log",
+                "--project-id",
+                project,
+                "--terminal-id",
+                &cli.terminal,
+                "--max-bytes",
+                max_bytes,
+            ],
+            "NotFoundOrHidden",
+        );
+    }
+    let empty = cli.log(&["--after-offset", "9007199254740991"]);
+    assert_eq!(empty.pointer("/result/log/segments"), Some(&json!([])));
+    assert_eq!(empty.pointer("/result/text"), Some(&json!("")));
+}
+
 #[tokio::test]
 #[ignore = "fournir UNLEASH_TEST_CLI_BIN et le process-host construits depuis le même arbre"]
 async fn t_f011_cli_acquires_observes_and_replays_the_same_terminal() {
@@ -284,6 +369,15 @@ async fn t_f011_cli_acquires_observes_and_replays_the_same_terminal() {
     let accepted = cli.acquire("new", &allocation_command, &allocate);
     wait_for_control(&mut fixture, &cli.terminal, 0).await;
     let observed = cli.observe(&allocation_command, &accepted);
+    let marker_offset = wait_for_log_marker(&cli).await;
+    assert_log_pagination(&cli, &marker_offset);
+    assert_log_scope_and_limits(&cli);
+    let after_read = cli.observe(&allocation_command, &accepted);
+    assert_eq!(
+        after_read.get("lease_expires_at"),
+        observed.get("lease_expires_at")
+    );
+    assert_eq!(after_read.get("fence"), observed.get("fence"));
     assert_eq!(cli.acquire("new", &allocation_command, &allocate), accepted);
     let before = fixture.host_manifest();
 
@@ -307,6 +401,7 @@ async fn t_f011_cli_acquires_observes_and_replays_the_same_terminal() {
     assert_eq!(after.host_id, before.host_id);
     assert_eq!(after.pid, before.pid);
     assert!(after.highest_fence > before.highest_fence);
+    assert_log_pagination(&cli, &marker_offset);
     assert_eq!(
         std::fs::read_to_string(fixture.project_root.path().join("worker-starts")).unwrap(),
         "started\n"

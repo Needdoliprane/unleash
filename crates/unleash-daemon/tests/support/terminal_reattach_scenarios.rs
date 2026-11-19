@@ -8,6 +8,9 @@ mod input_scenarios;
 #[path = "terminal_cli_scenarios.rs"]
 mod cli_scenarios;
 
+#[path = "terminal_log_rotation_scenarios.rs"]
+mod log_rotation_scenarios;
+
 struct LiveFixture {
     daemon: FixtureDaemon,
     client: UnleashClient,
