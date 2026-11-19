@@ -225,19 +225,18 @@ fn same_object_pin(
     }
     if publication.pin_id == original_pin {
         let pin:Option<ReplayPin>=tx.query_row("SELECT object_hash,object_generation,owner_kind,owner_id,authority_generation,pin_kind,state FROM object_pins WHERE pin_id=?1",[original_pin],ReplayPin::read).optional()?;
-        if let Some(pin) = pin {
-            if pin.hash != publication.object_hash.to_string()
+        if let Some(pin) = pin
+            && (pin.hash != publication.object_hash.to_string()
                 || pin.generation != publication.object_generation
                 || pin.owner_kind != "action"
                 || pin.owner_id != request.source_action_id.to_string()
                 || pin.authority != context.daemon.authority_generation.to_string()
                 || pin.kind != "preparation"
-                || pin.state != "released"
-            {
-                return Err(unavailable(
-                    "original historical producer handle is not consumed and exact",
-                ));
-            }
+                || pin.state != "released")
+        {
+            return Err(unavailable(
+                "original historical producer handle is not consumed and exact",
+            ));
         }
         // A consumed preparation can be collected. Its original identity is
         // still sealed in the event; the live proof was verified above.
