@@ -93,6 +93,7 @@ struct ServerShared {
     writer: Mutex<Option<Box<dyn Write + Send>>>,
     spool: Arc<LogSpool>,
     inputs: PtyInputTracker,
+    cutpoints: Arc<dyn HostCutpointObserver>,
     shutdown: AtomicBool,
     active_connections: AtomicU64,
 }
@@ -263,10 +264,8 @@ impl ProcessHostServer {
             max_volatile_bytes: spec.max_volatile_bytes.max(64),
         };
         let spool = Arc::new(LogSpool::open(&spool_dir, spool_cfg, &canaries)?);
-        let inputs = PtyInputTracker::open(
-            &spec.runtime_dir,
-            Some(cutpoint_observer.unwrap_or_else(|| Arc::new(NoopHostCutpointObserver))),
-        )?;
+        let cutpoints = cutpoint_observer.unwrap_or_else(|| Arc::new(NoopHostCutpointObserver));
+        let inputs = PtyInputTracker::open(&spec.runtime_dir, Some(Arc::clone(&cutpoints)))?;
 
         let mut drain_handles = Vec::new();
         let (anchor, pty_master, writer): (
@@ -415,6 +414,7 @@ impl ProcessHostServer {
             writer: Mutex::new(writer),
             spool,
             inputs,
+            cutpoints,
             shutdown: AtomicBool::new(false),
             active_connections: AtomicU64::new(0),
         });
@@ -699,6 +699,14 @@ fn handle_connection(mut stream: UnixStream, shared: &Arc<ServerShared>) {
         }
         let is_shutdown = matches!(resp, HostResponse::ShutdownAck);
         drop(operation);
+        if matches!(resp, HostResponse::HandshakeAck { .. })
+            && shared
+                .cutpoints
+                .hit(HostInputCutpoint::HandshakeAppliedBeforeAck)
+                .is_err()
+        {
+            break;
+        }
         if send_response(&mut stream, &resp).is_err() || is_shutdown {
             break;
         }
@@ -1391,7 +1399,8 @@ pub struct StdioBarrierCutpointObserver {
 }
 
 impl StdioBarrierCutpointObserver {
-    /// Crée un observateur si `UNLEASH_HOST_CUTPOINT_TARGET` vaut `"C3"`, `"C4"` ou `"C5"`.
+    /// Selects historical C3/C4/C5 or `HandshakeAppliedBeforeAck` for an
+    /// exclusively owned native crash fixture. Normal launch clears this variable.
     #[must_use]
     pub fn from_env() -> Option<Self> {
         let val = std::env::var("UNLEASH_HOST_CUTPOINT_TARGET").ok()?;
@@ -1407,6 +1416,10 @@ impl StdioBarrierCutpointObserver {
             "C5" => Some(Self {
                 target: HostInputCutpoint::C5AfterPtyWriteBeforeReceipt,
                 label: "C5",
+            }),
+            "HandshakeAppliedBeforeAck" => Some(Self {
+                target: HostInputCutpoint::HandshakeAppliedBeforeAck,
+                label: "HandshakeAppliedBeforeAck",
             }),
             _ => None,
         }

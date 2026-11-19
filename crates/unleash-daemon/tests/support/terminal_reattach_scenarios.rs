@@ -14,6 +14,9 @@ mod log_rotation_scenarios;
 #[path = "terminal_renewal_fixture.rs"]
 mod renewal_fixture;
 
+#[path = "terminal_renewal_recovery_fixture.rs"]
+mod renewal_recovery_fixture;
+
 mod renewal_scenarios {
     use super::*;
 
