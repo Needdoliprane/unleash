@@ -567,10 +567,8 @@ fn legacy_rows(store: &UnleashStore) -> Vec<Vec<Vec<rusqlite::types::Value>>> {
         .unwrap()
 }
 
-#[test]
-fn t_f011_001_v010_is_additive_and_interrupted_migration_keeps_v009_history() {
-    let (s, cfg, _clock, p, _dir) = fixture_at_schema(Arc::new(NoopCutpointObserver), 9);
-    let lease = s
+fn seed_historical_terminal(store: &UnleashStore, hash: Sha256Digest) -> TerminalId {
+    let lease = store
         .acquire_lease(AcquireLeaseRequest {
             resource_kind: "terminal".to_owned(),
             resource_key: "synthetic-legacy-resource".to_owned(),
@@ -579,15 +577,21 @@ fn t_f011_001_v010_is_additive_and_interrupted_migration_keeps_v009_history() {
             ttl_ms: 60_000,
         })
         .unwrap();
-    let d = s.daemon_state().unwrap();
+    let d = store.daemon_state().unwrap();
     let old_terminal = TerminalId::from_u128(10001);
-    let hash = p.process_spec.environment.digest;
     // Stored historical fixture only; these rows do not attest an OS process.
-    s.execute_in_writer_tx(WriteCriticality::Critical,move|tx,now|{
+    store.execute_in_writer_tx(WriteCriticality::Critical,move|tx,now|{
         tx.execute("INSERT INTO actions(action_id,origin_kind,control_principal_id,action_type,payload_hash,policy_revision,authority_generation,daemon_epoch,fence,state,reconcile_strategy,revision,created_at_ms) VALUES('legacy-terminal-action','control_plane','human-alice','process_exec',?1,0,?2,?3,0,'outcome_unknown','observe_then_decide',1,?4)",rusqlite::params![hash.to_string(),d.authority_generation.to_string(),i64::try_from(d.daemon_epoch.as_u64()).unwrap(),now.as_i64()])?;
         tx.execute("INSERT INTO processes(process_id,action_id,process_run_uuid,authority_generation,identity_backend,owner_uid,cwd_ref,state,last_observed_at_ms,exit_code) VALUES('legacy-process','legacy-terminal-action','legacy-run',?1,'macos_proc_pidinfo',1,'synthetic historical cwd','exited',0,0)",[d.authority_generation.to_string()])?;
         tx.execute("INSERT INTO terminal_sessions(terminal_id,process_id,owner_agent_id,mission_id,purpose_key,rows,cols,lease_id,input_seq,durable_log_seq,state) VALUES(?1,'legacy-process',NULL,?2,'legacy-purpose',24,80,?3,0,0,'exited')",rusqlite::params![old_terminal.to_string(),MISSION.to_string(),lease.lease_id.to_string()])?;Ok(())
     }).unwrap();
+    old_terminal
+}
+
+#[test]
+fn t_f011_001_v010_is_additive_and_interrupted_migration_keeps_v009_history() {
+    let (s, cfg, _clock, p, _dir) = fixture_at_schema(Arc::new(NoopCutpointObserver), 9);
+    let old_terminal = seed_historical_terminal(&s, p.process_spec.environment.digest);
     let before = legacy_rows(&s);
     let backup = s
         .prepare_backup(PrepareBackupRequest {
@@ -598,7 +602,7 @@ fn t_f011_001_v010_is_additive_and_interrupted_migration_keeps_v009_history() {
         .unwrap();
     Arc::try_unwrap(s).unwrap().shutdown().unwrap();
     let mut next = cfg.clone();
-    next.max_supported_schema_version = CURRENT_SCHEMA_VERSION;
+    next.max_supported_schema_version = 10;
     next.cutpoints = Arc::new(FailAt {
         armed: AtomicBool::new(true),
         point: StoreCutpoint::C11MigrationInProgress,
@@ -622,8 +626,9 @@ fn t_f011_001_v010_is_additive_and_interrupted_migration_keeps_v009_history() {
     assert_eq!(tables, 0);
     old.shutdown().unwrap();
     let mut next = cfg;
-    next.max_supported_schema_version = CURRENT_SCHEMA_VERSION;
+    next.max_supported_schema_version = 10;
     let upgraded = UnleashStore::open_with_migration_backup(next, Some(backup.backup_id)).unwrap();
+    assert_eq!(upgraded.daemon_state().unwrap().schema_version, 10);
     assert_eq!(legacy_rows(&upgraded), before);
     assert!(
         upgraded
@@ -642,6 +647,102 @@ fn t_f011_001_v010_is_additive_and_interrupted_migration_keeps_v009_history() {
         })
         .unwrap();
     assert_eq!(foreign_keys, 0);
+}
+
+#[test]
+fn t_f011_003_v012_rolls_back_then_preserves_v011_terminal_history() {
+    let (store, old_config, _clock, preparation, _dir) =
+        fixture_at_schema(Arc::new(NoopCutpointObserver), 11);
+    let terminal = seed_historical_terminal(&store, preparation.process_spec.environment.digest);
+    store
+        .commit_command(request(&store, preparation, 1201))
+        .unwrap();
+    let allocation_before = read(&store, 1201);
+    let rows_before = legacy_rows(&store);
+    let checksums_through_v011 = |store: &UnleashStore| {
+        store
+            .read_snapshot(|conn, _| {
+                let mut query = conn.prepare(
+                    "SELECT version, checksum_sha256 FROM schema_migrations
+                     WHERE version <= 11 ORDER BY version",
+                )?;
+                Ok(query
+                    .query_map([], |row| {
+                        Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+                    })?
+                    .collect::<Result<Vec<_>, _>>()?)
+            })
+            .unwrap()
+    };
+    let before_checksums = checksums_through_v011(&store);
+    assert_eq!(before_checksums.len(), 11);
+    let backup = store
+        .prepare_backup(PrepareBackupRequest {
+            destination_dir: old_config.data_root.join("before-v012"),
+            retention_tier: BackupRetentionTier::Manual,
+            coverage: "db_and_objects".to_owned(),
+        })
+        .unwrap();
+    Arc::try_unwrap(store).unwrap().shutdown().unwrap();
+
+    let mut next_config = old_config.clone();
+    next_config.max_supported_schema_version = 12;
+    let mut interrupted = next_config.clone();
+    interrupted.cutpoints = Arc::new(FailAt {
+        armed: AtomicBool::new(true),
+        point: StoreCutpoint::C11MigrationInProgress,
+    });
+    assert!(matches!(
+        UnleashStore::open_with_migration_backup(interrupted, Some(backup.backup_id)),
+        Err(StoreError::CutpointInjected { .. })
+    ));
+    let rolled_back = UnleashStore::open(old_config).unwrap();
+    assert_eq!(rolled_back.daemon_state().unwrap().schema_version, 11);
+    assert_eq!(checksums_through_v011(&rolled_back), before_checksums);
+    assert_eq!(legacy_rows(&rolled_back), rows_before);
+    assert_eq!(read(&rolled_back, 1201), allocation_before);
+    rolled_back
+        .read_snapshot(|conn, _| {
+            assert!(
+                !conn
+                    .prepare("SELECT 1 FROM sqlite_master WHERE name='terminal_control_intents'")?
+                    .exists([])?
+            );
+            assert!(
+                !conn
+                    .prepare("SELECT 1 FROM schema_migrations WHERE version=12")?
+                    .exists([])?
+            );
+            Ok(())
+        })
+        .unwrap();
+    rolled_back.shutdown().unwrap();
+
+    let upgraded =
+        UnleashStore::open_with_migration_backup(next_config, Some(backup.backup_id)).unwrap();
+    assert_eq!(upgraded.daemon_state().unwrap().schema_version, 12);
+    assert_eq!(checksums_through_v011(&upgraded), before_checksums);
+    assert_eq!(read(&upgraded, 1201), allocation_before);
+    let mut expected_rows = rows_before;
+    expected_rows[1][0].push(rusqlite::types::Value::Integer(0));
+    assert_eq!(legacy_rows(&upgraded), expected_rows);
+    upgraded
+        .read_snapshot(|conn, _| {
+            let revision: i64 = conn.query_row(
+                "SELECT control_revision FROM terminal_sessions WHERE terminal_id=?1",
+                [terminal.to_string()],
+                |row| row.get(0),
+            )?;
+            assert_eq!(revision, 0);
+            assert!(
+                !conn
+                    .prepare("SELECT 1 FROM terminal_control_intents")?
+                    .exists([])?
+            );
+            assert!(!conn.prepare("PRAGMA foreign_key_check")?.exists([])?);
+            Ok(())
+        })
+        .unwrap();
 }
 
 #[test]
