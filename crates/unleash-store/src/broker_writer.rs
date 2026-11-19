@@ -223,6 +223,7 @@ fn validate_live_intent(
     intent: &BrokerIntent,
 ) -> Result<(), StoreError> {
     crate::backup_requests::validate_backup_intent_tx(tx, daemon, intent)?;
+    crate::provider_probes::validate_intent(tx, daemon, intent)?;
     if daemon.mode != DaemonMode::Ready {
         return Err(StoreError::RecoveryInProgress(
             "daemon indisponible pour dispatch broker".to_owned(),
@@ -429,6 +430,7 @@ pub(crate) fn commit_phase_tx(
             });
         }
     }
+    crate::provider_probes::validate_incarnation(tx, &daemon, action)?;
     if matches!(request.phase, BrokerPhase::Dispatch { .. }) {
         let markers: i64 = tx
             .query_row(
@@ -605,6 +607,7 @@ pub(crate) fn commit_phase_tx(
             fence,
             ..
         } => {
+            crate::provider_probes::reject_unqualified_dispatch(tx, action)?;
             let current = current
                 .as_ref()
                 .ok_or_else(|| invalid("action broker absente"))?;
@@ -752,6 +755,9 @@ pub(crate) fn commit_phase_tx(
         event_name,
         &Value::Object(payload),
     )?;
+    if matches!(&request.phase, BrokerPhase::Authorizing { .. }) {
+        crate::provider_probes::materialize(tx, &intent, &event_id, now)?;
+    }
     tx.execute("INSERT INTO broker_phase_records (action_id,evaluation_id,phase_key,phase_json,phase_digest,action_revision,event_id,event_sequence) VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",params![action.to_string(),request.evaluation.evaluation_id.to_string(),key,serde_json::to_string(&exact)?,digest.as_prefixed_str(),integer(revision.as_u64())?,event_id,sequence]).map_err(StoreError::from_rusqlite)?;
     config.cutpoints.hit(StoreCutpoint::C1BeforeCommandCommit)?;
     Ok(BrokerPhaseCommit {

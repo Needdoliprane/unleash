@@ -27,6 +27,9 @@ fn next_evidence() -> Uuid {
     ))
 }
 
+#[path = "common/provider_probe.rs"]
+mod probe_bench;
+
 const POOL: PoolId = PoolId::from_u128(1);
 const PROJECT: Uuid = Uuid::from_u128(100);
 const OTHER_PROJECT: Uuid = Uuid::from_u128(101);
@@ -82,11 +85,16 @@ fn seed(store: &UnleashStore, include_control: bool) -> Sha256Digest {
             tx.execute("INSERT INTO step_instances(step_id,run_id,definition_node_id,iteration_vector,step_attempt,state,revision) VALUES(?1,'00000000-0000-0000-0000-0000000000c8',?1,'[]',1,'ready',0)",[&id])?;
             tx.execute("INSERT INTO replay_workers(replay_worker_id,run_id,step_id,attempt_ordinal,authority_generation,daemon_epoch,fence,state,admission_class,revision,queued_at_ms) VALUES(?1,'00000000-0000-0000-0000-0000000000c8',?1,1,?2,?3,0,'queued','work',0,?4)",rusqlite::params![id,daemon.authority_generation.to_string(),i64::try_from(daemon.daemon_epoch.as_u64()).unwrap(),now.as_i64()])?;
         }
-        for n in [5_u128,6] {
-            tx.execute("INSERT INTO provider_probes(probe_id,command_receipt_id,principal_id,source_run_id,profile_version_ref,context_hash,phase,state,admission_class,authority_generation,daemon_epoch,fence,revision,queued_at_ms) VALUES(?1,'fixture-receipt','admission-bench','00000000-0000-0000-0000-0000000000c8','profile',?2,'generation_probe','queued','work',?3,?4,0,0,?5)",rusqlite::params![Uuid::from_u128(n).to_string(),object.to_string(),daemon.authority_generation.to_string(),i64::try_from(daemon.daemon_epoch.as_u64()).unwrap(),now.as_i64()])?;
-        }
         Ok(())
     }).unwrap();
+    for n in [5_u128, 6] {
+        probe_bench::seed_admission_probe(
+            store,
+            ProviderProbeId::from_u128(n),
+            unleash_domain::ProjectId::from_uuid(PROJECT),
+            object,
+        );
+    }
     object
 }
 
@@ -587,7 +595,10 @@ fn t_f003_003_v007_migration_keeps_unknown_owners_held_without_fabricating_proof
         Err(StoreError::MigrationBackupRequired)
     ));
     let store = UnleashStore::open_with_migration_backup(config, Some(backup.backup_id)).unwrap();
-    assert_eq!(store.daemon_state().unwrap().schema_version, 8);
+    assert_eq!(
+        store.daemon_state().unwrap().schema_version,
+        unleash_store::CURRENT_SCHEMA_VERSION
+    );
     assert_eq!(
         store.execution_pool_state(POOL).unwrap().current_occupation,
         1

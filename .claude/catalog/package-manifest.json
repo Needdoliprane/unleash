@@ -13,7 +13,7 @@
     "evidence/"
   ],
   "hash_algorithm": "sha256",
-  "source_tree_digest": "38950a72b6410e864d8be5b89dd4a633ebe719e95966f14358e206257d4851d5",
+  "source_tree_digest": "f2055931a9c9cd49c1393f418181b8cf70d8e53d9806267a8b50db418206f4fe",
   "files": [
     {
       "path": "INDEX.md",
@@ -395,8 +395,8 @@
     },
     {
       "path": "architecture/sqlite-design.md",
-      "sha256": "b05392d2241ec01b8ae6e05f5129ef55f3ee494e88a1dc5eda9a8fb15128e463",
-      "bytes": 58387,
+      "sha256": "d12d655f73de35a17b725941065f28ffc368a917aead7a448980b3374bd2045e",
+      "bytes": 60801,
       "media_type": "text/markdown"
     },
     {
@@ -1529,8 +1529,8 @@
     },
     {
       "path": "features/F012-model-api-router/interfaces.md",
-      "sha256": "2bd29296a9ade338b94adb558bbe8fc8ef751d125fa72e31edab449129ff526d",
-      "bytes": 19520,
+      "sha256": "114c094dd45ff6a3df8681d7fdee108e45e6f6963ad84eb33c3c8aef90d0858d",
+      "bytes": 22904,
       "media_type": "text/markdown"
     },
     {
@@ -2057,8 +2057,8 @@
     },
     {
       "path": "schemas/ipc-command.schema.json",
-      "sha256": "800f109890b03a95a92465001843f992ac2df5260fda1139dccde36da3101d14",
-      "bytes": 4486,
+      "sha256": "f83b01a657ff90ad1932328585b54affe1532f57201c50d812be6fb20b09063e",
+      "bytes": 12575,
       "media_type": "application/json"
     },
     {

@@ -24,6 +24,7 @@ zeroize.workspace = true
 subtle = "2.6"
 chrono.workspace = true
 ts-rs.workspace = true
+url.workspace = true
 
 [dev-dependencies]
 jsonschema.workspace = true

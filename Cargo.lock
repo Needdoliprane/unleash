@@ -6077,6 +6077,7 @@ dependencies = [
  "thiserror 2.0.21",
  "ts-rs",
  "unleash-domain",
+ "url",
  "uuid",
  "zeroize",
 ]

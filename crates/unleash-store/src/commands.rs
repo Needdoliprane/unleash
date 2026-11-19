@@ -74,6 +74,8 @@ pub enum AggregateKind {
     RetentionPurge,
     /// Demande et job de sauvegarde (`backup_requests`, `backup_jobs`).
     BackupJob,
+    /// Préparation de probe de génération (`provider_probes`).
+    ProviderProbe,
 }
 
 impl AggregateKind {
@@ -98,6 +100,7 @@ impl AggregateKind {
             Self::ApprovalResolution => "approval_resolution",
             Self::RetentionPurge => "retention_purge",
             Self::BackupJob => "backup_job",
+            Self::ProviderProbe => "provider_probe",
         }
     }
 }
@@ -105,6 +108,15 @@ impl AggregateKind {
 /// Mutation pure décidée par le domaine et exécutée atomiquement par [`CommitCommandRequest`].
 #[derive(Debug, Clone)]
 pub enum CommandMutation {
+    /// Prépare un probe authentifié, sans action, réseau ou réservation de capacité.
+    PrepareProviderProbe {
+        /// Identité stable égale à l'agrégat de commande.
+        probe_id: unleash_domain::ProviderProbeId,
+        /// Autorité dérivée de la connexion, jamais du payload client.
+        caller: CallerAuthority,
+        /// Références et bornes résolues côté service.
+        preparation: crate::ProviderProbePreparation,
+    },
     /// Réserve une sauvegarde manuelle gérée, sans I/O filesystem.
     RequestBackup {
         /// Identité client stable égale à l'agrégat de l'enveloppe.
@@ -758,6 +770,7 @@ pub(crate) fn tx_commit_command(
         });
     }
     crate::backup_requests::validate_request_backup_envelope(req)?;
+    crate::provider_probes::validate_command(tx, req)?;
 
     // Étape 2 : Rechercher `(actor_id, command_id)` dans `command_receipts`
     let actor_str = req.actor_id.as_str();
@@ -1010,11 +1023,18 @@ pub(crate) fn tx_commit_command(
     } else {
         None
     };
-    let effective_receipt_state = if purge_id.is_some() || reserved_backup.is_some() {
-        ReceiptState::Accepted
-    } else {
-        req.receipt_state
-    };
+    let prepared_probe =
+        if let CommandMutation::PrepareProviderProbe { probe_id, .. } = &req.mutation {
+            Some(*probe_id)
+        } else {
+            None
+        };
+    let effective_receipt_state =
+        if purge_id.is_some() || reserved_backup.is_some() || prepared_probe.is_some() {
+            ReceiptState::Accepted
+        } else {
+            req.receipt_state
+        };
     let receipt = CommandReceipt {
         receipt_id,
         command_id: req.envelope.command_id,
@@ -1030,6 +1050,7 @@ pub(crate) fn tx_commit_command(
         result_ref: purge_id
             .map(|id| format!("retention-purge:{id}"))
             .or_else(|| reserved_backup.map(|id| format!("backup:{id}")))
+            .or_else(|| prepared_probe.map(|id| format!("provider-probe:{id}")))
             .or_else(|| req.result_ref.clone()),
     };
     let receipt_json = serde_json::to_string(&receipt)?;
@@ -1172,6 +1193,22 @@ fn apply_command_mutation(
 ) -> Result<Revision, StoreError> {
     let exp_i64 = i64::try_from(expected_rev.as_u64()).unwrap_or(0);
     match mutation {
+        CommandMutation::PrepareProviderProbe {
+            probe_id,
+            preparation,
+            ..
+        } => crate::provider_probes::prepare_tx(
+            tx,
+            config,
+            daemon,
+            now_ms,
+            *probe_id,
+            receipt_id,
+            actor_id,
+            envelope.project_id,
+            preparation,
+            generated_events,
+        ),
         CommandMutation::RequestBackup { backup_id } => crate::backup_requests::reserve_backup_tx(
             tx,
             config,
