@@ -1,0 +1,34 @@
+{
+  "protocol_version": "unleash.ipc.v2",
+  "request_id": "10000000-0000-4000-8000-000000000001",
+  "command_id": "10000000-0000-4000-8000-000000000002",
+  "authority_generation": "10000000-0000-4000-8000-000000000003",
+  "actor_ref": null,
+  "project_id": null,
+  "aggregate_id": "10000000-0000-4000-8000-000000000003",
+  "expected_revision": 1,
+  "command_type": "SetPolicy",
+  "payload": {
+    "scope_kind": "global",
+    "scope_id": "global",
+    "isolation_mode": "standard",
+    "policy_version": "fixture-v2",
+    "reason": "Autoriser la connexion de la fixture loopback",
+    "provider_probe_mandate": {
+      "kind": "issue",
+      "principal_id": "fixture-local-admin",
+      "profile_id": "10000000-0000-4000-8000-000000000004",
+      "profile_version": 2,
+      "phase": "connect",
+      "locality": "local_only",
+      "capability_set": [],
+      "limits": {
+        "timeout_ms": 1000,
+        "max_calls": 0,
+        "max_output_tokens": 0,
+        "max_cost_usd_micros": 0
+      },
+      "expires_at_ms": 1800000000000
+    }
+  }
+}

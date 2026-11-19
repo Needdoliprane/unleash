@@ -166,7 +166,8 @@ struct Revocation {
     schema_version: u32,
     mandate_ref: ReceiptId,
     mandate_digest: Sha256Digest,
-    revocation_receipt_id: ReceiptId,
+    #[serde(rename = "revocation_receipt_id")]
+    receipt_id: ReceiptId,
     command_id: CommandId,
     revoked_by_actor: ActorId,
     revoked_at_ms: TimestampMs,
@@ -227,7 +228,7 @@ fn project(kind: PolicyScopeKind, id: &str) -> Result<Option<ProjectId>, StoreEr
             }
             Ok(Some(parsed))
         }
-        _ => Err(invalid("portée de mandat invalide")),
+        PolicyScopeKind::Global => Err(invalid("portée de mandat invalide")),
     }
 }
 
@@ -437,7 +438,7 @@ fn revoke_tx(
         schema_version: 1,
         mandate_ref: reference,
         mandate_digest: stored.digest,
-        revocation_receipt_id: ctx.receipt_id,
+        receipt_id: ctx.receipt_id,
         command_id: ctx.envelope.command_id,
         revoked_by_actor: ctx.caller.actor_id.clone(),
         revoked_at_ms: ctx.now,
@@ -530,9 +531,7 @@ fn view(
         expires_at_ms: grant.permission.expires_at_ms,
         mandate_digest: stored.digest,
         status,
-        revocation_receipt_id: stored
-            .revocation
-            .map(|revocation| revocation.revocation_receipt_id),
+        revocation_receipt_id: stored.revocation.map(|revocation| revocation.receipt_id),
     }
 }
 
@@ -561,10 +560,6 @@ pub(crate) fn read_visible(
 }
 
 #[cfg(test)]
-#[expect(
-    clippy::unwrap_used,
-    reason = "Banc SQLite local et assertions de contrat"
-)]
 mod tests {
     use super::*;
     use crate::{
@@ -832,7 +827,12 @@ mod tests {
         let snapshot = store.read_policy_summary_snapshot(None).unwrap();
         assert_eq!(snapshot.cursor, receipt.event_cursor);
         assert_eq!(snapshot.value.provider_probe_mandates.len(), 1);
-        let original = snapshot.value.provider_probe_mandates[0].clone();
+        let original = snapshot
+            .value
+            .provider_probe_mandates
+            .first()
+            .unwrap()
+            .clone();
         assert_eq!(
             original.mandate_ref, receipt.receipt_id,
             "identité du vrai reçu engagé"
@@ -913,7 +913,12 @@ mod tests {
         let summary = store.read_policy_summary_snapshot(None).unwrap();
         assert_eq!(summary.value.provider_probe_mandates.len(), 1);
         assert_eq!(
-            summary.value.provider_probe_mandates[0].status,
+            summary
+                .value
+                .provider_probe_mandates
+                .first()
+                .unwrap()
+                .status,
             ProviderProbeMandateStatus::Active
         );
         store
@@ -1021,7 +1026,8 @@ mod tests {
         store.execute_in_writer_tx(WriteCriticality::Normal,move|tx,now| {
             assert!(tx.execute("UPDATE provider_probe_mandates SET expires_at_ms=expires_at_ms+1",[]).is_err());
             let expired=read_visible(tx,None,expiry)?;
-            assert_eq!(expired[0].status,ProviderProbeMandateStatus::Expired);
+            let expired = expired.first().unwrap();
+            assert_eq!(expired.status,ProviderProbeMandateStatus::Expired);
             let old=read_one(tx,ReceiptId::from_u128(100))?.ok_or_else(hidden)?;
             let historical=view(old,AuthorityGeneration::from_u128(0xf012_dead),now);
             assert_eq!(historical.status,ProviderProbeMandateStatus::Historical,"autorité injectée du banc seulement");
@@ -1029,9 +1035,10 @@ mod tests {
             apply(tx,now,101,1,&revoke)?;
             receipt_fixture(tx,now,101)?;
             let revoked=read_visible(tx,None,now)?;
-            assert_eq!(revoked[0].status,ProviderProbeMandateStatus::Revoked);
-            assert_eq!(revoked[0].revocation_receipt_id,Some(ReceiptId::from_u128(101)));
-            assert_eq!(revoked[0].mandate_digest,expired[0].mandate_digest);
+            let revoked = revoked.first().unwrap();
+            assert_eq!(revoked.status,ProviderProbeMandateStatus::Revoked);
+            assert_eq!(revoked.revocation_receipt_id,Some(ReceiptId::from_u128(101)));
+            assert_eq!(revoked.mandate_digest,expired.mandate_digest);
             assert!(tx.execute("UPDATE provider_probe_mandates SET revocation_receipt_id=revocation_receipt_id",[]).is_err());
             Ok(())
         }).unwrap();

@@ -515,6 +515,8 @@ impl UnleashDaemon {
         let shared_mode = Arc::new(RwLock::new(DaemonMode::Recovering));
 
         let state = Arc::new(DaemonRuntimeState {
+            rendezvous_dir: rdv_dir.clone(),
+            terminal_children: Mutex::new(Vec::new()),
             broker_activity: crate::broker_activity::BrokerActivity::new(),
             store: Arc::clone(&store),
             authority_generation: recovery_row.authority_generation,

@@ -112,7 +112,7 @@ impl Fixture {
             project,
             principal,
             authority: client.hello().authority_generation,
-            configuration_digest: view.result["configuration_digest"].clone(),
+            configuration_digest: field(&view.result, "configuration_digest").clone(),
         })
     }
 
@@ -216,7 +216,10 @@ fn policy(
     );
     let mut payload = json!({"scope_kind":scope,"scope_id":scope_id,"isolation_mode":"standard","policy_version":"mandate-fixture-v1","reason":"synthetic provider permission"});
     if let Some(mandate) = mandate {
-        payload["provider_probe_mandate"] = mandate;
+        payload
+            .as_object_mut()
+            .unwrap()
+            .insert("provider_probe_mandate".into(), mandate);
     }
     let mut request = command(client, id, "SetPolicy", aggregate, payload);
     request.project_id = project;
@@ -253,15 +256,19 @@ async fn summary(
         .await
 }
 
+fn field<'a>(value: &'a Value, name: &str) -> &'a Value {
+    value.get(name).unwrap()
+}
+
 fn mandate<'a>(view: &'a QueryResponse, receipt: &CommandReceipt) -> &'a Value {
-    let rows: Vec<_> = view.result["provider_probe_mandates"]
+    let rows: Vec<_> = field(&view.result, "provider_probe_mandates")
         .as_array()
         .unwrap()
         .iter()
-        .filter(|row| row["mandate_ref"] == json!(receipt.receipt_id))
+        .filter(|row| field(row, "mandate_ref") == &json!(receipt.receipt_id))
         .collect();
     assert_eq!(rows.len(), 1, "mandat exact visible une seule fois");
-    rows[0]
+    rows.first().copied().unwrap()
 }
 
 fn assert_binding(row: &Value, profile: &Profile, phase: &str, expires: u64) {
@@ -269,19 +276,25 @@ fn assert_binding(row: &Value, profile: &Profile, phase: &str, expires: u64) {
         || ("global", "global".to_owned()),
         |id| ("project", id.to_string()),
     );
-    assert_eq!(row["scope_kind"], scope);
-    assert_eq!(row["scope_id"], scope_id);
-    assert_eq!(row["authority_generation"], json!(profile.authority));
-    assert_eq!(row["principal_id"], profile.principal);
-    assert_eq!(row["profile_id"], json!(profile.id));
-    assert_eq!(row["profile_version"], 1);
-    assert_eq!(row["configuration_digest"], profile.configuration_digest);
-    assert_eq!(row["phase"], phase);
-    assert_eq!(row["locality"], "local_only");
-    assert_eq!(row["capability_set"], json!([]));
-    assert_eq!(row["limits"], limits());
-    assert_eq!(row["expires_at_ms"], expires);
-    row["mandate_digest"]
+    assert_eq!(field(row, "scope_kind"), &json!(scope));
+    assert_eq!(field(row, "scope_id"), &json!(scope_id));
+    assert_eq!(
+        field(row, "authority_generation"),
+        &json!(profile.authority)
+    );
+    assert_eq!(field(row, "principal_id"), &json!(profile.principal));
+    assert_eq!(field(row, "profile_id"), &json!(profile.id));
+    assert_eq!(field(row, "profile_version"), &json!(1));
+    assert_eq!(
+        field(row, "configuration_digest"),
+        &profile.configuration_digest
+    );
+    assert_eq!(field(row, "phase"), &json!(phase));
+    assert_eq!(field(row, "locality"), &json!("local_only"));
+    assert_eq!(field(row, "capability_set"), &json!([]));
+    assert_eq!(field(row, "limits"), &limits());
+    assert_eq!(field(row, "expires_at_ms"), &json!(expires));
+    field(row, "mandate_digest")
         .as_str()
         .unwrap()
         .parse::<Sha256Digest>()
@@ -340,10 +353,12 @@ async fn lifecycle(
     let replay = client.send_command(&replay_wire).await?;
     let mut divergent_wire = a_wire;
     divergent_wire.request_id = RequestId::from_u128(206);
-    divergent_wire
+    *divergent_wire
         .payload
         .get_mut("provider_probe_mandate")
-        .unwrap()["limits"]["timeout_ms"] = json!(1_001);
+        .and_then(|mandate| mandate.get_mut("limits"))
+        .and_then(|limits| limits.get_mut("timeout_ms"))
+        .unwrap() = json!(1_001);
     let divergent = client.send_command(&divergent_wire).await;
     let after = summary(client, 207, None).await?;
     let profile = client
@@ -383,7 +398,7 @@ fn assert_lifecycle(flow: &Lifecycle, profile: &Profile, expires: u64) {
     );
     for view in [&flow.before, &flow.after] {
         assert_eq!(
-            view.result["provider_probe_mandates"]
+            field(&view.result, "provider_probe_mandates")
                 .as_array()
                 .unwrap()
                 .len(),
@@ -395,17 +410,29 @@ fn assert_lifecycle(flow: &Lifecycle, profile: &Profile, expires: u64) {
         let after = mandate(&flow.after, receipt);
         assert_binding(before, profile, phase, expires);
         assert_binding(after, profile, phase, expires);
-        assert_eq!(before["status"], "active");
-        assert!(before["revocation_receipt_id"].is_null());
-        assert_eq!(before["mandate_digest"], after["mandate_digest"]);
+        assert_eq!(field(before, "status"), &json!("active"));
+        assert!(field(before, "revocation_receipt_id").is_null());
+        assert_eq!(
+            field(before, "mandate_digest"),
+            field(after, "mandate_digest")
+        );
     }
     let a = mandate(&flow.after, &flow.a);
-    assert_eq!(a["status"], "revoked");
-    assert_eq!(a["revocation_receipt_id"], json!(flow.revoke.receipt_id));
-    assert_eq!(mandate(&flow.after, &flow.b)["status"], "active");
-    assert!(mandate(&flow.after, &flow.b)["revocation_receipt_id"].is_null());
-    assert_eq!(flow.profile.result["qualification"], "required");
-    assert_eq!(flow.profile.result["observations"], json!([]));
+    assert_eq!(field(a, "status"), &json!("revoked"));
+    assert_eq!(
+        field(a, "revocation_receipt_id"),
+        &json!(flow.revoke.receipt_id)
+    );
+    assert_eq!(
+        field(mandate(&flow.after, &flow.b), "status"),
+        &json!("active")
+    );
+    assert!(field(mandate(&flow.after, &flow.b), "revocation_receipt_id").is_null());
+    assert_eq!(
+        field(&flow.profile.result, "qualification"),
+        &json!("required")
+    );
+    assert_eq!(field(&flow.profile.result, "observations"), &json!([]));
 }
 
 #[tokio::test]
@@ -590,9 +617,9 @@ async fn t_f012_013_policy_mandate_visibility_and_revocation_keep_the_authentica
         expires,
     );
     for view in [&flow.hidden, &flow.other_after] {
-        assert_eq!(view.result["provider_probe_mandates"], json!([]));
+        assert_eq!(field(&view.result, "provider_probe_mandates"), &json!([]));
         assert!(
-            view.result["project_policy"].is_null(),
+            field(&view.result, "project_policy").is_null(),
             "aucune politique hors scope créée par le refus"
         );
     }
@@ -600,8 +627,8 @@ async fn t_f012_013_policy_mandate_visibility_and_revocation_keep_the_authentica
         matches!(flow.foreign_revoke, Err(ClientError::Remote(error)) if error.code == ErrorCode::NotFoundOrHidden)
     );
     let after = mandate(&flow.after, &flow.issued);
-    assert_eq!(after["status"], "active");
-    assert!(after["revocation_receipt_id"].is_null());
+    assert_eq!(field(after, "status"), &json!("active"));
+    assert!(field(after, "revocation_receipt_id").is_null());
     assert_eq!(
         flow.after.watermark.as_ref(),
         Some(&flow.issued.event_cursor)

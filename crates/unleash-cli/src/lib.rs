@@ -33,6 +33,10 @@ use unleash_protocol::{
 };
 use uuid::Uuid;
 
+pub mod terminal;
+
+use terminal::ProcessCommand;
+
 static UUID_COUNTER: AtomicU64 = AtomicU64::new(1);
 
 /// Erreur typée retournée par les commandes de la CLI Unleash.
@@ -59,6 +63,23 @@ pub enum CliError {
         /// Lignée épinglée avant l'envoi.
         authority_generation: AuthorityGeneration,
         /// Erreur retournée lors de l'envoi ou de la lecture du reçu.
+        source: Box<ClientError>,
+    },
+
+    /// Demande de terminal dont le client n'a pas obtenu le reçu.
+    #[error(
+        "Reçu indisponible pour le terminal {terminal_id} du projet {project_id}, commande {command_id}, lignée {authority_generation}. {source}"
+    )]
+    TerminalReceiptMissing {
+        /// Terminal visé par l'enveloppe.
+        terminal_id: Uuid,
+        /// Projet de la commande.
+        project_id: ProjectId,
+        /// Identifiant à utiliser pour retrouver le reçu.
+        command_id: CommandId,
+        /// Lignée épinglée avant l'envoi.
+        authority_generation: AuthorityGeneration,
+        /// Erreur de transport ou refus du daemon.
         source: Box<ClientError>,
     },
 
@@ -117,12 +138,24 @@ pub enum Commands {
     Receipt {
         /// Identifiant UUID de la commande.
         command_id: Uuid,
+        /// Projet de l’acquisition de terminal observée.
+        #[arg(long, requires = "result_ref")]
+        project_id: Option<Uuid>,
+        /// Référence exacte `result_ref` du reçu d’acquisition de terminal.
+        #[arg(long, requires = "project_id")]
+        result_ref: Option<String>,
     },
     /// Gestion des projets.
     Project {
         /// Action sur les projets.
         #[command(subcommand)]
         action: ProjectCommand,
+    },
+    /// Demande le contrôle d'un terminal supervisé.
+    Process {
+        /// Action sur un terminal.
+        #[command(subcommand)]
+        action: ProcessCommand,
     },
     /// Rapport de récupération durable.
     Recovery,
@@ -369,14 +402,12 @@ pub async fn run_cli(cli: &Cli) -> Result<Value, CliError> {
                 "snapshot": snapshot,
             }))
         }
-        Commands::Receipt { command_id } => {
-            let inspection = client
-                .get_command_receipt(
-                    RequestId::from_uuid(next_uuid()),
-                    CommandId::from_uuid(*command_id),
-                )
-                .await?;
-            Ok(serde_json::to_value(inspection)?)
+        Commands::Receipt {
+            command_id,
+            project_id,
+            result_ref,
+        } => {
+            run_receipt_command(&mut client, *command_id, *project_id, result_ref.as_deref()).await
         }
         Commands::Recovery => {
             let resp = query_simple(&mut client, "InspectRecovery", None, Map::new()).await?;
@@ -384,9 +415,52 @@ pub async fn run_cli(cli: &Cli) -> Result<Value, CliError> {
         }
         Commands::Backup { action } => run_backup_command(&mut client, action).await,
         Commands::Project { action } => run_project_command(&mut client, action).await,
+        Commands::Process { action } => terminal::run_process_command(&mut client, action).await,
         Commands::Mission { action } => run_mission_command(&mut client, action).await,
         Commands::Daemon { action } => run_daemon_command(&mut client, action).await,
         Commands::Tui { .. } => Ok(json!({ "status": "exited" })),
+    }
+}
+
+async fn run_receipt_command(
+    client: &mut UnleashClient,
+    command_id: Uuid,
+    project_id: Option<Uuid>,
+    result_ref: Option<&str>,
+) -> Result<Value, CliError> {
+    match (project_id, result_ref) {
+        (None, None) => {
+            let inspection = client
+                .get_command_receipt(
+                    RequestId::from_uuid(next_uuid()),
+                    CommandId::from_uuid(command_id),
+                )
+                .await?;
+            Ok(serde_json::to_value(inspection)?)
+        }
+        (Some(project), Some(reference)) => {
+            let payload = Map::from_iter([
+                (
+                    String::from("command_id"),
+                    Value::String(command_id.to_string()),
+                ),
+                (
+                    String::from("result_ref"),
+                    Value::String(reference.to_owned()),
+                ),
+            ]);
+            let response = query_simple(
+                client,
+                "GetCommandReceipt",
+                Some(ProjectId::from_uuid(project)),
+                payload,
+            )
+            .await?;
+            Ok(json!({"watermark": response.watermark, "result": response.result}))
+        }
+        _ => Err(CliError::InvalidArgument(String::from(
+            "La lecture causale exige --project-id et --result-ref ensemble",
+        ))),
     }
 }
 
@@ -846,6 +920,41 @@ fn next_uuid() -> Uuid {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn terminal_receipt_requires_project_and_result_reference_together() {
+        let command = "00000000-0000-4000-8000-000000000001";
+        let project = "00000000-0000-4000-8000-000000000002";
+        let reference = "terminal-allocation:00000000-0000-4000-8000-000000000003";
+        let args = ["unleash", "receipt", command];
+        assert!(matches!(
+            Cli::try_parse_from(args).unwrap().command,
+            Commands::Receipt {
+                project_id: None,
+                result_ref: None,
+                ..
+            }
+        ));
+        assert!(Cli::try_parse_from(args.into_iter().chain(["--project-id", project])).is_err());
+        assert!(Cli::try_parse_from(args.into_iter().chain(["--result-ref", reference])).is_err());
+        let causal = Cli::try_parse_from(args.into_iter().chain([
+            "--project-id",
+            project,
+            "--result-ref",
+            reference,
+        ]))
+        .unwrap();
+        assert!(matches!(
+            causal.command,
+            Commands::Receipt {
+                command_id,
+                project_id: Some(project_id),
+                result_ref: Some(result_ref),
+            } if command_id.to_string() == command
+                && project_id.to_string() == project
+                && result_ref == reference
+        ));
+    }
 
     #[test]
     fn backup_request_accepts_only_a_complete_retry_identity() {

@@ -19,10 +19,17 @@ use unleash_store::{
     UnleashStore,
 };
 
+type TerminalLaunchObservationSlot =
+    std::sync::Mutex<Option<unleash_store::terminal_allocations::TerminalLaunchObservation>>;
+type TerminalControlObservationSlot =
+    std::sync::Mutex<Option<unleash_store::terminal_allocations::TerminalControlObservation>>;
+
 /// Broker journal backed by a durable Store port.
 pub(crate) struct SqliteBrokerJournal {
     store: Arc<UnleashStore>,
     runtime: Option<Weak<DaemonRuntimeState>>,
+    terminal_observation: Option<Arc<TerminalLaunchObservationSlot>>,
+    terminal_control_observation: Option<Arc<TerminalControlObservationSlot>>,
 }
 
 impl SqliteBrokerJournal {
@@ -32,6 +39,8 @@ impl SqliteBrokerJournal {
         Self {
             store: Arc::clone(&runtime.store),
             runtime: Some(Arc::downgrade(runtime)),
+            terminal_observation: None,
+            terminal_control_observation: None,
         }
     }
 
@@ -40,7 +49,27 @@ impl SqliteBrokerJournal {
         Self {
             store,
             runtime: None,
+            terminal_observation: None,
+            terminal_control_observation: None,
         }
+    }
+
+    pub(crate) fn with_terminal_observation(
+        runtime: &Arc<DaemonRuntimeState>,
+        slot: Arc<TerminalLaunchObservationSlot>,
+    ) -> Self {
+        let mut journal = Self::new(runtime);
+        journal.terminal_observation = Some(slot);
+        journal
+    }
+
+    pub(crate) fn with_terminal_control_observation(
+        runtime: &Arc<DaemonRuntimeState>,
+        slot: Arc<TerminalControlObservationSlot>,
+    ) -> Self {
+        let mut journal = Self::new(runtime);
+        journal.terminal_control_observation = Some(slot);
+        journal
     }
 }
 
@@ -94,6 +123,10 @@ fn intention(intent: &ActionIntent) -> Result<BrokerIntent, BrokerJournalError> 
 #[cfg(test)]
 #[path = "broker_journal_sqlite_tests.rs"]
 mod sqlite_tests;
+
+#[cfg(test)]
+#[path = "terminal_unknown_sqlite_tests.rs"]
+mod terminal_unknown_sqlite_tests;
 
 fn decision(d: &AuthorizationDecision) -> Result<BrokerAuthorizationDecision, BrokerJournalError> {
     Ok(BrokerAuthorizationDecision {
@@ -273,15 +306,67 @@ fn project(
     ))
 }
 
+fn commit_journal_phase(
+    store: &UnleashStore,
+    request: BrokerPhaseRequest,
+    terminal_slot: Option<&TerminalLaunchObservationSlot>,
+    control_slot: Option<&TerminalControlObservationSlot>,
+) -> Result<unleash_store::BrokerPhaseCommit, BrokerJournalError> {
+    let phase_name = match &request.phase {
+        BrokerPhase::Authorizing { .. } => "authorizing",
+        BrokerPhase::Authorization { .. } => "authorization",
+        BrokerPhase::Dispatch { .. } => "dispatch",
+        BrokerPhase::Observation { .. } => "observation",
+    };
+    let successful_observation = matches!(
+        &request.phase,
+        BrokerPhase::Observation { receipt, .. }
+            if receipt.state == unleash_domain::ActionState::ObservedSuccess
+    );
+    let (terminal_observation, control_observation) = if successful_observation {
+        // Keep the exact proof after precommit errors or a lost ACK.
+        // Re-appending the observation never invokes the executor.
+        let terminal = terminal_slot.and_then(|slot| slot.lock().ok()?.clone());
+        let control = control_slot.and_then(|slot| slot.lock().ok()?.clone());
+        (terminal, control)
+    } else {
+        (None, None)
+    };
+    let committed = if let Some(observation) = control_observation {
+        store.commit_terminal_control_observation(observation, request)
+    } else if let Some(observation) = terminal_observation {
+        store.commit_terminal_launch_observation(observation, request)
+    } else {
+        store.commit_broker_phase(request)
+    };
+    committed.map_err(|error| {
+        tracing::warn!(
+            broker_phase = phase_name,
+            code = %error.error_code(),
+            reason = ?error.reason_code(),
+            "Broker durable phase refused"
+        );
+        BrokerJournalError
+    })
+}
+
 impl BrokerJournalPort for SqliteBrokerJournal {
     fn append<'a>(
         &'a self,
         entry: &'a BrokerJournalEntry,
     ) -> BoxFuture<'a, Result<(), BrokerJournalError>> {
         Box::pin(async move {
-            let (evaluation, intent, phase) = project(entry)?;
+            let (evaluation, intent, phase) = if self.terminal_observation.is_some()
+                || self.terminal_control_observation.is_some()
+            {
+                project_terminal(entry)?
+            } else {
+                project(entry)?
+            };
             let store = Arc::clone(&self.store);
             let runtime = self.runtime.clone();
+            let terminal_slot = self.terminal_observation.clone();
+            let control_slot = self.terminal_control_observation.clone();
             let activity = match &runtime {
                 Some(runtime) => Some(Arc::new(
                     runtime
@@ -313,9 +398,12 @@ impl BrokerJournalPort for SqliteBrokerJournal {
                         evaluation,
                         phase,
                     };
-                    let commit = store
-                        .commit_broker_phase(request)
-                        .map_err(|_| BrokerJournalError)?;
+                    let commit = commit_journal_phase(
+                        &store,
+                        request,
+                        terminal_slot.as_deref(),
+                        control_slot.as_deref(),
+                    )?;
                     Ok::<_, BrokerJournalError>((commit, dispatch, intent.action_id))
                 })
                 .await;
@@ -373,6 +461,37 @@ impl BrokerJournalPort for SqliteBrokerJournal {
             .map_err(|_| BrokerJournalError)?
         })
     }
+}
+
+fn project_terminal(
+    entry: &BrokerJournalEntry,
+) -> Result<(BrokerEvaluation, BrokerIntent, BrokerPhase), BrokerJournalError> {
+    if let BrokerJournalEntry::Observation {
+        intent,
+        receipt,
+        cause: ObservationCause::Execution,
+        ..
+    } = entry
+        && (intent.verb == unleash_store::TERMINAL_ALLOCATION_VERB
+            || intent.verb == unleash_store::terminal_allocations::TERMINAL_CONTROL_VERB)
+        && matches!(
+            &intent.resource_refs[..],
+            [unleash_action_broker::NormalizedResourceRef::Terminal(_)]
+        )
+        && receipt.state == unleash_domain::ActionState::OutcomeUnknown
+        && receipt.output_digest.is_none()
+        && receipt.remote_audit_ref.is_none()
+    {
+        // A local executor failure proves only that the dispatch has an unknown
+        // outcome. Keep its exact receipt, never copy untrusted executor text,
+        // and never use this projection to qualify OS facts or success.
+        let mut safe = entry.clone();
+        if let BrokerJournalEntry::Observation { reason, .. } = &mut safe {
+            *reason = None;
+        }
+        return project(&safe);
+    }
+    project(entry)
 }
 
 #[cfg(test)]
@@ -463,6 +582,59 @@ mod tests {
             .secret_refs
             .push(SecretRef::new("unattested-reference").unwrap());
         assert!(intention(&secret).is_err());
+    }
+
+    #[test]
+    fn terminal_unknown_projection_keeps_receipt_and_omits_executor_text() {
+        let (evaluation, mut intent) = fixture();
+        intent.verb = unleash_store::TERMINAL_ALLOCATION_VERB.into();
+        intent.effects_class = unleash_action_broker::EffectsClass::ProcessExec;
+        intent.resource_refs = vec![unleash_action_broker::NormalizedResourceRef::Terminal(
+            unleash_domain::TerminalId::from_u128(99),
+        )];
+        let receipt = unleash_action_broker::ActionReceipt {
+            evaluation_id: evaluation.evaluation_id,
+            action_id: intent.action_id,
+            dispatch_id: unleash_domain::DispatchId::from_u128(100),
+            decision_ref: GuardDecisionRef::new("terminal-local-decision").unwrap(),
+            state: unleash_domain::ActionState::OutcomeUnknown,
+            output_digest: None,
+            enforcement_refs: vec![],
+            remote_audit_ref: None,
+            remote_audit_unavailable: false,
+            observed_at_ms: TimestampMs::new(1234),
+        };
+        let entry = BrokerJournalEntry::Observation {
+            evaluation,
+            intent,
+            receipt: receipt.clone(),
+            observation_revision: Revision::new(1),
+            cause: ObservationCause::Execution,
+            reason: Some("EXECUTOR-TEXT-MUST-NOT-PERSIST".into()),
+        };
+        assert!(
+            project(&entry).is_err(),
+            "generic projection remains closed"
+        );
+        let (_, _, phase) = project_terminal(&entry)
+            .expect("terminal unknown is a durable fact even without an OS proof");
+        let expected = super::receipt(&receipt);
+        assert!(
+            matches!(&phase,BrokerPhase::Observation {receipt,reason:None,..} if receipt==&expected)
+        );
+        assert!(
+            !serde_json::to_string(&phase)
+                .unwrap()
+                .contains("EXECUTOR-TEXT")
+        );
+        let mut forged = entry;
+        if let BrokerJournalEntry::Observation { receipt, .. } = &mut forged {
+            receipt.state = unleash_domain::ActionState::ObservedSuccess;
+        }
+        assert!(
+            project_terminal(&forged).is_err(),
+            "reason omission cannot qualify success"
+        );
     }
 
     #[test]

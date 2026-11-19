@@ -1286,6 +1286,34 @@ impl UnleashStore {
             + Send
             + 'static,
     {
+        self.commit_execution_admission_with_report(pool_id, source_revision, move |snapshot| {
+            decide(snapshot).map(|decision| (decision, ()))
+        })
+        .map(|(outcome, ())| outcome)
+    }
+
+    /// Engage une décision d'admission et restitue son résultat de politique.
+    ///
+    /// La closure travaille sur le snapshot relu sous le writer, sans I/O et sans
+    /// rappel au Store. Le rapport n'est rendu qu'en cas de succès du writer.
+    ///
+    /// # Errors
+    ///
+    /// Refuse un snapshot périmé, une précondition absente, un fence ou des deltas invalides.
+    pub fn commit_execution_admission_with_report<F, R>(
+        &self,
+        pool_id: PoolId,
+        source_revision: crate::AdmissionSnapshotToken,
+        decide: F,
+    ) -> Result<(crate::AdmissionOutcome, R), StoreError>
+    where
+        F: FnOnce(
+                &crate::ExecutionAdmissionSnapshot,
+            ) -> Result<(crate::AdmissionDecision, R), StoreError>
+            + Send
+            + 'static,
+        R: Send + 'static,
+    {
         let config = self.config.clone();
         self.execute_in_writer_tx(WriteCriticality::Normal, move |tx, now| {
             crate::admission::commit(tx, &config, now, pool_id, source_revision, decide)

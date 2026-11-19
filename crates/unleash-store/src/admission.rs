@@ -717,16 +717,16 @@ fn check_lineage(
     clippy::too_many_lines,
     reason = "Séquence indivisible CAS, tentative, lease, réservations, équité et journal"
 )]
-pub(crate) fn commit<F>(
+pub(crate) fn commit<F, R>(
     tx: &Transaction<'_>,
     config: &StoreConfig,
     now: TimestampMs,
     pool_id: PoolId,
     expected: AdmissionSnapshotToken,
     decide: F,
-) -> Result<AdmissionOutcome, StoreError>
+) -> Result<(AdmissionOutcome, R), StoreError>
 where
-    F: FnOnce(&ExecutionAdmissionSnapshot) -> Result<AdmissionDecision, StoreError>,
+    F: FnOnce(&ExecutionAdmissionSnapshot) -> Result<(AdmissionDecision, R), StoreError>,
 {
     if config
         .clock_uncertain
@@ -750,21 +750,22 @@ where
             command_id: None,
         });
     }
-    let AdmissionDecision::Admit {
-        unit,
-        deficit_deltas,
-        consecutive_controls,
-        budgets,
-    } = decide(&snapshot)?
-    else {
-        return Ok(AdmissionOutcome::Unchanged);
-    };
+    let (decision, report) = decide(&snapshot)?;
     if expected
         .valid_until
         .is_some_and(|deadline| deadline.as_i64() <= config.clock.now_ms().as_i64())
     {
         return Err(invalid("snapshot admission expiré pendant la décision"));
     }
+    let AdmissionDecision::Admit {
+        unit,
+        deficit_deltas,
+        consecutive_controls,
+        budgets,
+    } = decision
+    else {
+        return Ok((AdmissionOutcome::Unchanged, report));
+    };
     let candidate = snapshot
         .queued
         .iter()
@@ -889,14 +890,15 @@ where
         event_name,
         &json!({"reservation_id":reservation_id,"attempt_id":attempt_id,"lease_id":lease.lease_id,"fence":lease.fence,"eligibility_evidence_id":evidence}),
     )?;
-    Ok(AdmissionOutcome::Admitted(Box::new(AdmissionCommit {
+    let commit = AdmissionCommit {
         unit,
         revision: next,
         reservation_id,
         attempt_id,
         lease,
         event_cursor: cursor,
-    })))
+    };
+    Ok((AdmissionOutcome::Admitted(Box::new(commit)), report))
 }
 
 fn validate_candidate(

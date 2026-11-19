@@ -225,9 +225,8 @@ pub fn authorize_command(
         | "RequestBackup"
         | "SetProviderProfile"
         | "TestProviderProfile" => Capability::Administer,
-        "AssignMission" | "PauseMission" | "ResumeMission" | "CancelMission" => {
-            Capability::ManageMissions
-        }
+        "AssignMission" | "PauseMission" | "ResumeMission" | "CancelMission"
+        | "AcquireTerminal" => Capability::ManageMissions,
         "StopDaemon" => Capability::StopDaemon,
         "RecordClaim" | "RecordObservation" | "RecordJudgment" => Capability::WorkerReport,
         _ => {
@@ -288,7 +287,7 @@ pub fn authorize_query(
         "GetDaemonStatus" => Capability::QueryDaemonDiagnostic,
         "GetHealth" | "GetStateSnapshot" | "GetCommandReceipt" | "ListProjects" | "GetProject"
         | "ReadSettings" | "ReadPolicySummary" | "ReadGuardHealth" | "InspectRecovery"
-        | "GetBackupManifest" | "GetProviderProfile" => Capability::QueryState,
+        | "GetBackupManifest" | "ReadTerminalLog" | "GetProviderProfile" => Capability::QueryState,
         _ => {
             return Err(IpcError::new(
                 ErrorCode::InvalidArgument,

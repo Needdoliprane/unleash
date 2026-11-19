@@ -59,6 +59,8 @@ pub(crate) struct StopRequest {
 
 /// État d'exécution partagé entre la boucle d'acceptation IPC et les connexions clientes.
 pub(crate) struct DaemonRuntimeState {
+    pub(crate) rendezvous_dir: std::path::PathBuf,
+    pub(crate) terminal_children: Mutex<Vec<std::process::Child>>,
     pub(crate) broker_activity: Arc<crate::broker_activity::BrokerActivity>,
     pub(crate) store: Arc<UnleashStore>,
     pub(crate) authority_generation: AuthorityGeneration,
@@ -491,6 +493,7 @@ async fn dispatch_query(
         "GetStateSnapshot" => query_state_snapshot(state, session, query).await,
         "GetCommandReceipt" => query_command_receipt(state, session, query).await,
         "GetBackupManifest" => query_backup_manifest(state, session, query).await,
+        "ReadTerminalLog" => crate::terminal_service::read_log(state, session, query).await,
         "GetProviderProfile" => {
             crate::provider_profile_validation_service::query(
                 Arc::clone(&state.store),
@@ -855,12 +858,19 @@ async fn query_state_snapshot(
     let store = Arc::clone(&state.store);
     let proj_filter = query.project_id;
     let allowed_projects = session.allowed_projects.clone();
+    let terminal_actor = session.actor_id.clone();
     let (snapshot_val, watermark) = tokio::task::spawn_blocking(move || {
         store.read_snapshot(|conn, _ctx| {
             let daemon_row = read_daemon_row_conn(conn)?;
             let wm = read_watermark_conn(conn, daemon_row.stream_id)?;
             let projects = read_projects_conn(conn, proj_filter, allowed_projects.as_ref())?;
             let missions = read_missions_conn(conn, proj_filter, allowed_projects.as_ref())?;
+            let terminals = crate::terminal_service::read_terminal_metadata(
+                conn,
+                &terminal_actor,
+                proj_filter,
+                allowed_projects.as_ref(),
+            )?;
             let val = json!({
                 "daemon": {
                     "authority_generation": daemon_row.authority_generation,
@@ -872,6 +882,7 @@ async fn query_state_snapshot(
                 },
                 "projects": projects,
                 "missions": missions,
+                "terminals": terminals,
             });
             Ok((val, wm))
         })
@@ -891,6 +902,55 @@ async fn query_state_snapshot(
 #[serde(deny_unknown_fields)]
 struct ReceiptQueryPayload {
     command_id: CommandId,
+    #[serde(default, deserialize_with = "deserialize_acquisition_reference")]
+    result_ref: Option<String>,
+}
+
+fn deserialize_acquisition_reference<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let reference = String::deserialize(deserializer)?;
+    if reference.is_empty() || reference.len() > 128 || reference.chars().any(char::is_control) {
+        return Err(serde::de::Error::custom(
+            "invalid acquisition result reference",
+        ));
+    }
+    Ok(Some(reference))
+}
+
+async fn query_terminal_acquisition_result(
+    state: &Arc<DaemonRuntimeState>,
+    session: &AuthenticatedSession,
+    request_id: unleash_domain::RequestId,
+    project_id: Option<unleash_domain::ProjectId>,
+    command: CommandId,
+    reference: String,
+) -> Result<QueryResponse, IpcError> {
+    let project = project_id.ok_or_else(|| {
+        IpcError::new(
+            ErrorCode::InvalidArgument,
+            None,
+            "Acquisition result requires its exact project",
+            RetryClass::Never,
+        )
+    })?;
+    let store = Arc::clone(&state.store);
+    let actor = session.actor_id.clone();
+    let snapshot = tokio::task::spawn_blocking(move || {
+        store.inspect_terminal_acquisition_result(&actor, command, &reference, project)
+    })
+    .await
+    .map_err(|_| internal_ipc_error("Acquisition result inspection task failed", Some(command)))?
+    .map_err(|error| store_error_to_ipc_error(&error, Some(command)))?;
+    let result = serde_json::to_value(snapshot.value).map_err(|_| {
+        internal_ipc_error("Acquisition result serialization failed", Some(command))
+    })?;
+    Ok(QueryResponse {
+        request_id,
+        watermark: Some(snapshot.cursor),
+        result,
+    })
 }
 
 async fn query_command_receipt(
@@ -916,6 +976,17 @@ async fn query_command_receipt(
             )
         })?;
     let cmd_id = payload.command_id;
+    if let Some(reference) = payload.result_ref {
+        return query_terminal_acquisition_result(
+            state,
+            session,
+            query.request_id,
+            query.project_id,
+            cmd_id,
+            reference,
+        )
+        .await;
+    }
     let store = Arc::clone(&state.store);
     let actor_id = session.actor_id.clone();
 
@@ -981,7 +1052,6 @@ fn validate_command_mode(mode: DaemonMode, cmd: &CommandEnvelope) -> Result<(), 
     Ok(())
 }
 
-/// Retourne `true` si le hook `PostCommitAction::DropConnection` demande de couper la connexion sans réponse.
 fn is_provider_profile_command(command: &CommandEnvelope) -> bool {
     matches!(
         command.command_type.as_str(),
@@ -989,6 +1059,7 @@ fn is_provider_profile_command(command: &CommandEnvelope) -> bool {
     )
 }
 
+/// Retourne `true` si le hook `PostCommitAction::DropConnection` demande de couper la connexion sans réponse.
 #[expect(
     clippy::too_many_lines,
     reason = "Admission, commit, réconciliation et réponse IPC ordonnés"
@@ -1060,7 +1131,10 @@ async fn handle_command_frame(
 
             if matches!(
                 prepared.req.mutation,
-                CommandMutation::CreateMission { .. } | CommandMutation::RequestBackup { .. }
+                CommandMutation::CreateMission { .. }
+                    | CommandMutation::RequestBackup { .. }
+                    | CommandMutation::PrepareTerminalAllocation { .. }
+                    | CommandMutation::PrepareTerminalControl { .. }
             ) && let Err(ipc) = ensure_principal_registered(&state.store, session).await
             {
                 let _ = write_json_frame_timeout(stream, &ipc, RESPONSE_WRITE_TIMEOUT).await;
@@ -1131,6 +1205,22 @@ async fn handle_command_frame(
 
     if cmd.command_type == "RequestBackup" {
         crate::backup_service::start(state, unleash_domain::BackupId::from_uuid(cmd.aggregate_id));
+    }
+    if cmd.command_type == "AcquireTerminal" {
+        if cmd.payload.contains_key("terminal_id") {
+            if newly_committed {
+                crate::terminal_service::start_registered(
+                    state,
+                    session.actor_id.clone(),
+                    cmd.command_id,
+                );
+            }
+        } else {
+            crate::terminal_service::start(
+                state,
+                unleash_domain::TerminalId::from_uuid(cmd.aggregate_id),
+            );
+        }
     }
 
     if newly_committed && let Some(stop_reason) = stop_reason.take() {
@@ -1303,8 +1393,29 @@ async fn prepare_command_request(
         "ReviseProject" => prepare_revise_project(session, cmd),
         "PurgeHistory" => prepare_purge_history(session, cmd),
         "RequestBackup" => prepare_request_backup(session, cmd),
+        "AcquireTerminal" => Ok(PreparedCommand {
+            req: crate::terminal_service::prepare_acquisition(state, session, cmd).await?,
+            stop_reason: None,
+            stop_drain_timeout: None,
+        }),
         "SetSettings" | "SetPolicy" | "ConfigureGuard" => {
-            prepare_admin_command(state, session, cmd)
+            let mut prepared = prepare_admin_command(state, session, cmd.clone())?;
+            if let Some(pins) = crate::terminal_service::prepare_configuration_objects(
+                state,
+                &session.actor_id,
+                &cmd,
+            )
+            .await?
+                && let CommandMutation::SetSettings { patch, .. } = &mut prepared.req.mutation
+            {
+                patch.extra_typed.get_or_insert_with(Map::new).insert(
+                    "__terminal_prepared".into(),
+                    serde_json::to_value(pins).map_err(|_| {
+                        internal_ipc_error("Terminal preparation serialization", Some(cid))
+                    })?,
+                );
+            }
+            Ok(prepared)
         }
         "AssignMission" => prepare_assign_mission(session, cmd),
         "PauseMission" | "ResumeMission" | "CancelMission" => {
@@ -1525,7 +1636,7 @@ fn has_only_keys(value: &Value, keys: &[&str]) -> bool {
         .is_some_and(|object| object.keys().all(|key| keys.contains(&key.as_str())))
 }
 
-fn strict_settings_patch(value: Value) -> Option<unleash_store::SettingsPatch> {
+fn strict_settings_patch(mut value: Value) -> Option<unleash_store::SettingsPatch> {
     if !has_only_keys(
         &value,
         &[
@@ -1533,6 +1644,7 @@ fn strict_settings_patch(value: Value) -> Option<unleash_store::SettingsPatch> {
             "retention_policy",
             "confirm_retention_shortening",
             "analyzer_paths",
+            "terminal_runtime",
         ],
     ) {
         return None;
@@ -1582,7 +1694,24 @@ fn strict_settings_patch(value: Value) -> Option<unleash_store::SettingsPatch> {
     {
         return None;
     }
-    serde_json::from_value(value).ok()
+    let terminal = value.as_object_mut()?.remove("terminal_runtime");
+    if terminal.is_some() {
+        value
+            .as_object_mut()?
+            .entry("confirm_retention_shortening")
+            .or_insert(Value::Bool(false));
+    }
+    let mut patch: unleash_store::SettingsPatch = serde_json::from_value(value).ok()?;
+    if let Some(raw) = terminal {
+        let typed: unleash_store::terminal_allocations::TerminalRuntimeSettings =
+            serde_json::from_value(raw).ok()?;
+        typed.validate().ok()?;
+        patch.extra_typed = Some(Map::from_iter([(
+            "terminal_runtime".into(),
+            serde_json::to_value(typed).ok()?,
+        )]));
+    }
+    Some(patch)
 }
 
 fn prepare_guard_mutation(
@@ -1641,21 +1770,73 @@ fn prepare_guard_mutation(
     ))
 }
 
+fn invalid_admin_command(command_id: CommandId) -> IpcError {
+    IpcError::new(
+        ErrorCode::InvalidArgument,
+        None,
+        "Commande administrative invalide ou non prise en charge",
+        RetryClass::Never,
+    )
+    .with_command_id(command_id)
+}
+
+fn prepare_policy_mutation(
+    cmd: &CommandEnvelope,
+    raw: Value,
+    caller: unleash_store::CallerAuthority,
+    generation: unleash_domain::AuthorityGeneration,
+) -> Result<(AggregateKind, CommandMutation), IpcError> {
+    let invalid = || invalid_admin_command(cmd.command_id);
+    if raw
+        .get("provider_probe_mandate")
+        .is_some_and(Value::is_null)
+    {
+        return Err(invalid());
+    }
+    let payload: SetPolicyPayload = serde_json::from_value(raw).map_err(|_| invalid())?;
+    match payload.scope_kind {
+        unleash_store::PolicyScopeKind::Global
+            if payload.scope_id == "global"
+                && cmd.project_id.is_none()
+                && cmd.aggregate_id == generation.as_uuid() => {}
+        unleash_store::PolicyScopeKind::Project
+            if cmd.project_id.is_some_and(|id| {
+                id.to_string() == payload.scope_id && id.as_uuid() == cmd.aggregate_id
+            }) => {}
+        _ => return Err(invalid()),
+    }
+    if payload.reason.len() > 1024 || payload.policy_version.len() > 128 {
+        return Err(invalid());
+    }
+    let mutation = if let Some(mandate) = payload.provider_probe_mandate {
+        CommandMutation::SetPolicyWithProviderProbeMandate {
+            scope_kind: payload.scope_kind,
+            scope_id: payload.scope_id,
+            isolation_mode: payload.isolation_mode,
+            policy_version: payload.policy_version,
+            reason: payload.reason,
+            caller,
+            mandate,
+        }
+    } else {
+        CommandMutation::SetPolicy {
+            scope_kind: payload.scope_kind,
+            scope_id: payload.scope_id,
+            isolation_mode: payload.isolation_mode,
+            policy_version: payload.policy_version,
+            reason: payload.reason,
+            caller,
+        }
+    };
+    Ok((AggregateKind::SecurityPolicy, mutation))
+}
+
 fn prepare_admin_command(
     state: &DaemonRuntimeState,
     session: &AuthenticatedSession,
     cmd: CommandEnvelope,
 ) -> Result<PreparedCommand, IpcError> {
-    let cid = cmd.command_id;
-    let invalid = || {
-        IpcError::new(
-            ErrorCode::InvalidArgument,
-            None,
-            "Commande administrative invalide ou non prise en charge",
-            RetryClass::Never,
-        )
-        .with_command_id(cid)
-    };
+    let invalid = || invalid_admin_command(cmd.command_id);
     let caller = unleash_store::CallerAuthority {
         actor_id: session.actor_id.clone(),
         role: unleash_store::CallerRole::PolicyAdmin,
@@ -1686,50 +1867,7 @@ fn prepare_admin_command(
                 },
             )
         }
-        "SetPolicy" => {
-            if raw
-                .get("provider_probe_mandate")
-                .is_some_and(Value::is_null)
-            {
-                return Err(invalid());
-            }
-            let payload: SetPolicyPayload = serde_json::from_value(raw).map_err(|_| invalid())?;
-            match payload.scope_kind {
-                unleash_store::PolicyScopeKind::Global
-                    if payload.scope_id == "global"
-                        && cmd.project_id.is_none()
-                        && cmd.aggregate_id == state.authority_generation.as_uuid() => {}
-                unleash_store::PolicyScopeKind::Project
-                    if cmd.project_id.is_some_and(|id| {
-                        id.to_string() == payload.scope_id && id.as_uuid() == cmd.aggregate_id
-                    }) => {}
-                _ => return Err(invalid()),
-            }
-            if payload.reason.len() > 1024 || payload.policy_version.len() > 128 {
-                return Err(invalid());
-            }
-            let mutation = if let Some(mandate) = payload.provider_probe_mandate {
-                CommandMutation::SetPolicyWithProviderProbeMandate {
-                    scope_kind: payload.scope_kind,
-                    scope_id: payload.scope_id,
-                    isolation_mode: payload.isolation_mode,
-                    policy_version: payload.policy_version,
-                    reason: payload.reason,
-                    caller,
-                    mandate,
-                }
-            } else {
-                CommandMutation::SetPolicy {
-                    scope_kind: payload.scope_kind,
-                    scope_id: payload.scope_id,
-                    isolation_mode: payload.isolation_mode,
-                    policy_version: payload.policy_version,
-                    reason: payload.reason,
-                    caller,
-                }
-            };
-            (AggregateKind::SecurityPolicy, mutation)
-        }
+        "SetPolicy" => prepare_policy_mutation(&cmd, raw, caller, state.authority_generation)?,
         "ConfigureGuard" => prepare_guard_mutation(state, &cmd, raw, caller)?,
         _ => return Err(invalid()),
     };

@@ -28,12 +28,14 @@ pub mod config;
 pub mod daemon;
 pub mod diagnostic;
 pub mod error;
+pub mod execution_scheduler;
 pub mod executors;
 pub mod ipc;
 mod provider_profile_service;
 mod provider_profile_validation_service;
 pub mod recovery;
 pub mod subscriptions;
+mod terminal_service;
 
 pub use auth::{AuthVerifierPort, AuthenticatedSession, Capability, PeerUidAuthVerifier};
 pub use config::{DaemonConfig, PostCommitAction, PostCommitHook, StoreOverrides};

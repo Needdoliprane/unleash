@@ -39,5 +39,53 @@
     "result": {
       "description": "Données ou objet de résultat de la requête."
     }
+  },
+  "$defs": {
+    "uuid": { "type": "string", "format": "uuid" },
+    "wire_uint": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
+    "terminal_acquisition_response": {
+      "$ref": "#",
+      "required": ["watermark"],
+      "properties": {
+        "watermark": { "type": "object" },
+        "result": { "$ref": "#/$defs/terminal_acquisition_result" }
+      }
+    },
+    "terminal_acquisition_result": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version", "receipt_id", "command_id", "result_ref",
+        "authority_generation", "daemon_epoch", "terminal_id", "process_id",
+        "process_run_uuid", "reused", "state", "lease_id", "fence",
+        "lease_expires_at", "control_revision", "input_seq", "cursor"
+      ],
+      "properties": {
+        "schema_version": { "const": 1 },
+        "receipt_id": { "$ref": "#/$defs/uuid" },
+        "command_id": { "$ref": "#/$defs/uuid" },
+        "result_ref": {
+          "type": "string",
+          "pattern": "^terminal-(allocation|control):[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+          "not": { "pattern": "[\\u0000-\\u001f\\u007f-\\u009f]" }
+        },
+        "authority_generation": { "$ref": "#/$defs/uuid" },
+        "daemon_epoch": { "$ref": "#/$defs/wire_uint" },
+        "terminal_id": { "$ref": "#/$defs/uuid" },
+        "process_id": { "$ref": "#/$defs/uuid" },
+        "process_run_uuid": { "$ref": "#/$defs/uuid" },
+        "reused": { "type": "boolean" },
+        "state": { "enum": ["ready", "busy", "detached"] },
+        "lease_id": { "$ref": "#/$defs/uuid" },
+        "fence": { "$ref": "#/$defs/wire_uint", "minimum": 1 },
+        "lease_expires_at": { "type": "integer" },
+        "control_revision": { "$ref": "#/$defs/wire_uint" },
+        "input_seq": { "$ref": "#/$defs/wire_uint" },
+        "cursor": { "$ref": "#/properties/watermark", "type": "object" }
+      },
+      "if": { "properties": { "reused": { "const": true } } },
+      "then": { "properties": { "result_ref": { "pattern": "^terminal-control:" } } },
+      "else": { "properties": { "result_ref": { "pattern": "^terminal-allocation:" } } }
+    }
   }
 }

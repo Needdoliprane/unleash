@@ -49,6 +49,9 @@ impl HostCutpointObserver for NoopHostCutpointObserver {
 /// Nom du journal durable d'entrées PTY (`0600`).
 pub const INPUT_JOURNAL_FILENAME: &str = "input-journal.json";
 
+/// Maximum bytes for one input, independent of the private protocol frame size.
+pub const MAX_PTY_INPUT_BYTES: usize = 65_536;
+
 /// État durable d'une entrée numérotée soumise au PTY.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
@@ -232,6 +235,11 @@ impl PtyInputTracker {
         payload: &[u8],
         now_ms: TimestampMs,
     ) -> Result<PtyInputReceipt, ProcessHostError> {
+        if payload.is_empty() || payload.len() > MAX_PTY_INPUT_BYTES {
+            return Err(ProcessHostError::InvalidArgument {
+                reason: String::from("input payload must contain 1 through 65536 bytes"),
+            });
+        }
         if input_seq == 0 {
             return Err(ProcessHostError::InvalidArgument {
                 reason: String::from("input_seq doit être >= 1"),
@@ -348,10 +356,13 @@ fn resolve_existing_entry(
                 reason: format!("entrée {input_seq} introuvable"),
             });
         };
-        if existing.command_id != command_id || existing.payload_hash != payload_hash {
+        if existing.command_id != command_id
+            || existing.action_id != action_id
+            || existing.payload_hash != payload_hash
+        {
             return Err(ProcessHostError::IdempotencyConflict {
                 reason: format!(
-                    "conflit sur input_seq={input_seq} : command_id ou payload_hash divergent"
+                    "conflit sur input_seq={input_seq} : command_id, action_id ou payload_hash divergent"
                 ),
             });
         }
@@ -510,6 +521,39 @@ mod tests {
         assert!(r2.deduplicated);
         assert_eq!(r2.receipt_id, r1.receipt_id);
         assert_eq!(sink, b"echo 1\n");
+    }
+
+    #[test]
+    fn t_f011_control_input_replay_requires_the_original_action() {
+        let dir = local_test_dir("ph-action-binding").unwrap();
+        let tracker = PtyInputTracker::open(dir.path().join("host"), None).unwrap();
+        let mut sink = Vec::new();
+        let command = CommandId::from_u128(1);
+        let action = ActionId::from_u128(2);
+        let receipt = tracker
+            .dispatch_input(
+                &mut sink,
+                1,
+                command,
+                action,
+                b"one-effect\n",
+                TimestampMs::new(1),
+            )
+            .unwrap();
+        assert_eq!(receipt.action_id, action);
+        let foreign = tracker.dispatch_input(
+            &mut sink,
+            1,
+            command,
+            ActionId::from_u128(3),
+            b"one-effect\n",
+            TimestampMs::new(2),
+        );
+        assert!(
+            matches!(foreign, Err(ProcessHostError::IdempotencyConflict { .. })),
+            "a different action cannot adopt this receipt"
+        );
+        assert_eq!(sink, b"one-effect\n");
     }
 
     #[test]

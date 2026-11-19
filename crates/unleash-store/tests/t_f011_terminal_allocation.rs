@@ -61,36 +61,15 @@ fn fixture_at_schema(
     store
         .configure_execution_pool(ExecutionPoolParams::default())
         .unwrap();
-    let root_string = root.to_str().unwrap().to_owned();
+    let root_string = root.canonicalize().unwrap().to_str().unwrap().to_owned();
     let saved = root_string.clone();
     store.execute_in_writer_tx(WriteCriticality::Critical,move|tx,now|{
   tx.execute("INSERT INTO projects(project_id,name,state,revision,created_at_ms,primary_root_path) VALUES(?1,'synthetic terminal fixture','active',2,?2,?3)",rusqlite::params![PROJECT.to_string(),now.as_i64(),saved])?;
   tx.execute("INSERT INTO missions(mission_id,project_id,owner_kind,owner_user_id,completion_policy,state,revision) VALUES(?1,?2,'user','human-alice','human','active',1)",rusqlite::params![MISSION.to_string(),PROJECT.to_string()])?;
-  for(n,kind)in[(21_u128,"process_host"),(22,"process"),(23,"pty")] {tx.execute("INSERT INTO capacity_pools(pool_id,pool_kind,scope_key,unit,requested_limit,effective_limit,admissions_frozen,hard_limit,revision) VALUES(?1,?2,'global','slot',2,2,0,2,0)",rusqlite::params![PoolId::from_u128(n).to_string(),kind])?;}
   Ok(())
  }).unwrap();
-    let bytes=canonicalize_to_vec(&json!({"schema_version":1,"fixture":"synthetic_sqlite_resolver_only","profile_id":"fixture-env","version":1,"variables":{"LANG":"C"}})).unwrap();
-    let hash = Sha256Digest::from_bytes(&bytes);
-    let handle = store
-        .prepare_object(PrepareObjectRequest {
-            object_hash: hash,
-            byte_length: bytes.len() as u64,
-            media_type: "application/json".to_owned(),
-            owner_kind: "fixture".to_owned(),
-            owner_id: "f011-synthetic-resolver".to_owned(),
-        })
-        .unwrap();
-    store.write_prepared_object_bytes(&handle, &bytes).unwrap();
-    store
-        .publish_object_reference(PublishObjectReferenceRequest {
-            pin_id: handle.pin_id,
-            object_hash: hash,
-            object_generation: handle.object_generation,
-            owner_kind: "fixture".to_owned(),
-            owner_id: "f011-synthetic-resolver".to_owned(),
-            source_field: "environment".to_owned(),
-        })
-        .unwrap();
+    let runtime = configure_fixture_runtime(&store);
+    let profile = runtime.profiles.first().unwrap();
     let prep = TerminalAllocationPreparation {
         mission_id: MISSION,
         mission_revision: Revision::new(1),
@@ -105,22 +84,43 @@ fn fixture_at_schema(
             requested_cwd: ".".to_owned(),
             cwd_canonical: root_string,
             environment: TerminalEnvironmentRef {
-                profile_id: "fixture-env".to_owned(),
-                version: 1,
-                digest: hash,
+                profile_id: profile.profile_id.clone(),
+                version: profile.version,
+                digest: profile.digest().unwrap(),
             },
             rows: 24,
             cols: 80,
             readiness_timeout_ms: 10_000,
         },
-        auxiliary: TerminalAuxiliaryPools {
-            host: PoolId::from_u128(21),
-            child: PoolId::from_u128(22),
-            pty: PoolId::from_u128(23),
-        },
-        lease_ttl_ms: 60_000,
+        auxiliary: runtime.pools(),
+        lease_ttl_ms: runtime.lease_ttl_ms,
     };
     (store, cfg, clock, prep, dir)
+}
+
+fn configure_fixture_runtime(
+    store: &UnleashStore,
+) -> terminal_allocations::TerminalRuntimeSettings {
+    let runtime:terminal_allocations::TerminalRuntimeSettings=serde_json::from_value(json!({"schema_version":1,"profiles":[{"profile_id":"store-terminal-fixture","version":1,"variables":{"LANG":"C"}}],"max_hosts":2,"max_processes":2,"max_ptys":2,"lease_ttl_ms":60000})).unwrap();
+    let command = unleash_domain::CommandId::from_u128(0xf011_fe01);
+    let prepared = runtime
+        .profiles
+        .iter()
+        .map(|p| store.prepare_terminal_environment(p, command).unwrap())
+        .collect::<Vec<_>>();
+    let patch = SettingsPatch {
+        extra_typed: Some(
+            json!({"terminal_runtime":runtime,"__terminal_prepared":prepared})
+                .as_object()
+                .unwrap()
+                .clone(),
+        ),
+        ..SettingsPatch::default()
+    };
+    let actor = ActorId::new("uid:fixture-alice").unwrap();
+    let authority = store.active_authority_generation().unwrap();
+    store.commit_command(CommitCommandRequest {actor_id:actor.clone(),envelope:CommandEnvelope {protocol_version:ProtocolVersion,request_id:RequestId::from_u128(0xf011_fe02),command_id:command,authority_generation:authority,actor_ref:None,project_id:None,aggregate_id:authority.as_uuid(),expected_revision:Revision::INITIAL,command_type:"SetSettings".into(),payload:json!({"scope_kind":"user","scope_id":"default","patch":{"terminal_runtime":runtime}}).as_object().unwrap().clone()},target_aggregate:AggregateKind::Settings,operation_id:None,receipt_state:ReceiptState::Accepted,result_ref:None,retention_days_override:None,fence_assertion:None,mutation:CommandMutation::SetSettings {scope_kind:SettingsScopeKind::User,scope_id:"default".into(),caller:CallerAuthority {actor_id:actor,role:CallerRole::PolicyAdmin},patch},events:vec![],capacity_reservations:vec![],budget_reservations:vec![]}).unwrap();
+    runtime
 }
 fn request(
     store: &UnleashStore,
@@ -183,7 +183,13 @@ fn counts(store: &UnleashStore) -> (i64, i64, i64, i64, i64, i64, i64) {
                 c.query_row("SELECT COUNT(*) FROM capacity_reservations", [], |r| {
                     r.get(0)
                 })?,
-                c.query_row("SELECT COUNT(*) FROM command_receipts", [], |r| r.get(0))?,
+                // Configuration is an accepted fixture prerequisite. Count
+                // only terminal command receipts for these allocation oracles.
+                c.query_row(
+                    "SELECT COUNT(*) FROM command_receipts WHERE command_type='AcquireTerminal'",
+                    [],
+                    |r| r.get(0),
+                )?,
             ))
         })
         .unwrap()
@@ -345,6 +351,81 @@ fn t_f011_001_prepare_receipt_replay_and_exclusive_human_owner() {
     }
     assert!(s.commit_command(bob).is_err());
     assert_eq!(counts(&s), (1, 0, 0, 0, 1, 3, 1));
+}
+
+#[test]
+fn t_f011_001_missing_runtime_configuration_cannot_prepare_new_terminal() {
+    let (s, _cfg, _clock, p, _dir) = fixture(Arc::new(NoopCutpointObserver));
+    // Models historical storage without the new settings, retaining published
+    // objects. A published object alone must never become an environment grant.
+    s.execute_in_writer_tx(WriteCriticality::Critical, |tx, _| {
+        tx.execute(
+            "DELETE FROM settings WHERE scope_kind='user' AND scope_id='default'",
+            [],
+        )?;
+        Ok(())
+    })
+    .unwrap();
+    let before = counts(&s);
+    let result = s.commit_command(request(&s, p, 1601));
+    assert!(
+        matches!(&result,Err(StoreError::InvalidArgument {message,..}) if message=="terminal runtime is not configured"),
+        "unexpected result: {result:?}"
+    );
+    assert_eq!(
+        counts(&s),
+        before,
+        "no receipt, intention, lease, hold, process or PTY without configuration"
+    );
+}
+
+#[test]
+fn t_f011_003_missing_runtime_preserves_known_receipt_and_phase_but_never_grants_launch() {
+    for committed_dispatch in [false, true] {
+        let (s, _cfg, _clock, p, _dir) = fixture(Arc::new(NoopCutpointObserver));
+        let req = request(&s, p, 1701);
+        let receipt = s.commit_command(req.clone()).unwrap();
+        let record = read(&s, 1701);
+        let marker = committed_dispatch.then(|| dispatch(&s, &record));
+        s.execute_in_writer_tx(WriteCriticality::Critical, |tx, _| {
+            tx.execute(
+                "DELETE FROM settings WHERE scope_kind='user' AND scope_id='default'",
+                [],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+        let before = counts(&s);
+        assert_eq!(
+            s.commit_command(req).unwrap().receipt(),
+            receipt.receipt(),
+            "historical wire replay does not revalidate new settings"
+        );
+        if let Some(marker) = marker {
+            assert!(
+                s.commit_broker_phase(authorizing(&record))
+                    .unwrap()
+                    .replayed,
+                "exact acquired phase remains historical"
+            );
+            let refused = s.resolve_terminal_launch(resolution(&record, marker));
+            assert!(
+                matches!(refused,Err(StoreError::InvalidArgument {message,..}) if message=="terminal runtime is not configured")
+            );
+            assert_eq!(
+                read(&s, 1701).state,
+                TerminalAllocationState::Allocated,
+                "no launch permit consumed"
+            );
+        } else {
+            let refused = s.commit_broker_phase(authorizing(&record));
+            assert!(
+                matches!(refused,Err(StoreError::InvalidArgument {message,..}) if message=="terminal runtime is not configured")
+            );
+        }
+        assert_eq!(counts(&s), before);
+        assert_eq!((counts(&s).2, counts(&s).3), (0, 0));
+    }
 }
 struct FailAt {
     armed: AtomicBool,
@@ -567,10 +648,8 @@ fn legacy_rows(store: &UnleashStore) -> Vec<Vec<Vec<rusqlite::types::Value>>> {
         .unwrap()
 }
 
-#[test]
-fn t_f011_001_v010_is_additive_and_interrupted_migration_keeps_v009_history() {
-    let (s, cfg, _clock, p, _dir) = fixture_at_schema(Arc::new(NoopCutpointObserver), 9);
-    let lease = s
+fn seed_historical_terminal(store: &UnleashStore, hash: Sha256Digest) -> TerminalId {
+    let lease = store
         .acquire_lease(AcquireLeaseRequest {
             resource_kind: "terminal".to_owned(),
             resource_key: "synthetic-legacy-resource".to_owned(),
@@ -579,15 +658,21 @@ fn t_f011_001_v010_is_additive_and_interrupted_migration_keeps_v009_history() {
             ttl_ms: 60_000,
         })
         .unwrap();
-    let d = s.daemon_state().unwrap();
+    let d = store.daemon_state().unwrap();
     let old_terminal = TerminalId::from_u128(10001);
-    let hash = p.process_spec.environment.digest;
     // Stored historical fixture only; these rows do not attest an OS process.
-    s.execute_in_writer_tx(WriteCriticality::Critical,move|tx,now|{
+    store.execute_in_writer_tx(WriteCriticality::Critical,move|tx,now|{
         tx.execute("INSERT INTO actions(action_id,origin_kind,control_principal_id,action_type,payload_hash,policy_revision,authority_generation,daemon_epoch,fence,state,reconcile_strategy,revision,created_at_ms) VALUES('legacy-terminal-action','control_plane','human-alice','process_exec',?1,0,?2,?3,0,'outcome_unknown','observe_then_decide',1,?4)",rusqlite::params![hash.to_string(),d.authority_generation.to_string(),i64::try_from(d.daemon_epoch.as_u64()).unwrap(),now.as_i64()])?;
         tx.execute("INSERT INTO processes(process_id,action_id,process_run_uuid,authority_generation,identity_backend,owner_uid,cwd_ref,state,last_observed_at_ms,exit_code) VALUES('legacy-process','legacy-terminal-action','legacy-run',?1,'macos_proc_pidinfo',1,'synthetic historical cwd','exited',0,0)",[d.authority_generation.to_string()])?;
         tx.execute("INSERT INTO terminal_sessions(terminal_id,process_id,owner_agent_id,mission_id,purpose_key,rows,cols,lease_id,input_seq,durable_log_seq,state) VALUES(?1,'legacy-process',NULL,?2,'legacy-purpose',24,80,?3,0,0,'exited')",rusqlite::params![old_terminal.to_string(),MISSION.to_string(),lease.lease_id.to_string()])?;Ok(())
     }).unwrap();
+    old_terminal
+}
+
+#[test]
+fn t_f011_001_v010_is_additive_and_interrupted_migration_keeps_v009_history() {
+    let (s, cfg, _clock, p, _dir) = fixture_at_schema(Arc::new(NoopCutpointObserver), 9);
+    let old_terminal = seed_historical_terminal(&s, p.process_spec.environment.digest);
     let before = legacy_rows(&s);
     let backup = s
         .prepare_backup(PrepareBackupRequest {
@@ -598,7 +683,7 @@ fn t_f011_001_v010_is_additive_and_interrupted_migration_keeps_v009_history() {
         .unwrap();
     Arc::try_unwrap(s).unwrap().shutdown().unwrap();
     let mut next = cfg.clone();
-    next.max_supported_schema_version = CURRENT_SCHEMA_VERSION;
+    next.max_supported_schema_version = 10;
     next.cutpoints = Arc::new(FailAt {
         armed: AtomicBool::new(true),
         point: StoreCutpoint::C11MigrationInProgress,
@@ -622,8 +707,9 @@ fn t_f011_001_v010_is_additive_and_interrupted_migration_keeps_v009_history() {
     assert_eq!(tables, 0);
     old.shutdown().unwrap();
     let mut next = cfg;
-    next.max_supported_schema_version = CURRENT_SCHEMA_VERSION;
+    next.max_supported_schema_version = 10;
     let upgraded = UnleashStore::open_with_migration_backup(next, Some(backup.backup_id)).unwrap();
+    assert_eq!(upgraded.daemon_state().unwrap().schema_version, 10);
     assert_eq!(legacy_rows(&upgraded), before);
     assert!(
         upgraded
@@ -642,6 +728,107 @@ fn t_f011_001_v010_is_additive_and_interrupted_migration_keeps_v009_history() {
         })
         .unwrap();
     assert_eq!(foreign_keys, 0);
+}
+
+#[test]
+fn t_f011_003_v012_rolls_back_then_preserves_v011_terminal_history() {
+    let (store, old_config, _clock, preparation, _dir) =
+        fixture_at_schema(Arc::new(NoopCutpointObserver), 11);
+    let terminal = seed_historical_terminal(&store, preparation.process_spec.environment.digest);
+    store
+        .commit_command(request(&store, preparation, 1201))
+        .unwrap();
+    let allocation_before = read(&store, 1201);
+    let rows_before = legacy_rows(&store);
+    let checksums_through_v011 = |store: &UnleashStore| {
+        store
+            .read_snapshot(|conn, _| {
+                let mut query = conn.prepare(
+                    "SELECT version, checksum_sha256 FROM schema_migrations
+                     WHERE version <= 11 ORDER BY version",
+                )?;
+                Ok(query
+                    .query_map([], |row| {
+                        Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+                    })?
+                    .collect::<Result<Vec<_>, _>>()?)
+            })
+            .unwrap()
+    };
+    let before_checksums = checksums_through_v011(&store);
+    assert_eq!(before_checksums.len(), 11);
+    let backup = store
+        .prepare_backup(PrepareBackupRequest {
+            destination_dir: old_config.data_root.join("before-v012"),
+            retention_tier: BackupRetentionTier::Manual,
+            coverage: "db_and_objects".to_owned(),
+        })
+        .unwrap();
+    Arc::try_unwrap(store).unwrap().shutdown().unwrap();
+
+    let mut next_config = old_config.clone();
+    next_config.max_supported_schema_version = 12;
+    let mut interrupted = next_config.clone();
+    interrupted.cutpoints = Arc::new(FailAt {
+        armed: AtomicBool::new(true),
+        point: StoreCutpoint::C11MigrationInProgress,
+    });
+    assert!(matches!(
+        UnleashStore::open_with_migration_backup(interrupted, Some(backup.backup_id)),
+        Err(StoreError::CutpointInjected { .. })
+    ));
+    let rolled_back = UnleashStore::open(old_config).unwrap();
+    assert_eq!(rolled_back.daemon_state().unwrap().schema_version, 11);
+    assert_eq!(checksums_through_v011(&rolled_back), before_checksums);
+    assert_eq!(legacy_rows(&rolled_back), rows_before);
+    assert_eq!(read(&rolled_back, 1201), allocation_before);
+    rolled_back
+        .read_snapshot(|conn, _| {
+            assert!(
+                !conn
+                    .prepare("SELECT 1 FROM sqlite_master WHERE name='terminal_control_intents'")?
+                    .exists([])?
+            );
+            assert!(
+                !conn
+                    .prepare("SELECT 1 FROM schema_migrations WHERE version=12")?
+                    .exists([])?
+            );
+            Ok(())
+        })
+        .unwrap();
+    rolled_back.shutdown().unwrap();
+
+    let upgraded =
+        UnleashStore::open_with_migration_backup(next_config, Some(backup.backup_id)).unwrap();
+    assert_eq!(upgraded.daemon_state().unwrap().schema_version, 12);
+    assert_eq!(checksums_through_v011(&upgraded), before_checksums);
+    assert_eq!(read(&upgraded, 1201), allocation_before);
+    let mut expected_rows = rows_before;
+    expected_rows
+        .get_mut(1)
+        .unwrap()
+        .first_mut()
+        .unwrap()
+        .push(rusqlite::types::Value::Integer(0));
+    assert_eq!(legacy_rows(&upgraded), expected_rows);
+    upgraded
+        .read_snapshot(|conn, _| {
+            let revision: i64 = conn.query_row(
+                "SELECT control_revision FROM terminal_sessions WHERE terminal_id=?1",
+                [terminal.to_string()],
+                |row| row.get(0),
+            )?;
+            assert_eq!(revision, 0);
+            assert!(
+                !conn
+                    .prepare("SELECT 1 FROM terminal_control_intents")?
+                    .exists([])?
+            );
+            assert!(!conn.prepare("PRAGMA foreign_key_check")?.exists([])?);
+            Ok(())
+        })
+        .unwrap();
 }
 
 #[test]
@@ -783,6 +970,242 @@ fn t_f011_001_future_disposition_requires_bound_observation_and_frees_only_activ
         tx.execute("INSERT INTO terminal_sessions(terminal_id,process_id,owner_agent_id,mission_id,purpose_key,rows,cols,lease_id,input_seq,durable_log_seq,state) VALUES(?1,'rebound-unknown-process',NULL,?2,?3,24,80,?4,0,0,'suspect')",rusqlite::params![c.terminal_id.to_string(),c.preparation.mission_id.to_string(),c.preparation.purpose_key,c.lease_id.to_string()])?;Ok(())
     }).unwrap();
     assert!(s.commit_broker_phase(authorizing(&next)).is_err());
+}
+
+// Writer fixtures only: synthetic OS facts exercise atomic correlation, not OS qualification.
+fn launch_observation_fixture(
+    s: &UnleashStore,
+    r: &TerminalAllocationRecord,
+    dispatch_id: DispatchId,
+    captured: i64,
+    received: i64,
+) -> (
+    terminal_allocations::TerminalLaunchObservation,
+    BrokerPhaseRequest,
+) {
+    launch_observation_state_fixture(s, r, dispatch_id, captured, received, true)
+}
+
+fn launch_observation_state_fixture(
+    s: &UnleashStore,
+    r: &TerminalAllocationRecord,
+    dispatch_id: DispatchId,
+    captured: i64,
+    received: i64,
+    exited: bool,
+) -> (
+    terminal_allocations::TerminalLaunchObservation,
+    BrokerPhaseRequest,
+) {
+    launch_observation_with_input_state_fixture(
+        s,
+        r,
+        dispatch_id,
+        captured,
+        received,
+        exited,
+        Some(
+            terminal_allocations::terminal_acquisition_query::TerminalObservedInputState {
+                last_confirmed_input_seq: 0,
+                unknown_input_seqs: vec![],
+            },
+        ),
+    )
+}
+
+fn launch_observation_with_input_state_fixture(
+    s: &UnleashStore,
+    r: &TerminalAllocationRecord,
+    dispatch_id: DispatchId,
+    captured: i64,
+    received: i64,
+    exited: bool,
+    input_state: Option<
+        terminal_allocations::terminal_acquisition_query::TerminalObservedInputState,
+    >,
+) -> (
+    terminal_allocations::TerminalLaunchObservation,
+    BrokerPhaseRequest,
+) {
+    let c = &r.context;
+    let d = s.daemon_state().unwrap();
+    let observation = terminal_allocations::TerminalLaunchObservation {
+        terminal_id: c.terminal_id,
+        action_id: c.action_id,
+        dispatch_id,
+        context_digest: r.context_digest,
+        host_id: c.host_id,
+        process_run_uuid: c.process_run_uuid,
+        pid: 123,
+        pgid: 123,
+        owner_uid: d.owner_uid,
+        boot_identity: d.boot_identity,
+        start_identity: "synthetic-sqlite-start".into(),
+        identity_backend: "macos_proc_pidinfo".into(),
+        manifest_digest: Sha256Digest::from_bytes(b"synthetic manifest"),
+        effective_environment_digest: c.preparation.process_spec.environment.digest,
+        durable_log_seq: 0,
+        input_state,
+        observed_at_ms: unleash_domain::TimestampMs::new(captured),
+        exit_code: exited.then_some(0),
+        exit_signal: None,
+        exited,
+    };
+    let hash = canonical_sha256(&observation).unwrap();
+    let bytes = canonicalize_to_vec(&observation).unwrap();
+    let pin = s
+        .prepare_object(PrepareObjectRequest {
+            object_hash: hash,
+            byte_length: bytes.len() as u64,
+            media_type: "application/json".into(),
+            owner_kind: "terminal_launch_observation".into(),
+            owner_id: c.terminal_id.to_string(),
+        })
+        .unwrap();
+    s.write_prepared_object_bytes(&pin, &bytes).unwrap();
+    s.publish_object_reference(PublishObjectReferenceRequest {
+        pin_id: pin.pin_id,
+        object_hash: hash,
+        object_generation: pin.object_generation,
+        owner_kind: "terminal_launch_observation".into(),
+        owner_id: c.terminal_id.to_string(),
+        source_field: dispatch_id.to_string(),
+    })
+    .unwrap();
+    let original = authorizing(r);
+    let intent_digest = match original.phase {
+        BrokerPhase::Authorizing { intent } => intent.intent_digest,
+        _ => unreachable!(),
+    };
+    let snapshot = s.inspect_broker_action(c.action_id).unwrap().unwrap();
+    let phase = BrokerPhaseRequest {
+        authority_generation: c.authority_generation,
+        expected_revision: snapshot.revision,
+        evaluation: original.evaluation,
+        phase: BrokerPhase::Observation {
+            action_id: c.action_id,
+            intent_digest,
+            receipt: BrokerActionReceipt {
+                action_id: c.action_id,
+                evaluation_id: original.evaluation.evaluation_id,
+                dispatch_id,
+                decision_ref: "synthetic-sqlite-allow".into(),
+                state: unleash_domain::ActionState::ObservedSuccess,
+                output_digest: Some(hash),
+                enforcement_refs: vec![],
+                remote_audit_ref: None,
+                remote_audit_unavailable: false,
+                observed_at_ms: unleash_domain::TimestampMs::new(received),
+            },
+            observation_revision: Revision::new(1),
+            cause: BrokerObservationCause::Execution,
+            reason: None,
+        },
+    };
+    (observation, phase)
+}
+
+#[path = "support/terminal_control_scenarios.rs"]
+mod control_scenarios;
+
+#[test]
+fn t_f011_003_capture_precedes_receipt_and_observation_commit_replays_without_new_rows() {
+    for point in [
+        StoreCutpoint::C1BeforeCommandCommit,
+        StoreCutpoint::C2AfterCommandCommit,
+    ] {
+        let fault = Arc::new(FailAt {
+            armed: AtomicBool::new(false),
+            point,
+        });
+        let (s, _cfg, clock, prep, _dir) = fixture(fault.clone());
+        s.commit_command(request(&s, prep, 1401)).unwrap();
+        let before = read(&s, 1401);
+        clock.set_utc_ms(100);
+        let id = dispatch(&s, &before);
+        s.resolve_terminal_launch(resolution(&before, id)).unwrap();
+        let record = read(&s, 1401);
+        clock.set_utc_ms(105);
+        let (observation, phase) = launch_observation_fixture(&s, &record, id, 101, 103);
+        fault.armed.store(true, Ordering::Release);
+        let cut_result = s.commit_terminal_launch_observation(observation.clone(), phase.clone());
+        assert!(
+            matches!(&cut_result, Err(StoreError::CutpointInjected { .. })),
+            "point={point:?}, result={cut_result:?}"
+        );
+        let committed_before_retry = point == StoreCutpoint::C2AfterCommandCommit;
+        assert_eq!(
+            (counts(&s).2, counts(&s).3),
+            if committed_before_retry {
+                (1, 1)
+            } else {
+                (0, 0)
+            }
+        );
+        let committed = s
+            .commit_terminal_launch_observation(observation.clone(), phase.clone())
+            .unwrap();
+        assert_eq!(committed.replayed, committed_before_retry);
+        let replay = s
+            .commit_terminal_launch_observation(observation, phase.clone())
+            .unwrap();
+        assert!(replay.replayed);
+        assert_eq!(replay.event_cursor, committed.event_cursor);
+        assert_eq!((counts(&s).2, counts(&s).3), (1, 1));
+        let times=s.read_snapshot(|conn,_| {
+            Ok(conn.query_row("SELECT p.last_observed_at_ms,d.ended_at_ms FROM processes p JOIN action_dispatches d ON d.action_id=p.action_id WHERE p.process_id=?1 AND d.dispatch_id=?2",rusqlite::params![record.context.process_id.to_string(),id.to_string()],|row|Ok((row.get::<_,i64>(0)?,row.get::<_,i64>(1)?)))?)
+        }).unwrap();
+        assert_eq!(
+            times,
+            (101, 103),
+            "capture and later broker receipt are distinct durable facts"
+        );
+        let mut forged = phase;
+        if let BrokerPhase::Observation { receipt, .. } = &mut forged.phase {
+            receipt.enforcement_refs.push("unproven-control".into());
+        }
+        assert!(s.commit_broker_phase(forged).is_err());
+        assert!(
+            s.resolve_terminal_launch(resolution(&before, id)).is_err(),
+            "observation replay never reissues launch permit"
+        );
+    }
+}
+
+#[test]
+fn t_f011_003_capture_before_dispatch_or_after_receipt_cannot_publish_process_rows() {
+    for captured in [99, 104] {
+        let (s, _cfg, clock, prep, _dir) = fixture(Arc::new(NoopCutpointObserver));
+        s.commit_command(request(&s, prep, 1501)).unwrap();
+        let before = read(&s, 1501);
+        clock.set_utc_ms(100);
+        let id = dispatch(&s, &before);
+        s.resolve_terminal_launch(resolution(&before, id)).unwrap();
+        let record = read(&s, 1501);
+        clock.set_utc_ms(105);
+        let (observation, phase) = launch_observation_fixture(&s, &record, id, captured, 103);
+        let prior = s
+            .inspect_broker_action(record.context.action_id)
+            .unwrap()
+            .unwrap();
+        let refused = s.commit_terminal_launch_observation(observation, phase);
+        assert!(
+            matches!(refused,Err(StoreError::InvalidArgument {message,..}) if message=="terminal capture timestamp is outside dispatch and receipt")
+        );
+        assert_eq!((counts(&s).2, counts(&s).3), (0, 0));
+        assert_eq!(
+            s.inspect_broker_action(record.context.action_id)
+                .unwrap()
+                .unwrap(),
+            prior,
+            "failed evidence cannot append a phase or advance action"
+        );
+        let (phases,events)=s.read_snapshot(|conn,_| {
+            let action=record.context.action_id.to_string();
+            Ok((conn.query_row("SELECT COUNT(*) FROM broker_phase_records WHERE action_id=?1 AND phase_key LIKE 'observation:%'",[&action],|row|row.get::<_,i64>(0))?,conn.query_row("SELECT COUNT(*) FROM events WHERE aggregate_id=?1 AND event_type='ActionObserved'",[&action],|row|row.get::<_,i64>(0))?))
+        }).unwrap();
+        assert_eq!((phases, events), (0, 0));
+    }
 }
 
 fn publish_disposition_fixture(

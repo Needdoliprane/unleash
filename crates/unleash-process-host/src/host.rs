@@ -49,6 +49,10 @@ pub const HOST_SOCKET_FILENAME: &str = "host.sock";
 /// Préfixe de la ligne émise sur `stdout` une fois le host lié et l'enfant démarré.
 pub const HOST_READY_PREFIX: &str = "UNLEASH_HOST_READY:";
 
+#[cfg(test)]
+#[path = "host_control_tests.rs"]
+mod control_tests;
+
 const IO_CHUNK_BYTES: usize = 8192;
 const SOCKET_IO_TIMEOUT: Duration = Duration::from_secs(15);
 const MAX_CONCURRENT_CONNECTIONS: usize = 16;
@@ -71,6 +75,12 @@ pub struct LostHostReconciliation {
 }
 
 struct ServerShared {
+    // Serializes authentication/fencing with actual PTY effects and rotation.
+    // Socket reads/writes are outside this gate and cannot pin its owner.
+    operation_gate: Mutex<()>,
+    last_transfer: Mutex<Option<ControlTransferAttempt>>,
+    #[cfg(test)]
+    operation_contentions: AtomicU64,
     manifest_path: PathBuf,
     control_secret_path: PathBuf,
     socket_path: PathBuf,
@@ -85,6 +95,13 @@ struct ServerShared {
     inputs: PtyInputTracker,
     shutdown: AtomicBool,
     active_connections: AtomicU64,
+}
+
+struct ControlTransferAttempt {
+    header: HostCommandHeader,
+    dispatch_id: unleash_domain::DispatchId,
+    initial_context_digest: unleash_domain::Sha256Digest,
+    ack: Option<crate::ControlTransferAck>,
 }
 
 /// Instance active d'un `unleash-process-host` prêt à servir les requêtes du daemon.
@@ -139,14 +156,59 @@ impl ProcessHostServer {
         assert_not_under_claude(&canon_cwd)?;
 
         // Fail-closed avant tout spawn : valide et sonde l'isolation OS si mode strict.
-        let prepared = prepare_launch_command(
-            &spec.program,
-            &spec.arguments,
-            &spec.explicit_env,
-            spec.isolation_mode,
-            spec.strict_spec.as_ref(),
-            isolation_probe,
-        )?;
+        let (prepared, effective_environment_digest) = match spec.environment_mode {
+            None => (
+                prepare_launch_command(
+                    &spec.program,
+                    &spec.arguments,
+                    &spec.explicit_env,
+                    spec.isolation_mode,
+                    spec.strict_spec.as_ref(),
+                    isolation_probe,
+                )?,
+                None,
+            ),
+            Some(crate::manifest::EnvironmentMode::ExplicitV1) => {
+                let invalid = || ProcessHostError::InvalidArgument {
+                    reason: "explicit terminal environment is not qualified".into(),
+                };
+                // Strict with an explicit managed TMPDIR requires its own confinement qualification.
+                // Refuse before a probe or child instead of inheriting or weakening the request.
+                if spec.isolation_mode != crate::isolation::IsolationMode::Standard
+                    || !Path::new(&spec.program).is_absolute()
+                    || spec.program.contains('\0')
+                    || spec.arguments.iter().any(|v| v.contains('\0'))
+                    || spec.allocation_context_digest.is_none()
+                    || canon_cwd != spec.cwd
+                {
+                    return Err(invalid());
+                }
+                let runtime = std::fs::canonicalize(&spec.runtime_dir)?;
+                if runtime != spec.runtime_dir {
+                    return Err(invalid());
+                }
+                let child_tmp = runtime.join("child-tmp");
+                let clean_env =
+                    crate::manifest::explicit_environment_v1(&spec.explicit_env, &child_tmp)?;
+                let digest = crate::manifest::effective_environment_digest_v1(&clean_env)?;
+                if spec.expected_effective_environment_digest != Some(digest) {
+                    return Err(invalid());
+                }
+                unleash_platform::ensure_private_rendezvous_dir(&child_tmp)?;
+                unleash_platform::validate_rendezvous_dir(&child_tmp)?;
+                (
+                    crate::isolation::PreparedLaunchCommand {
+                        executable: PathBuf::from(&spec.program),
+                        args: spec.arguments.clone(),
+                        clean_env,
+                        backend_name: "none_standard".into(),
+                        profile_digest: None,
+                        profile_path: None,
+                    },
+                    Some(digest),
+                )
+            }
+        };
 
         let command_digest = spec.compute_command_digest()?;
         let socket_path = spec.runtime_dir.join(HOST_SOCKET_FILENAME);
@@ -170,6 +232,12 @@ impl ProcessHostServer {
             cwd_canonical: canon_cwd.clone(),
             worktree_id: spec.worktree_id,
             command_digest,
+            effective_environment_digest,
+            allocation_context_digest: if spec.environment_mode.is_some() {
+                spec.allocation_context_digest
+            } else {
+                None
+            },
             owner_uid,
             pid: None,
             pgid: None,
@@ -326,6 +394,10 @@ impl ProcessHostServer {
         let listener = bind_private_unix_listener(&socket_path)?;
 
         let shared = Arc::new(ServerShared {
+            operation_gate: Mutex::new(()),
+            last_transfer: Mutex::new(None),
+            #[cfg(test)]
+            operation_contentions: AtomicU64::new(0),
             manifest_path,
             control_secret_path: spec.control_secret_path.clone(),
             socket_path,
@@ -560,6 +632,31 @@ fn handle_connection(mut stream: UnixStream, shared: &Arc<ServerShared>) {
             }
         };
 
+        if let Ok(crate::control_transfer::TransferEnvelope::TransferControlV1(request)) =
+            serde_json::from_slice(&frame)
+        {
+            let response = {
+                let _operation = lock_operation(shared);
+                let response = match process_control_transfer(&request, shared) {
+                    Ok(ack) => crate::ControlTransferResponse::Ack { ack: Box::new(ack) },
+                    Err(error) => crate::ControlTransferResponse::Refused {
+                        error: error.to_ipc_error(Some(request.header.command_id)),
+                    },
+                };
+                if matches!(response, crate::ControlTransferResponse::Ack { .. }) {
+                    bound_auth_gen = shared.auth_generation.load(Ordering::SeqCst);
+                }
+                response
+            };
+            let Ok(payload) = serde_json::to_vec(&response) else {
+                break;
+            };
+            if write_frame(&mut stream, &payload).is_err() {
+                break;
+            }
+            continue;
+        }
+
         let req: HostRequest = match serde_json::from_slice(&frame) {
             Ok(r) => r,
             Err(err) => {
@@ -569,6 +666,8 @@ fn handle_connection(mut stream: UnixStream, shared: &Arc<ServerShared>) {
             }
         };
 
+        let operation = lock_operation(shared);
+        // Recheck channel generation under the same gate as fencing and I/O.
         // Si le secret a tourné après un Handshake de récupération sur une autre connexion,
         // invalider immédiatement toute ancienne connexion ouverte avant toute opération.
         let current_auth_gen = shared.auth_generation.load(Ordering::SeqCst);
@@ -578,6 +677,7 @@ fn handle_connection(mut stream: UnixStream, shared: &Arc<ServerShared>) {
                     "canal obsolète invalidé par rotation de capacité lors d'une reprise",
                 ),
             };
+            drop(operation);
             let _ = send_response(
                 &mut stream,
                 &HostResponse::Error {
@@ -598,10 +698,153 @@ fn handle_connection(mut stream: UnixStream, shared: &Arc<ServerShared>) {
             bound_auth_gen = shared.auth_generation.load(Ordering::SeqCst);
         }
         let is_shutdown = matches!(resp, HostResponse::ShutdownAck);
+        drop(operation);
         if send_response(&mut stream, &resp).is_err() || is_shutdown {
             break;
         }
     }
+}
+
+fn lock_operation(shared: &ServerShared) -> std::sync::MutexGuard<'_, ()> {
+    match shared.operation_gate.try_lock() {
+        Ok(guard) => guard,
+        Err(std::sync::TryLockError::Poisoned(error)) => error.into_inner(),
+        Err(std::sync::TryLockError::WouldBlock) => {
+            #[cfg(test)]
+            shared.operation_contentions.fetch_add(1, Ordering::SeqCst);
+            shared
+                .operation_gate
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+        }
+    }
+}
+
+fn validate_new_transfer(
+    request: &crate::ControlTransferRequest,
+    shared: &ServerShared,
+) -> Result<(), ProcessHostError> {
+    if verify_secret(shared, &request.next_secret).is_ok() {
+        return Err(ProcessHostError::InvalidArgument {
+            reason: "control transfer requires a different capability".into(),
+        });
+    }
+    let _validated_secret = HostControlSecret::new(request.next_secret.clone())?;
+    let manifest = shared
+        .manifest
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if manifest.allocation_context_digest != Some(request.initial_context_digest)
+        || manifest.effective_environment_digest.is_none()
+    {
+        return Err(ProcessHostError::IdentityUnverified {
+            reason: "control transfer launch binding differs".into(),
+        });
+    }
+    drop(manifest);
+    let anchor = shared.anchor.verification_report();
+    if anchor.reaped || !anchor.sigchld_qualified || anchor.identity_status != "match" {
+        return Err(ProcessHostError::IdentityUnverified {
+            reason: "control transfer requires the same live anchored child".into(),
+        });
+    }
+    let mut candidate = *shared
+        .fencing
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if request.header.resource_fence <= candidate.current().fence {
+        return Err(ProcessHostError::StaleEpochOrFence {
+            reason: "control transfer requires a higher resource fence".into(),
+        });
+    }
+    candidate.check_recovery_handshake(&request.header, true)?;
+    Ok(())
+}
+
+fn process_control_transfer(
+    request: &crate::ControlTransferRequest,
+    shared: &ServerShared,
+) -> Result<crate::ControlTransferAck, ProcessHostError> {
+    verify_secret(shared, &request.current_secret)?;
+    {
+        let previous = shared
+            .last_transfer
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(previous) = previous.as_ref() {
+            if previous.header == request.header
+                && previous.dispatch_id == request.dispatch_id
+                && previous.initial_context_digest == request.initial_context_digest
+            {
+                // After an ACK is lost only the currently active capability
+                // can inspect the same transfer; no second rotation occurs.
+                verify_secret(shared, &request.next_secret)?;
+                return previous.ack.clone().ok_or_else(|| {
+                    ProcessHostError::LaunchOutcomeUnknown {
+                        reason: "control transfer requires inspection; no repeat permit".into(),
+                    }
+                });
+            }
+            if previous.ack.is_none() {
+                return Err(ProcessHostError::LaunchOutcomeUnknown {
+                    reason: "a control transfer is unresolved".into(),
+                });
+            }
+        }
+    }
+    validate_new_transfer(request, shared)?;
+    *shared
+        .last_transfer
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(ControlTransferAttempt {
+        header: request.header.clone(),
+        dispatch_id: request.dispatch_id,
+        initial_context_digest: request.initial_context_digest,
+        ack: None,
+    });
+    let response = process_request(
+        HostRequest::Handshake {
+            header: request.header.clone(),
+            current_secret: request.current_secret.clone(),
+            rotate_to_secret: Some(request.next_secret.clone()),
+            require_higher_epoch: true,
+        },
+        shared,
+    );
+    let HostResponse::HandshakeAck {
+        os_identity,
+        effective_environment_digest: Some(effective_environment_digest),
+        allocation_context_digest: Some(initial_context_digest),
+        durable_log_seq,
+        last_confirmed_input_seq,
+        unknown_input_seqs,
+        secret_rotated: true,
+        ..
+    } = response
+    else {
+        return Err(ProcessHostError::LaunchOutcomeUnknown {
+            reason: "control transfer has no complete acknowledgement".into(),
+        });
+    };
+    let ack = crate::ControlTransferAck {
+        header: request.header.clone(),
+        dispatch_id: request.dispatch_id,
+        initial_context_digest,
+        effective_environment_digest,
+        os_identity,
+        durable_log_seq,
+        last_confirmed_input_seq,
+        unknown_input_seqs,
+    };
+    if let Some(attempt) = shared
+        .last_transfer
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .as_mut()
+    {
+        attempt.ack = Some(ack.clone());
+    }
+    Ok(ack)
 }
 
 fn send_response(stream: &mut UnixStream, resp: &HostResponse) -> Result<(), ProcessHostError> {
@@ -674,11 +917,11 @@ fn process_request(req: HostRequest, shared: &ServerShared) -> HostResponse {
                 secret_rotated = true;
             }
 
-            let unknown_input_seqs = shared.inputs.reconcile_in_flight()?;
-            let (last_confirmed_input_seq, _) = shared.inputs.summary();
+            shared.inputs.reconcile_in_flight()?;
+            let (last_confirmed_input_seq, unknown_input_seqs) = shared.inputs.summary();
             let durable_log_seq = shared.spool.snapshot_index().durable_watermark_offset;
 
-            {
+            let (effective_environment_digest, allocation_context_digest) = {
                 let mut mf = shared
                     .manifest
                     .lock()
@@ -689,9 +932,15 @@ fn process_request(req: HostRequest, shared: &ServerShared) -> HostResponse {
                 mf.last_confirmed_input_seq = last_confirmed_input_seq;
                 mf.in_flight_input_seq = unknown_input_seqs.first().copied();
                 mf.save_atomic(&shared.manifest_path)?;
-            }
+                (
+                    mf.effective_environment_digest,
+                    mf.allocation_context_digest,
+                )
+            };
 
             Ok(HostResponse::HandshakeAck {
+                effective_environment_digest,
+                allocation_context_digest,
                 process_run_uuid: header.process_run_uuid,
                 authority_generation: current_fence.authority_generation,
                 daemon_epoch: current_fence.epoch,
@@ -857,8 +1106,8 @@ fn process_request(req: HostRequest, shared: &ServerShared) -> HostResponse {
                         .unwrap_or_else(std::sync::PoisonError::into_inner);
                     fencing.check_and_advance(&header)?;
                 }
-                let unknown_input_seqs = shared.inputs.reconcile_in_flight()?;
-                let (last_confirmed_input_seq, _) = shared.inputs.summary();
+                shared.inputs.reconcile_in_flight()?;
+                let (last_confirmed_input_seq, unknown_input_seqs) = shared.inputs.summary();
                 let durable_log_seq = shared.spool.sync_durable_now()?;
                 let exit_status = shared.anchor.poll_exit(false)?;
                 let anchor_report = shared.anchor.verification_report();
@@ -1033,6 +1282,33 @@ impl std::fmt::Debug for HostClient {
 }
 
 impl HostClient {
+    /// Send a correlated control transfer to an existing host. No legacy fallback exists.
+    /// # Errors
+    /// Refuses mismatched client coordinates, transport failure or an unsupported response.
+    pub fn transfer_control(
+        &mut self,
+        request: &crate::ControlTransferRequest,
+    ) -> Result<crate::ControlTransferResponse, ProcessHostError> {
+        if request.header.process_run_uuid != self.process_run_uuid
+            || request.header.authority_generation != self.authority_generation
+            || request.header.daemon_epoch != self.daemon_epoch
+            || request.header.resource_fence != self.fence
+        {
+            return Err(ProcessHostError::InvalidArgument {
+                reason: "control transfer differs from client coordinates".into(),
+            });
+        }
+        let bytes = serde_json::to_vec(
+            &crate::control_transfer::TransferEnvelope::TransferControlV1(request.clone()),
+        )?;
+        write_frame(&mut self.stream, &bytes)?;
+        let response =
+            read_frame(&mut self.stream)?.ok_or_else(|| ProcessHostError::TerminalUnavailable {
+                reason: "control transfer connection closed".into(),
+            })?;
+        Ok(serde_json::from_slice(&response)?)
+    }
+
     /// Ouvre une connexion Unix privée vers `socket_path` (vérifiant `0700`/`0600` et UID pair).
     ///
     /// # Errors
@@ -1142,10 +1418,10 @@ impl HostCutpointObserver for StdioBarrierCutpointObserver {
         if cutpoint == self.target {
             let line = format!("UNLEASH_CRASH_REACHED:{}\n", self.label);
             let mut out = std::io::stdout();
-            let _ = out.write_all(line.as_bytes());
-            let _ = out.flush();
+            out.write_all(line.as_bytes())?;
+            out.flush()?;
             let mut buf = [0_u8; 1];
-            let _ = std::io::stdin().read(&mut buf);
+            std::io::stdin().read_exact(&mut buf)?;
         }
         Ok(())
     }

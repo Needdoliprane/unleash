@@ -38,6 +38,7 @@
 #![warn(missing_docs)]
 
 pub mod anchor;
+mod control_transfer;
 pub mod error;
 pub mod fencing;
 pub mod host;
@@ -52,6 +53,7 @@ pub use anchor::{
     OwnedChildHandle, ProcessInspector, SigchldQualification, StopObservation,
     configure_setsid_pre_exec, ensure_sigchld_qualified, inspect_sigchld_disposition,
 };
+pub use control_transfer::{ControlTransferAck, ControlTransferRequest, ControlTransferResponse};
 pub use error::ProcessHostError;
 pub use fencing::{FencingGate, HostCommandHeader};
 pub use host::{
@@ -65,8 +67,9 @@ pub use isolation::{
     render_macos_seatbelt_profile,
 };
 pub use manifest::{
-    CANARY_SECRETS_FILENAME, CONTROL_SECRET_FILENAME, HOST_MANIFEST_FILENAME, HostBootstrapSpec,
-    HostControlSecret, HostLaunchState, HostManifest, ResourceKind, load_canary_secrets,
+    CANARY_SECRETS_FILENAME, CONTROL_SECRET_FILENAME, EnvironmentMode, HOST_MANIFEST_FILENAME,
+    HostBootstrapSpec, HostControlSecret, HostLaunchState, HostManifest, ResourceKind,
+    effective_environment_digest_v1, explicit_environment_v1, load_canary_secrets,
     load_control_secret, store_canary_secrets, store_control_secret,
 };
 pub use protocol::{HostRequest, HostResponse};
