@@ -478,8 +478,8 @@ pub(crate) fn tx_publish_object_reference(
 
     tx.execute(
         "UPDATE object_pins SET state = 'released', released_at_ms = ?1
-         WHERE pin_id = ?2
-            OR (pin_kind = 'preparation' AND object_hash = ?3 AND object_generation = ?4 AND state IN ('held', 'reconciling'))",
+         WHERE pin_id = ?2 AND object_hash = ?3 AND object_generation = ?4
+           AND state IN ('held', 'reconciling')",
         rusqlite::params![now_ms.as_i64(), req.pin_id, hash_str, req.object_generation],
     )
     .map_err(StoreError::from_rusqlite)?;

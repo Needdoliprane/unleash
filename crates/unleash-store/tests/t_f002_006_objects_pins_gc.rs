@@ -120,12 +120,31 @@ fn test_t_f002_006_c10_a_b_c_d_pins_exclusive_deletion_and_recreation() {
         payload_bytes
     );
 
-    // 2. C10b ordre 1 (vrai multi-thread sous barrière) :
-    // GC présélectionne H et se suspend sur C10b avant tx_prepare_object_deletion ;
-    // producteur concurrent acquiert un read pin puis republie pendant que GC attend -> GC échoue.
+    // La nouvelle publication ne neutralise pas le producteur C10a précédent.
+    // Retirer la référence prévue pour le test GC ne suffit pas à lever son pin.
     store2
         .tombstone_object_references(hash_h, "candidate_before_c10b")
         .unwrap();
+    let orphan_pin: String = store2.read_snapshot(|conn,_| {
+        Ok(conn.query_row("SELECT pin_id FROM object_pins WHERE object_hash=?1 AND object_generation=1 AND owner_kind='evidence' AND owner_id='ev-1' AND pin_kind='preparation' AND state='reconciling'",[hash_h.to_string()],|row|row.get(0))?)
+    }).unwrap();
+    assert!(matches!(
+        store2.prepare_object_deletion(PrepareObjectDeletionRequest {
+            object_hash: hash_h,
+            expected_generation: 1,
+            reason: "old_producer_still_protected".to_owned(),
+            decision_receipt_id: None
+        }),
+        Err(StoreError::ObjectPinned { .. })
+    ));
+    // Fixture attestée : l'appel synchrone a rendu Err en C10a AVANT toute I/O
+    // physique et ce banc n'a aucun ancien thread producteur encore en vol.
+    // Ceci n'est pas une qualification de récupération automatique en produit.
+    store2.release_pin(&orphan_pin).unwrap();
+
+    // 2. C10b ordre 1 (vrai multi-thread sous barrière) :
+    // GC présélectionne H et se suspend sur C10b avant tx_prepare_object_deletion ;
+    // producteur concurrent acquiert un read pin puis republie pendant que GC attend -> GC échoue.
     let b_gc_lose = ctrl.arm_barrier(Cutpoint::C10b, Duration::from_secs(10));
     let s_gc1 = Arc::clone(&store2);
     let t_gc1 = std::thread::spawn(move || {
