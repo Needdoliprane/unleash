@@ -25,6 +25,9 @@ use unleash_store::{CutpointObserver, StoreCutpoint, StoreError};
 use unleash_testkit::{Cutpoint, CutpointBarrier, CutpointController, local_test_dir};
 use uuid::Uuid;
 
+#[path = "support/provider_probe_connect_observation_scenarios.rs"]
+mod observation_scenarios;
+
 struct ConnectFixture {
     _rendezvous: tempfile::TempDir,
     data: tempfile::TempDir,
@@ -591,11 +594,11 @@ WHERE a.state='observed_success'
 #[tokio::test]
 async fn t_f012_013_connect_active_mandate_uses_durable_dispatch_once() {
     let pause = DispatchPause::new();
+    let (fixture, mut admin) = ConnectFixture::start_with_cutpoints(Some(pause.clone())).await;
     let mut dispatch_guard = DispatchGuard {
         barrier: Arc::clone(&pause.barrier),
         armed: true,
     };
-    let (fixture, mut admin) = ConnectFixture::start_with_cutpoints(Some(pause.clone())).await;
     let profile = Uuid::from_u128(0xf012_c101);
     let configured = fixture.configure(&mut admin, profile).await;
     let mandate = fixture
