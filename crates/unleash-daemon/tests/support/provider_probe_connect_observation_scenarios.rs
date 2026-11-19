@@ -555,6 +555,7 @@ async fn t_f012_013_connect_adoption_ack_loss_keeps_alias_capacity_unknown() {
         first_request.aggregate_id,
         second_request.aggregate_id,
     );
+    super::connect_trace::wait_for_capacity_blocked(second_request.aggregate_id).await;
     drop(events);
     fixture
         .handle
@@ -629,6 +630,7 @@ async fn assert_unknown_after_restart(
         &mut recovery_events,
     )
     .await;
+    super::connect_trace::wait_for_capacity_blocked(fresh_request.aggregate_id).await;
     assert_alias_retained(
         &fixture,
         first_request.aggregate_id,

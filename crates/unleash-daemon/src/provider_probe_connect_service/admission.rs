@@ -87,7 +87,14 @@ impl ConnectJournal {
                             // The unresolved-server bound is inside the same V008
                             // transaction. Wait for a durable change, never dispatch
                             // or synthesize another capacity reservation.
-                            Err(StoreError::CapacityBlocked(_)) => return Ok(None),
+                            Err(StoreError::CapacityBlocked(_)) => {
+                                tracing::debug!(
+                                    stage = "v008_capacity_blocked",
+                                    probe_id = %claim.context().probe_id,
+                                    "Connect awaits existing capacity"
+                                );
+                                return Ok(None);
+                            }
                             Err(error) => return Err(error),
                         };
                     if let AdmissionOutcome::Admitted(commit) = &outcome {
