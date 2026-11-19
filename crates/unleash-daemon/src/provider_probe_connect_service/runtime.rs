@@ -81,19 +81,26 @@ async fn run(
             c.profile_version,
             c.configuration_digest,
         )
-        .map_err(|_| ())?,
+        .map_err(|_| failed("profile_reference"))?,
         c.limits.timeout_ms(),
     )
-    .map_err(|_| ())?;
-    if frozen.payload_digest().map_err(|_| ())? != c.request_digest {
-        return Err(());
+    .map_err(|error| {
+        tracing::warn!(stage="frozen_request", code=?error,"Connect preparation refused");
+        ()
+    })?;
+    if frozen
+        .payload_digest()
+        .map_err(|_| failed("frozen_digest"))?
+        != c.request_digest
+    {
+        return Err(failed("request_digest_binding"));
     }
     let store = Arc::clone(&state.store);
     let project = c.project_id;
     let policy = tokio::task::spawn_blocking(move || store.read_policy_summary_snapshot(project))
         .await
-        .map_err(|_| ())?
-        .map_err(|_| ())?
+        .map_err(|_| failed("policy_reader_task"))?
+        .map_err(|error| {tracing::warn!(stage="policy_reader",code=%error.error_code(),reason=?error.reason_code(),"Connect preparation refused");()})?
         .value;
     if policy.effective_isolation_mode != unleash_store::PolicyIsolationMode::Standard
         || policy
@@ -101,7 +108,7 @@ async fn run(
             .as_ref()
             .is_some_and(|guard| guard.guard_mode != unleash_store::GuardPolicyMode::BrokerOnly)
     {
-        return Err(());
+        return Err(failed("policy_executor_profile"));
     }
     let authority = compute_effective_authority(
         c.project_id,
@@ -136,7 +143,7 @@ async fn run(
             c.principal_id.clone(),
             format!("receipt:{}", c.receipt_id),
         )
-        .map_err(|_| ())?,
+        .map_err(|_| failed("subject"))?,
         project_id: c.project_id,
         verb: connect_transport::CONNECT_VERB.into(),
         resource_refs: vec![NormalizedResourceRef::NetworkEndpoint {
@@ -182,10 +189,10 @@ async fn run(
     let decision = match broker
         .authorize_action(intent, &authority)
         .await
-        .map_err(|_| ())?
+        .map_err(|error| {tracing::warn!(stage="authorization",code=%error.error_code(),reason=?error.reason_code(),"Connect authorization refused");()})?
     {
         AuthorizationOutcome::Authorized(decision) => decision,
-        AuthorizationOutcome::ApprovalRequired { .. } => return Err(()),
+        AuthorizationOutcome::ApprovalRequired { .. } => return Err(failed("human_approval_required")),
     };
     let observation = Arc::new(super::observation::ObservationAdapter {
         store: Arc::clone(&state.store),
@@ -214,4 +221,8 @@ async fn run(
     .map_err(|_| ())?;
     result.receipt.map_err(|_| ())?;
     Ok(())
+}
+
+fn failed(stage: &'static str) {
+    tracing::warn!(stage, "Connect preparation refused");
 }

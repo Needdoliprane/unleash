@@ -28,6 +28,9 @@ use uuid::Uuid;
 #[path = "support/provider_probe_connect_observation_scenarios.rs"]
 mod observation_scenarios;
 
+#[path = "support/provider_probe_connect_trace.rs"]
+mod connect_trace;
+
 struct ConnectFixture {
     _rendezvous: tempfile::TempDir,
     data: tempfile::TempDir,
@@ -96,6 +99,7 @@ impl ConnectFixture {
     async fn start_with_cutpoints(
         cutpoints: Option<Arc<dyn CutpointObserver>>,
     ) -> (Self, UnleashClient) {
+        connect_trace::install();
         use std::os::unix::fs::PermissionsExt;
         let rendezvous = local_test_dir("f012-connect-rdv").unwrap();
         std::fs::set_permissions(rendezvous.path(), std::fs::Permissions::from_mode(0o700))

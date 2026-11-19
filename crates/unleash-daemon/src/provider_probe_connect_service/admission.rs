@@ -220,7 +220,16 @@ impl BrokerJournalPort for ConnectJournal {
     ) -> BoxFuture<'a, Result<(), BrokerJournalError>> {
         Box::pin(async move {
             let state = self.runtime.upgrade().ok_or(BrokerJournalError)?;
-            let (evaluation, intent, phase) = project(entry)?;
+            let (evaluation, intent, phase) = project(entry).map_err(|error| {
+                tracing::warn!(stage = "broker_projection", "Connect journal refused");
+                error
+            })?;
+            let phase_name = match &phase {
+                unleash_store::BrokerPhase::Authorizing { .. } => "authorizing",
+                unleash_store::BrokerPhase::Authorization { .. } => "authorization",
+                unleash_store::BrokerPhase::Dispatch { .. } => "dispatch",
+                unleash_store::BrokerPhase::Observation { .. } => "observation",
+            };
             if intent.action_id != self.claim.context().action_id {
                 return Err(BrokerJournalError);
             }
@@ -288,12 +297,34 @@ impl BrokerJournalPort for ConnectJournal {
                 .await;
             }
             result
-                .map_err(|_| BrokerJournalError)?
-                .map_err(|_| BrokerJournalError)?;
+                .map_err(|_| {tracing::warn!(phase=phase_name,stage="phase_writer_task","Connect journal refused");BrokerJournalError})?
+                .map_err(|error| {tracing::warn!(phase=phase_name,stage="phase_writer",code=%error.error_code(),reason=?error.reason_code(),refusal=closed_refusal(&error),"Connect journal refused");BrokerJournalError})?;
             if authorizing {
-                self.await_admission(&state).await?;
+                self.await_admission(&state).await.map_err(|error| {
+                    tracing::warn!(stage = "v008_gate", "Connect journal refused");
+                    error
+                })?;
             }
             Ok(())
         })
+    }
+}
+
+// Diagnostic classification only. Never emit a raw writer/provider error message
+// or use this label to make an authority/transition decision.
+fn closed_refusal(error: &StoreError) -> &'static str {
+    let StoreError::InvalidArgument { message, .. } = error else {
+        return "typed_writer_error";
+    };
+    match message.as_str() {
+        "manifeste broker ou digest invalide" => "manifest_shape_or_digest",
+        "autorité broker divergente du manifeste" => "manifest_authority",
+        "principal broker divergent" => "manifest_principal",
+        "cause durable broker absente ou non attribuée" => "receipt_cause",
+        "intention connect divergente du contexte authentique" => "connect_intent_binding",
+        "préparation connect périmée ou divergente" => "connect_preparation_binding",
+        "révision du scope broker périmée" => "scope_revision",
+        "identité connect incohérente" => "connect_identity",
+        _ => "unclassified_invalid_argument",
     }
 }
