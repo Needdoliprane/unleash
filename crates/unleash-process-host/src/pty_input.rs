@@ -16,7 +16,7 @@ use unleash_platform::{
 
 use crate::error::ProcessHostError;
 
-/// Points de coupure observables lors du traitement d'une entrée PTY numérotée.
+/// Native effect/acknowledgement cutpoints; historical input points are unchanged.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum HostInputCutpoint {
     /// Avant d'écrire le marqueur durable `WriteDispatched` (`C3`).
@@ -25,6 +25,9 @@ pub enum HostInputCutpoint {
     C4AfterDispatchedBeforePtyWrite,
     /// Après l'écriture effective au maître PTY et avant la persistance du reçu durable (`C5`).
     C5AfterPtyWriteBeforeReceipt,
+    /// Handshake state and manifest are published, before sending its ACK.
+    /// The operation gate has been released; EOF closes this response only.
+    HandshakeAppliedBeforeAck,
 }
 
 /// Observateur injectable des points de coupure d'entrée PTY (sans dépendance testkit en production).
@@ -426,6 +429,8 @@ mod tests {
                 HostInputCutpoint::C3BeforeWriteDispatched => Cutpoint::C3,
                 HostInputCutpoint::C4AfterDispatchedBeforePtyWrite => Cutpoint::C4,
                 HostInputCutpoint::C5AfterPtyWriteBeforeReceipt => Cutpoint::C5,
+                // Input tests keep their existing C3/C4/C5 counters and scope.
+                HostInputCutpoint::HandshakeAppliedBeforeAck => return Ok(()),
             };
             self.0
                 .hit(mapped)

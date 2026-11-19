@@ -35,6 +35,45 @@ struct FixtureDaemon {
 }
 
 impl FixtureDaemon {
+    fn spawn_driver(
+        entry: &str,
+        data: &Path,
+        variables: &[(&str, &Path)],
+        ready_prefix: &'static str,
+    ) -> Self {
+        let mut command = Command::new(std::env::current_exe().unwrap());
+        command
+            .args(["--ignored", "--exact", entry, "--nocapture"])
+            .env_clear()
+            .env("HOME", std::env::var_os("HOME").unwrap())
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit());
+        for (key, value) in variables {
+            command.env(key, value);
+        }
+        let mut child = command.spawn().unwrap();
+        let stdout = child.stdout.take().unwrap();
+        let (sender, ready) = mpsc::sync_channel(1);
+        std::thread::spawn(move || {
+            let mut sender = Some(sender);
+            for line in BufReader::new(stdout).lines() {
+                let line = line.unwrap();
+                if let Some((_, json)) = line.split_once(ready_prefix)
+                    && let Some(sender) = sender.take()
+                {
+                    let _ = sender.send(Ok(json.to_owned()));
+                }
+            }
+        });
+        Self {
+            child,
+            ready,
+            data_root: data.to_path_buf(),
+            cleanup_hosts: true,
+        }
+    }
+
     fn spawn(data: &Path, rendezvous: &Path) -> Self {
         let mut child = Command::new(env!("CARGO_BIN_EXE_unleashd"))
             .args(["--data-root"])

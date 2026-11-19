@@ -115,38 +115,17 @@ async fn terminal_c5_daemon_fixture() {
 
 impl FixtureDaemon {
     fn spawn_c5(data: &Path, rendezvous: &Path, marker: &Path, notify: &Path) -> Self {
-        let mut child = Command::new(std::env::current_exe().unwrap())
-            .args(["--ignored", "--exact", FIXTURE_ENTRY, "--nocapture"])
-            .env_clear()
-            .env("HOME", std::env::var_os("HOME").unwrap())
-            .env(ENV_DATA, data)
-            .env(ENV_RENDEZVOUS, rendezvous)
-            .env(ENV_MARKER, marker)
-            .env(ENV_NOTIFY, notify)
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::inherit())
-            .spawn()
-            .unwrap();
-        let stdout = child.stdout.take().unwrap();
-        let (sender, ready) = mpsc::sync_channel(1);
-        std::thread::spawn(move || {
-            let mut sender = Some(sender);
-            for line in BufReader::new(stdout).lines() {
-                let line = line.unwrap();
-                if let Some((_, json)) = line.split_once(READY_PREFIX)
-                    && let Some(sender) = sender.take()
-                {
-                    let _ = sender.send(Ok(json.to_owned()));
-                }
-            }
-        });
-        Self {
-            child,
-            ready,
-            data_root: data.to_path_buf(),
-            cleanup_hosts: true,
-        }
+        Self::spawn_driver(
+            FIXTURE_ENTRY,
+            data,
+            &[
+                (ENV_DATA, data),
+                (ENV_RENDEZVOUS, rendezvous),
+                (ENV_MARKER, marker),
+                (ENV_NOTIFY, notify),
+            ],
+            READY_PREFIX,
+        )
     }
 }
 

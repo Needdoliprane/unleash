@@ -184,6 +184,9 @@ pub enum StoreCutpoint {
     C0BeforeCommandTx,
     /// Dans la transaction de commande, juste avant `COMMIT` (`C1`).
     C1BeforeCommandCommit,
+    /// Native renewal proof validated, before the final clock/authority checks
+    /// and lease activation in its observation transaction.
+    C1BeforeTerminalRenewalObservationCommit,
     /// Juste après `COMMIT` de commande, avant retour au client (`C2`).
     C2AfterCommandCommit,
     /// Intention broker engagée, avant Guard ou tout marqueur de dispatch (`C3`).

@@ -11,6 +11,472 @@ mod cli_scenarios;
 #[path = "terminal_log_rotation_scenarios.rs"]
 mod log_rotation_scenarios;
 
+#[path = "terminal_renewal_fixture.rs"]
+mod renewal_fixture;
+
+#[path = "terminal_renewal_recovery_fixture.rs"]
+mod renewal_recovery_fixture;
+
+mod renewal_scenarios {
+    use super::*;
+
+    #[derive(Debug, PartialEq, Eq)]
+    pub(super) struct RenewalSnapshot {
+        lease_id: String,
+        expires_at: i64,
+        fence: i64,
+        revision: i64,
+        epoch: i64,
+        actions: i64,
+        dispatches: i64,
+        proofs: i64,
+        proof_sequence: i64,
+        terminal_leases: i64,
+    }
+
+    fn utc_ms() -> i64 {
+        i64::try_from(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis(),
+        )
+        .unwrap()
+    }
+
+    async fn cross_utc_boundary(target: i64, expiry: i64) {
+        assert!(
+            target < expiry,
+            "the clock boundary must leave the held lease valid"
+        );
+        let safety = Instant::now() + DEADLINE;
+        while utc_ms() < target {
+            assert!(
+                Instant::now() < safety,
+                "real UTC did not cross the explicit boundary"
+            );
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+        assert!(
+            utc_ms() < expiry,
+            "the positive renewal must not cross expiry"
+        );
+    }
+
+    async fn ttl(fixture: &mut LiveFixture) -> i64 {
+        let settings = fixture
+            .client
+            .query(&QueryEnvelope {
+                protocol_version: ProtocolVersion,
+                request_id: RequestId::from_u128(0xf011_7001),
+                query_type: "ReadSettings".into(),
+                project_id: None,
+                payload: object(json!({"scope_kind":"user","scope_id":"default"})),
+            })
+            .await
+            .unwrap();
+        settings
+            .result
+            .pointer("/extra_typed/terminal_runtime/lease_ttl_ms")
+            .and_then(Value::as_i64)
+            .unwrap()
+    }
+
+    async fn result(
+        fixture: &mut LiveFixture,
+        receipt: &unleash_protocol::CommandReceipt,
+    ) -> Value {
+        let reply = fixture
+            .client
+            .query(&QueryEnvelope {
+                protocol_version: ProtocolVersion,
+                request_id: RequestId::from_u128(0xf011_7002),
+                query_type: "GetCommandReceipt".into(),
+                project_id: Some(fixture.project),
+                payload: object(json!({"command_id":receipt.command_id,
+                "result_ref":receipt.result_ref.as_ref().unwrap()})),
+            })
+            .await
+            .unwrap();
+        let cursor: unleash_protocol::EventCursor =
+            serde_json::from_value(reply.result.get("cursor").unwrap().clone()).unwrap();
+        let watermark = reply.watermark.unwrap();
+        assert_eq!(watermark.stream_id, cursor.stream_id);
+        assert!(watermark.sequence >= cursor.sequence);
+        reply.result
+    }
+
+    async fn durable_log(fixture: &mut LiveFixture, mut page: Value) -> Value {
+        let safety = Instant::now() + DEADLINE;
+        loop {
+            let log: unleash_process_host::LogReadResult =
+                serde_json::from_value(page.get("log").unwrap().clone()).unwrap();
+            if log.durable_watermark_offset > 0 {
+                return page;
+            }
+            assert!(
+                Instant::now() < safety,
+                "initial PTY output must really be durable"
+            );
+            page = fixture
+                .client
+                .query(&QueryEnvelope {
+                    protocol_version: ProtocolVersion,
+                    request_id: RequestId::from_u128(0xf011_7005),
+                    query_type: "ReadTerminalLog".into(),
+                    project_id: Some(fixture.project),
+                    payload: object(json!({"terminal_id":page.get("terminal_id").unwrap(),
+                    "after_offset":0,"max_bytes":65536})),
+                })
+                .await
+                .unwrap()
+                .result;
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    }
+
+    fn snapshot(
+        fixture: &LiveFixture,
+        receipt: &unleash_protocol::CommandReceipt,
+    ) -> RenewalSnapshot {
+        let conn = rusqlite::Connection::open_with_flags(
+            fixture.data.path().join("unleash-authority.db"),
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .unwrap();
+        // One SQL statement observes the lease and its exact durable cause in
+        // the same snapshot. It never manufactures a native observation.
+        conn.query_row(
+            "WITH renewal AS (
+                SELECT a.action_id FROM broker_intents i JOIN actions a ON a.action_id=i.action_id
+                WHERE json_extract(i.intent_json,'$.cause.receipt_id')=?2 AND a.project_id=?3
+             ), proof AS (
+                SELECT DISTINCT p.event_sequence FROM renewal x JOIN actions a ON a.action_id=x.action_id
+                JOIN broker_phase_records p ON p.action_id=a.action_id AND p.phase_key LIKE 'observation:%'
+                JOIN object_references r ON r.owner_id=a.action_id
+                  AND r.source_field=json_extract(p.phase_json,'$.phase.receipt.dispatch_id')
+                  AND r.object_hash=json_extract(p.phase_json,'$.phase.receipt.output_digest') AND r.state='live'
+                JOIN object_records o ON o.object_hash=r.object_hash AND o.state='live'
+                WHERE a.state='observed_success'
+             ) SELECT l.lease_id,l.expires_at_ms,l.fence,s.control_revision,l.daemon_epoch,
+                (SELECT COUNT(*) FROM renewal),
+                (SELECT COUNT(*) FROM action_dispatches d JOIN renewal x ON x.action_id=d.action_id),
+                (SELECT COUNT(*) FROM proof),(SELECT COALESCE(MAX(event_sequence),0) FROM proof),
+                (SELECT COUNT(*) FROM resource_leases WHERE resource_kind='terminal')
+             FROM terminal_sessions s JOIN resource_leases l ON l.lease_id=s.lease_id
+             WHERE s.terminal_id=?1",
+            rusqlite::params![receipt.aggregate_id.to_string(),receipt.receipt_id.to_string(),fixture.project.to_string()],
+            |row| Ok(RenewalSnapshot {lease_id:row.get(0)?,expires_at:row.get(1)?,fence:row.get(2)?,
+                revision:row.get(3)?,epoch:row.get(4)?,actions:row.get(5)?,dispatches:row.get(6)?,
+                proofs:row.get(7)?,proof_sequence:row.get(8)?,terminal_leases:row.get(9)?}),
+        ).unwrap()
+    }
+
+    async fn wait_observed(
+        fixture: &LiveFixture,
+        receipt: &unleash_protocol::CommandReceipt,
+        previous_expiry: i64,
+    ) -> RenewalSnapshot {
+        let safety = Instant::now() + DEADLINE;
+        loop {
+            let state = snapshot(fixture, receipt);
+            if state.expires_at != previous_expiry {
+                assert_eq!(
+                    (state.actions, state.dispatches, state.proofs),
+                    (1, 1, 1),
+                    "a changed deadline requires the same receipt's dispatch and published native proof"
+                );
+                assert!(state.expires_at > previous_expiry);
+                return state;
+            }
+            assert!(
+                Instant::now() < safety,
+                "registered acquisition did not renew after observation"
+            );
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    }
+
+    fn same_controller(before: &Value, after: &Value) {
+        for field in [
+            "terminal_id",
+            "process_id",
+            "process_run_uuid",
+            "lease_id",
+            "fence",
+            "control_revision",
+            "daemon_epoch",
+            "input_seq",
+        ] {
+            assert_eq!(
+                after.get(field).unwrap(),
+                before.get(field).unwrap(),
+                "renewal preserves {field}"
+            );
+        }
+    }
+
+    fn same_native(
+        before: &unleash_process_host::HostManifest,
+        after: &unleash_process_host::HostManifest,
+    ) {
+        assert_eq!(
+            (
+                &after.host_id,
+                &after.process_id,
+                &after.process_run_uuid,
+                &after.pid,
+                &after.pgid,
+                &after.owner_uid,
+                &after.boot_identity,
+                &after.start_identity,
+                &after.identity_backend,
+                &after.socket_path
+            ),
+            (
+                &before.host_id,
+                &before.process_id,
+                &before.process_run_uuid,
+                &before.pid,
+                &before.pgid,
+                &before.owner_uid,
+                &before.boot_identity,
+                &before.start_identity,
+                &before.identity_backend,
+                &before.socket_path
+            )
+        );
+        assert_eq!(after.daemon_epoch, before.daemon_epoch);
+        assert_eq!(after.highest_fence, before.highest_fence);
+    }
+
+    fn assert_known_deadline(
+        before: &Value,
+        after: &Value,
+        state: &RenewalSnapshot,
+        sent_at: i64,
+        completed_at: i64,
+        ttl: i64,
+    ) {
+        assert!(state.expires_at >= sent_at.checked_add(ttl).unwrap());
+        assert!(state.expires_at <= completed_at.checked_add(ttl).unwrap());
+        same_controller(before, after);
+        assert_eq!(after.get("reused"), Some(&json!(true)));
+        assert_eq!(
+            after.get("lease_expires_at"),
+            Some(&json!(state.expires_at))
+        );
+        assert_eq!(
+            after.pointer("/cursor/sequence").and_then(Value::as_i64),
+            Some(state.proof_sequence)
+        );
+        assert_eq!(state.terminal_leases, 1);
+    }
+
+    async fn exact_replay(
+        fixture: &mut LiveFixture,
+        request: &CommandEnvelope,
+        receipt: &unleash_protocol::CommandReceipt,
+        committed: &RenewalSnapshot,
+        after: &Value,
+    ) {
+        cross_utc_boundary(utc_ms().checked_add(100).unwrap(), committed.expires_at).await;
+        assert_eq!(
+            fixture.client.send_command(request).await.unwrap(),
+            *receipt,
+            "exact replay returns the original receipt after UTC has advanced"
+        );
+        assert_eq!(
+            snapshot(fixture, receipt),
+            *committed,
+            "replay never extends or appends another action/proof"
+        );
+        assert_eq!(result(fixture, receipt).await, *after);
+    }
+
+    async fn stop_and_check_quiescent_replay(
+        fixture: &mut LiveFixture,
+        receipt: &unleash_protocol::CommandReceipt,
+        committed: &RenewalSnapshot,
+    ) {
+        let revision = fixture
+            .snapshot()
+            .await
+            .pointer("/daemon/revision")
+            .and_then(Value::as_u64)
+            .unwrap();
+        let stop = CommandEnvelope {
+            protocol_version: ProtocolVersion,
+            request_id: RequestId::from_u128(0xf011_7006),
+            command_id: CommandId::from_u128(0xf011_7006),
+            authority_generation: fixture.authority,
+            actor_ref: None,
+            project_id: None,
+            aggregate_id: fixture.authority.as_uuid(),
+            expected_revision: Revision::new(revision),
+            command_type: "StopDaemon".into(),
+            payload: object(json!({"reason":"renewal replay drain","drain_timeout_ms":10000})),
+        };
+        assert_eq!(
+            fixture.client.send_command(&stop).await.unwrap().state,
+            ReceiptState::Accepted
+        );
+        let deadline = Instant::now() + DEADLINE;
+        loop {
+            if let Some(status) = fixture.daemon.child.try_wait().unwrap() {
+                assert!(status.success(), "the daemon must finish the actual drain");
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "drain did not close the writer and broker tasks"
+            );
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+        // The default drain changes daemon mode, not resource lease deadlines.
+        // Reaping the owner closes its writer and broker tasks before this read.
+        assert_eq!(
+            snapshot(fixture, receipt),
+            *committed,
+            "no deferred replay task may extend or publish after the immediate checks"
+        );
+        assert_single_launch_without_input(fixture);
+    }
+
+    fn assert_single_launch_without_input(fixture: &LiveFixture) {
+        assert_eq!(
+            std::fs::read(fixture.project_root.path().join("worker-starts")).unwrap(),
+            b"started\n"
+        );
+        assert!(
+            !fixture.project_root.path().join("worker-effects").exists(),
+            "renewal never sends input, including after draining deferred tasks"
+        );
+    }
+
+    #[tokio::test]
+    async fn t_f011_registered_acquisition_same_daemon_renews_once_after_proof() {
+        let mut fixture = LiveFixture::new(true).await;
+        exercise(&mut fixture, None).await;
+    }
+
+    async fn assert_passive_read_keeps_deadline(
+        fixture: &mut LiveFixture,
+        allocation: &unleash_protocol::CommandReceipt,
+        before: &Value,
+        before_expiry: i64,
+    ) {
+        let log_after_boundary = fixture
+            .client
+            .query(&QueryEnvelope {
+                protocol_version: ProtocolVersion,
+                request_id: RequestId::from_u128(0xf011_7007),
+                query_type: "ReadTerminalLog".into(),
+                project_id: Some(fixture.project),
+                payload: object(json!({"terminal_id":before.get("terminal_id").unwrap(),
+                "after_offset":0,"max_bytes":65536})),
+            })
+            .await
+            .unwrap();
+        assert!(
+            log_after_boundary.result.get("log").is_some(),
+            "the post-boundary passive operation must be a real host log read"
+        );
+        assert_eq!(
+            result(fixture, allocation).await.get("lease_expires_at"),
+            Some(&json!(before_expiry)),
+            "output and causal reads never renew a lease"
+        );
+    }
+
+    pub(super) async fn exercise(
+        fixture: &mut LiveFixture,
+        barrier: Option<&tokio::net::UnixListener>,
+    ) {
+        let initial_log = fixture.start_terminal().await;
+        let original_log = durable_log(fixture, initial_log).await;
+        let allocation = fixture
+            .client
+            .get_command_receipt(
+                RequestId::from_u128(0xf011_7003),
+                CommandId::from_u128(0xf011_4105),
+            )
+            .await
+            .unwrap()
+            .receipt;
+        let before = result(fixture, &allocation).await;
+        let before_native = fixture.host_manifest();
+        let daemon_pid = fixture.daemon.child.id();
+        let before_expiry = before
+            .get("lease_expires_at")
+            .and_then(Value::as_i64)
+            .unwrap();
+        let ttl = ttl(fixture).await;
+        let anchor = before_expiry.checked_sub(ttl).unwrap();
+        cross_utc_boundary(
+            utc_ms().max(anchor).checked_add(100).unwrap(),
+            before_expiry,
+        )
+        .await;
+        assert_passive_read_keeps_deadline(fixture, &allocation, &before, before_expiry).await;
+        let request = command(
+            fixture.authority,
+            0xf011_7004,
+            fixture.project,
+            allocation.aggregate_id,
+            before
+                .get("control_revision")
+                .and_then(Value::as_u64)
+                .unwrap(),
+            "AcquireTerminal",
+            json!({"terminal_id":before.get("terminal_id").unwrap(),
+                "process_run_uuid":before.get("process_run_uuid").unwrap(),
+                "scope_revision":2,"control_mode":"exclusive"}),
+        );
+        let sent_at = utc_ms();
+        let accepted = fixture
+            .client
+            .send_command(&request)
+            .await
+            .expect("the same authenticated holder must be able to renew in the same daemon");
+        assert_eq!(accepted.state, ReceiptState::Accepted);
+        if let Some(barrier) = barrier {
+            let mut blocked = renewal_fixture::wait_before_commit(barrier).await;
+            let pending = snapshot(fixture, &accepted);
+            assert_eq!(
+                pending.expires_at, before_expiry,
+                "native observation cannot grant time before its commit"
+            );
+            assert_eq!(
+                (pending.actions, pending.dispatches, pending.proofs),
+                (1, 1, 0)
+            );
+            assert_eq!(
+                pending.lease_id,
+                before.get("lease_id").unwrap().as_str().unwrap()
+            );
+            assert_eq!(
+                pending.revision,
+                before.get("control_revision").unwrap().as_i64().unwrap()
+            );
+            tokio::io::AsyncWriteExt::write_all(&mut blocked, &[1])
+                .await
+                .unwrap();
+        }
+        let committed = wait_observed(fixture, &accepted, before_expiry).await;
+        let observed_at = utc_ms();
+        let after = result(fixture, &accepted).await;
+        assert_known_deadline(&before, &after, &committed, sent_at, observed_at, ttl);
+        exact_replay(fixture, &request, &accepted, &committed, &after).await;
+        assert_eq!(fixture.daemon.child.id(), daemon_pid);
+        assert!(fixture.daemon.child.try_wait().unwrap().is_none());
+        same_native(&before_native, &fixture.host_manifest());
+        assert_preserved_output(fixture, &original_log).await;
+        assert_single_launch_without_input(fixture);
+        stop_and_check_quiescent_replay(fixture, &accepted, &committed).await;
+    }
+}
+
 struct LiveFixture {
     daemon: FixtureDaemon,
     client: UnleashClient,
@@ -30,12 +496,15 @@ impl Drop for LiveFixture {
 }
 impl LiveFixture {
     async fn empty() -> Self {
+        Self::empty_with(FixtureDaemon::spawn).await
+    }
+    async fn empty_with(spawn: impl FnOnce(&Path, &Path) -> FixtureDaemon) -> Self {
         let data = local_test_dir("f011-live-data").unwrap();
         let rendezvous = local_test_dir("f011-live-rdv").unwrap();
         let project_root = local_test_dir("f011-live-root").unwrap();
         std::fs::set_permissions(rendezvous.path(), std::fs::Permissions::from_mode(0o700))
             .unwrap();
-        let daemon = FixtureDaemon::spawn(data.path(), rendezvous.path());
+        let daemon = spawn(data.path(), rendezvous.path());
         daemon.readiness();
         let client = UnleashClient::connect(ClientConfig::new(
             rendezvous.path().join("daemon.sock"),
@@ -61,6 +530,11 @@ impl LiveFixture {
 
     async fn new(configured: bool) -> Self {
         let mut fixture = Self::empty().await;
+        fixture.provision(configured).await;
+        fixture
+    }
+    async fn provision(&mut self, configured: bool) {
+        let fixture = self;
         let (authority, project, mission) = (fixture.authority, fixture.project, fixture.mission);
         let root = fixture.project_root.path().canonicalize().unwrap();
         for request in [
@@ -100,7 +574,6 @@ impl LiveFixture {
         if configured {
             fixture.configure().await;
         }
-        fixture
     }
     async fn configure(&mut self) {
         let mut request = command(

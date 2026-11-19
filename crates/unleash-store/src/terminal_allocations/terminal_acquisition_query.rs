@@ -175,6 +175,7 @@ pub(super) fn read_result(
     // input belongs to the physical run, including after control rotates;
     // consulting this projection cannot dispose or retry that uncertain write.
     super::terminal_input_writer::guard_causal_assertions(conn, &binding.allocation)?;
+    super::terminal_renewal::guard_causal_assertions(conn, &binding.allocation)?;
     let (mut proof, cursor) = observation(conn, config, &binding, &daemon)?;
     if !proof.unknown_input_seqs.is_empty() {
         return Err(stale("terminal native input state requires reconciliation"));
@@ -195,7 +196,7 @@ pub(super) fn read_result(
         terminal_id: base.terminal_id,
         process_id: base.process_id,
         process_run_uuid: base.process_run_uuid,
-        reused: binding.control.is_some(),
+        reused: binding.control.is_some() || binding.renewal.is_some(),
         state: session.state,
         lease_id: binding.lease,
         fence: binding.fence,
@@ -230,6 +231,7 @@ fn owned_receipt(
 struct AcquisitionBinding {
     allocation: TerminalAllocationRecord,
     control: Option<TerminalControlRecord>,
+    renewal: Option<super::terminal_renewal_types::TerminalRenewalRecord>,
     action: ActionId,
     dispatch: DispatchId,
     digest: Sha256Digest,
@@ -266,6 +268,7 @@ fn binding(
             epoch: context.daemon_epoch,
             allocation,
             control: None,
+            renewal: None,
         }
     } else if let Some(id) = reference.strip_prefix("terminal-control:") {
         let action: ActionId = id.parse().map_err(|_| hidden())?;
@@ -293,7 +296,9 @@ fn binding(
         ],
         |row| row.get(0),
     )?;
-    if !owned || (binding.control.is_none() && base.receipt_id != receipt) {
+    if !owned
+        || (binding.control.is_none() && binding.renewal.is_none() && base.receipt_id != receipt)
+    {
         return Err(hidden());
     }
     Ok(binding)
@@ -307,7 +312,21 @@ fn control_binding(
     command: CommandId,
     project: ProjectId,
 ) -> Result<AcquisitionBinding, StoreError> {
-    let control = terminal_allocations::control_read_conn(conn, action)?.ok_or_else(hidden)?;
+    let control = terminal_allocations::control_read_conn(conn, action)?;
+    let renewal = super::terminal_renewal::read_renewal_conn(conn, action)?;
+    if control.is_some() && renewal.is_some() {
+        return Err(unavailable("registered acquisition identity is ambiguous"));
+    }
+    let Some(control) = control else {
+        return renewal_binding(
+            conn,
+            renewal.ok_or_else(hidden)?,
+            receipt,
+            actor,
+            command,
+            project,
+        );
+    };
     let context = &control.context;
     if context.receipt_id != receipt
         || context.command_id != command
@@ -352,6 +371,59 @@ fn control_binding(
         epoch: context.daemon_epoch,
         revision: Revision::new(revision),
         control: Some(control),
+        renewal: None,
+    })
+}
+
+fn renewal_binding(
+    conn: &Connection,
+    renewal: super::terminal_renewal_types::TerminalRenewalRecord,
+    receipt: ReceiptId,
+    actor: &ActorId,
+    command: CommandId,
+    project: ProjectId,
+) -> Result<AcquisitionBinding, StoreError> {
+    use super::terminal_renewal_types::TerminalRenewalState;
+    let c = &renewal.context;
+    if c.receipt_id != receipt
+        || c.command_id != command
+        || c.actor_id != *actor
+        || c.project_id != project
+    {
+        return Err(hidden());
+    }
+    if renewal.state != TerminalRenewalState::Observed
+        || renewal.broker_action_state != Some(ActionState::ObservedSuccess)
+        || renewal.observation_object_hash.is_none()
+    {
+        return Err(stale("terminal renewal has no observed activation"));
+    }
+    let allocation = terminal_allocations::read_conn(conn, c.terminal_id)?.ok_or_else(hidden)?;
+    let base = &allocation.context;
+    if c.initial_context_digest != allocation.context_digest
+        || c.initial_action_id != base.action_id
+        || c.process_id != base.process_id
+        || c.host_id != base.host_id
+        || c.process_run_uuid != base.process_run_uuid
+        || c.principal_id != base.principal_id
+        || c.authority_generation != base.authority_generation
+        || c.daemon_boot_identity != base.daemon_boot_identity
+    {
+        return Err(stale("terminal renewal differs from the observed launch"));
+    }
+    Ok(AcquisitionBinding {
+        allocation,
+        control: None,
+        action: c.action_id,
+        dispatch: renewal
+            .dispatch_id
+            .ok_or_else(|| stale("terminal renewal has no dispatch"))?,
+        digest: renewal.context_digest,
+        lease: c.lease_id,
+        fence: c.resource_fence,
+        revision: c.control_revision,
+        epoch: c.daemon_epoch,
+        renewal: Some(renewal),
     })
 }
 
@@ -585,6 +657,23 @@ fn native_proof(
     binding: &AcquisitionBinding,
     hash: Sha256Digest,
 ) -> Result<TerminalObservedInputState, StoreError> {
+    if let Some(renewal) = &binding.renewal {
+        if renewal.observation_object_hash != Some(hash) {
+            return Err(unavailable("renewal proof hash differs"));
+        }
+        let proof = super::terminal_renewal_observation::read_published(
+            conn,
+            config,
+            renewal,
+            binding.dispatch,
+            hash,
+        )?;
+        require_observed_identity(conn, binding, &proof.os_identity)?;
+        return Ok(TerminalObservedInputState {
+            last_confirmed_input_seq: proof.last_confirmed_input_seq,
+            unknown_input_seqs: proof.unknown_input_seqs,
+        });
+    }
     let base = &binding.allocation.context;
     let (owner_kind, owner_id) = if binding.control.is_some() {
         ("terminal_control_observation", binding.action.to_string())

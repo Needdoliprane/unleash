@@ -26,6 +26,9 @@ type TerminalControlObservationSlot =
 type TerminalInputObservationSlot = std::sync::Mutex<
     Option<unleash_store::terminal_allocations::terminal_input_types::TerminalInputObservation>,
 >;
+type TerminalRenewalObservationSlot = std::sync::Mutex<
+    Option<unleash_store::terminal_allocations::terminal_renewal_types::TerminalRenewalObservation>,
+>;
 
 /// Broker journal backed by a durable Store port.
 pub(crate) struct SqliteBrokerJournal {
@@ -34,6 +37,7 @@ pub(crate) struct SqliteBrokerJournal {
     terminal_observation: Option<Arc<TerminalLaunchObservationSlot>>,
     terminal_control_observation: Option<Arc<TerminalControlObservationSlot>>,
     terminal_input_observation: Option<Arc<TerminalInputObservationSlot>>,
+    terminal_renewal_observation: Option<Arc<TerminalRenewalObservationSlot>>,
 }
 
 impl SqliteBrokerJournal {
@@ -46,6 +50,7 @@ impl SqliteBrokerJournal {
             terminal_observation: None,
             terminal_control_observation: None,
             terminal_input_observation: None,
+            terminal_renewal_observation: None,
         }
     }
 
@@ -57,6 +62,7 @@ impl SqliteBrokerJournal {
             terminal_observation: None,
             terminal_control_observation: None,
             terminal_input_observation: None,
+            terminal_renewal_observation: None,
         }
     }
 
@@ -87,6 +93,15 @@ impl SqliteBrokerJournal {
         journal
     }
 
+    pub(crate) fn with_terminal_renewal_observation(
+        runtime: &Arc<DaemonRuntimeState>,
+        slot: Arc<TerminalRenewalObservationSlot>,
+    ) -> Self {
+        let mut journal = Self::new(runtime);
+        journal.terminal_renewal_observation = Some(slot);
+        journal
+    }
+
     fn project_entry(
         &self,
         entry: &BrokerJournalEntry,
@@ -94,6 +109,7 @@ impl SqliteBrokerJournal {
         if self.terminal_observation.is_some()
             || self.terminal_control_observation.is_some()
             || self.terminal_input_observation.is_some()
+            || self.terminal_renewal_observation.is_some()
         {
             project_terminal(entry)
         } else {
@@ -341,6 +357,7 @@ fn commit_journal_phase(
     terminal_slot: Option<&TerminalLaunchObservationSlot>,
     control_slot: Option<&TerminalControlObservationSlot>,
     input_slot: Option<&TerminalInputObservationSlot>,
+    renewal_slot: Option<&TerminalRenewalObservationSlot>,
 ) -> Result<unleash_store::BrokerPhaseCommit, BrokerJournalError> {
     let phase_name = match &request.phase {
         BrokerPhase::Authorizing { .. } => "authorizing",
@@ -353,17 +370,21 @@ fn commit_journal_phase(
         BrokerPhase::Observation { receipt, .. }
             if receipt.state == unleash_domain::ActionState::ObservedSuccess
     );
-    let (terminal_observation, control_observation, input_observation) = if successful_observation {
-        // Keep the exact proof after precommit errors or a lost ACK.
-        // Re-appending the observation never invokes the executor.
-        let terminal = terminal_slot.and_then(|slot| slot.lock().ok()?.clone());
-        let control = control_slot.and_then(|slot| slot.lock().ok()?.clone());
-        let input = input_slot.and_then(|slot| slot.lock().ok()?.clone());
-        (terminal, control, input)
-    } else {
-        (None, None, None)
-    };
-    let committed = if let Some(observation) = input_observation {
+    let (terminal_observation, control_observation, input_observation, renewal_observation) =
+        if successful_observation {
+            // Keep the exact proof after precommit errors or a lost ACK.
+            // Re-appending the observation never invokes the executor.
+            let terminal = terminal_slot.and_then(|slot| slot.lock().ok()?.clone());
+            let control = control_slot.and_then(|slot| slot.lock().ok()?.clone());
+            let input = input_slot.and_then(|slot| slot.lock().ok()?.clone());
+            let renewal = renewal_slot.and_then(|slot| slot.lock().ok()?.clone());
+            (terminal, control, input, renewal)
+        } else {
+            (None, None, None, None)
+        };
+    let committed = if let Some(observation) = renewal_observation {
+        store.commit_terminal_renewal_observation(observation, request)
+    } else if let Some(observation) = input_observation {
         store.commit_terminal_input_observation(observation, request)
     } else if let Some(observation) = control_observation {
         store.commit_terminal_control_observation(observation, request)
@@ -395,6 +416,7 @@ impl BrokerJournalPort for SqliteBrokerJournal {
             let terminal_slot = self.terminal_observation.clone();
             let control_slot = self.terminal_control_observation.clone();
             let input_slot = self.terminal_input_observation.clone();
+            let renewal_slot = self.terminal_renewal_observation.clone();
             let activity = match &runtime {
                 Some(runtime) => Some(Arc::new(
                     runtime
@@ -432,6 +454,7 @@ impl BrokerJournalPort for SqliteBrokerJournal {
                         terminal_slot.as_deref(),
                         control_slot.as_deref(),
                         input_slot.as_deref(),
+                        renewal_slot.as_deref(),
                     )?;
                     Ok::<_, BrokerJournalError>((commit, dispatch, intent.action_id))
                 })
@@ -504,7 +527,9 @@ fn project_terminal(
         && (intent.verb == unleash_store::TERMINAL_ALLOCATION_VERB
             || intent.verb == unleash_store::terminal_allocations::TERMINAL_CONTROL_VERB
             || intent.verb
-                == unleash_store::terminal_allocations::terminal_input_types::TERMINAL_INPUT_VERB)
+                == unleash_store::terminal_allocations::terminal_input_types::TERMINAL_INPUT_VERB
+            || intent.verb
+                == unleash_store::terminal_allocations::terminal_renewal_types::TERMINAL_RENEWAL_VERB)
         && matches!(
             &intent.resource_refs[..],
             [unleash_action_broker::NormalizedResourceRef::Terminal(_)]

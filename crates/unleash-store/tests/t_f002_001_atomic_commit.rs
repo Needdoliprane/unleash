@@ -38,7 +38,8 @@ impl CutpointObserver for CutpointAdapter {
     fn hit(&self, cutpoint: StoreCutpoint) -> Result<(), StoreError> {
         let cp = match cutpoint {
             StoreCutpoint::C0BeforeCommandTx => Cutpoint::C0,
-            StoreCutpoint::C1BeforeCommandCommit => Cutpoint::C1,
+            StoreCutpoint::C1BeforeCommandCommit
+            | StoreCutpoint::C1BeforeTerminalRenewalObservationCommit => Cutpoint::C1,
             StoreCutpoint::C2AfterCommandCommit => Cutpoint::C2,
             StoreCutpoint::C3AfterBrokerIntentCommit => Cutpoint::C3,
             StoreCutpoint::C4AfterBrokerDispatchCommit => Cutpoint::C4,
