@@ -44,7 +44,7 @@ pub struct AuthorityLockMetadata {
 
 /// Garde RAII détenant le verrou exclusif OS `flock` d'autorité pour un UID effectif.
 ///
-/// Tant que cette garde est vivante, toute autre tentative d'acquisition pour le même UID
+/// Tant que cette garde n'a pas été libérée, toute autre acquisition pour le même UID
 /// échoue avec [`PlatformError::DaemonAlreadyRunning`] (même `data_root`) ou
 /// [`PlatformError::AuthorityAlreadyActive`] (autre `data_root`).
 #[must_use = "Libérer immédiatement AuthorityLock relâcherait l'exclusivité d'autorité daemon"]
@@ -54,6 +54,13 @@ pub struct AuthorityLock {
     lock_path: PathBuf,
     rendezvous_dir: PathBuf,
     metadata: AuthorityLockMetadata,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AuthorityReleaseStep {
+    ClearMetadata,
+    SyncMetadata,
+    Unlock,
 }
 
 impl AuthorityLock {
@@ -212,10 +219,22 @@ impl AuthorityLock {
     ///
     /// # Errors
     /// Retourne une erreur si l'effacement durable ou `flock(LOCK_UN)` échoue.
-    pub fn release(mut self) -> Result<(), PlatformError> {
+    /// La garde et son descripteur restent détenus sur erreur ; seul le succès
+    /// ferme le descripteur et interdit les opérations d'autorité ultérieures.
+    pub fn release(&mut self) -> Result<(), PlatformError> {
+        self.release_with(|_| Ok(()))
+    }
+
+    fn release_with(
+        &mut self,
+        mut before_step: impl FnMut(AuthorityReleaseStep) -> Result<(), PlatformError>,
+    ) -> Result<(), PlatformError> {
         if let Some(file) = self.file.as_ref() {
+            before_step(AuthorityReleaseStep::ClearMetadata)?;
             file.set_len(0)?;
+            before_step(AuthorityReleaseStep::SyncMetadata)?;
             file.sync_data()?;
+            before_step(AuthorityReleaseStep::Unlock)?;
             flock(file, FlockOperation::Unlock).map_err(|errno| PlatformError::OsCall {
                 op: "flock(LOCK_UN)",
                 source: std::io::Error::from(errno),
@@ -231,6 +250,12 @@ impl AuthorityLock {
     /// # Errors
     /// Retourne [`PlatformError`] si la cible est un symlink/répertoire ou si la suppression échoue.
     pub fn remove_stale_socket(&self) -> Result<(), PlatformError> {
+        if self.file.is_none() {
+            return Err(PlatformError::InvalidPath {
+                path: self.lock_path.display().to_string(),
+                reason: String::from("Autorité déjà libérée"),
+            });
+        }
         let sock = &self.metadata.socket_path;
         match fs::symlink_metadata(sock) {
             Ok(meta) => {
@@ -301,6 +326,48 @@ mod shutdown_tests {
     use super::*;
     use unleash_testkit::local_test_dir;
 
+    fn failed_release_keeps_authority(step: AuthorityReleaseStep) {
+        let fixture = local_test_dir("authority-release-failure").unwrap();
+        let rendezvous = fixture.path().join("rdv");
+        let data = fixture.path().join("data");
+        let mut owner = AuthorityLock::acquire_in(&rendezvous, &data).unwrap();
+        let result = owner.release_with(|current| {
+            if current == step {
+                return Err(PlatformError::Io(std::io::Error::other(
+                    "injected authority release failure",
+                )));
+            }
+            Ok(())
+        });
+        assert!(result.is_err());
+        assert!(
+            matches!(
+                AuthorityLock::acquire_in(&rendezvous, &data),
+                Err(PlatformError::DaemonAlreadyRunning { .. }
+                    | PlatformError::AuthorityAlreadyActive { .. })
+            ),
+            "a failed {step:?} released the still-owned authority"
+        );
+        assert!(owner.file.is_some(), "the owner lost its descriptor");
+        owner.release().unwrap();
+        assert!(AuthorityLock::acquire_in(&rendezvous, &data).is_ok());
+    }
+
+    #[test]
+    fn metadata_clear_failure_keeps_authority_locked() {
+        failed_release_keeps_authority(AuthorityReleaseStep::ClearMetadata);
+    }
+
+    #[test]
+    fn metadata_sync_failure_keeps_authority_locked() {
+        failed_release_keeps_authority(AuthorityReleaseStep::SyncMetadata);
+    }
+
+    #[test]
+    fn explicit_unlock_failure_keeps_authority_locked() {
+        failed_release_keeps_authority(AuthorityReleaseStep::Unlock);
+    }
+
     // REQ-CORE-001 / T-F001-001: a duplicate open-file-description must not
     // retain the stopped authority or later unlock its replacement.
     #[test]
@@ -308,7 +375,7 @@ mod shutdown_tests {
         let fixture = local_test_dir("authority-shutdown-duplicate").unwrap();
         let rendezvous = fixture.path().join("rdv");
         let data = fixture.path().join("data");
-        let first = AuthorityLock::acquire_in(&rendezvous, &data).unwrap();
+        let mut first = AuthorityLock::acquire_in(&rendezvous, &data).unwrap();
         let duplicate = first.file.as_ref().unwrap().try_clone().unwrap();
         assert!(matches!(
             AuthorityLock::acquire_in(&rendezvous, &data),
@@ -328,5 +395,19 @@ mod shutdown_tests {
         ));
         drop(replacement);
         assert!(AuthorityLock::acquire_in(&rendezvous, &data).is_ok());
+    }
+
+    #[test]
+    fn released_guard_cannot_remove_the_replacement_authority_socket() {
+        let fixture = local_test_dir("authority-released-guard").unwrap();
+        let rendezvous = fixture.path().join("rdv");
+        let data = fixture.path().join("data");
+        let mut first = AuthorityLock::acquire_in(&rendezvous, &data).unwrap();
+        first.release().unwrap();
+        let replacement = AuthorityLock::acquire_in(&rendezvous, &data).unwrap();
+        let socket = replacement.socket_path();
+        let _listener = crate::bind_private_unix_listener(socket).unwrap();
+        assert!(first.remove_stale_socket().is_err());
+        assert!(socket.exists());
     }
 }

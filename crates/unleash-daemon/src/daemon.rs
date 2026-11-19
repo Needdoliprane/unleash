@@ -679,16 +679,38 @@ impl From<DaemonError> for ShutdownCleanupError {
 struct ShutdownResources {
     state: Option<Arc<DaemonRuntimeState>>,
     store: Option<Arc<UnleashStore>>,
-    lock: Option<AuthorityLock>,
+    // The coordinator retains this owner while a blocking release borrows it.
+    // An I/O error or panic cannot drop the only authority guard in that job.
+    lock: Option<Arc<Mutex<AuthorityLock>>>,
     accept: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl ShutdownResources {
+    async fn release_authority_with<F>(&mut self, release: F) -> Result<(), ShutdownCleanupError>
+    where
+        F: FnOnce(&mut AuthorityLock) -> Result<(), PlatformError> + Send + 'static,
+    {
+        if let Some(lock) = self.lock.as_ref().map(Arc::clone) {
+            tokio::task::spawn_blocking(move || {
+                let mut authority = lock.lock().unwrap_or_else(PoisonError::into_inner);
+                release(&mut authority)
+            })
+            .await
+            .map_err(|error| {
+                DaemonError::InvalidConfiguration(format!(
+                    "Libération d'autorité interrompue : {error}",
+                ))
+            })?
+            .map_err(DaemonError::Platform)?;
+            self.lock.take();
+        }
+        Ok(())
+    }
+
     async fn take_exclusive_store(
         &mut self,
-        timeout: Option<Duration>,
+        deadline: Option<tokio::time::Instant>,
     ) -> Result<Option<UnleashStore>, ShutdownCleanupError> {
-        let deadline = timeout.map(|duration| tokio::time::Instant::now() + duration);
         loop {
             if let Some(state) = self.state.take() {
                 match Arc::try_unwrap(state) {
@@ -724,14 +746,17 @@ impl ShutdownResources {
         proof: &AdminProof,
         timeout: Option<Duration>,
     ) -> Result<(), ShutdownCleanupError> {
+        // One wait budget for this cleanup attempt, not a fresh window per stage.
+        // This bounds waiting, never establishes completion of a blocking job.
+        let deadline = timeout.map(|duration| tokio::time::Instant::now() + duration);
         if let Some(state) = &self.state {
             state.set_mode(DaemonMode::Stopped);
             state.subscriptions.close_all();
             state.stop_accepting();
         }
         if let Some(accept) = self.accept.as_mut() {
-            let result = if let Some(timeout) = timeout {
-                tokio::time::timeout(timeout, &mut *accept)
+            let result = if let Some(deadline) = deadline {
+                tokio::time::timeout_at(deadline, &mut *accept)
                     .await
                     .map_err(|_| {
                         ShutdownCleanupError::Pending(
@@ -748,12 +773,8 @@ impl ShutdownResources {
                 )))
             })?;
         }
-        if let Some(timeout) = timeout {
-            drain_active_connections(connections, timeout).await?;
-        } else {
-            drain_connection_tasks(connections, None).await?;
-        }
-        if let Some(store) = self.take_exclusive_store(timeout).await? {
+        drain_connection_tasks(connections, deadline).await?;
+        if let Some(store) = self.take_exclusive_store(deadline).await? {
             // Never detach Store::shutdown, even if the request's wait expired.
             tokio::task::spawn_blocking(move || store.shutdown())
                 .await
@@ -787,17 +808,7 @@ impl ShutdownResources {
         .map_err(|error| {
             DaemonError::InvalidConfiguration(format!("Nettoyage d'autorité interrompu : {error}",))
         })??;
-        if let Some(lock) = self.lock.take() {
-            tokio::task::spawn_blocking(move || lock.release())
-                .await
-                .map_err(|error| {
-                    DaemonError::InvalidConfiguration(format!(
-                        "Libération d'autorité interrompue : {error}",
-                    ))
-                })?
-                .map_err(DaemonError::Platform)?;
-        }
-        Ok(())
+        self.release_authority_with(AuthorityLock::release).await
     }
 }
 
@@ -811,7 +822,7 @@ fn spawn_drain_coordinator(params: DrainCoordinatorParams) {
         let mut resources = ShutdownResources {
             state: Some(params.state),
             store: Some(params.store),
-            lock: Some(params.lock),
+            lock: Some(Arc::new(Mutex::new(params.lock))),
             accept: Some(params.accept_handle),
         };
         let mut recovery_opt = params.recovery_handle;
@@ -952,22 +963,14 @@ fn spawn_drain_coordinator(params: DrainCoordinatorParams) {
     });
 }
 
-async fn drain_active_connections(
-    active_conns: &Mutex<Vec<tokio::task::JoinHandle<()>>>,
-    timeout: Duration,
-) -> Result<(), ShutdownCleanupError> {
-    drain_connection_tasks(active_conns, Some(timeout)).await
-}
-
 async fn drain_connection_tasks(
     active_conns: &Mutex<Vec<tokio::task::JoinHandle<()>>>,
-    timeout: Option<Duration>,
+    deadline: Option<tokio::time::Instant>,
 ) -> Result<(), ShutdownCleanupError> {
     let tasks = {
         let mut guard = active_conns.lock().unwrap_or_else(PoisonError::into_inner);
         std::mem::take(&mut *guard)
     };
-    let deadline = timeout.map(|duration| tokio::time::Instant::now() + duration);
     let mut pending = std::collections::VecDeque::from(tasks);
     while let Some(mut task) = pending.pop_front() {
         let result = if let Some(deadline) = deadline {
@@ -1254,6 +1257,54 @@ mod shutdown_ownership_tests {
     use super::*;
     use unleash_testkit::local_test_dir;
 
+    async fn failed_release_keeps_coordinator_authority(panics: bool) {
+        let directory = local_test_dir("shutdown-release-failure").unwrap();
+        let rendezvous = directory.path().join("rdv");
+        let data = directory.path().join("data");
+        let mut resources = ShutdownResources {
+            state: None,
+            store: None,
+            lock: Some(Arc::new(Mutex::new(
+                AuthorityLock::acquire_in(&rendezvous, &data).unwrap(),
+            ))),
+            accept: None,
+        };
+        let result = resources
+            .release_authority_with(move |_lock| {
+                assert!(!panics, "injected blocking release panic");
+                Err(PlatformError::Io(std::io::Error::other(
+                    "injected blocking release failure",
+                )))
+            })
+            .await;
+        assert!(matches!(result, Err(ShutdownCleanupError::Failed(_))));
+        assert!(
+            matches!(
+                AuthorityLock::acquire_in(&rendezvous, &data),
+                Err(PlatformError::DaemonAlreadyRunning { .. }
+                    | PlatformError::AuthorityAlreadyActive { .. })
+            ),
+            "release error abandoned the live coordinator's authority"
+        );
+        assert!(resources.lock.is_some());
+        resources
+            .release_authority_with(AuthorityLock::release)
+            .await
+            .unwrap();
+        assert!(resources.lock.is_none());
+        assert!(AuthorityLock::acquire_in(&rendezvous, &data).is_ok());
+    }
+
+    #[tokio::test]
+    async fn release_error_keeps_coordinator_authority() {
+        failed_release_keeps_coordinator_authority(false).await;
+    }
+
+    #[tokio::test]
+    async fn release_join_error_keeps_coordinator_authority() {
+        failed_release_keeps_coordinator_authority(true).await;
+    }
+
     // REQ-CORE-001 / REQ-CORE-007: a connection timeout must keep ownership
     // of an admitted blocking writer until its real completion.
     #[tokio::test]
@@ -1285,7 +1336,7 @@ mod shutdown_ownership_tests {
         });
         let connections = Mutex::new(vec![task]);
         started_rx.await.unwrap();
-        let _ = drain_active_connections(&connections, Duration::ZERO).await;
+        let _ = drain_connection_tasks(&connections, Some(tokio::time::Instant::now())).await;
         let retained = connections
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
@@ -1293,7 +1344,11 @@ mod shutdown_ownership_tests {
         let owners = Arc::strong_count(&store);
         release_tx.send(()).unwrap();
         done_rx.await.unwrap();
-        let _ = drain_active_connections(&connections, Duration::from_secs(5)).await;
+        let _ = drain_connection_tasks(
+            &connections,
+            Some(tokio::time::Instant::now() + Duration::from_secs(5)),
+        )
+        .await;
         tokio::task::spawn_blocking(move || drop(store))
             .await
             .unwrap();
