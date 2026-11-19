@@ -1509,6 +1509,8 @@ struct SetPolicyPayload {
     isolation_mode: unleash_store::PolicyIsolationMode,
     policy_version: String,
     reason: String,
+    #[serde(default)]
+    provider_probe_mandate: Option<unleash_store::ProviderProbeMandateChange>,
 }
 
 #[derive(Deserialize)]
@@ -1685,6 +1687,12 @@ fn prepare_admin_command(
             )
         }
         "SetPolicy" => {
+            if raw
+                .get("provider_probe_mandate")
+                .is_some_and(Value::is_null)
+            {
+                return Err(invalid());
+            }
             let payload: SetPolicyPayload = serde_json::from_value(raw).map_err(|_| invalid())?;
             match payload.scope_kind {
                 unleash_store::PolicyScopeKind::Global
@@ -1700,8 +1708,17 @@ fn prepare_admin_command(
             if payload.reason.len() > 1024 || payload.policy_version.len() > 128 {
                 return Err(invalid());
             }
-            (
-                AggregateKind::SecurityPolicy,
+            let mutation = if let Some(mandate) = payload.provider_probe_mandate {
+                CommandMutation::SetPolicyWithProviderProbeMandate {
+                    scope_kind: payload.scope_kind,
+                    scope_id: payload.scope_id,
+                    isolation_mode: payload.isolation_mode,
+                    policy_version: payload.policy_version,
+                    reason: payload.reason,
+                    caller,
+                    mandate,
+                }
+            } else {
                 CommandMutation::SetPolicy {
                     scope_kind: payload.scope_kind,
                     scope_id: payload.scope_id,
@@ -1709,8 +1726,9 @@ fn prepare_admin_command(
                     policy_version: payload.policy_version,
                     reason: payload.reason,
                     caller,
-                },
-            )
+                }
+            };
+            (AggregateKind::SecurityPolicy, mutation)
         }
         "ConfigureGuard" => prepare_guard_mutation(state, &cmd, raw, caller)?,
         _ => return Err(invalid()),

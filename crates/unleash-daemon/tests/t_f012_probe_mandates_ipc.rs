@@ -469,6 +469,37 @@ async fn t_f012_013_policy_mandate_requires_current_administrative_authority() {
     assert_eq!(fixture.policy_receipts(), 0);
 }
 
+#[tokio::test]
+async fn t_f012_013_policy_mandate_null_is_not_a_classic_update() {
+    let (fixture, mut admin) = Fixture::start().await;
+    let principals: i64 = fixture
+        .db()
+        .query_row("SELECT COUNT(*) FROM principals", [], |row| row.get(0))
+        .unwrap();
+    let request = policy(&admin, 200, None, 0, Some(Value::Null));
+    let response = admin.send_command(&request).await;
+    fixture.shutdown().await;
+    fixture.assert_no_effect();
+    assert!(
+        matches!(response,Err(ClientError::Remote(error)) if error.code == ErrorCode::InvalidArgument)
+    );
+    assert_eq!(fixture.policy_receipts(), 0);
+    let db = fixture.db();
+    let policies: i64 = db
+        .query_row("SELECT COUNT(*) FROM security_policies", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(
+        policies, 0,
+        "null ne doit pas être interprété comme une absence"
+    );
+    let after: i64 = db
+        .query_row("SELECT COUNT(*) FROM principals", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(after, principals, "aucune identité créée au rejet de forme");
+}
+
 struct ScopedLifecycle {
     issued: CommandReceipt,
     visible: QueryResponse,
