@@ -110,7 +110,7 @@ pub struct ProviderProfileView {
     pub configuration_receipt_id: ReceiptId,
     /// La validation locale ne qualifie pas un fournisseur.
     pub qualification: crate::ProviderProfileQualification,
-    /// Dernière observation conservée par phase ; seule validate_config est produite ici.
+    /// Dernière observation conservée par phase ; seule `validate_config` est produite ici.
     pub observations: Vec<ProviderValidationSummary>,
 }
 
@@ -326,6 +326,7 @@ pub(crate) fn verify_configuration_bytes(
 }
 
 /// Entrées empruntées de la seule mutation locale.
+#[derive(Clone, Copy)]
 pub(crate) struct ValidationCommand<'a> {
     pub envelope: &'a CommandEnvelope,
     pub caller: &'a CallerAuthority,
