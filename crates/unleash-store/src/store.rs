@@ -285,6 +285,34 @@ fn apply_startup_state(
 }
 
 impl UnleashStore {
+    /// Lit la préparation terminal et le watermark dans la même vue.
+    /// # Errors
+    /// Retourne les erreurs de lecture du Store.
+    pub fn inspect_terminal_allocation_snapshot(
+        &self,
+        terminal: unleash_domain::TerminalId,
+    ) -> Result<SnapshotProjection<Option<crate::TerminalAllocationRecord>>, StoreError> {
+        self.project_snapshot(|conn| crate::terminal_allocations::read_conn(conn, terminal))
+    }
+
+    /// Consomme une seule fois le dispatch courant sans lancer de processus.
+    /// # Errors
+    /// Refuse toute divergence, lease expirée ou résolution déjà engagée.
+    pub fn resolve_terminal_launch(
+        &self,
+        request: crate::ResolveTerminalLaunchRequest,
+    ) -> Result<crate::ResolvedTerminalLaunch, StoreError> {
+        let cfg = self.config.clone();
+        let result = self.writer.submit_immediate_blocking(
+            WriteCriticality::Normal,
+            true,
+            move |tx, now| crate::terminal_allocations::resolve_tx(tx, &cfg, now, &request),
+        )?;
+        self.config
+            .cutpoints
+            .hit(StoreCutpoint::C2AfterCommandCommit)?;
+        Ok(result)
+    }
     /// Lit la demande réservée et l'état réel de son job dans le même snapshot.
     ///
     /// # Errors

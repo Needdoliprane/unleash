@@ -105,11 +105,9 @@ fn t_f012_009_v009_preserves_invocation_manifests_and_rolls_back_interrupted_reb
     assert_eq!(preserved.daemon_state().unwrap().schema_version, 8);
     assert_eq!(manifests(&preserved), before);
     preserved.shutdown().unwrap();
-    let upgraded = UnleashStore::open_with_migration_backup(
-        StoreConfig::new(directory.path()),
-        Some(backup.backup_id),
-    )
-    .unwrap();
+    let mut v009 = StoreConfig::new(directory.path());
+    v009.max_supported_schema_version = 9;
+    let upgraded = UnleashStore::open_with_migration_backup(v009, Some(backup.backup_id)).unwrap();
     assert_eq!(upgraded.daemon_state().unwrap().schema_version, 9);
     assert_eq!(manifests(&upgraded), before);
     let (foreign_keys,variants,triggers):(i64,i64,i64)=upgraded.read_snapshot(|conn,_|Ok((conn.query_row("SELECT COUNT(*) FROM pragma_foreign_key_check",[],|row|row.get(0))?,conn.query_row("SELECT COUNT(*) FROM model_call_manifests WHERE context_kind='invocation_context' AND provider_probe_context_id IS NULL",[],|row|row.get(0))?,conn.query_row("SELECT COUNT(*) FROM sqlite_master WHERE type='trigger' AND name LIKE 'admission_source_model_call_manifests_%'",[],|row|row.get(0))?))).unwrap();

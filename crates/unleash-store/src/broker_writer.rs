@@ -224,6 +224,7 @@ fn validate_live_intent(
 ) -> Result<(), StoreError> {
     crate::backup_requests::validate_backup_intent_tx(tx, daemon, intent)?;
     crate::provider_probes::validate_intent(tx, daemon, intent)?;
+    crate::terminal_allocations::validate_intent(tx, daemon, now, intent)?;
     if daemon.mode != DaemonMode::Ready {
         return Err(StoreError::RecoveryInProgress(
             "daemon indisponible pour dispatch broker".to_owned(),
@@ -431,6 +432,8 @@ pub(crate) fn commit_phase_tx(
         }
     }
     crate::provider_probes::validate_incarnation(tx, &daemon, action)?;
+    crate::terminal_allocations::validate_incarnation(tx, &daemon, action)?;
+    crate::terminal_allocations::guard_observation(tx, &request.phase)?;
     if matches!(request.phase, BrokerPhase::Dispatch { .. }) {
         let markers: i64 = tx
             .query_row(
