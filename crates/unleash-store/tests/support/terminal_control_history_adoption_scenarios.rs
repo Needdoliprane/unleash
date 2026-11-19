@@ -446,24 +446,24 @@ fn t_f011_003_historical_source_and_native_bindings_must_all_match() {
         let different_hash = Sha256Digest::from_bytes(b"different historical binding");
         match field {
             "receipt" => {
-                proof.source_receipt_id = unleash_domain::ReceiptId::from_u128(CONTROL + 701)
+                proof.source_receipt_id = unleash_domain::ReceiptId::from_u128(CONTROL + 701);
             }
             "evaluation" => {
-                proof.source_evaluation_id = AuthorizationEvaluationId::from_u128(CONTROL + 702)
+                proof.source_evaluation_id = AuthorizationEvaluationId::from_u128(CONTROL + 702);
             }
             "intent" => proof.source_intent_digest = different_hash,
             "command" => {
-                proof.ack.header.command_id = unleash_domain::CommandId::from_u128(CONTROL + 703)
+                proof.ack.header.command_id = unleash_domain::CommandId::from_u128(CONTROL + 703);
             }
             "action" => {
-                proof.ack.header.action_id = unleash_domain::ActionId::from_u128(CONTROL + 704)
+                proof.ack.header.action_id = unleash_domain::ActionId::from_u128(CONTROL + 704);
             }
             "dispatch" => proof.ack.dispatch_id = DispatchId::from_u128(CONTROL + 705),
             "payload" => proof.ack.header.payload_hash = different_hash,
             "initial_context" => proof.ack.initial_context_digest = different_hash,
             "lineage" => {
                 proof.ack.header.authority_generation =
-                    AuthorityGeneration::from_u128(CONTROL + 706)
+                    AuthorityGeneration::from_u128(CONTROL + 706);
             }
             "epoch" => proof.ack.header.daemon_epoch = unleash_domain::DaemonEpoch::new(1),
             "fence" => proof.ack.header.resource_fence = Fence::new(1),
