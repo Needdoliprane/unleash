@@ -637,39 +637,39 @@ fn validate_preparation(
         )?;
     }
     let s = &prep.process_spec;
-    // When the authenticated runtime producer is configured, re-read its exact
-    // version, pools and TTL under this writer transaction. Older normalized
-    // internal preparations remain a separate compatibility port, never a daemon fallback.
+    // Every new preparation/launch re-reads configured authority under the
+    // writer transaction. Historical lookup, disposition and exact replay do
+    // not call this guard and never manufacture a new environment grant.
     let settings = crate::projects_settings::read_settings_conn(
         tx,
         now,
         crate::SettingsScopeKind::User,
         "default",
     )?;
-    if let Some(raw) = settings.extra_typed.get("terminal_runtime") {
-        let runtime: TerminalRuntimeSettings = serde_json::from_value(raw.clone())?;
-        runtime.validate()?;
-        let profile = runtime
-            .profiles
-            .iter()
-            .find(|p| {
-                p.profile_id == s.environment.profile_id && p.version == s.environment.version
-            })
-            .ok_or_else(|| invalid("terminal configured profile changed"))?;
-        if profile.digest()? != s.environment.digest
-            || runtime.pools() != prep.auxiliary
-            || runtime.lease_ttl_ms != prep.lease_ttl_ms
-        {
-            return Err(invalid(
-                "terminal configured scope, profile or pools changed",
-            ));
-        }
-        let bound:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM object_references WHERE owner_kind='terminal_environment' AND owner_id=?1 AND source_field=?2 AND object_hash=?3 AND state='live')",params![profile.profile_id,profile.version.to_string(),s.environment.digest.to_string()],|r|r.get(0))?;
-        if !bound {
-            return Err(invalid(
-                "terminal configured profile has no durable reference",
-            ));
-        }
+    let raw = settings
+        .extra_typed
+        .get("terminal_runtime")
+        .ok_or_else(|| invalid("terminal runtime is not configured"))?;
+    let runtime: TerminalRuntimeSettings = serde_json::from_value(raw.clone())?;
+    runtime.validate()?;
+    let profile = runtime
+        .profiles
+        .iter()
+        .find(|p| p.profile_id == s.environment.profile_id && p.version == s.environment.version)
+        .ok_or_else(|| invalid("terminal configured profile changed"))?;
+    if profile.digest()? != s.environment.digest
+        || runtime.pools() != prep.auxiliary
+        || runtime.lease_ttl_ms != prep.lease_ttl_ms
+    {
+        return Err(invalid(
+            "terminal configured scope, profile or pools changed",
+        ));
+    }
+    let bound:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM object_references WHERE owner_kind='terminal_environment' AND owner_id=?1 AND source_field=?2 AND object_hash=?3 AND state='live')",params![profile.profile_id,profile.version.to_string(),s.environment.digest.to_string()],|r|r.get(0))?;
+    if !bound {
+        return Err(invalid(
+            "terminal configured profile has no durable reference",
+        ));
     }
     let root = root.ok_or_else(|| invalid("terminal primary project root absent"))?;
     let relative = Path::new(&s.requested_cwd);

@@ -61,36 +61,15 @@ fn fixture_at_schema(
     store
         .configure_execution_pool(ExecutionPoolParams::default())
         .unwrap();
-    let root_string = root.to_str().unwrap().to_owned();
+    let root_string = root.canonicalize().unwrap().to_str().unwrap().to_owned();
     let saved = root_string.clone();
     store.execute_in_writer_tx(WriteCriticality::Critical,move|tx,now|{
   tx.execute("INSERT INTO projects(project_id,name,state,revision,created_at_ms,primary_root_path) VALUES(?1,'synthetic terminal fixture','active',2,?2,?3)",rusqlite::params![PROJECT.to_string(),now.as_i64(),saved])?;
   tx.execute("INSERT INTO missions(mission_id,project_id,owner_kind,owner_user_id,completion_policy,state,revision) VALUES(?1,?2,'user','human-alice','human','active',1)",rusqlite::params![MISSION.to_string(),PROJECT.to_string()])?;
-  for(n,kind)in[(21_u128,"process_host"),(22,"process"),(23,"pty")] {tx.execute("INSERT INTO capacity_pools(pool_id,pool_kind,scope_key,unit,requested_limit,effective_limit,admissions_frozen,hard_limit,revision) VALUES(?1,?2,'global','slot',2,2,0,2,0)",rusqlite::params![PoolId::from_u128(n).to_string(),kind])?;}
   Ok(())
  }).unwrap();
-    let bytes=canonicalize_to_vec(&json!({"schema_version":1,"fixture":"synthetic_sqlite_resolver_only","profile_id":"fixture-env","version":1,"variables":{"LANG":"C"}})).unwrap();
-    let hash = Sha256Digest::from_bytes(&bytes);
-    let handle = store
-        .prepare_object(PrepareObjectRequest {
-            object_hash: hash,
-            byte_length: bytes.len() as u64,
-            media_type: "application/json".to_owned(),
-            owner_kind: "fixture".to_owned(),
-            owner_id: "f011-synthetic-resolver".to_owned(),
-        })
-        .unwrap();
-    store.write_prepared_object_bytes(&handle, &bytes).unwrap();
-    store
-        .publish_object_reference(PublishObjectReferenceRequest {
-            pin_id: handle.pin_id,
-            object_hash: hash,
-            object_generation: handle.object_generation,
-            owner_kind: "fixture".to_owned(),
-            owner_id: "f011-synthetic-resolver".to_owned(),
-            source_field: "environment".to_owned(),
-        })
-        .unwrap();
+    let runtime = configure_fixture_runtime(&store);
+    let profile = runtime.profiles.first().unwrap();
     let prep = TerminalAllocationPreparation {
         mission_id: MISSION,
         mission_revision: Revision::new(1),
@@ -105,22 +84,43 @@ fn fixture_at_schema(
             requested_cwd: ".".to_owned(),
             cwd_canonical: root_string,
             environment: TerminalEnvironmentRef {
-                profile_id: "fixture-env".to_owned(),
-                version: 1,
-                digest: hash,
+                profile_id: profile.profile_id.clone(),
+                version: profile.version,
+                digest: profile.digest().unwrap(),
             },
             rows: 24,
             cols: 80,
             readiness_timeout_ms: 10_000,
         },
-        auxiliary: TerminalAuxiliaryPools {
-            host: PoolId::from_u128(21),
-            child: PoolId::from_u128(22),
-            pty: PoolId::from_u128(23),
-        },
-        lease_ttl_ms: 60_000,
+        auxiliary: runtime.pools(),
+        lease_ttl_ms: runtime.lease_ttl_ms,
     };
     (store, cfg, clock, prep, dir)
+}
+
+fn configure_fixture_runtime(
+    store: &UnleashStore,
+) -> terminal_allocations::TerminalRuntimeSettings {
+    let runtime:terminal_allocations::TerminalRuntimeSettings=serde_json::from_value(json!({"schema_version":1,"profiles":[{"profile_id":"store-terminal-fixture","version":1,"variables":{"LANG":"C"}}],"max_hosts":2,"max_processes":2,"max_ptys":2,"lease_ttl_ms":60000})).unwrap();
+    let command = unleash_domain::CommandId::from_u128(0xf011_fe01);
+    let prepared = runtime
+        .profiles
+        .iter()
+        .map(|p| store.prepare_terminal_environment(p, command).unwrap())
+        .collect::<Vec<_>>();
+    let patch = SettingsPatch {
+        extra_typed: Some(
+            json!({"terminal_runtime":runtime,"__terminal_prepared":prepared})
+                .as_object()
+                .unwrap()
+                .clone(),
+        ),
+        ..SettingsPatch::default()
+    };
+    let actor = ActorId::new("uid:fixture-alice").unwrap();
+    let authority = store.active_authority_generation().unwrap();
+    store.commit_command(CommitCommandRequest {actor_id:actor.clone(),envelope:CommandEnvelope {protocol_version:ProtocolVersion,request_id:RequestId::from_u128(0xf011_fe02),command_id:command,authority_generation:authority,actor_ref:None,project_id:None,aggregate_id:authority.as_uuid(),expected_revision:Revision::INITIAL,command_type:"SetSettings".into(),payload:json!({"scope_kind":"user","scope_id":"default","patch":{"terminal_runtime":runtime}}).as_object().unwrap().clone()},target_aggregate:AggregateKind::Settings,operation_id:None,receipt_state:ReceiptState::Accepted,result_ref:None,retention_days_override:None,fence_assertion:None,mutation:CommandMutation::SetSettings {scope_kind:SettingsScopeKind::User,scope_id:"default".into(),caller:CallerAuthority {actor_id:actor,role:CallerRole::PolicyAdmin},patch},events:vec![],capacity_reservations:vec![],budget_reservations:vec![]}).unwrap();
+    runtime
 }
 fn request(
     store: &UnleashStore,
@@ -183,7 +183,13 @@ fn counts(store: &UnleashStore) -> (i64, i64, i64, i64, i64, i64, i64) {
                 c.query_row("SELECT COUNT(*) FROM capacity_reservations", [], |r| {
                     r.get(0)
                 })?,
-                c.query_row("SELECT COUNT(*) FROM command_receipts", [], |r| r.get(0))?,
+                // Configuration is an accepted fixture prerequisite. Count
+                // only terminal command receipts for these allocation oracles.
+                c.query_row(
+                    "SELECT COUNT(*) FROM command_receipts WHERE command_type='AcquireTerminal'",
+                    [],
+                    |r| r.get(0),
+                )?,
             ))
         })
         .unwrap()
@@ -345,6 +351,81 @@ fn t_f011_001_prepare_receipt_replay_and_exclusive_human_owner() {
     }
     assert!(s.commit_command(bob).is_err());
     assert_eq!(counts(&s), (1, 0, 0, 0, 1, 3, 1));
+}
+
+#[test]
+fn t_f011_001_missing_runtime_configuration_cannot_prepare_new_terminal() {
+    let (s, _cfg, _clock, p, _dir) = fixture(Arc::new(NoopCutpointObserver));
+    // Models historical storage without the new settings, retaining published
+    // objects. A published object alone must never become an environment grant.
+    s.execute_in_writer_tx(WriteCriticality::Critical, |tx, _| {
+        tx.execute(
+            "DELETE FROM settings WHERE scope_kind='user' AND scope_id='default'",
+            [],
+        )?;
+        Ok(())
+    })
+    .unwrap();
+    let before = counts(&s);
+    let result = s.commit_command(request(&s, p, 1601));
+    assert!(
+        matches!(&result,Err(StoreError::InvalidArgument {message,..}) if message=="terminal runtime is not configured"),
+        "unexpected result: {result:?}"
+    );
+    assert_eq!(
+        counts(&s),
+        before,
+        "no receipt, intention, lease, hold, process or PTY without configuration"
+    );
+}
+
+#[test]
+fn t_f011_003_missing_runtime_preserves_known_receipt_and_phase_but_never_grants_launch() {
+    for committed_dispatch in [false, true] {
+        let (s, _cfg, _clock, p, _dir) = fixture(Arc::new(NoopCutpointObserver));
+        let req = request(&s, p, 1701);
+        let receipt = s.commit_command(req.clone()).unwrap();
+        let record = read(&s, 1701);
+        let marker = committed_dispatch.then(|| dispatch(&s, &record));
+        s.execute_in_writer_tx(WriteCriticality::Critical, |tx, _| {
+            tx.execute(
+                "DELETE FROM settings WHERE scope_kind='user' AND scope_id='default'",
+                [],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+        let before = counts(&s);
+        assert_eq!(
+            s.commit_command(req).unwrap().receipt(),
+            receipt.receipt(),
+            "historical wire replay does not revalidate new settings"
+        );
+        if let Some(marker) = marker {
+            assert!(
+                s.commit_broker_phase(authorizing(&record))
+                    .unwrap()
+                    .replayed,
+                "exact acquired phase remains historical"
+            );
+            let refused = s.resolve_terminal_launch(resolution(&record, marker));
+            assert!(
+                matches!(refused,Err(StoreError::InvalidArgument {message,..}) if message=="terminal runtime is not configured")
+            );
+            assert_eq!(
+                read(&s, 1701).state,
+                TerminalAllocationState::Allocated,
+                "no launch permit consumed"
+            );
+        } else {
+            let refused = s.commit_broker_phase(authorizing(&record));
+            assert!(
+                matches!(refused,Err(StoreError::InvalidArgument {message,..}) if message=="terminal runtime is not configured")
+            );
+        }
+        assert_eq!(counts(&s), before);
+        assert_eq!((counts(&s).2, counts(&s).3), (0, 0));
+    }
 }
 struct FailAt {
     armed: AtomicBool,
