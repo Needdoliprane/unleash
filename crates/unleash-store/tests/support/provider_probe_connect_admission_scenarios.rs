@@ -667,7 +667,10 @@ fn t_f012_013_admission_context_expiry_is_rechecked_after_decide() {
         ready.record.context.deadline.as_i64() - store.config().clock.now_ms().as_i64() + 1,
     )
     .unwrap();
+    let callback_ran = Arc::new(AtomicBool::new(false));
+    let callback_flag = callback_ran.clone();
     let result = store.commit_execution_admission(pool, snapshot.token, move |_| {
+        callback_flag.store(true, Ordering::SeqCst);
         clock.advance_ms(delta);
         Ok(AdmissionDecision::Admit {
             unit,
@@ -677,12 +680,17 @@ fn t_f012_013_admission_context_expiry_is_rechecked_after_decide() {
         })
     });
     assert!(
+        callback_ran.load(Ordering::SeqCst),
+        "the genuine writer decision must be reached"
+    );
+    assert!(
         matches!(result, Err(StoreError::StaleFence { .. })),
         "the context expires inside decide while the eligibility token remains live: {result:?}"
     );
     assert_eq!(counts(&store), before);
     assert_eq!(lease_rows(&store), leases);
     let after = store.execution_admission_snapshot(pool).unwrap();
+    assert_eq!(after.source_revision, snapshot.source_revision);
     assert_eq!(after.fairness, snapshot.fairness);
     assert!(after.active.is_empty());
     assert_no_model(&store);
