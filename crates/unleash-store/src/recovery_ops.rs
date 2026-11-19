@@ -538,9 +538,10 @@ pub(crate) fn tx_reconcile_action(
         Option<String>,
         Option<String>,
         Option<String>,
+        String,
     )> = tx
         .query_row(
-            "SELECT state, revision, daemon_epoch, fence, run_id, project_id, scope_key
+            "SELECT state, revision, daemon_epoch, fence, run_id, project_id, scope_key, action_type
              FROM actions WHERE action_id = ?1",
             [action_id.to_string()],
             |r| {
@@ -552,14 +553,23 @@ pub(crate) fn tx_reconcile_action(
                     r.get(4)?,
                     r.get(5)?,
                     r.get(6)?,
+                    r.get(7)?,
                 ))
             },
         )
         .optional()
         .map_err(StoreError::from_rusqlite)?;
 
-    let Some((cur_state_s, cur_rev, action_epoch, action_fence, run_id_s, proj_id_s, _scope_key)) =
-        row
+    let Some((
+        cur_state_s,
+        cur_rev,
+        action_epoch,
+        action_fence,
+        run_id_s,
+        proj_id_s,
+        _scope_key,
+        action_type,
+    )) = row
     else {
         return Err(StoreError::NotFound(format!("action {action_id}")));
     };
@@ -609,6 +619,17 @@ pub(crate) fn tx_reconcile_action(
                 "action {action_id} en état '{cur_state_s}' non éligible à ReconcileAction"
             ),
         });
+    }
+
+    if outcome == ReconcileOutcome::ConfirmedSuccess
+        && action_type == crate::terminal_allocations::TERMINAL_CONTROL_VERB
+    {
+        // A digest supplied to generic reconciliation is not the correlated
+        // native observation required by the terminal control writer. In
+        // particular, a historical rotation must not become current success.
+        return Err(StoreError::EvidenceUnavailable(
+            "terminal control success requires its specialized qualified observation".to_owned(),
+        ));
     }
 
     if outcome == ReconcileOutcome::ConfirmedSuccess
