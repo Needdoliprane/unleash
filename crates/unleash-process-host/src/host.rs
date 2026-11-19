@@ -1418,10 +1418,10 @@ impl HostCutpointObserver for StdioBarrierCutpointObserver {
         if cutpoint == self.target {
             let line = format!("UNLEASH_CRASH_REACHED:{}\n", self.label);
             let mut out = std::io::stdout();
-            let _ = out.write_all(line.as_bytes());
-            let _ = out.flush();
+            out.write_all(line.as_bytes())?;
+            out.flush()?;
             let mut buf = [0_u8; 1];
-            let _ = std::io::stdin().read(&mut buf);
+            std::io::stdin().read_exact(&mut buf)?;
         }
         Ok(())
     }
