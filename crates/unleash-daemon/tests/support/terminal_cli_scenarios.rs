@@ -407,3 +407,260 @@ async fn t_f011_cli_acquires_observes_and_replays_the_same_terminal() {
         "started\n"
     );
 }
+
+mod input_cli_scenarios {
+    use super::*;
+    use std::io::{BufRead, Write};
+
+    const WORKER: &str = "reattach_scenarios::cli_scenarios::input_cli_scenarios::cli_input_worker";
+    const INPUT: &[u8] = b"PAYLOAD-ONLY\0\xff\n";
+
+    fn input_args(cli: &TerminalCli<'_>, observed: &Value, file: &Path) -> Vec<String> {
+        let mut args = [
+            "process",
+            "input",
+            "--project-id",
+            &cli.project,
+            "--terminal-id",
+            &cli.terminal,
+            "--process-run-uuid",
+            observed["process_run_uuid"].as_str().unwrap(),
+            "--lease-id",
+            observed["lease_id"].as_str().unwrap(),
+            "--authority-generation",
+            &cli.authority,
+            "--command-id",
+            "00000000-0000-4000-8000-0000f0114802",
+            "--file",
+            file.to_str().unwrap(),
+        ]
+        .map(str::to_owned)
+        .to_vec();
+        for (flag, field, increment) in [
+            ("--fence", "fence", 0),
+            ("--control-revision", "control_revision", 0),
+            ("--input-seq", "input_seq", 1),
+        ] {
+            args.push(flag.into());
+            args.push(
+                observed[field]
+                    .as_u64()
+                    .unwrap()
+                    .checked_add(increment)
+                    .unwrap()
+                    .to_string(),
+            );
+        }
+        args
+    }
+
+    fn replace(args: &mut [String], flag: &str, value: &str) {
+        let index = args
+            .iter()
+            .position(|item| item == flag)
+            .unwrap()
+            .checked_add(1)
+            .unwrap();
+        *args.get_mut(index).unwrap() = value.to_owned();
+    }
+
+    fn invoke(cli: &TerminalCli<'_>, args: &[String]) -> std::process::Output {
+        cli.invoke(&args.iter().map(String::as_str).collect::<Vec<_>>())
+    }
+
+    fn input_counts(fixture: &LiveFixture) -> (i64, i64, i64) {
+        let conn = rusqlite::Connection::open_with_flags(
+            fixture.data.path().join("unleash-authority.db"),
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .unwrap();
+        conn.query_row("SELECT (SELECT COUNT(*) FROM terminal_input_intents),(SELECT COUNT(*) FROM actions WHERE action_type='terminal.send_input'),(SELECT COUNT(*) FROM action_dispatches d JOIN actions a ON a.action_id=d.action_id WHERE a.action_type='terminal.send_input')", [], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?))).unwrap()
+    }
+
+    fn assert_local_bounds(cli: &TerminalCli<'_>, fixture: &LiveFixture, observed: &Value) {
+        for (name, bytes) in [
+            ("empty-input", Vec::new()),
+            ("oversized-input", vec![0; 65_537]),
+        ] {
+            let file = fixture.project_root.path().join(name);
+            std::fs::write(&file, bytes).unwrap();
+            let output = invoke(cli, &input_args(cli, observed, &file));
+            assert!(!output.status.success());
+            let error: Value = serde_json::from_slice(&output.stderr).unwrap();
+            assert!(
+                error["error"].as_str().unwrap().contains("1..=65536"),
+                "bounded local refusal: {error}"
+            );
+            assert!(
+                error.get("code").is_none(),
+                "local bounds precede a remote mutation"
+            );
+            assert_eq!(input_counts(fixture), (0, 0, 0));
+        }
+    }
+
+    fn assert_remote_fence_and_sequence(
+        cli: &TerminalCli<'_>,
+        fixture: &LiveFixture,
+        args: &[String],
+    ) {
+        for flag in ["--fence", "--input-seq"] {
+            let mut invalid = args.to_vec();
+            replace(&mut invalid, flag, "2");
+            let output = invoke(cli, &invalid);
+            assert!(!output.status.success());
+            let error: Value = serde_json::from_slice(&output.stderr).unwrap();
+            assert_eq!(
+                error.get("code"),
+                Some(&json!("ContractViolation")),
+                "writer refuses the mismatching {flag}: {error}"
+            );
+            assert_eq!(input_counts(fixture), (0, 0, 0));
+        }
+    }
+
+    async fn wait_known(fixture: &LiveFixture) {
+        let deadline = Instant::now() + DEADLINE;
+        loop {
+            let conn = rusqlite::Connection::open_with_flags(
+                fixture.data.path().join("unleash-authority.db"),
+                rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+            )
+            .unwrap();
+            let known: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM terminal_input_intents i JOIN actions a ON a.action_id=i.action_id WHERE i.state='observed' AND a.state='observed_success' AND i.observation_object_hash IS NOT NULL)",[],|row|row.get(0)).unwrap();
+            let effect = match std::fs::read(fixture.project_root.path().join("cli-input-effects"))
+            {
+                Ok(bytes) => bytes,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+                Err(error) => panic!("owned effect file: {error}"),
+            };
+            if known && effect == b"effect\n" {
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "native receipt and fsynced effect must both be observed"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "explicit UNLEASH_TEST_CLI_BIN plus daemon/host built from this tree"]
+    async fn t_f011_cli_input_uses_observed_control_and_replays_one_binary_effect() {
+        let binary = PathBuf::from(std::env::var_os("UNLEASH_TEST_CLI_BIN").unwrap());
+        assert!(binary.is_absolute() && binary.is_file());
+        let mut fixture = LiveFixture::empty().await;
+        let cli = TerminalCli {
+            binary: &binary,
+            socket: fixture.rendezvous.path().join("daemon.sock"),
+            project: fixture.project.to_string(),
+            authority: fixture.authority.to_string(),
+            terminal: Uuid::from_u128(0xf011_4801).to_string(),
+        };
+        configure_project(&cli, &fixture);
+        configure_terminal_and_mission(&cli, &fixture);
+        let program = std::env::current_exe().unwrap();
+        let command = Uuid::from_u128(0xf011_4803).to_string();
+        let accepted = cli.acquire(
+            "new",
+            &command,
+            &[
+                "--mission-id",
+                &fixture.mission.to_string(),
+                "--purpose-key",
+                "cli-binary-input",
+                "--program",
+                program.to_str().unwrap(),
+                "--environment-profile-id",
+                "terminal-test",
+                "--",
+                "--ignored",
+                "--exact",
+                WORKER,
+                "--nocapture",
+            ],
+        );
+        wait_for_control(&mut fixture, &cli.terminal, 0).await;
+        wait_for_log_marker(&cli).await;
+        let observed = cli.observe(&command, &accepted);
+        assert_eq!(observed.get("input_seq"), Some(&json!(0)));
+        let help = cli.invoke(&["process", "input", "--help"]);
+        assert!(
+            help.status.success(),
+            "real CLI process input is absent: {}",
+            String::from_utf8_lossy(&help.stderr)
+        );
+        assert_local_bounds(&cli, &fixture, &observed);
+        let file = fixture.project_root.path().join("input.bin");
+        std::fs::write(&file, INPUT).unwrap();
+        let args = input_args(&cli, &observed, &file);
+        assert_remote_fence_and_sequence(&cli, &fixture, &args);
+        let sent = invoke(&cli, &args);
+        assert!(
+            sent.status.success(),
+            "real CLI input: {}",
+            String::from_utf8_lossy(&sent.stderr)
+        );
+        let receipt: Value = serde_json::from_slice(&sent.stdout).unwrap();
+        assert_eq!(receipt.pointer("/receipt/state"), Some(&json!("accepted")));
+        assert_eq!(
+            receipt.pointer("/receipt/command_id"),
+            Some(&json!("00000000-0000-4000-8000-0000f0114802"))
+        );
+        assert!(!String::from_utf8_lossy(&sent.stdout).contains("PAYLOAD-ONLY"));
+        assert!(!String::from_utf8_lossy(&sent.stderr).contains("PAYLOAD-ONLY"));
+        wait_known(&fixture).await;
+        let known = cli.observe(&command, &accepted);
+        assert_eq!(known.get("input_seq"), Some(&json!(1)));
+        assert_eq!(known.get("lease_id"), observed.get("lease_id"));
+        for _ in 0..3 {
+            let replay = invoke(&cli, &args);
+            assert!(replay.status.success());
+            assert_eq!(
+                serde_json::from_slice::<Value>(&replay.stdout).unwrap(),
+                receipt
+            );
+        }
+        assert_eq!(input_counts(&fixture), (1, 1, 1));
+        assert_eq!(
+            std::fs::read(fixture.project_root.path().join("cli-input-effects")).unwrap(),
+            b"effect\n"
+        );
+        assert_eq!(
+            std::fs::read(fixture.project_root.path().join("worker-starts")).unwrap(),
+            b"started\n"
+        );
+    }
+
+    #[test]
+    #[ignore = "owned native PTY worker selected only by exact fixture argv"]
+    fn cli_input_worker() {
+        let mut starts = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open("worker-starts")
+            .unwrap();
+        starts.write_all(b"started\n").unwrap();
+        starts.sync_all().unwrap();
+        println!("live-terminal-ready");
+        std::io::stdout().flush().unwrap();
+        let stdin = std::io::stdin();
+        let mut reader = stdin.lock();
+        let mut bytes = Vec::new();
+        loop {
+            bytes.clear();
+            if reader.read_until(b'\n', &mut bytes).unwrap() == 0 {
+                break;
+            }
+            assert_eq!(bytes, INPUT, "native child receives the exact binary input");
+            let mut effect = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open("cli-input-effects")
+                .unwrap();
+            effect.write_all(b"effect\n").unwrap();
+            effect.sync_all().unwrap();
+        }
+    }
+}
