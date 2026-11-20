@@ -150,6 +150,14 @@ impl FrozenConnectRequest {
     pub(crate) const fn timeout_ms(&self) -> u64 {
         self.timeout_ms
     }
+
+    pub(crate) fn http_authority(&self) -> String {
+        if self.host.contains(':') {
+            format!("[{}]:{}", self.host, self.port)
+        } else {
+            format!("{}:{}", self.host, self.port)
+        }
+    }
 }
 
 /// What actually verified the TLS peer; never a claim of provider/model readiness.

@@ -23,7 +23,7 @@ use crate::connect_transport::{
     CertificateValidation, FrozenConnectRequest, SystemResolver, resolve_loopback_peer,
     system_tls_validation,
 };
-use crate::transport::{BrokerDispatch, ProfileRef};
+use crate::transport::{BrokerDispatch, MAX_RESPONSE, ProfileRef};
 
 mod http;
 
@@ -76,7 +76,8 @@ impl FrozenOllamaInventoryRequest {
     /// not perform resolution, I/O or authorization.
     ///
     /// # Errors
-    /// Rejects a different route, zero body bound or unsupported target/timeout.
+    /// Rejects a different route, zero body bound, a bound above the crate's
+    /// 1 MiB response ceiling or an unsupported target/timeout.
     pub fn new_loopback(
         endpoint: &str,
         profile: ProfileRef,
@@ -84,7 +85,7 @@ impl FrozenOllamaInventoryRequest {
         max_response_bytes: usize,
     ) -> Result<Self, InventoryError> {
         let url = reqwest::Url::parse(endpoint).map_err(|_| InventoryError::InvalidRequest)?;
-        if url.path() != "/api/tags" || max_response_bytes == 0 {
+        if url.path() != "/api/tags" || !(1..=MAX_RESPONSE).contains(&max_response_bytes) {
             return Err(InventoryError::InvalidRequest);
         }
         let digest = canonical_sha256(&serde_json::json!({
@@ -349,12 +350,7 @@ impl InventoryExecutor {
         decision: &AuthorizationDecision,
     ) -> Result<ObservedInventory, InventoryError> {
         let (mut channel, peer, certificate_validation) = self.channel(intent, decision).await?;
-        let host = self.request.target.host();
-        let authority = if host.contains(':') {
-            format!("[{host}]:{}", peer.port())
-        } else {
-            format!("{host}:{}", peer.port())
-        };
+        let authority = self.request.target.http_authority();
         let request = format!(
             "GET /api/tags HTTP/1.1\r\nHost: {authority}\r\nAccept: application/json\r\nConnection: close\r\n\r\n"
         );
@@ -525,5 +521,49 @@ pub async fn execute_ollama_inventory(
                 observation: None,
             })
         }
+    }
+}
+
+#[cfg(test)]
+mod request_tests {
+    use super::{FrozenOllamaInventoryRequest, InventoryError, MAX_RESPONSE};
+    use crate::transport::ProfileRef;
+    use unleash_domain::Sha256Digest;
+
+    fn request(
+        endpoint: &str,
+        bound: usize,
+    ) -> Result<FrozenOllamaInventoryRequest, InventoryError> {
+        let profile = ProfileRef::new(
+            "synthetic-inventory-profile",
+            1,
+            Sha256Digest::from_bytes(b"profile"),
+        )
+        .map_err(|_| InventoryError::InvalidRequest)?;
+        FrozenOllamaInventoryRequest::new_loopback(endpoint, profile, 1000, bound)
+    }
+
+    #[test]
+    fn t_f012_013_inventory_body_bound_cannot_exceed_transport_ceiling()
+    -> Result<(), InventoryError> {
+        for bound in [0, MAX_RESPONSE + 1, usize::MAX] {
+            assert!(matches!(
+                request("http://127.0.0.1:11434/api/tags", bound),
+                Err(InventoryError::InvalidRequest)
+            ));
+        }
+        let ceiling = request("http://127.0.0.1:11434/api/tags", MAX_RESPONSE)?;
+        let smaller = request("http://127.0.0.1:11434/api/tags", MAX_RESPONSE - 1)?;
+        assert_ne!(ceiling.payload_digest(), smaller.payload_digest());
+        Ok(())
+    }
+
+    #[test]
+    fn t_f012_013_inventory_ipv6_host_has_one_pair_of_brackets() -> Result<(), InventoryError> {
+        let ipv6 = request("http://[::1]:11434/api/tags", 128)?;
+        assert_eq!(ipv6.target.http_authority(), "[::1]:11434");
+        let ipv4 = request("http://127.0.0.1:11434/api/tags", 128)?;
+        assert_eq!(ipv4.target.http_authority(), "127.0.0.1:11434");
+        Ok(())
     }
 }
