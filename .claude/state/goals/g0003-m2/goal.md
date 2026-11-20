@@ -103,3 +103,5 @@ Sur `d8a95be` en branche de tâche, la sonde F012 de connexion autorisée et son
 La suite F012 à neuf cas passe huit essais. Le neuvième, perte de l’accusé d’adoption, conserve les faits et la capacité attendus mais échoue au drainage. Le correctif de réveil est en cours de rejeu sur la branche de tâche. M2 reste à 13/16.
 
 Sur la branche F012 à `aa201e3`, la suite IPC passe ses neuf cas. Le banc observe deux retours `CapacityBlocked` avant les arrêts, avec conservation du fait et de la réservation après redémarrage. Le cas de changement de politique après Autorisation engagée et les campagnes fournisseur restent ouverts. M2 reste à 13/16.
+
+`1adead4` relie l’admission V008 de la sonde de génération à une observation de placement conservée dans SQLite. Le banc de fixture refuse un autre observateur, une preuve expirée et une deuxième réservation pour la même instance. Un serveur distinct reste admissible. Les suites ciblées passent avec 92 tests Store et 21 tests IPC. Le producteur natif, l’exécution sur les moteurs réels et Q-19 restent ouverts. M2 reste à 13/16.
