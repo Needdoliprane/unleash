@@ -453,6 +453,13 @@ pub(crate) fn guard_phase_access(
     phase: &crate::BrokerPhase,
     access: Option<ConnectPhaseAccess<'_>>,
 ) -> Result<bool, StoreError> {
+    if is_reserved_inventory_phase(tx, phase)? {
+        // Inventory remains closed until its own original claim and native
+        // proof ports are wired. A connect permission does not grant this phase.
+        return Err(StoreError::EvidenceUnavailable(
+            "inventory exige sa claim originale de transport".to_owned(),
+        ));
+    }
     let record = for_action(tx, phase.action_id())?;
     let is_connect = matches!(phase, crate::BrokerPhase::Authorizing { intent }
         if intent.manifest.get("verb") == Some(&serde_json::json!("model.provider.connect")));
@@ -503,6 +510,30 @@ pub(crate) fn guard_phase_access(
         validate_execution_reservation(tx, daemon, now, &record.context)?;
     }
     Ok(true)
+}
+
+fn is_reserved_inventory_phase(
+    tx: &Transaction<'_>,
+    phase: &crate::BrokerPhase,
+) -> Result<bool, StoreError> {
+    // Later entries do not carry an intent. Read its immutable verb only to
+    // refuse generic access, never to reconstruct a permission from SQLite.
+    let verb: Option<String> = if let crate::BrokerPhase::Authorizing { intent } = phase {
+        intent
+            .manifest
+            .get("verb")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned)
+    } else {
+        tx.query_row(
+            "SELECT json_extract(intent_json,'$.manifest.verb') FROM broker_intents WHERE action_id=?1",
+            [phase.action_id().to_string()],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .optional()?
+        .flatten()
+    };
+    Ok(verb.as_deref() == Some("model.provider.inventory"))
 }
 
 fn validate_bound_intent(
