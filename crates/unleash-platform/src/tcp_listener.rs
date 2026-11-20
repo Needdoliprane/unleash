@@ -40,6 +40,9 @@ pub enum TcpListenerError {
     /// The original connection observation belongs to another socket instance.
     #[error("owned connection instance changed")]
     ConnectionChanged,
+    /// Distinct native socket instances match the same connected tuple.
+    #[error("owned accepted connection is ambiguous")]
+    AmbiguousConnection,
     /// Several distinct or reusable socket instances make ownership ambiguous.
     #[error("owned listener is ambiguous")]
     AmbiguousListener,
@@ -197,15 +200,24 @@ impl TcpConnectionObservation {
 /// server FDs, future ownership and proxying cannot be excluded by this sample.
 ///
 /// # Errors
-/// Fails closed until the native accepted-connection observer is available.
+/// Rejects a missing accepted FD, changed listener/process/socket, mismatched
+/// endpoints, inaccessible or incomplete native records and unsupported ABIs.
+/// No success guarantees continued ownership after this sampled observation.
 #[cfg(unix)]
 pub fn observe_owned_tcp_connection(
     expected: &OsProcessIdentity,
     listener: &TcpListenerObservation,
     client: BorrowedFd<'_>,
 ) -> Result<TcpConnectionObservation, TcpListenerError> {
-    let _ = (expected, listener, client);
-    Err(TcpListenerError::Unavailable)
+    #[cfg(target_os = "macos")]
+    {
+        darwin::observe_connection(expected, listener, client)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (expected, listener, client);
+        Err(TcpListenerError::UnsupportedPlatform)
+    }
 }
 
 /// Reobserve the original binding using the actual connection FD.

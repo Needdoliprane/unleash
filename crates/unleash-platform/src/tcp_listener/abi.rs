@@ -70,7 +70,7 @@ pub(super) struct InSockInfo {
     pub(super) version_flags: u8,
     ttl: u8,
     reserved: u32,
-    foreign_address: [u32; 4],
+    pub(super) foreign_address: [u32; 4],
     pub(super) local_address: [u32; 4],
     ipv4_tos: u8,
     ipv6: Ipv6Info,
@@ -141,6 +141,7 @@ pub(super) const fn supported() -> bool {
         && offset_of!(SocketInfo, protocol) == 240
         && offset_of!(SocketInfo, kind) == 232
         && offset_of!(InSockInfo, generation) == 8
+        && offset_of!(InSockInfo, foreign_address) == 32
         && offset_of!(InSockInfo, local_address) == 48
         && offset_of!(TcpSockInfo, state) == 80
 }
