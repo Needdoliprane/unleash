@@ -54,6 +54,28 @@ pub enum InventoryError {
     /// The total request deadline expired.
     #[error("inventory deadline expired")]
     DeadlineExpired,
+    /// The native producer did not receive an acknowledgement for its proof.
+    #[error("inventory observation unavailable")]
+    ObservationUnavailable,
+}
+
+/// Closed acknowledgement failure, without provider bytes or storage details.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum InventoryObservationError {
+    /// The caller must retain uncertainty after the already dispatched GET.
+    #[error("inventory observation acknowledgement unavailable")]
+    Unavailable,
+}
+
+/// Receives only the exact native fact and typed list after channel closure.
+/// An acknowledgement does not itself attest final resource disposition.
+pub trait InventoryObservationPort: Send + Sync {
+    /// Adopt this exact pair or fail without authorizing a retry.
+    fn persist<'a>(
+        &'a self,
+        observation: &'a InventoryObservation,
+        inventory: &'a OllamaInventory,
+    ) -> BoxFuture<'a, Result<(), InventoryObservationError>>;
 }
 
 /// Frozen GET identity. Bounds belong to the caller's authorized request; they
@@ -72,6 +94,21 @@ impl fmt::Debug for FrozenOllamaInventoryRequest {
 }
 
 impl FrozenOllamaInventoryRequest {
+    /// Freeze separate connection and whole-exchange bounds for the durable
+    /// inventory producer. The older constructor retains its original digest.
+    ///
+    /// # Errors
+    /// Closed until both bounds are enforced by this native transport.
+    pub fn new_loopback_with_limits(
+        _endpoint: &str,
+        _profile: ProfileRef,
+        _connect_timeout_ms: u64,
+        _timeout_ms: u64,
+        _max_response_bytes: usize,
+    ) -> Result<Self, InventoryError> {
+        Err(InventoryError::Unavailable)
+    }
+
     /// Freeze the exact native `/api/tags` route on a loopback target. This does
     /// not perform resolution, I/O or authorization.
     ///
@@ -549,6 +586,20 @@ pub async fn execute_ollama_inventory(
     }
 }
 
+/// Durable producer entry: a proof acknowledgement is mandatory before the
+/// broker receives a successful execution result. The transport remains closed
+/// until that ordering is implemented and exercised with the native fixture.
+///
+/// # Errors
+/// Returns a closed refusal while the proof port is not yet connected.
+pub async fn execute_ollama_inventory_with_observation(
+    _request: FrozenOllamaInventoryRequest,
+    _dispatch: BrokerDispatch<'_>,
+    _observation: Arc<dyn InventoryObservationPort>,
+) -> Result<InventoryExecution, InventoryError> {
+    Err(InventoryError::Unavailable)
+}
+
 #[cfg(test)]
 mod request_tests {
     use super::{FrozenOllamaInventoryRequest, InventoryError, MAX_RESPONSE};
@@ -590,5 +641,56 @@ mod request_tests {
         let ipv4 = request("http://127.0.0.1:11434/api/tags", 128)?;
         assert_eq!(ipv4.target.http_authority(), "127.0.0.1:11434");
         Ok(())
+    }
+
+    fn bounded(
+        connect_timeout_ms: u64,
+        timeout_ms: u64,
+    ) -> Result<FrozenOllamaInventoryRequest, InventoryError> {
+        let profile = ProfileRef::new(
+            "synthetic-inventory-profile",
+            1,
+            Sha256Digest::from_bytes(b"profile"),
+        )
+        .map_err(|_| InventoryError::InvalidRequest)?;
+        FrozenOllamaInventoryRequest::new_loopback_with_limits(
+            "http://127.0.0.1:11434/api/tags",
+            profile,
+            connect_timeout_ms,
+            timeout_ms,
+            MAX_RESPONSE,
+        )
+    }
+
+    #[test]
+    fn inventory_v2_binds_connection_and_exchange_limits_separately() -> Result<(), InventoryError>
+    {
+        let frozen = bounded(250, 1000)?;
+        let expected = unleash_protocol::canonical_sha256(&serde_json::json!({
+            "schema":"unleash.ollama_inventory.v2","method":"GET","endpoint":"http://127.0.0.1:11434/api/tags",
+            "profile_id":"synthetic-inventory-profile","profile_version":1,"profile_digest":Sha256Digest::from_bytes(b"profile"),
+            "connect_timeout_ms":250,"timeout_ms":1000,"max_response_bytes":MAX_RESPONSE,
+            "request_body_bytes":0,"redirects":false,"retries":0,
+        })).map_err(|_| InventoryError::DigestUnavailable)?;
+        assert_eq!(frozen.payload_digest(), expected);
+        assert_ne!(
+            frozen.payload_digest(),
+            bounded(251, 1000)?.payload_digest()
+        );
+        assert_ne!(
+            frozen.payload_digest(),
+            bounded(250, 1001)?.payload_digest()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn inventory_v2_refuses_absent_or_incompatible_connection_bound() {
+        for (connect, exchange) in [(0, 1000), (1001, 1000), (1, 0), (1, 60001)] {
+            assert!(matches!(
+                bounded(connect, exchange),
+                Err(InventoryError::InvalidRequest)
+            ));
+        }
     }
 }

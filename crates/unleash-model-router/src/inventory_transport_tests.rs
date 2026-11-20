@@ -28,7 +28,8 @@ use unleash_testkit::{
 
 use crate::inventory_transport::{
     FrozenOllamaInventoryRequest, INVENTORY_VERB, InventoryError, InventoryExecution,
-    InventoryOutcome, OllamaInventory, execute_ollama_inventory,
+    InventoryObservation, InventoryObservationError, InventoryObservationPort, InventoryOutcome,
+    OllamaInventory, execute_ollama_inventory, execute_ollama_inventory_with_observation,
 };
 use crate::transport::{BrokerDispatch, ProfileRef};
 
@@ -89,10 +90,10 @@ impl Harness {
         }
     }
 
-    async fn run(
+    async fn authorize(
         &self,
-        request: FrozenOllamaInventoryRequest,
-    ) -> Result<InventoryExecution, Box<dyn Error>> {
+        request: &FrozenOllamaInventoryRequest,
+    ) -> Result<(ActionId, AuthorizationDecision), Box<dyn Error>> {
         let action = ActionIntent {
             action_id: ActionId::from_u128(303),
             subject: ActionSubject::new_control_plane(
@@ -124,17 +125,47 @@ impl Harness {
             }
         };
         assert_eq!(self.dispatches.load(Ordering::SeqCst), 0);
+        Ok((action.action_id, decision))
+    }
+
+    async fn run(
+        &self,
+        request: FrozenOllamaInventoryRequest,
+    ) -> Result<InventoryExecution, Box<dyn Error>> {
+        let (action, decision) = self.authorize(&request).await?;
         Ok(execute_ollama_inventory(
             request,
             BrokerDispatch {
                 broker: &self.broker,
-                action: action.action_id,
+                action,
                 decision: &decision.decision_ref,
                 fence: self.fence,
                 authority: &self.authority,
                 clock: self.clock.clone(),
                 secrets: &self.secrets,
             },
+        )
+        .await?)
+    }
+
+    async fn run_observed(
+        &self,
+        request: FrozenOllamaInventoryRequest,
+        observation: Arc<dyn InventoryObservationPort>,
+    ) -> Result<InventoryExecution, Box<dyn Error>> {
+        let (action, decision) = self.authorize(&request).await?;
+        Ok(execute_ollama_inventory_with_observation(
+            request,
+            BrokerDispatch {
+                broker: &self.broker,
+                action,
+                decision: &decision.decision_ref,
+                fence: self.fence,
+                authority: &self.authority,
+                clock: self.clock.clone(),
+                secrets: &self.secrets,
+            },
+            observation,
         )
         .await?)
     }
@@ -222,6 +253,15 @@ impl Fixture {
         dispatches: Arc<AtomicUsize>,
         allow_response_reset: bool,
     ) -> io::Result<Self> {
+        Self::with_close_signal(response, dispatches, allow_response_reset, None).await
+    }
+
+    async fn with_close_signal(
+        response: Response,
+        dispatches: Arc<AtomicUsize>,
+        allow_response_reset: bool,
+        closed: Option<Arc<tokio::sync::Notify>>,
+    ) -> io::Result<Self> {
         let listener = TcpListener::bind("127.0.0.1:0").await?;
         let port = listener.local_addr()?.port();
         let task = tokio::spawn(async move {
@@ -267,6 +307,9 @@ impl Fixture {
                 return Err(error);
             }
             request.extend(remaining);
+            if let Some(closed) = closed {
+                closed.notify_one();
+            }
             let extra_connection =
                 tokio::time::timeout(Duration::from_millis(30), listener.accept())
                     .await
@@ -357,6 +400,132 @@ fn assert_unknown(execution: &InventoryExecution) {
         matches!(&execution.receipt, Err(ActionBrokerError::OutcomeUnknown { action_id, .. }) if *action_id == ActionId::from_u128(303))
     );
     assert!(execution.observation.is_none());
+}
+
+struct ObservationProbe {
+    closed: Arc<tokio::sync::Notify>,
+    entered: tokio::sync::Notify,
+    acknowledge: tokio::sync::Notify,
+    attempts: AtomicUsize,
+    fail: bool,
+}
+
+impl ObservationProbe {
+    fn new(fail: bool) -> Self {
+        Self {
+            closed: Arc::new(tokio::sync::Notify::new()),
+            entered: tokio::sync::Notify::new(),
+            acknowledge: tokio::sync::Notify::new(),
+            attempts: AtomicUsize::new(0),
+            fail,
+        }
+    }
+}
+
+impl InventoryObservationPort for ObservationProbe {
+    fn persist<'a>(
+        &'a self,
+        observation: &'a InventoryObservation,
+        inventory: &'a OllamaInventory,
+    ) -> BoxFuture<'a, Result<(), InventoryObservationError>> {
+        Box::pin(async move {
+            tokio::time::timeout(Duration::from_secs(1), self.closed.notified())
+                .await
+                .map_err(|_| InventoryObservationError::Unavailable)?;
+            let inventory_digest = unleash_protocol::canonical_sha256(inventory)
+                .map_err(|_| InventoryObservationError::Unavailable)?;
+            let value = serde_json::to_value(observation)
+                .map_err(|_| InventoryObservationError::Unavailable)?;
+            if observation.action_id() != ActionId::from_u128(303)
+                || value["inventory_digest"] != serde_json::json!(inventory_digest)
+            {
+                return Err(InventoryObservationError::Unavailable);
+            }
+            self.attempts.fetch_add(1, Ordering::SeqCst);
+            self.entered.notify_one();
+            if self.fail {
+                return Err(InventoryObservationError::Unavailable);
+            }
+            self.acknowledge.notified().await;
+            Ok(())
+        })
+    }
+}
+
+#[tokio::test]
+async fn inventory_durable_observation_waits_for_closed_channel_and_ack() -> TestResult {
+    let harness = Harness::new();
+    let observer = Arc::new(ObservationProbe::new(false));
+    let mut fixture = Fixture::with_close_signal(
+        json_response(br#"{"models":[]}"#),
+        Arc::clone(&harness.dispatches),
+        false,
+        Some(Arc::clone(&observer.closed)),
+    )
+    .await?;
+    let check = async {
+        tokio::time::timeout(Duration::from_secs(1), observer.entered.notified()).await?;
+        assert_eq!(observer.attempts.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            harness.broker.action_state(ActionId::from_u128(303)),
+            Some(ActionState::Dispatching)
+        );
+        harness.assert_one_dispatch_no_secret();
+        observer.acknowledge.notify_one();
+        Ok::<(), Box<dyn Error>>(())
+    };
+    let execution = harness.run_observed(request(fixture.port, 2000, 128)?, observer.clone());
+    let (execution, witness) = tokio::join!(execution, check);
+    witness?;
+    assert!(listed(execution?)?.models.is_empty());
+    assert_eq!(observer.attempts.load(Ordering::SeqCst), 1);
+    assert_get_only(&fixture.capture().await?, fixture.port)
+}
+
+#[tokio::test]
+async fn inventory_durable_observation_failure_is_unknown_without_second_get() -> TestResult {
+    let harness = Harness::new();
+    let observer = Arc::new(ObservationProbe::new(true));
+    let mut fixture = Fixture::with_close_signal(
+        json_response(br#"{"models":[]}"#),
+        Arc::clone(&harness.dispatches),
+        false,
+        Some(Arc::clone(&observer.closed)),
+    )
+    .await?;
+    let execution = harness
+        .run_observed(request(fixture.port, 2000, 128)?, observer.clone())
+        .await?;
+    assert_unknown(&execution);
+    assert!(matches!(
+        execution.outcome,
+        InventoryOutcome::Failed(InventoryError::ObservationUnavailable)
+    ));
+    assert_eq!(observer.attempts.load(Ordering::SeqCst), 1);
+    let decision = harness
+        .broker
+        .action_audit(ActionId::from_u128(303))
+        .and_then(|audit| audit.decision_ref)
+        .ok_or("missing decision after unknown")?;
+    let repeated = execute_ollama_inventory_with_observation(
+        request(fixture.port, 2000, 128)?,
+        BrokerDispatch {
+            broker: &harness.broker,
+            action: ActionId::from_u128(303),
+            decision: &decision,
+            fence: harness.fence,
+            authority: &harness.authority,
+            clock: harness.clock.clone(),
+            secrets: &harness.secrets,
+        },
+        observer.clone(),
+    )
+    .await?;
+    assert!(repeated.receipt.is_err());
+    assert_eq!(repeated.state, ActionState::OutcomeUnknown);
+    assert_eq!(observer.attempts.load(Ordering::SeqCst), 1);
+    harness.assert_one_dispatch_no_secret();
+    assert_get_only(&fixture.capture().await?, fixture.port)
 }
 
 async fn rejected_response(
