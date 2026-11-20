@@ -214,6 +214,14 @@ impl Drop for Fixture {
 
 impl Fixture {
     async fn new(response: Response, dispatches: Arc<AtomicUsize>) -> io::Result<Self> {
+        Self::with_response_reset(response, dispatches, false).await
+    }
+
+    async fn with_response_reset(
+        response: Response,
+        dispatches: Arc<AtomicUsize>,
+        allow_response_reset: bool,
+    ) -> io::Result<Self> {
         let listener = TcpListener::bind("127.0.0.1:0").await?;
         let port = listener.local_addr()?.port();
         let task = tokio::spawn(async move {
@@ -235,10 +243,13 @@ impl Fixture {
                     return Err(io::Error::other("fixture request header exceeded bound"));
                 }
             }
-            if let Response::Bytes(response) = response {
+            let response_sent = if let Response::Bytes(response) = response {
                 socket.write_all(&response).await?;
                 socket.shutdown().await?;
-            }
+                true
+            } else {
+                false
+            };
             let mut remaining = Vec::new();
             let closed = tokio::time::timeout(
                 Duration::from_secs(2),
@@ -249,7 +260,9 @@ impl Fixture {
             // This only collects its already received request bytes; it is not
             // a successful product observation or permission to drain/retry.
             if let Err(error) = closed
-                && error.kind() != io::ErrorKind::ConnectionReset
+                && !(error.kind() == io::ErrorKind::ConnectionReset
+                    && allow_response_reset
+                    && response_sent)
             {
                 return Err(error);
             }
@@ -352,7 +365,12 @@ async fn rejected_response(
     expected: InventoryError,
 ) -> TestResult {
     let harness = Harness::new();
-    let mut fixture = Fixture::new(response, Arc::clone(&harness.dispatches)).await?;
+    let mut fixture = Fixture::with_response_reset(
+        response,
+        Arc::clone(&harness.dispatches),
+        expected == InventoryError::ResponseTooLarge,
+    )
+    .await?;
     let execution = harness.run(request(fixture.port, 1000, max_bytes)?).await?;
     assert_unknown(&execution);
     assert!(matches!(execution.outcome, InventoryOutcome::Failed(error) if error == expected));
