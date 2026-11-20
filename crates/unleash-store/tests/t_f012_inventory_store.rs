@@ -171,11 +171,10 @@ fn t_f012_013_inventory_generic_authorizing_requires_its_original_claim() -> Tes
     let before = fixture.counts()?;
     for _ in 0..2 {
         let rejected = fixture.store.commit_broker_phase(request.clone());
-        if !matches!(
-            rejected,
-            Err(StoreError::NotFound(_) | StoreError::EvidenceUnavailable(_))
-        ) {
-            return Err("generic inventory append was acknowledged without its prepared context and original claim".into());
+        match rejected {
+            Err(StoreError::NotFound(_) | StoreError::EvidenceUnavailable(_)) => {}
+            Ok(_) => return Err("generic inventory append was acknowledged without its prepared context and original claim".into()),
+            Err(error) => return Err(format!("unexpected generic inventory refusal: code={}, reason={:?}", error.error_code(), error.reason_code()).into()),
         }
         if fixture.counts()? != before {
             return Err("generic inventory refusal changed actions, admission or events".into());
