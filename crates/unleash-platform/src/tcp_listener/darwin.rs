@@ -2,15 +2,20 @@
 
 use std::mem::{MaybeUninit, size_of};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::os::fd::{AsRawFd, BorrowedFd};
 use std::time::{Duration, Instant};
 
-use super::{OsProcessIdentity, TcpListenerError, TcpListenerObservation, abi};
+use super::{
+    OsProcessIdentity, TcpConnectionObservation, TcpListenerError, TcpListenerObservation, abi,
+    verify_owned_tcp_listener,
+};
 use crate::{PlatformError, inspect_process_identity};
 
 const PROC_PIDFDSOCKETINFO: i32 = 3;
 const PROX_FDTYPE_SOCKET: u32 = 2;
 const SOCKINFO_TCP: i32 = 2;
 const TSI_S_LISTEN: i32 = 1;
+const TSI_S_ESTABLISHED: i32 = 4;
 const SO_ACCEPTCONN: i16 = 0x0002;
 const SO_REUSEPORT: i16 = 0x0200;
 // This bound fails the entire observation; no prefix is treated as complete.
@@ -27,6 +32,14 @@ struct Descriptor {
 #[derive(Clone, Copy, PartialEq, Eq)]
 struct Candidate {
     fd: i32,
+    generation: u64,
+    handle: u64,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct ConnectionSocket {
+    local: SocketAddr,
+    peer: SocketAddr,
     generation: u64,
     handle: u64,
 }
@@ -264,20 +277,29 @@ fn matching_socket(
 }
 
 fn local_address(family: i32, ip: &abi::InSockInfo) -> Result<SocketAddr, TcpListenerError> {
-    let raw_port = u16::try_from(ip.local_port).map_err(|_| TcpListenerError::AbiMismatch)?;
+    socket_address(family, ip.version_flags, ip.local_port, ip.local_address)
+}
+
+fn socket_address(
+    family: i32,
+    version_flags: u8,
+    raw_port: i32,
+    words: [u32; 4],
+) -> Result<SocketAddr, TcpListenerError> {
+    let raw_port = u16::try_from(raw_port).map_err(|_| TcpListenerError::AbiMismatch)?;
     let port = u16::from_be(raw_port);
     let mut address = [0_u8; 16];
-    for (chunk, word) in address.chunks_exact_mut(4).zip(ip.local_address) {
+    for (chunk, word) in address.chunks_exact_mut(4).zip(words) {
         chunk.copy_from_slice(&word.to_ne_bytes());
     }
     let ip = match family {
-        libc::AF_INET if ip.version_flags & 1 != 0 => IpAddr::V4(Ipv4Addr::new(
+        libc::AF_INET if version_flags & 1 != 0 => IpAddr::V4(Ipv4Addr::new(
             address[12],
             address[13],
             address[14],
             address[15],
         )),
-        libc::AF_INET6 if ip.version_flags & 2 != 0 => IpAddr::V6(Ipv6Addr::from(address)),
+        libc::AF_INET6 if version_flags & 2 != 0 => IpAddr::V6(Ipv6Addr::from(address)),
         _ => return Err(TcpListenerError::AbiMismatch),
     };
     Ok(SocketAddr::new(ip, port))
@@ -295,4 +317,161 @@ fn select_candidate(candidates: &[Candidate]) -> Result<Candidate, TcpListenerEr
         return Err(TcpListenerError::AmbiguousListener);
     }
     Ok(selected)
+}
+
+pub(super) fn observe_connection(
+    expected: &OsProcessIdentity,
+    listener: &TcpListenerObservation,
+    client: BorrowedFd<'_>,
+) -> Result<TcpConnectionObservation, TcpListenerError> {
+    if expected != &listener.process {
+        return Err(TcpListenerError::IdentityChanged);
+    }
+    let deadline = Instant::now() + INSPECTION_BUDGET;
+    verify_owned_tcp_listener(listener)?;
+    let client_start = client_connection(client)?;
+    if client_start.peer != listener.endpoint {
+        return Err(TcpListenerError::ConnectionMismatch);
+    }
+    let accepted = stable_connection(expected, client_start, deadline)?;
+    verify_owned_tcp_listener(listener)?;
+    if client_connection(client)? != client_start {
+        return Err(TcpListenerError::ConnectionChanged);
+    }
+    verify_identity(expected)?;
+    if Instant::now() >= deadline {
+        return Err(TcpListenerError::Unavailable);
+    }
+    Ok(TcpConnectionObservation {
+        listener: listener.clone(),
+        client_local: client_start.local,
+        client_peer: client_start.peer,
+        client_generation: client_start.generation,
+        client_handle: client_start.handle,
+        server_generation: accepted.generation,
+        server_handle: accepted.handle,
+    })
+}
+
+fn stable_connection(
+    expected: &OsProcessIdentity,
+    client: ConnectionSocket,
+    deadline: Instant,
+) -> Result<Candidate, TcpListenerError> {
+    for _ in 0..MAX_ATTEMPTS {
+        verify_identity(expected)?;
+        let first_fds = descriptors(expected.pid)?;
+        let first = accepted_connections(expected.pid, &first_fds, client, deadline)?;
+        let last_fds = descriptors(expected.pid)?;
+        if first_fds != last_fds {
+            continue;
+        }
+        let last = accepted_connections(expected.pid, &last_fds, client, deadline)?;
+        verify_identity(expected)?;
+        if first != last {
+            continue;
+        }
+        let selected = first
+            .first()
+            .copied()
+            .ok_or(TcpListenerError::ConnectionNotFound)?;
+        // Duplicated descriptors count as one observed socket, not exclusive ownership.
+        if first.iter().any(|candidate| {
+            candidate.generation != selected.generation || candidate.handle != selected.handle
+        }) {
+            return Err(TcpListenerError::AmbiguousConnection);
+        }
+        return Ok(selected);
+    }
+    Err(TcpListenerError::IncompleteDescriptorList)
+}
+
+fn accepted_connections(
+    pid: u32,
+    descriptors: &[Descriptor],
+    client: ConnectionSocket,
+    deadline: Instant,
+) -> Result<Vec<Candidate>, TcpListenerError> {
+    let mut matches = Vec::new();
+    for descriptor in descriptors
+        .iter()
+        .filter(|descriptor| descriptor.kind == PROX_FDTYPE_SOCKET)
+    {
+        if Instant::now() >= deadline {
+            return Err(TcpListenerError::Unavailable);
+        }
+        let record = socket_record(pid, descriptor.fd)?;
+        let Some(socket) = established_connection(&record.socket)? else {
+            continue;
+        };
+        if socket.local == client.peer && socket.peer == client.local {
+            matches
+                .try_reserve(1)
+                .map_err(|_| TcpListenerError::Unavailable)?;
+            matches.push(Candidate {
+                fd: descriptor.fd,
+                generation: socket.generation,
+                handle: socket.handle,
+            });
+        }
+    }
+    Ok(matches)
+}
+
+fn client_connection(client: BorrowedFd<'_>) -> Result<ConnectionSocket, TcpListenerError> {
+    let local = rustix::net::getsockname(client)
+        .map_err(|error| native_error(Some(error.raw_os_error())))?;
+    let local = SocketAddr::try_from(local).map_err(|_| TcpListenerError::ConnectionMismatch)?;
+    let peer = rustix::net::getpeername(client)
+        .map_err(|error| native_error(Some(error.raw_os_error())))?
+        .ok_or(TcpListenerError::ConnectionMismatch)?;
+    let peer = SocketAddr::try_from(peer).map_err(|_| TcpListenerError::ConnectionMismatch)?;
+    if !loopback_endpoint(local) || !loopback_endpoint(peer) || local.is_ipv4() != peer.is_ipv4() {
+        return Err(TcpListenerError::ConnectionMismatch);
+    }
+    let record = socket_record(std::process::id(), client.as_raw_fd())?;
+    let socket =
+        established_connection(&record.socket)?.ok_or(TcpListenerError::ConnectionMismatch)?;
+    if socket.local != local || socket.peer != peer {
+        return Err(TcpListenerError::ConnectionMismatch);
+    }
+    Ok(socket)
+}
+
+fn loopback_endpoint(endpoint: SocketAddr) -> bool {
+    endpoint.ip().is_loopback()
+        && endpoint.port() != 0
+        && !matches!(endpoint, SocketAddr::V6(v6) if v6.scope_id()!=0 || v6.flowinfo()!=0)
+}
+
+#[allow(unsafe_code)]
+fn established_connection(
+    socket: &abi::SocketInfo,
+) -> Result<Option<ConnectionSocket>, TcpListenerError> {
+    if socket.kind != SOCKINFO_TCP {
+        return Ok(None);
+    }
+    if socket.socket_type != libc::SOCK_STREAM || socket.protocol_number != libc::IPPROTO_TCP {
+        return Err(TcpListenerError::AbiMismatch);
+    }
+    // SAFETY: the full native record has the checked TCP discriminator. Its
+    // TCP union member contains only initialized integer bit representations.
+    let tcp = unsafe { socket.protocol.tcp };
+    if tcp.state != TSI_S_ESTABLISHED {
+        return Ok(None);
+    }
+    if tcp.ip.generation == 0 || socket.socket_handle == 0 {
+        return Err(TcpListenerError::AbiMismatch);
+    }
+    Ok(Some(ConnectionSocket {
+        local: local_address(socket.family, &tcp.ip)?,
+        peer: socket_address(
+            socket.family,
+            tcp.ip.version_flags,
+            tcp.ip.foreign_port,
+            tcp.ip.foreign_address,
+        )?,
+        generation: tcp.ip.generation,
+        handle: socket.socket_handle,
+    }))
 }

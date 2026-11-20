@@ -63,5 +63,8 @@ pub use rendezvous::{
     write_private_file_atomic,
 };
 pub use tcp_listener::{
-    TcpListenerError, TcpListenerObservation, observe_owned_tcp_listener, verify_owned_tcp_listener,
+    TcpConnectionObservation, TcpListenerError, TcpListenerObservation, observe_owned_tcp_listener,
+    verify_owned_tcp_listener,
 };
+#[cfg(unix)]
+pub use tcp_listener::{observe_owned_tcp_connection, verify_owned_tcp_connection};
