@@ -2,6 +2,7 @@
 //! Synthetic trusted caller only; the source receipt uses the real command Tx.
 
 use std::error::Error;
+use std::path::Path;
 use std::sync::Arc;
 
 use rusqlite::{Connection, OpenFlags};
@@ -21,21 +22,21 @@ use uuid::Uuid;
 
 type TestResult<T = ()> = Result<T, Box<dyn Error>>;
 
-struct Fixture {
+struct Fixture<D> {
     store: UnleashStore,
-    root: tempfile::TempDir,
+    root: D,
 }
 
-impl Fixture {
-    fn new() -> TestResult<Self> {
-        let root = local_test_dir("f012-inventory-store")?;
-        let mut config = StoreConfig::new(root.path());
-        config.clock = Arc::new(ManualClock::new(1_000));
-        let store = UnleashStore::open(config)?;
-        store.register_principal("inventory-principal", "user", "user:inventory-store")?;
-        Ok(Self { store, root })
-    }
+fn fixture() -> TestResult<Fixture<impl AsRef<Path>>> {
+    let root = local_test_dir("f012-inventory-store")?;
+    let mut config = StoreConfig::new(root.path());
+    config.clock = Arc::new(ManualClock::new(1_000));
+    let store = UnleashStore::open(config)?;
+    store.register_principal("inventory-principal", "user", "user:inventory-store")?;
+    Ok(Fixture { store, root })
+}
 
+impl<D: AsRef<Path>> Fixture<D> {
     fn source(&self) -> TestResult<unleash_protocol::CommandReceipt> {
         let actor = ActorId::new("user:inventory-store")?;
         let envelope = CommandEnvelope {
@@ -86,7 +87,7 @@ impl Fixture {
 
     fn counts(&self) -> TestResult<Vec<i64>> {
         let db = Connection::open_with_flags(
-            self.root.path().join("unleash-authority.db"),
+            self.root.as_ref().join("unleash-authority.db"),
             OpenFlags::SQLITE_OPEN_READ_ONLY,
         )?;
         [
@@ -165,7 +166,7 @@ impl Fixture {
 
 #[test]
 fn t_f012_013_inventory_generic_authorizing_requires_its_original_claim() -> TestResult {
-    let fixture = Fixture::new()?;
+    let fixture = fixture()?;
     let source = fixture.source()?;
     let request = fixture.authorizing(&source)?;
     let before = fixture.counts()?;
