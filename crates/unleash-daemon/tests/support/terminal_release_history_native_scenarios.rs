@@ -2,6 +2,9 @@
 //! This test does not seal a Store fact or grant a current terminal capability.
 use super::*;
 use unleash_process_host::{ControlReleaseAck, ControlReleaseRequest, ControlReleaseResponse};
+use unleash_store::terminal_allocations::terminal_release_history::{
+    TerminalReleaseHistoryTarget, qualify_terminal_release_history_source,
+};
 
 struct LostRelease {
     harness: Harness,
@@ -119,8 +122,91 @@ fn assert_quarantined(lost: &LostRelease) {
     );
 }
 
+fn qualify_source(lost: &LostRelease) -> unleash_process_host::ControlReleaseKey {
+    let conn = rusqlite::Connection::open_with_flags(
+        lost.harness
+            .fixture
+            .data
+            .path()
+            .join("unleash-authority.db"),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .unwrap();
+    let snapshot = conn.unchecked_transaction().unwrap();
+    let context: unleash_store::terminal_allocations::terminal_release_types::TerminalReleaseContext =
+        serde_json::from_str(&lost.context_json).unwrap();
+    let caller = unleash_store::CallerAuthority {
+        actor_id: context.actor_id.clone(),
+        role: unleash_store::CallerRole::HumanOperator,
+    };
+    let target = TerminalReleaseHistoryTarget {
+        project_id: lost.harness.fixture.project,
+        terminal_id: lost.acquired.terminal_id,
+        process_run_uuid: lost.acquired.process_run_uuid,
+        action_id: lost.ack.key.header.action_id,
+        dispatch_id: lost.ack.key.dispatch_id,
+    };
+    assert_scope_refused(&snapshot, &caller, target);
+    let source = qualify_terminal_release_history_source(&snapshot, &caller, target).unwrap();
+    assert_eq!(source.context, context);
+    assert_eq!(source.context.receipt_id, lost.receipt.receipt_id);
+    let key: unleash_process_host::ControlReleaseKey =
+        serde_json::from_value(serde_json::to_value(source.key).unwrap()).unwrap();
+    assert_eq!(key, lost.ack.key);
+    key
+}
+
+fn assert_scope_refused(
+    conn: &rusqlite::Connection,
+    caller: &unleash_store::CallerAuthority,
+    target: TerminalReleaseHistoryTarget,
+) {
+    use unleash_store::StoreError;
+
+    for foreign in [
+        TerminalReleaseHistoryTarget {
+            project_id: unleash_domain::ProjectId::from_u128(0xf011_8203),
+            ..target
+        },
+        TerminalReleaseHistoryTarget {
+            process_run_uuid: unleash_domain::ProcessRunUuid::from_u128(0xf011_8204),
+            ..target
+        },
+    ] {
+        assert!(matches!(
+            qualify_terminal_release_history_source(conn, caller, foreign),
+            Err(StoreError::NotFound(_))
+        ));
+    }
+    let wrong_actor = unleash_store::CallerAuthority {
+        actor_id: unleash_domain::ActorId::new("user:unrelated").unwrap(),
+        ..caller.clone()
+    };
+    let wrong_role = unleash_store::CallerAuthority {
+        role: unleash_store::CallerRole::Agent,
+        ..caller.clone()
+    };
+    let wrong_dispatch = TerminalReleaseHistoryTarget {
+        dispatch_id: unleash_domain::DispatchId::from_u128(0xf011_8205),
+        ..target
+    };
+    assert!(matches!(
+        qualify_terminal_release_history_source(conn, &wrong_actor, target),
+        Err(StoreError::NotFound(_))
+    ));
+    assert!(matches!(
+        qualify_terminal_release_history_source(conn, &wrong_role, target),
+        Err(StoreError::Unauthorized(_))
+    ));
+    assert!(matches!(
+        qualify_terminal_release_history_source(conn, caller, wrong_dispatch),
+        Err(StoreError::InvalidArgument { .. })
+    ));
+}
+
 fn inspector(lost: &LostRelease) -> (HostClient, ControlReleaseRequest) {
-    let header = &lost.ack.key.header;
+    let key = qualify_source(lost);
+    let header = &key.header;
     let secret = unleash_process_host::load_control_secret(
         &lost
             .native
@@ -141,7 +227,7 @@ fn inspector(lost: &LostRelease) -> (HostClient, ControlReleaseRequest) {
     // The CURRENT effective credential is opaque. Reusing it in both fields
     // makes the Active/cache-missing route fail before any new rotation.
     let request = ControlReleaseRequest {
-        key: lost.ack.key.clone(),
+        key,
         current_secret: secret.expose_secret().into(),
         next_secret: secret.expose_secret().into(),
     };

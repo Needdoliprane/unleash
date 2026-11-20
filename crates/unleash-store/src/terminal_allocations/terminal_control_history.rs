@@ -16,6 +16,8 @@ mod validation;
 #[path = "terminal_control_history_writer.rs"]
 mod writer;
 
+pub(super) use validation::validate_historical_dispatch;
+
 pub(super) fn observed_launch_environment(
     conn: &rusqlite::Connection,
     config: &crate::StoreConfig,

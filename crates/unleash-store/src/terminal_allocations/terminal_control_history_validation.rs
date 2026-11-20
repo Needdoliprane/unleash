@@ -120,7 +120,7 @@ pub(super) fn source(
     )?;
     let intent: BrokerIntent = serde_json::from_str(&encoded)?;
     validate_intent(&record, &broker, &intent)?;
-    let (evaluation, started_at) = validate_marker(conn, &record, &broker, &intent, dispatch)?;
+    let (evaluation, started_at) = validate_historical_dispatch(conn, &broker, &intent, dispatch)?;
     Ok(Source {
         record,
         broker,
@@ -348,31 +348,31 @@ fn validate_control_coordinates(
     Ok(())
 }
 
-fn validate_marker(
+pub(in crate::terminal_allocations) fn validate_historical_dispatch(
     conn: &Connection,
-    record: &TerminalControlRecord,
     broker: &BrokerActionSnapshot,
     intent: &BrokerIntent,
     dispatch: DispatchId,
 ) -> Result<(BrokerEvaluation, TimestampMs), StoreError> {
-    let c = &record.context;
-    let (evaluation_id,encoded,authority,epoch,fence):(String,String,String,i64,i64)=conn.query_row("SELECT evaluation_id,decision_json,authority_generation,daemon_epoch,fence FROM broker_dispatches WHERE dispatch_id=?1 AND action_id=?2",params![dispatch.to_string(),c.action_id.to_string()],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?)))?;
+    let action = intent.action_id;
+    let lineage = intent.lineage_fence;
+    let (evaluation_id,encoded,authority,epoch,fence):(String,String,String,i64,i64)=conn.query_row("SELECT evaluation_id,decision_json,authority_generation,daemon_epoch,fence FROM broker_dispatches WHERE dispatch_id=?1 AND action_id=?2",params![dispatch.to_string(),action.to_string()],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?)))?;
     if evaluation_id != broker.evaluation_id.to_string()
-        || authority != c.authority_generation.to_string()
+        || authority != lineage.authority_generation.to_string()
         || epoch
-            != i64::try_from(c.daemon_epoch.as_u64())
+            != i64::try_from(lineage.epoch.as_u64())
                 .map_err(|_| invalid("historical epoch out of range"))?
-        || fence != 0
+        || u64::try_from(fence).ok() != Some(lineage.fence.as_u64())
     {
         return Err(invalid("historical broker marker coordinates differ"));
     }
-    let previous:Option<String>=conn.query_row("SELECT previous_evaluation_id FROM broker_evaluations WHERE evaluation_id=?1 AND action_id=?2 AND state='authorized'",params![evaluation_id,c.action_id.to_string()],|row|row.get(0))?;
+    let previous:Option<String>=conn.query_row("SELECT previous_evaluation_id FROM broker_evaluations WHERE evaluation_id=?1 AND action_id=?2 AND state='authorized'",params![evaluation_id,action.to_string()],|row|row.get(0))?;
     let evaluation = BrokerEvaluation {
         evaluation_id: broker.evaluation_id,
         previous_evaluation_id: previous.map(|id| id.parse()).transpose()?,
     };
     let decision: BrokerAuthorizationDecision = serde_json::from_str(&encoded)?;
-    if decision.action_id != c.action_id
+    if decision.action_id != action
         || decision.evaluation_id != evaluation.evaluation_id
         || decision.payload_digest != intent.payload_digest
         || decision.policy_revision != intent.policy_revision
@@ -380,21 +380,21 @@ fn validate_marker(
     {
         return Err(invalid("historical broker decision differs"));
     }
-    let auth = historical_phase(conn, c.action_id, &evaluation, "authorization")?;
+    let auth = historical_phase(conn, action, &evaluation, "authorization")?;
     if auth.pointer("/phase/outcome/decision") != Some(&serde_json::to_value(&decision)?) {
         return Err(invalid("historical authorization differs from dispatch"));
     }
-    phase_binding(&auth, c.action_id, intent.intent_digest)?;
-    let marker = historical_phase(conn, c.action_id, &evaluation, "dispatch")?;
-    phase_binding(&marker, c.action_id, intent.intent_digest)?;
+    phase_binding(&auth, action, intent.intent_digest)?;
+    let marker = historical_phase(conn, action, &evaluation, "dispatch")?;
+    phase_binding(&marker, action, intent.intent_digest)?;
     if marker.pointer("/phase/dispatch_id") != Some(&serde_json::to_value(dispatch)?)
         || marker.pointer("/phase/decision") != Some(&serde_json::to_value(&decision)?)
         || marker.pointer("/phase/fence") != Some(&serde_json::to_value(intent.lineage_fence)?)
     {
         return Err(invalid("historical dispatch phase differs from its marker"));
     }
-    let normalized = json!({"schema_version":1,"action_id":c.action_id,"evaluation":evaluation,"intent_digest":intent.intent_digest,"payload_digest":intent.payload_digest,"decision":decision,"dispatch_id":dispatch,"fence":intent.lineage_fence});
-    let (hash,ordinal,started,count):(String,i64,i64,i64)=conn.query_row("SELECT request_hash,ordinal,started_at_ms,(SELECT COUNT(*) FROM action_dispatches WHERE action_id=?2) FROM action_dispatches WHERE dispatch_id=?1 AND action_id=?2",params![dispatch.to_string(),c.action_id.to_string()],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?)))?;
+    let normalized = json!({"schema_version":1,"action_id":action,"evaluation":evaluation,"intent_digest":intent.intent_digest,"payload_digest":intent.payload_digest,"decision":decision,"dispatch_id":dispatch,"fence":intent.lineage_fence});
+    let (hash,ordinal,started,count):(String,i64,i64,i64)=conn.query_row("SELECT request_hash,ordinal,started_at_ms,(SELECT COUNT(*) FROM action_dispatches WHERE action_id=?2) FROM action_dispatches WHERE dispatch_id=?1 AND action_id=?2",params![dispatch.to_string(),action.to_string()],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?)))?;
     if hash != canonical_sha256(&normalized)?.to_string() || ordinal != 1 || count != 1 {
         return Err(invalid("historical normalized dispatch differs"));
     }

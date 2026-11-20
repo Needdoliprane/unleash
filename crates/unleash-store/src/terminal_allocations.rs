@@ -9,6 +9,7 @@ mod terminal_input_observation;
 pub mod terminal_input_types;
 pub(crate) mod terminal_input_writer;
 pub(crate) mod terminal_release;
+pub mod terminal_release_history;
 pub(crate) mod terminal_release_observation;
 mod terminal_release_recovery;
 pub mod terminal_release_types;
