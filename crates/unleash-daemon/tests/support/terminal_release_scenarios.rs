@@ -7,6 +7,9 @@ use unleash_process_host::{HostClient, HostControlSecret, HostRequest, HostRespo
 use unleash_protocol::{ErrorCode, EventEnvelope};
 use unleash_store::terminal_allocations::terminal_acquisition_query::TerminalAcquisitionResult;
 
+#[path = "terminal_release_recovery_scenarios.rs"]
+mod recovery_scenarios;
+
 async fn acquire(fixture: &mut LiveFixture) -> TerminalAcquisitionResult {
     fixture.start_terminal().await;
     let receipt = fixture
