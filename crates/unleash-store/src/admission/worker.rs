@@ -1,7 +1,7 @@
 //! One-shot claim of the exact admitted worker launch, before native startup.
 
 mod continuation;
-pub(crate) use continuation::record_worker_continuation_lost;
+pub(crate) use continuation::{WorkerContinuationLoss, record_worker_continuation_lost};
 
 use rusqlite::{OptionalExtension, Transaction, named_params, params};
 use serde::Serialize;

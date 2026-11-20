@@ -552,11 +552,26 @@ fn t_f003_001_worker_permit_requires_running_commit() {
         payload.pointer("/process_identity/start_identity"),
         Some(&serde_json::json!(identity.start_identity))
     );
+    let start = active.start_cursor();
+    let before_close = worker_preparation_state(&store, &grant);
+    let resources = invocation_worker_resources(&store, &grant);
     runtime.block_on(active.close()).unwrap();
     assert_eq!(
         verify_process_identity(&identity).unwrap(),
         ProcessVerification::Exited
     );
+    assert_eq!(
+        worker_preparation_state(&store, &grant),
+        (
+            "reconciling".to_owned(),
+            "reconciling".to_owned(),
+            before_close.2 + 1,
+            1,
+        ),
+        "closing an activated worker must leave a durable reconciliation"
+    );
+    assert_worker_reconciliation(&store, &grant, start, "worker_control_channel_closed");
+    assert_eq!(invocation_worker_resources(&store, &grant), resources);
     assert_eq!(
         store.execution_pool_state(POOL).unwrap().current_occupation,
         1
@@ -800,7 +815,7 @@ fn t_f003_006_shutdown_after_worker_start_preserves_the_single_attempt() {
             1
         )
     );
-    assert_continuation_unconfirmed(&store, &grant, start);
+    assert_worker_reconciliation(&store, &grant, start, "worker_continuation_unconfirmed");
     assert_eq!(
         store.execution_pool_state(POOL).unwrap().current_occupation,
         1
@@ -808,10 +823,13 @@ fn t_f003_006_shutdown_after_worker_start_preserves_the_single_attempt() {
     Arc::try_unwrap(store).ok().unwrap().shutdown().unwrap();
 }
 
-fn assert_continuation_unconfirmed(
+const UNCONFIRMED: &str = "worker_continuation_unconfirmed";
+
+fn assert_worker_reconciliation(
     store: &UnleashStore,
     grant: &unleash_store::AdmissionCommit,
     start: unleash_protocol::EventCursor,
+    expected_reason: &str,
 ) {
     let counts: (i64, i64) = store.read_snapshot(|conn, _| {
         Ok(conn.query_row(
@@ -822,15 +840,24 @@ fn assert_continuation_unconfirmed(
         )?)
     }).unwrap();
     assert_eq!(counts, (1, 1));
-    let (count, sequence, exit_observed, outbox): (i64, i64, bool, i64) = store
+    let (count, sequence, exit_observed, outbox, reason): (i64, i64, bool, i64, String) = store
         .read_snapshot(|conn, _| {
             Ok(conn.query_row(
                 "SELECT COUNT(*), json_extract(payload_json,'$.start_sequence'),
                         json_extract(payload_json,'$.process_exit_observed'),
-                        (SELECT COUNT(*) FROM outbox WHERE event_id=events.event_id)
+                        (SELECT COUNT(*) FROM outbox WHERE event_id=events.event_id),
+                        json_extract(payload_json,'$.reason')
                  FROM events WHERE aggregate_id=?1 AND event_type='InvocationReconciling'",
                 [grant.unit.id().to_string()],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
             )?)
         })
         .unwrap();
@@ -838,6 +865,80 @@ fn assert_continuation_unconfirmed(
     assert_eq!(u64::try_from(sequence).unwrap(), start.sequence.as_u64());
     assert!(exit_observed);
     assert_eq!(outbox, 2);
+    assert_eq!(reason, expected_reason);
+}
+
+#[test]
+#[ignore = "requires the packaged Rust worker via UNLEASH_TEST_AGENT_WORKER_BIN"]
+fn t_f003_006_worker_close_reports_failed_reconciliation_and_preserves_the_attempt() {
+    let data = local_test_dir("f003-worker-close-rollback").unwrap();
+    let store = worker_test_store(data.path());
+    let runtime = worker_test_runtime();
+    let (grant, _) = admit_worker_fixture(&store);
+    let pending = runtime
+        .block_on(prepare_invocation_worker(
+            Arc::clone(&store),
+            grant.clone(),
+            &worker_test_executable(),
+        ))
+        .unwrap();
+    let identity = pending.identity().clone();
+    let preparation = pending.preparation().clone();
+    let running = runtime
+        .block_on(pending.activate(Arc::clone(&store)))
+        .unwrap();
+    let start = running.start_cursor();
+    let before = worker_preparation_state(&store, &grant);
+    let resources = invocation_worker_resources(&store, &grant);
+    let outbox = reconciliation_outbox_count(&store);
+    reject_reconciliation_delivery(&store);
+
+    assert!(matches!(
+        runtime.block_on(running.close()),
+        Err(WorkerLaunchError::ContinuationNotRecorded { start_cursor }) if start_cursor == start
+    ));
+    assert_eq!(
+        verify_process_identity(&identity).unwrap(),
+        ProcessVerification::Exited
+    );
+    assert_eq!(worker_preparation_state(&store, &grant), before);
+    assert_eq!(invocation_worker_resources(&store, &grant), resources);
+    assert_eq!(reconciliation_outbox_count(&store), outbox);
+
+    allow_reconciliation_during_drain(&store);
+    let observation = WorkerProcessObservation {
+        pid: identity.pid,
+        owner_uid: identity.owner_uid,
+        boot_identity: identity.boot_identity.as_str().to_owned(),
+        start_identity: identity.start_identity.as_str().to_owned(),
+    };
+    let record = || {
+        store.record_invocation_worker_channel_closed(
+            preparation.clone(),
+            start,
+            observation.clone(),
+            true,
+        )
+    };
+    let cursor = record().unwrap();
+    assert_eq!(record().unwrap(), cursor);
+    assert!(matches!(
+        store.record_invocation_worker_continuation_lost(preparation, start, observation, true),
+        Err(StoreError::StaleFence { .. })
+    ));
+    assert_eq!(
+        worker_preparation_state(&store, &grant),
+        (
+            "reconciling".to_owned(),
+            "reconciling".to_owned(),
+            before.2 + 1,
+            1,
+        )
+    );
+    assert_worker_reconciliation(&store, &grant, start, "worker_control_channel_closed");
+    assert_eq!(invocation_worker_resources(&store, &grant), resources);
+    assert_eq!(reconciliation_outbox_count(&store), outbox + 2);
+    Arc::try_unwrap(store).ok().unwrap().shutdown().unwrap();
 }
 
 fn reject_reconciliation_delivery(store: &UnleashStore) {
@@ -987,7 +1088,7 @@ fn t_f003_006_reconciliation_outbox_rollback_then_exact_replay_during_drain() {
         ),
         Err(StoreError::StaleFence { .. })
     ));
-    assert_continuation_unconfirmed(&store, &grant, start_cursor);
+    assert_worker_reconciliation(&store, &grant, start_cursor, UNCONFIRMED);
     assert_eq!(
         worker_preparation_state(&store, &grant),
         (
@@ -1096,7 +1197,17 @@ fn t_f003_006_restart_reconciles_a_live_worker_without_freeing_its_capacity() {
             .current_occupation,
         1
     );
-    runtime.block_on(running.close()).unwrap();
+    assert!(matches!(
+        runtime.block_on(running.close()),
+        Err(WorkerLaunchError::ContinuationNotRecorded { start_cursor: original })
+            if original == start_cursor
+    ));
+    assert_eq!(
+        verify_process_identity(&identity).unwrap(),
+        ProcessVerification::Exited
+    );
+    assert_eq!(worker_preparation_state(&recovered, &grant).2, revision + 1);
+    assert_eq!(invocation_worker_resources(&recovered, &grant), resources);
     recovered.shutdown().unwrap();
 }
 

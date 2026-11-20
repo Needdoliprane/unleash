@@ -1391,6 +1391,47 @@ impl UnleashStore {
         identity: crate::WorkerProcessObservation,
         process_exit_observed: bool,
     ) -> Result<unleash_protocol::EventCursor, StoreError> {
+        self.record_invocation_worker_reconciliation(
+            preparation,
+            start,
+            identity,
+            crate::admission::WorkerContinuationLoss::PermitUnconfirmed {
+                process_exit_observed,
+            },
+        )
+    }
+
+    /// Record the daemon controller's observation of its private channel closing.
+    ///
+    /// The controller owns the channel and observes its closure and the native exit.
+    /// The writer attributes that observation to the exact durable start and takes the
+    /// running attempt into reconciliation while retaining its resources.
+    /// # Errors
+    /// Refuses a divergent start, identity, incarnation, owner or replay.
+    pub fn record_invocation_worker_channel_closed(
+        &self,
+        preparation: crate::WorkerLaunchPreparation,
+        start: unleash_protocol::EventCursor,
+        identity: crate::WorkerProcessObservation,
+        process_exit_observed: bool,
+    ) -> Result<unleash_protocol::EventCursor, StoreError> {
+        self.record_invocation_worker_reconciliation(
+            preparation,
+            start,
+            identity,
+            crate::admission::WorkerContinuationLoss::ControlChannelClosed {
+                process_exit_observed,
+            },
+        )
+    }
+
+    fn record_invocation_worker_reconciliation(
+        &self,
+        preparation: crate::WorkerLaunchPreparation,
+        start: unleash_protocol::EventCursor,
+        identity: crate::WorkerProcessObservation,
+        loss: crate::admission::WorkerContinuationLoss,
+    ) -> Result<unleash_protocol::EventCursor, StoreError> {
         let config = self.config.clone();
         self.execute_in_writer_tx(WriteCriticality::Critical, move |tx, now| {
             crate::admission::record_worker_continuation_lost(
@@ -1400,7 +1441,7 @@ impl UnleashStore {
                 &preparation,
                 start,
                 &identity,
-                process_exit_observed,
+                loss,
             )
         })
     }

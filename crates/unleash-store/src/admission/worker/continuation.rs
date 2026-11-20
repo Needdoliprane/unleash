@@ -17,6 +17,12 @@ use super::{
 
 const RECONCILING: &str = "InvocationReconciling";
 
+#[derive(Clone, Copy)]
+pub(crate) enum WorkerContinuationLoss {
+    PermitUnconfirmed { process_exit_observed: bool },
+    ControlChannelClosed { process_exit_observed: bool },
+}
+
 pub(crate) fn record_worker_continuation_lost(
     tx: &Transaction<'_>,
     config: &StoreConfig,
@@ -24,7 +30,7 @@ pub(crate) fn record_worker_continuation_lost(
     preparation: &WorkerLaunchPreparation,
     start: EventCursor,
     identity: &WorkerProcessObservation,
-    process_exit_observed: bool,
+    loss: WorkerContinuationLoss,
 ) -> Result<EventCursor, StoreError> {
     let daemon = read_daemon_state_tx(tx)?;
     let admission = &preparation.admission;
@@ -51,8 +57,16 @@ pub(crate) fn record_worker_continuation_lost(
     validate_launch_sequence(start)?;
     let (running_revision, reconciliation_revision) = revisions(preparation.prepared_revision)?;
     let project = start_project(tx, preparation, start, identity, running_revision)?;
+    let (reason, process_exit_observed) = match loss {
+        WorkerContinuationLoss::PermitUnconfirmed {
+            process_exit_observed,
+        } => ("worker_continuation_unconfirmed", process_exit_observed),
+        WorkerContinuationLoss::ControlChannelClosed {
+            process_exit_observed,
+        } => ("worker_control_channel_closed", process_exit_observed),
+    };
     let payload = json!({
-        "reason": "worker_continuation_unconfirmed",
+        "reason": reason,
         "start_sequence": start.sequence,
         "attempt_id": preparation.attempt_id,
         "reservation_id": admission.reservation_id,

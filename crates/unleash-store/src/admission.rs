@@ -34,10 +34,11 @@ use crate::{StoreConfig, StoreError};
 
 mod worker;
 
-pub use worker::{WorkerLaunchPreparation, WorkerProcessObservation};
 pub(crate) use worker::{
-    claim_worker_launch, commit_worker_running, record_worker_continuation_lost,
+    WorkerContinuationLoss, claim_worker_launch, commit_worker_running,
+    record_worker_continuation_lost,
 };
+pub use worker::{WorkerLaunchPreparation, WorkerProcessObservation};
 
 /// Unité réelle projetée de sa table d'origine, sans agent fictif pour un probe.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]

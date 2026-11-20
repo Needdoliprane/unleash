@@ -2,7 +2,7 @@
 
 use std::path::Path;
 use std::process::Stdio;
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 use std::time::Duration;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -110,12 +110,7 @@ impl PendingInvocationWorker {
         .map_err(|_| WorkerLaunchError::Readiness)?;
         let identity = self.identity.clone();
         let preparation = self.preparation.clone();
-        let observation = WorkerProcessObservation {
-            pid: identity.pid,
-            owner_uid: identity.owner_uid,
-            boot_identity: identity.boot_identity.as_str().to_owned(),
-            start_identity: identity.start_identity.as_str().to_owned(),
-        };
+        let observation = self.process_observation();
         let start_observation = observation.clone();
         let start_store = Arc::clone(&store);
         let start = tokio::task::spawn_blocking(move || {
@@ -174,10 +169,20 @@ impl PendingInvocationWorker {
             pending: self,
             acknowledgement,
             start_cursor,
+            store: Arc::downgrade(&store),
         })
     }
 
-    async fn close_after_failed_activation(self) -> bool {
+    fn process_observation(&self) -> WorkerProcessObservation {
+        WorkerProcessObservation {
+            pid: self.identity.pid,
+            owner_uid: self.identity.owner_uid,
+            boot_identity: self.identity.boot_identity.as_str().to_owned(),
+            start_identity: self.identity.start_identity.as_str().to_owned(),
+        }
+    }
+
+    async fn close_after_failed_activation(mut self) -> bool {
         match self.reap().await {
             Ok(status) => {
                 if !status.success() {
@@ -196,7 +201,7 @@ impl PendingInvocationWorker {
     ///
     /// # Errors
     /// Returns an error if the exit cannot be established.
-    pub async fn close(self) -> Result<(), WorkerLaunchError> {
+    pub async fn close(mut self) -> Result<(), WorkerLaunchError> {
         if self.reap().await?.success() {
             Ok(())
         } else {
@@ -204,7 +209,7 @@ impl PendingInvocationWorker {
         }
     }
 
-    async fn reap(mut self) -> Result<std::process::ExitStatus, WorkerLaunchError> {
+    async fn reap(&mut self) -> Result<std::process::ExitStatus, WorkerLaunchError> {
         drop(self.child.stdin.take());
         tokio::time::timeout(STARTUP_TIMEOUT, self.child.wait())
             .await
@@ -218,6 +223,7 @@ pub struct RunningInvocationWorker {
     pending: PendingInvocationWorker,
     acknowledgement: WorkerReply,
     start_cursor: EventCursor,
+    store: Weak<UnleashStore>,
 }
 
 impl RunningInvocationWorker {
@@ -231,12 +237,48 @@ impl RunningInvocationWorker {
         self.start_cursor
     }
 
-    /// Close and reap the child, leaving disposition to the writer.
+    /// Close the current worker's controller and journal reconciliation for the
+    /// exact running attempt. The lease and capacity remain held.
     ///
     /// # Errors
-    /// Returns an error if a normal exit cannot be established.
+    /// Returns an error if the exit or the reconciliation write cannot be established.
     pub async fn close(self) -> Result<(), WorkerLaunchError> {
-        self.pending.close().await
+        let Self {
+            mut pending,
+            start_cursor,
+            store,
+            ..
+        } = self;
+        let identity = pending.process_observation();
+        let exit = pending.reap().await;
+        let preparation = pending.preparation;
+        drop(pending.child);
+
+        let store = store
+            .upgrade()
+            .ok_or(WorkerLaunchError::ContinuationNotRecorded { start_cursor })?;
+        let process_exit_observed = exit.is_ok();
+        let written = tokio::task::spawn_blocking(move || {
+            let result = store.record_invocation_worker_channel_closed(
+                preparation,
+                start_cursor,
+                identity,
+                process_exit_observed,
+            );
+            if let Err(error) = &result {
+                tracing::warn!(code=%error.error_code(), "Recording closed worker channel failed");
+            }
+            result
+        })
+        .await;
+        if !matches!(written, Ok(Ok(_))) {
+            return Err(WorkerLaunchError::ContinuationNotRecorded { start_cursor });
+        }
+        if exit?.success() {
+            Ok(())
+        } else {
+            Err(WorkerLaunchError::NativeProcess)
+        }
     }
 }
 
