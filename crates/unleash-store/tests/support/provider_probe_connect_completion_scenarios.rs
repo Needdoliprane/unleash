@@ -204,6 +204,95 @@ fn t_f012_013_adoption_refuses_changed_dispatch_request_hash() {
 }
 
 #[test]
+fn t_f012_013_completion_rechecks_marker_after_fact_adoption() {
+    let (store, _directory, mandate, pool) = fixture(Arc::new(NoopCutpointObserver));
+    let execution = dispatched(&store, mandate, pool);
+    let fact = store
+        .adopt_provider_probe_connect_observation(
+            &execution.ready.claim,
+            candidate(&store, &execution),
+        )
+        .unwrap();
+    let request = final_request(&store, &execution, Some(fact.clone()));
+    let dispatch = execution.dispatch;
+    let modified = Sha256Digest::from_bytes(b"synthetic marker corruption after fact adoption");
+    let changed = store
+        .execute_in_writer_tx(WriteCriticality::Normal, move |tx, _| {
+            Ok(tx.execute(
+                "UPDATE action_dispatches SET request_hash=?2 WHERE dispatch_id=?1",
+                rusqlite::params![dispatch.to_string(), modified.to_string()],
+            )?)
+        })
+        .unwrap();
+    assert_eq!(changed, 1);
+    let before = counts(&store);
+    assert!(
+        store
+            .commit_provider_probe_connect_observation(&execution.ready.claim, request)
+            .is_err()
+    );
+    assert_eq!(counts(&store), before);
+    assert_eq!(held_capacity(&store), 1);
+    assert_eq!(disposition_count(&store), 0);
+    assert_eq!(
+        store
+            .inspect_broker_action(execution.ready.intent.action_id)
+            .unwrap()
+            .unwrap()
+            .state,
+        ActionState::Dispatching
+    );
+    let retained:i64=store.read_snapshot(|conn,_|Ok(conn.query_row(
+        "SELECT COUNT(*) FROM evidence e JOIN object_references r ON r.object_hash=e.object_hash AND r.owner_kind='provider_probe' AND r.owner_id=?1 AND r.source_field='connect_observation' AND r.state='live' WHERE e.action_id=?2 AND e.object_hash=?3 AND e.availability='available'",
+        rusqlite::params![execution.ready.record.context.probe_id.to_string(),execution.ready.intent.action_id.to_string(),fact.content_hash().to_string()],|row|row.get(0),
+    )?)).unwrap();
+    assert_eq!(
+        retained, 1,
+        "an adopted native fact survives a refused final disposition"
+    );
+    assert_no_model(&store);
+}
+
+#[test]
+fn t_f012_013_native_fact_after_policy_change_does_not_reauthorize_io() {
+    let (store, _directory, mandate, pool) = fixture(Arc::new(NoopCutpointObserver));
+    let execution = dispatched(&store, mandate, pool);
+    let mut changed = change(&store);
+    if let ProviderProbeMandateChange::Issue(issue) = &mut changed {
+        issue.profile_version = 2;
+        issue.limits = ProviderTestLimits::new(30_000, 0, 0, MicrosAmount::ZERO);
+    }
+    let receipt = store
+        .commit_command(policy(&store, 202, 1, changed))
+        .unwrap();
+    assert_eq!(receipt.receipt().new_revision, Revision::new(2));
+    // Trusted-observer fixture only: this asserts SQLite attribution, not real I/O.
+    let fact = store
+        .adopt_provider_probe_connect_observation(
+            &execution.ready.claim,
+            candidate(&store, &execution),
+        )
+        .unwrap();
+    store
+        .commit_provider_probe_connect_observation(
+            &execution.ready.claim,
+            final_request(&store, &execution, Some(fact)),
+        )
+        .unwrap();
+    assert_eq!(
+        store
+            .inspect_broker_action(execution.ready.intent.action_id)
+            .unwrap()
+            .unwrap()
+            .state,
+        ActionState::ObservedSuccess
+    );
+    assert_eq!(held_capacity(&store), 0);
+    assert_eq!(disposition_count(&store), 1);
+    assert_no_model(&store);
+}
+
+#[test]
 fn t_f012_013_completion_requires_adopted_fact_and_original_continuation() {
     let (store, _directory, mandate, pool) = fixture(Arc::new(NoopCutpointObserver));
     let execution = dispatched(&store, mandate, pool);
