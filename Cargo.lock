@@ -5957,6 +5957,7 @@ dependencies = [
  "unleash-client",
  "unleash-domain",
  "unleash-gui",
+ "unleash-model-router",
  "unleash-platform",
  "unleash-process-host",
  "unleash-protocol",

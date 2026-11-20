@@ -81,6 +81,35 @@
           }
         }
       }
+    },
+    {
+      "if": { "properties": { "event_type": { "const": "ProviderProbeDispatchRefused" } } },
+      "then": {
+        "properties": {
+          "payload": {
+            "oneOf": [
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["schema_version", "probe_id", "action_id", "evaluation_id", "intent_digest", "reason", "disposition_digest", "reservation_id", "lease_id", "fence"],
+                "properties": {
+                  "schema_version": { "const": 1 },
+                  "probe_id": { "type": "string", "format": "uuid" },
+                  "action_id": { "type": "string", "format": "uuid" },
+                  "evaluation_id": { "type": "string", "format": "uuid" },
+                  "intent_digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+                  "reason": { "enum": ["policy_changed", "authorization_denied"] },
+                  "disposition_digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+                  "reservation_id": { "type": "string", "format": "uuid" },
+                  "lease_id": { "type": "string", "format": "uuid" },
+                  "fence": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 }
+                }
+              },
+              { "const": { "tombstoned": true } }
+            ]
+          }
+        }
+      }
     }
   ],
   "properties": {

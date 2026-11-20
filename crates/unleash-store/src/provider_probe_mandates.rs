@@ -413,6 +413,176 @@ fn read_one(conn: &Connection, reference: ReceiptId) -> Result<Option<StoredGran
     .transpose()
 }
 
+/// Résolution interne d'une émission ; aucune autorisation n'est portée par le client.
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) struct ResolvedConnectGrant {
+    pub principal_id: ActorId,
+    pub mandate_ref: ReceiptId,
+    pub mandate_digest: Sha256Digest,
+    pub expires_at_ms: TimestampMs,
+}
+
+/// Relit les octets immuables, leur reçu et la révocation dans la transaction writer.
+/// Une projection `ReadPolicySummary` ou une chaîne `mandate_ref` ne confère aucun droit.
+pub(crate) fn resolve_connect_grant(
+    tx: &Transaction<'_>,
+    daemon: &DaemonStateRow,
+    now: TimestampMs,
+    envelope: &CommandEnvelope,
+    caller: &CallerAuthority,
+    wire: &TestProviderProfilePayload,
+    profile: &crate::ConfiguredProviderProfile,
+) -> Result<ResolvedConnectGrant, StoreError> {
+    require_security_admin(caller, "TestProviderProfile")?;
+    if envelope.authority_generation != daemon.authority_generation {
+        return Err(StoreError::StaleAuthorityGeneration {
+            expected: daemon.authority_generation,
+            actual: envelope.authority_generation,
+            command_id: Some(envelope.command_id),
+        });
+    }
+    resolve_connect_binding(
+        tx,
+        daemon,
+        now,
+        &ConnectGrantBinding {
+            actor_id: &caller.actor_id,
+            project_id: envelope.project_id,
+            wire,
+            profile,
+        },
+    )
+}
+
+struct ConnectGrantBinding<'a> {
+    actor_id: &'a ActorId,
+    project_id: Option<ProjectId>,
+    wire: &'a TestProviderProfilePayload,
+    profile: &'a crate::ConfiguredProviderProfile,
+}
+
+/// Checks the already authorized context's facts for admission. This does not
+/// construct a caller role, a fresh claim or permission to append broker phases.
+pub(crate) fn revalidate_connect_grant(
+    tx: &Transaction<'_>,
+    daemon: &DaemonStateRow,
+    now: TimestampMs,
+    context: &crate::ProviderProbeConnectContext,
+    profile: &crate::ConfiguredProviderProfile,
+) -> Result<ResolvedConnectGrant, StoreError> {
+    let wire = TestProviderProfilePayload::try_new(
+        context.profile_id.to_string(),
+        context.profile_version,
+        context.phase,
+        context.capability_set.clone(),
+        context.limits.clone(),
+        context.locality,
+        context.mandate_ref.to_string(),
+    )
+    .map_err(|_| hidden())?;
+    resolve_connect_binding(
+        tx,
+        daemon,
+        now,
+        &ConnectGrantBinding {
+            actor_id: &context.actor_id,
+            project_id: context.project_id,
+            wire: &wire,
+            profile,
+        },
+    )
+}
+
+fn resolve_connect_binding(
+    tx: &Transaction<'_>,
+    daemon: &DaemonStateRow,
+    now: TimestampMs,
+    binding: &ConnectGrantBinding<'_>,
+) -> Result<ResolvedConnectGrant, StoreError> {
+    let ConnectGrantBinding {
+        actor_id,
+        project_id,
+        wire,
+        profile,
+    } = binding;
+    let reference: ReceiptId = wire.mandate_ref().parse().map_err(|_| hidden())?;
+    if reference.as_uuid().is_nil() || reference.to_string() != wire.mandate_ref() {
+        return Err(hidden());
+    }
+    let stored = read_one(tx, reference)?.ok_or_else(hidden)?;
+    let grant = &stored.grant;
+    let principal = grant.permission.principal_id.clone();
+    let current_principal: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM principals WHERE principal_id=?1 AND actor_id=?2 AND state='active' AND principal_kind IN ('user','service','system'))",
+        params![principal.as_str(),actor_id.as_str()], |row|row.get(0),
+    )?;
+    let target = project(grant.scope_kind, &grant.scope_id)?;
+    if stored.revocation.is_some()
+        || grant.authority_generation != daemon.authority_generation
+        || grant.permission.phase != ProviderTestPhase::Connect
+        || wire.phase() != ProviderTestPhase::Connect
+        || grant.permission.expires_at_ms <= now
+        || grant.issued_at_ms > now
+        || !current_principal
+        || target != *project_id
+        || target != profile.configuration.project_id
+        || grant.permission.profile_id != profile.configuration.profile_id
+        || wire.profile_id() != profile.configuration.profile_id.to_string()
+        || wire.profile_version() != profile.configuration.profile_version
+        || grant.permission.profile_version != profile.configuration.profile_version
+        || grant.profile_version_ref != profile.profile_version_ref
+        || grant.configuration_digest != profile.configuration_digest
+        || grant.configuration_receipt_id != profile.receipt_id
+        || grant.destination != profile.configuration.payload.endpoint()
+    {
+        return Err(hidden());
+    }
+    validate_connect_bounds(wire, &grant.permission, profile)?;
+    let source: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM command_receipts WHERE receipt_id=?1 AND command_type='SetPolicy' AND command_id=?2 AND actor_id=?3 AND authority_generation=?4 AND state IN ('accepted','completed'))",
+        params![reference.to_string(),grant.command_id.to_string(),grant.issued_by_actor.as_str(),daemon.authority_generation.to_string()], |row|row.get(0),
+    )?;
+    if !source {
+        return Err(hidden());
+    }
+    ensure_scope_not_frozen_tx(tx, target, None, None)?;
+    for subject in [principal.as_str(), actor_id.as_str()] {
+        ensure_subject_not_blocked_tx(tx, SubjectKind::Actor, subject, target)?;
+    }
+    provider_profiles::verify_secret(tx, &profile.configuration)?;
+    Ok(ResolvedConnectGrant {
+        principal_id: principal,
+        mandate_ref: reference,
+        mandate_digest: stored.digest,
+        expires_at_ms: grant.permission.expires_at_ms,
+    })
+}
+
+fn validate_connect_bounds(
+    wire: &TestProviderProfilePayload,
+    permission: &ProviderProbeMandateIssue,
+    profile: &crate::ConfiguredProviderProfile,
+) -> Result<(), StoreError> {
+    let limits = wire.limits();
+    if limits.timeout_ms() > permission.limits.timeout_ms()
+        || limits.timeout_ms() > profile.configuration.payload.limits().connect_timeout_ms
+        || limits.max_calls() > permission.limits.max_calls()
+        || limits.max_output_tokens() > permission.limits.max_output_tokens()
+        || limits.max_cost_usd_micros() > permission.limits.max_cost_usd_micros()
+        || wire
+            .capability_set()
+            .iter()
+            .any(|capability| !permission.capability_set.contains(capability))
+        || (wire.locality() == DataLocality::ApprovedRemote
+            && permission.locality == DataLocality::LocalOnly)
+        || (wire.locality() == DataLocality::LocalOnly
+            && profile.configuration.payload.locality() != DataLocality::LocalOnly)
+    {
+        return Err(hidden());
+    }
+    Ok(())
+}
+
 fn revoke_tx(
     tx: &Transaction<'_>,
     ctx: &PolicyMandateCommand<'_>,

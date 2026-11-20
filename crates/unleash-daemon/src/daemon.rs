@@ -423,6 +423,13 @@ impl UnleashDaemon {
         let store_init_res = tokio::task::spawn_blocking(move || -> Result<_, DaemonError> {
             let local_principal = format!("uid:{uid}");
             opened.register_principal(&local_principal, "user", &local_principal)?;
+            // Internal native observer. Facts bind this producer to the actual
+            // authority/epoch, fresh claim and resource lease in the writer.
+            opened.register_principal(
+                unleash_store::CONNECT_OBSERVER_PRINCIPAL,
+                "system",
+                unleash_store::CONNECT_OBSERVER_PRINCIPAL,
+            )?;
             let new_inst = DaemonInstanceId::from_uuid(opened.config().id_generator.new_uuid());
             let (row, prev_mode, started_ev) =
                 enter_recovering_and_emit_event(&opened, &boot_id, new_inst)?;

@@ -225,6 +225,54 @@ pub enum ProviderProfilePayloadError {
     InvalidAuthentication,
 }
 
+/// Destination dérivée, sans résolution DNS, permission ou preuve de placement.
+/// Elle ne fait pas partie du wire et ne modifie pas son empreinte.
+#[derive(Clone, PartialEq, Eq)]
+pub struct ProviderEndpointDestination {
+    normalized_endpoint: String,
+    scheme: String,
+    host: String,
+    port: u16,
+}
+
+impl std::fmt::Debug for ProviderEndpointDestination {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ProviderEndpointDestination")
+            .field("port", &self.port)
+            .finish_non_exhaustive()
+    }
+}
+
+impl ProviderEndpointDestination {
+    /// Copie canonique de l'URL, avec son chemin conservé.
+    #[must_use]
+    pub fn normalized_endpoint(&self) -> &str {
+        &self.normalized_endpoint
+    }
+    /// Schéma HTTP ou HTTPS déjà admis par le payload.
+    #[must_use]
+    pub fn scheme(&self) -> &str {
+        &self.scheme
+    }
+    /// Hôte canonique, sans crochets pour un littéral IPv6.
+    #[must_use]
+    pub fn host(&self) -> &str {
+        &self.host
+    }
+    /// Port effectif, y compris 80 ou 443 en l'absence de port explicite.
+    #[must_use]
+    pub const fn port(&self) -> u16 {
+        self.port
+    }
+    /// Propriété syntaxique du seul littéral IP, sans résoudre de nom.
+    #[must_use]
+    pub fn is_loopback_literal(&self) -> bool {
+        self.host
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|address| address.is_loopback())
+    }
+}
+
 /// Payload de `SetProviderProfile` ; identité et version viennent de l'enveloppe.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(try_from = "RawProviderProfile")]
@@ -436,6 +484,34 @@ impl TryFrom<RawProviderProfile> for SetProviderProfilePayload {
 }
 
 impl SetProviderProfilePayload {
+    /// Dérive la destination avec la canonicalisation existante, sans I/O.
+    /// Le payload et son digest d'origine restent inchangés.
+    /// # Errors
+    /// Refuse une URL dont les parties requises ne sont pas disponibles.
+    pub fn endpoint_destination(
+        &self,
+    ) -> Result<ProviderEndpointDestination, ProviderProfilePayloadError> {
+        let normalized = self.with_normalized_endpoint()?;
+        let endpoint = Url::parse(normalized.endpoint())
+            .map_err(|_| ProviderProfilePayloadError::InvalidReference)?;
+        let host = match endpoint.host() {
+            Some(url::Host::Domain(host)) => host.to_owned(),
+            Some(url::Host::Ipv4(address)) => address.to_string(),
+            Some(url::Host::Ipv6(address)) => address.to_string(),
+            None => return Err(ProviderProfilePayloadError::InvalidReference),
+        };
+        let port = endpoint
+            .port_or_known_default()
+            .filter(|port| *port != 0)
+            .ok_or(ProviderProfilePayloadError::InvalidReference)?;
+        Ok(ProviderEndpointDestination {
+            normalized_endpoint: endpoint.to_string(),
+            scheme: endpoint.scheme().to_owned(),
+            host,
+            port,
+        })
+    }
+
     /// Produit une copie dont seul l'endpoint est normalisé suivant `Url`.
     /// Le décodage et le digest de l'enveloppe d'origine restent inchangés.
     /// Aucune résolution DNS, connexion ou preuve de placement n'est effectuée.

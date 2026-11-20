@@ -33,6 +33,15 @@ pub struct SubscriptionHub {
 }
 
 impl SubscriptionHub {
+    pub(crate) fn observe_internal(self: &Arc<Self>) -> InternalEventSubscription {
+        let (id, receiver, aborted) = self.register();
+        InternalEventSubscription {
+            hub: Arc::clone(self),
+            id,
+            receiver,
+            aborted,
+        }
+    }
     /// Crée un hub avec une file bornée de `capacity` lots par abonné.
     #[must_use]
     pub fn new(capacity: usize) -> Arc<Self> {
@@ -125,6 +134,33 @@ impl SubscriptionHub {
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
         guard.clear();
+    }
+}
+
+/// An internal wake-up observes the existing outbox stream, never grants admission.
+pub(crate) struct InternalEventSubscription {
+    hub: Arc<SubscriptionHub>,
+    id: u64,
+    receiver: mpsc::Receiver<Vec<EventEnvelope>>,
+    aborted: Arc<tokio::sync::Notify>,
+}
+
+impl InternalEventSubscription {
+    pub(crate) async fn changed(&mut self) -> Result<(), ()> {
+        if self.receiver.is_closed() {
+            return Err(());
+        }
+        tokio::select! {
+            biased;
+            ()=self.aborted.notified()=>Err(()),
+            events=self.receiver.recv()=>events.map(|_|()).ok_or(()),
+        }
+    }
+}
+
+impl Drop for InternalEventSubscription {
+    fn drop(&mut self) {
+        self.hub.unregister(self.id);
     }
 }
 

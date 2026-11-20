@@ -217,7 +217,7 @@ fn receipt(value: &unleash_action_broker::ActionReceipt) -> BrokerActionReceipt 
     clippy::too_many_lines,
     reason = "Projection exhaustive et contrôles de corrélation des quatre phases"
 )]
-fn project(
+pub(crate) fn project(
     entry: &BrokerJournalEntry,
 ) -> Result<(BrokerEvaluation, BrokerIntent, BrokerPhase), BrokerJournalError> {
     let (evaluation, source) = match entry {

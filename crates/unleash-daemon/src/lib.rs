@@ -31,6 +31,7 @@ pub mod error;
 pub mod execution_scheduler;
 pub mod executors;
 pub mod ipc;
+mod provider_probe_connect_service;
 mod provider_profile_service;
 mod provider_profile_validation_service;
 pub mod recovery;

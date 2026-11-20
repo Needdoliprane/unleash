@@ -39,9 +39,14 @@ impl CutpointObserver for CutpointAdapter {
         let cp = match cutpoint {
             StoreCutpoint::C0BeforeCommandTx => Cutpoint::C0,
             StoreCutpoint::C1BeforeCommandCommit
-            | StoreCutpoint::C1BeforeTerminalRenewalObservationCommit => Cutpoint::C1,
-            StoreCutpoint::C2AfterCommandCommit => Cutpoint::C2,
-            StoreCutpoint::C3AfterBrokerIntentCommit => Cutpoint::C3,
+            | StoreCutpoint::C1BeforeTerminalRenewalObservationCommit
+            | StoreCutpoint::C1BeforeProviderProbeConnectFactAdoption
+            | StoreCutpoint::C1BeforeProviderProbeConnectObservationCommit => Cutpoint::C1,
+            StoreCutpoint::C2AfterCommandCommit
+            | StoreCutpoint::C2AfterProviderProbeConnectFactAdoption => Cutpoint::C2,
+            StoreCutpoint::C3AfterBrokerIntentCommit
+            | StoreCutpoint::C3AfterProviderProbeConnectClaimCommit
+            | StoreCutpoint::C3AfterProviderProbeConnectAuthorizationCommit => Cutpoint::C3,
             StoreCutpoint::C4AfterBrokerDispatchCommit => Cutpoint::C4,
             StoreCutpoint::C10aAfterPrepPin => Cutpoint::C10a,
             StoreCutpoint::C10bBeforeDeletingReserve => Cutpoint::C10b,

@@ -440,6 +440,10 @@ pub(crate) fn read_snapshot(
             eligibility_valid_until: None,
             urgency: AdmissionUrgency::Ordinary,
         };
+        if matches!(unit, AdmissionUnit::Probe(_)) {
+            // The same resolver supplies queued and active scope projections.
+            candidate.project_id = project_for(conn, unit)?;
+        }
         let evidence: Option<(String,String,i64)> = conn.query_row("SELECT e.evidence_id,a.urgency,a.valid_until_ms FROM evidence e JOIN admission_eligibility_observations a ON a.evidence_id=e.evidence_id WHERE e.snapshot_ref=?1 ORDER BY a.observation_seq DESC LIMIT 1", [eligibility_binding(&candidate,&daemon,source_revision)], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?))).optional()?;
         if let Some((raw, urgency, valid_until)) =
             evidence.filter(|(_, _, until)| *until > now.as_i64())
@@ -586,7 +590,9 @@ fn project_for(conn: &Connection, unit: AdmissionUnit) -> Result<Option<ProjectI
             "SELECT m.project_id FROM replay_workers w JOIN workflow_runs r ON r.run_id=w.run_id JOIN missions m ON m.mission_id=r.mission_id WHERE w.replay_worker_id=?1"
         }
         AdmissionUnit::Probe(_) => {
-            if read_daemon_state_conn(conn)?.schema_version >= 9 {
+            if read_daemon_state_conn(conn)?.schema_version >= 15 {
+                "SELECT CASE WHEN t.probe_id IS NOT NULL THEN t.project_id WHEN pc.probe_id IS NOT NULL THEN pc.project_id ELSE m.project_id END FROM provider_probes p LEFT JOIN provider_probe_transport_contexts t ON t.probe_id=p.probe_id LEFT JOIN provider_probe_contexts pc ON pc.probe_id=p.probe_id LEFT JOIN workflow_runs r ON r.run_id=p.source_run_id LEFT JOIN missions m ON m.mission_id=r.mission_id WHERE p.probe_id=?1"
+            } else if read_daemon_state_conn(conn)?.schema_version >= 9 {
                 "SELECT CASE WHEN pc.probe_id IS NOT NULL THEN pc.project_id ELSE m.project_id END FROM provider_probes p LEFT JOIN provider_probe_contexts pc ON pc.probe_id=p.probe_id LEFT JOIN workflow_runs r ON r.run_id=p.source_run_id LEFT JOIN missions m ON m.mission_id=r.mission_id WHERE p.probe_id=?1"
             } else {
                 "SELECT m.project_id FROM provider_probes p LEFT JOIN workflow_runs r ON r.run_id=p.source_run_id LEFT JOIN missions m ON m.mission_id=r.mission_id WHERE p.probe_id=?1"
@@ -791,7 +797,9 @@ where
         return Err(invalid("date de mise en file non attestée"));
     }
     validate_candidate(tx, candidate, &daemon, now)?;
-    if let AdmissionUnit::Probe(probe) = unit {
+    if let AdmissionUnit::Probe(probe) = unit
+        && !crate::provider_probe_connect::validate_admission_budgets(tx, probe, &budgets)?
+    {
         crate::provider_probes::validate_admission_budgets(tx, probe, &budgets)?;
     }
     validate_scope_and_subjects(tx, candidate)?;
@@ -941,7 +949,9 @@ fn validate_candidate(
             }
         }
         AdmissionUnit::Probe(id) => {
-            crate::provider_probes::validate_admission(tx, id, now)?;
+            if !crate::provider_probe_connect::validate_admission(tx, id, now)? {
+                crate::provider_probes::validate_admission(tx, id, now)?;
+            }
             let valid:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM provider_probes p JOIN principals s ON s.principal_id=p.principal_id JOIN command_receipts c ON c.receipt_id=p.command_receipt_id JOIN provider_profiles f ON f.profile_version_ref=p.profile_version_ref WHERE p.probe_id=?1 AND s.state='active' AND c.actor_id=s.actor_id AND c.authority_generation=?2 AND c.state IN ('accepted','completed') AND p.authority_generation=?2 AND p.daemon_epoch=?3 AND p.admission_class='work' AND p.context_hash!='')",params![id.to_string(),daemon.authority_generation.to_string(),integer(daemon.daemon_epoch.as_u64())?],|row|row.get(0))?;
             if !valid {
                 return Err(invalid("cause, sujet ou incarnation probe non valides"));

@@ -158,6 +158,13 @@ pub enum CommandMutation {
         /// Observation réelle et objet publié avant la transaction.
         preparation: Box<crate::ProviderValidationPreparation>,
     },
+    /// Prépare un contexte réseau authentifié sans action, `ModelCall` ou réservation.
+    PrepareProviderProbeConnect {
+        /// Autorité issue de la session, sans délégation d'un payload client.
+        caller: CallerAuthority,
+        /// Résolution exacte, relue dans la transaction du nouveau reçu.
+        preparation: Box<crate::ProviderProbeConnectPreparation>,
+    },
     /// Prépare un terminal sans action OS ni action broker préinsérée.
     PrepareTerminalAllocation {
         /// Identité égale à l'agrégat de commande.
@@ -916,7 +923,8 @@ pub(crate) fn tx_commit_command(
     }
     crate::backup_requests::validate_request_backup_envelope(req)?;
     let local_validation = crate::provider_profile_validation::validate_identity(req)?;
-    if !local_validation {
+    let connect = crate::provider_probe_connect::validate_identity(req)?;
+    if !local_validation && !connect {
         crate::provider_probes::validate_command(tx, req)?;
     }
     crate::provider_profiles::validate_identity(req)?;
@@ -932,6 +940,7 @@ pub(crate) fn tx_commit_command(
     }
     crate::provider_profiles::validate_new_command(req)?;
     crate::provider_profile_validation::validate_new_command(req)?;
+    crate::provider_probe_connect::validate_new_command(req)?;
 
     // Mode `read_only_recovery` refuse les nouvelles écritures métier ordinaires tout en
     // autorisant les opérations d'urgence / réconciliation / arrêt / purge.
@@ -1151,12 +1160,13 @@ pub(crate) fn tx_commit_command(
     } else {
         None
     };
-    let prepared_probe =
-        if let CommandMutation::PrepareProviderProbe { probe_id, .. } = &req.mutation {
-            Some(*probe_id)
-        } else {
-            None
-        };
+    let prepared_probe = match &req.mutation {
+        CommandMutation::PrepareProviderProbe { probe_id, .. } => Some(*probe_id),
+        CommandMutation::PrepareProviderProbeConnect { .. } => Some(
+            unleash_domain::ProviderProbeId::from_uuid(req.envelope.aggregate_id),
+        ),
+        _ => None,
+    };
     let effective_receipt_state = if purge_id.is_some()
         || reserved_backup.is_some()
         || prepared_probe.is_some()
@@ -1457,6 +1467,22 @@ fn apply_command_mutation(
             daemon,
             now_ms,
             crate::provider_profile_validation::ValidationCommand {
+                envelope,
+                caller,
+                preparation,
+            },
+            receipt_id,
+            generated_events,
+        ),
+        CommandMutation::PrepareProviderProbeConnect {
+            caller,
+            preparation,
+        } => crate::provider_probe_connect::commit_tx(
+            tx,
+            config,
+            daemon,
+            now_ms,
+            &crate::provider_probe_connect::ConnectCommand {
                 envelope,
                 caller,
                 preparation,

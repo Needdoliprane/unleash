@@ -14,8 +14,8 @@ use crate::{StoreConfig, StoreCutpoint, StoreError};
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde_json::{Value, json};
 use unleash_domain::{
-    ActionId, ActionOrigin, ActionState, DaemonMode, Fence, Revision, Sequence, Sha256Digest,
-    TimestampMs,
+    ActionId, ActionOrigin, ActionState, DaemonMode, DispatchId, Fence, LineageFence, Revision,
+    Sequence, Sha256Digest, TimestampMs,
 };
 use unleash_protocol::{EventCursor, RetryClass, canonical_sha256};
 
@@ -110,7 +110,7 @@ pub(crate) fn inspect_action_conn(
     clippy::too_many_lines,
     reason = "Validation du manifeste complet et de ses champs d’autorité sans dépendance vers le broker"
 )]
-fn validate_manifest(intent: &BrokerIntent) -> Result<(), StoreError> {
+pub(crate) fn validate_manifest(intent: &BrokerIntent) -> Result<(), StoreError> {
     const KEYS: &[&str] = &[
         "action_id",
         "subject",
@@ -222,8 +222,20 @@ fn validate_live_intent(
     now: TimestampMs,
     intent: &BrokerIntent,
 ) -> Result<(), StoreError> {
+    validate_live_intent_with_connect(tx, daemon, now, intent, false)
+}
+
+fn validate_live_intent_with_connect(
+    tx: &Transaction<'_>,
+    daemon: &DaemonStateRow,
+    now: TimestampMs,
+    intent: &BrokerIntent,
+    connect_authorized: bool,
+) -> Result<(), StoreError> {
     crate::backup_requests::validate_backup_intent_tx(tx, daemon, intent)?;
-    crate::provider_probes::validate_intent(tx, daemon, intent)?;
+    if !connect_authorized && !crate::provider_probe_connect::validate_intent(tx, daemon, intent)? {
+        crate::provider_probes::validate_intent(tx, daemon, intent)?;
+    }
     crate::terminal_allocations::validate_intent(tx, daemon, now, intent)?;
     if daemon.mode != DaemonMode::Ready {
         return Err(StoreError::RecoveryInProgress(
@@ -399,7 +411,7 @@ pub(crate) fn commit_phase_tx(
     now: TimestampMs,
     request: &BrokerPhaseRequest,
 ) -> Result<BrokerPhaseCommit, StoreError> {
-    commit_phase_tx_inner(tx, config, now, request, None)
+    commit_phase_tx_inner(tx, config, now, request, None, None, None)
 }
 pub(crate) fn commit_terminal_observation_tx(
     tx: &Transaction<'_>,
@@ -408,7 +420,84 @@ pub(crate) fn commit_terminal_observation_tx(
     request: &BrokerPhaseRequest,
     proof: &crate::terminal_allocations::TerminalObservationProof,
 ) -> Result<BrokerPhaseCommit, StoreError> {
-    commit_phase_tx_inner(tx, config, now, request, Some(proof))
+    commit_phase_tx_inner(tx, config, now, request, Some(proof), None, None)
+}
+
+pub(crate) fn commit_connect_phase_tx(
+    tx: &Transaction<'_>,
+    config: &StoreConfig,
+    now: TimestampMs,
+    request: &BrokerPhaseRequest,
+    permission: &crate::provider_probe_connect::ConnectPhasePermission,
+) -> Result<BrokerPhaseCommit, StoreError> {
+    commit_phase_tx_inner(
+        tx,
+        config,
+        now,
+        request,
+        None,
+        Some(crate::provider_probe_connect::ConnectPhaseAccess::Live(
+            permission,
+        )),
+        None,
+    )
+}
+
+pub(crate) fn commit_connect_observation_tx(
+    tx: &Transaction<'_>,
+    config: &StoreConfig,
+    now: TimestampMs,
+    request: &BrokerPhaseRequest,
+    observation: &crate::provider_probe_connect_observation::ConnectObservationPermission,
+) -> Result<BrokerPhaseCommit, StoreError> {
+    commit_phase_tx_inner(
+        tx,
+        config,
+        now,
+        request,
+        None,
+        Some(
+            crate::provider_probe_connect::ConnectPhaseAccess::Observation(
+                observation.permission(),
+            ),
+        ),
+        Some(observation),
+    )
+}
+
+/// Canonical immutable phase replay lookup shared with specialized preflights.
+/// The caller must validate its own authority and forbid dispatch replay first.
+pub(crate) fn lookup_phase_record(
+    conn: &Connection,
+    daemon: &DaemonStateRow,
+    request: &BrokerPhaseRequest,
+) -> Result<Option<BrokerPhaseCommit>, StoreError> {
+    let action = request.phase.action_id();
+    let exact = json!({"schema_version":BROKER_PHASE_SCHEMA_VERSION,"evaluation":request.evaluation,"phase":request.phase});
+    let digest = canonical_sha256(&exact)?;
+    let key = phase_key(&request.phase);
+    let prior:Option<(String,i64,i64)>=conn.query_row("SELECT phase_digest,action_revision,event_sequence FROM broker_phase_records WHERE action_id=?1 AND evaluation_id=?2 AND phase_key=?3",params![action.to_string(),request.evaluation.evaluation_id.to_string(),key],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional().map_err(StoreError::from_rusqlite)?;
+    prior
+        .map(|(stored, revision, sequence)| {
+            if stored != digest.as_prefixed_str() {
+                return Err(invalid("phase broker divergente pour identité existante"));
+            }
+            Ok(BrokerPhaseCommit {
+                action_id: action,
+                revision: Revision::new(
+                    u64::try_from(revision).map_err(|_| invalid("révision de phase négative"))?,
+                ),
+                event_cursor: EventCursor::new(
+                    daemon.stream_id,
+                    Sequence::new(
+                        u64::try_from(sequence)
+                            .map_err(|_| invalid("séquence de phase négative"))?,
+                    ),
+                ),
+                replayed: true,
+            })
+        })
+        .transpose()
 }
 
 /// Résout la phase avant toute I/O ; un dispatch durable n'est jamais acquitté une seconde fois.
@@ -422,6 +511,10 @@ fn commit_phase_tx_inner(
     now: TimestampMs,
     request: &BrokerPhaseRequest,
     terminal_proof: Option<&crate::terminal_allocations::TerminalObservationProof>,
+    connect_access: Option<crate::provider_probe_connect::ConnectPhaseAccess<'_>>,
+    connect_observation: Option<
+        &crate::provider_probe_connect_observation::ConnectObservationPermission,
+    >,
 ) -> Result<BrokerPhaseCommit, StoreError> {
     let daemon = read_daemon_state_tx(tx)?;
     if daemon.authority_generation != request.authority_generation {
@@ -450,6 +543,13 @@ fn commit_phase_tx_inner(
             });
         }
     }
+    let connect_authorized = crate::provider_probe_connect::guard_phase_access(
+        tx,
+        &daemon,
+        now,
+        &request.phase,
+        connect_access,
+    )?;
     crate::provider_probes::validate_incarnation(tx, &daemon, action)?;
     crate::terminal_allocations::validate_incarnation(tx, &daemon, action)?;
     if matches!(request.phase, BrokerPhase::Dispatch { .. }) {
@@ -469,20 +569,8 @@ fn commit_phase_tx_inner(
     let key = phase_key(&request.phase);
     let exact = json!({"schema_version":BROKER_PHASE_SCHEMA_VERSION,"evaluation":request.evaluation,"phase":request.phase});
     let digest = canonical_sha256(&exact)?;
-    let prior:Option<(String,i64,i64)>=tx.query_row("SELECT phase_digest,action_revision,event_sequence FROM broker_phase_records WHERE action_id=?1 AND evaluation_id=?2 AND phase_key=?3",params![action.to_string(),request.evaluation.evaluation_id.to_string(),key],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional().map_err(StoreError::from_rusqlite)?;
-    if let Some((stored, revision, sequence)) = prior {
-        if stored != digest.as_prefixed_str() {
-            return Err(invalid("phase broker divergente pour identité existante"));
-        }
-        return Ok(BrokerPhaseCommit {
-            action_id: action,
-            revision: Revision::new(u64::try_from(revision).unwrap_or(0)),
-            event_cursor: EventCursor::new(
-                daemon.stream_id,
-                Sequence::new(u64::try_from(sequence).unwrap_or(0)),
-            ),
-            replayed: true,
-        });
+    if let Some(replayed) = lookup_phase_record(tx, &daemon, request)? {
+        return Ok(replayed);
     }
     crate::terminal_allocations::guard_observation(tx, &request.phase, terminal_proof)?;
     let current = inspect_action_conn(tx, action)?;
@@ -505,9 +593,10 @@ fn commit_phase_tx_inner(
     if intent_digest(&request.phase) != intent.intent_digest {
         return Err(invalid("digest intention broker divergent"));
     }
+    let mut connect_completion = None;
     let (state, event_name, extra) = match &request.phase {
         BrokerPhase::Authorizing { .. } => {
-            validate_live_intent(tx, &daemon, now, &intent)?;
+            validate_live_intent_with_connect(tx, &daemon, now, &intent, connect_authorized)?;
             let (snapshot, policy_hash) = policy_snapshot(tx, &intent)?;
             let ordinal = if let Some(prior) = current.as_ref() {
                 if prior.intent_digest != intent.intent_digest
@@ -543,7 +632,7 @@ fn commit_phase_tx_inner(
                 .as_ref()
                 .ok_or_else(|| invalid("action broker absente"))?;
             require_current_evaluation(tx, current, request.evaluation)?;
-            validate_live_intent(tx, &daemon, now, &intent)?;
+            validate_live_intent_with_connect(tx, &daemon, now, &intent, connect_authorized)?;
             require_policy_unchanged(tx, &intent, request.evaluation)?;
             if !matches!(cause, BrokerAuthorizationCause::Evaluation) {
                 return Err(invalid(
@@ -640,7 +729,7 @@ fn commit_phase_tx_inner(
             {
                 return Err(invalid("dispatch sans état autorisé/fence exact"));
             }
-            validate_live_intent(tx, &daemon, now, &intent)?;
+            validate_live_intent_with_connect(tx, &daemon, now, &intent, connect_authorized)?;
             require_policy_unchanged(tx, &intent, request.evaluation)?;
             validate_decision(&intent, request.evaluation, now, decision)?;
             let encoded:String=tx.query_row("SELECT phase_json FROM broker_phase_records WHERE action_id=?1 AND evaluation_id=?2 AND phase_key='authorization'",params![action.to_string(),request.evaluation.evaluation_id.to_string()],|r|r.get(0)).map_err(StoreError::from_rusqlite)?;
@@ -651,7 +740,13 @@ fn commit_phase_tx_inner(
                 return Err(invalid("décision dispatch différente du résultat durable"));
             }
             validate_executor_profile(tx, &intent, decision)?;
-            let normalized = json!({"schema_version":1,"action_id":action,"evaluation":request.evaluation,"intent_digest":intent.intent_digest,"payload_digest":intent.payload_digest,"decision":decision,"dispatch_id":dispatch_id,"fence":fence});
+            let request_hash = normalized_dispatch_request_hash(
+                &intent,
+                request.evaluation,
+                decision,
+                *dispatch_id,
+                *fence,
+            )?;
             crate::recovery_ops::record_action_dispatch_tx(
                 tx,
                 now,
@@ -664,7 +759,7 @@ fn commit_phase_tx_inner(
                         BrokerExecutor::Guard => "guard",
                     }
                     .to_owned(),
-                    request_hash: canonical_sha256(&normalized)?,
+                    request_hash,
                     provider_request_id: None,
                     transport_state: "dispatch_committed".to_owned(),
                     receipt_hash: None,
@@ -734,10 +829,28 @@ fn commit_phase_tx_inner(
                     |r| r.get(0),
                 )
                 .map_err(StoreError::from_rusqlite)?;
-            if receipt.observed_at_ms.as_i64() < started
-                || receipt.observed_at_ms.as_i64() > now.as_i64()
+            let unknown_clock = connect_observation.is_some()
+                && receipt.state == ActionState::OutcomeUnknown
+                && config
+                    .clock_uncertain
+                    .load(std::sync::atomic::Ordering::Acquire);
+            if !unknown_clock
+                && (receipt.observed_at_ms.as_i64() < started
+                    || receipt.observed_at_ms.as_i64() > now.as_i64())
             {
                 return Err(invalid("horodatage observation broker invalide"));
+            }
+            if let Some(observation) = connect_observation {
+                connect_completion = Some(
+                    crate::provider_probe_connect_observation::validate_completion(
+                        tx,
+                        config,
+                        &daemon,
+                        now,
+                        request,
+                        observation,
+                    )?,
+                );
             }
             // Empreinte de la preuve LOCALE complète conservée dans phase_json, aucune attribution fournisseur.
             let local_hash = canonical_sha256(&exact)?;
@@ -784,6 +897,15 @@ fn commit_phase_tx_inner(
         crate::provider_probes::materialize(tx, &intent, &event_id, now)?;
     }
     tx.execute("INSERT INTO broker_phase_records (action_id,evaluation_id,phase_key,phase_json,phase_digest,action_revision,event_id,event_sequence) VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",params![action.to_string(),request.evaluation.evaluation_id.to_string(),key,serde_json::to_string(&exact)?,digest.as_prefixed_str(),integer(revision.as_u64())?,event_id,sequence]).map_err(StoreError::from_rusqlite)?;
+    if let Some(completion) = connect_completion {
+        crate::provider_probe_connect_observation::finish_completion(
+            tx,
+            config,
+            now,
+            &completion,
+            &event_id,
+        )?;
+    }
     config.cutpoints.hit(StoreCutpoint::C1BeforeCommandCommit)?;
     Ok(BrokerPhaseCommit {
         action_id: action,
@@ -901,9 +1023,31 @@ pub(crate) fn validate_execution_dispatch_tx(
     require_policy_unchanged(tx, &intent, evaluation)?;
     validate_decision(&intent, evaluation, now, &decision)?;
     validate_executor_profile(tx, &intent, &decision)?;
-    let expected = canonical_sha256(
-        &json!({"schema_version":1,"action_id":action,"evaluation":evaluation,"intent_digest":intent.intent_digest,"payload_digest":intent.payload_digest,"decision":decision,"dispatch_id":dispatch,"fence":current.fence}),
-    )?;
+    let expected =
+        normalized_dispatch_request_hash(&intent, evaluation, &decision, dispatch, current.fence)?;
+    require_normalized_dispatch_hash(tx, action, dispatch, expected)
+}
+
+fn normalized_dispatch_request_hash(
+    intent: &BrokerIntent,
+    evaluation: BrokerEvaluation,
+    decision: &BrokerAuthorizationDecision,
+    dispatch: DispatchId,
+    fence: LineageFence,
+) -> Result<Sha256Digest, StoreError> {
+    Ok(canonical_sha256(
+        &json!({"schema_version":1,"action_id":intent.action_id,
+        "evaluation":evaluation,"intent_digest":intent.intent_digest,"payload_digest":intent.payload_digest,
+        "decision":decision,"dispatch_id":dispatch,"fence":fence}),
+    )?)
+}
+
+fn require_normalized_dispatch_hash(
+    tx: &Transaction<'_>,
+    action: ActionId,
+    dispatch: DispatchId,
+    expected: Sha256Digest,
+) -> Result<(), StoreError> {
     let valid:i64=tx.query_row("SELECT COUNT(*) FROM action_dispatches WHERE dispatch_id=?1 AND action_id=?2 AND request_hash=?3 AND transport_state='dispatch_committed' AND ended_at_ms IS NULL",params![dispatch.to_string(),action.to_string(),expected.as_prefixed_str()],|r|r.get(0)).map_err(StoreError::from_rusqlite)?;
     if valid != 1 {
         return Err(invalid("requête normalisée du dispatch divergente"));
@@ -911,11 +1055,79 @@ pub(crate) fn validate_execution_dispatch_tx(
     Ok(())
 }
 
+struct RecordedDispatchRow {
+    decision: String,
+    evaluation: String,
+    previous_evaluation: Option<String>,
+    authority: String,
+    epoch: i64,
+    fence: i64,
+}
+
+/// Checks immutable dispatch attribution after I/O, without granting a new effect.
+/// Current policy, decision expiry and active subject checks belong before dispatch.
+pub(crate) fn validate_recorded_dispatch_binding_tx(
+    tx: &Transaction<'_>,
+    intent: &BrokerIntent,
+    dispatch: DispatchId,
+) -> Result<(), StoreError> {
+    let recorded=tx.query_row(
+        "SELECT d.decision_json,d.evaluation_id,e.previous_evaluation_id,d.authority_generation,d.daemon_epoch,d.fence FROM broker_dispatches d JOIN broker_evaluations e ON e.evaluation_id=d.evaluation_id AND e.action_id=d.action_id WHERE d.dispatch_id=?1 AND d.action_id=?2",
+        params![dispatch.to_string(),intent.action_id.to_string()],|row|Ok(RecordedDispatchRow {
+            decision:row.get(0)?,evaluation:row.get(1)?,previous_evaluation:row.get(2)?,authority:row.get(3)?,epoch:row.get(4)?,fence:row.get(5)?,
+        }),
+    )?;
+    let evaluation = BrokerEvaluation {
+        evaluation_id: recorded.evaluation.parse()?,
+        previous_evaluation_id: recorded
+            .previous_evaluation
+            .map(|id| id.parse())
+            .transpose()?,
+    };
+    let fence = LineageFence::new(
+        recorded.authority.parse()?,
+        unleash_domain::DaemonEpoch::new(
+            u64::try_from(recorded.epoch).map_err(|_| invalid("époque du marqueur négative"))?,
+        ),
+        Fence::new(
+            u64::try_from(recorded.fence).map_err(|_| invalid("fence du marqueur négatif"))?,
+        ),
+    );
+    let decision: BrokerAuthorizationDecision = serde_json::from_str(&recorded.decision)?;
+    if fence != intent.lineage_fence
+        || decision.action_id != intent.action_id
+        || decision.evaluation_id != evaluation.evaluation_id
+        || decision.payload_digest != intent.payload_digest
+        || decision.scope_revision != intent.scope_revision
+        || decision.policy_revision != intent.policy_revision
+    {
+        return Err(invalid("faisceau du dispatch enregistré divergent"));
+    }
+    let (encoded,digest):(String,String)=tx.query_row(
+        "SELECT phase_json,phase_digest FROM broker_phase_records WHERE action_id=?1 AND evaluation_id=?2 AND phase_key='authorization'",
+        params![intent.action_id.to_string(),evaluation.evaluation_id.to_string()],|row|Ok((row.get(0)?,row.get(1)?)),
+    )?;
+    let authorized: Value = serde_json::from_str(&encoded)?;
+    if canonical_sha256(&authorized)?.as_prefixed_str() != digest
+        || authorized.get("evaluation") != Some(&serde_json::to_value(evaluation)?)
+        || authorized.pointer("/phase/intent_digest")
+            != Some(&serde_json::to_value(intent.intent_digest)?)
+        || authorized.pointer("/phase/outcome/decision") != Some(&serde_json::to_value(&decision)?)
+    {
+        return Err(invalid(
+            "décision du dispatch différente de l'autorisation durable",
+        ));
+    }
+    let expected =
+        normalized_dispatch_request_hash(intent, evaluation, &decision, dispatch, fence)?;
+    require_normalized_dispatch_hash(tx, intent.action_id, dispatch, expected)
+}
+
 #[expect(
     clippy::too_many_arguments,
     reason = "Contexte explicite de l’événement interne atomique, sans commande fictive"
 )]
-fn append_phase_event_tx(
+pub(crate) fn append_phase_event_tx(
     tx: &Transaction<'_>,
     config: &StoreConfig,
     daemon: &DaemonStateRow,
