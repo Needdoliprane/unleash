@@ -443,6 +443,24 @@ pub(crate) fn commit_connect_phase_tx(
     )
 }
 
+pub(crate) fn commit_inventory_phase_tx(
+    tx: &Transaction<'_>,
+    config: &StoreConfig,
+    now: TimestampMs,
+    request: &BrokerPhaseRequest,
+    permission: &crate::provider_probe_inventory::InventoryPhasePermission,
+) -> Result<BrokerPhaseCommit, StoreError> {
+    commit_phase_tx_inner(
+        tx,
+        config,
+        now,
+        request,
+        None,
+        Some(crate::provider_probe_connect::ConnectPhaseAccess::InventoryLive(permission)),
+        None,
+    )
+}
+
 pub(crate) fn commit_connect_observation_tx(
     tx: &Transaction<'_>,
     config: &StoreConfig,

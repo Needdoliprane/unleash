@@ -116,17 +116,50 @@ pub(crate) fn request_endpoint(
 pub(crate) fn request_digest(
     preparation: &transport::ProviderProbeConnectPreparation,
 ) -> Result<Sha256Digest, StoreError> {
-    let limits = bounds(&preparation.profile, &preparation.wire)?;
-    let configuration = &preparation.profile.configuration;
+    request_digest_for(&preparation.profile, &preparation.wire)
+}
+
+fn request_digest_for(
+    profile: &crate::ConfiguredProviderProfile,
+    wire: &TestProviderProfilePayload,
+) -> Result<Sha256Digest, StoreError> {
+    let limits = bounds(profile, wire)?;
+    let configuration = &profile.configuration;
     Ok(unleash_protocol::canonical_sha256(&serde_json::json!({
         "schema":"unleash.ollama_inventory.v2", "method":"GET",
-        "endpoint":request_endpoint(&preparation.profile)?,
+        "endpoint":request_endpoint(profile)?,
         "profile_id":configuration.profile_id,"profile_version":configuration.profile_version,
-        "profile_digest":preparation.profile.configuration_digest,
+        "profile_digest":profile.configuration_digest,
         "connect_timeout_ms":limits.connect_timeout_ms,"timeout_ms":limits.timeout_ms,
         "max_response_bytes":limits.max_response_bytes,
         "request_body_bytes":0,"redirects":false,"retries":0,
     }))?)
+}
+
+pub(crate) fn validate_context_profile(
+    context: &transport::ProviderProbeConnectContext,
+    profile: &crate::ConfiguredProviderProfile,
+) -> Result<(), StoreError> {
+    // Reconstruct immutable request facts only, never caller authority or a claim.
+    let wire = TestProviderProfilePayload::try_new(
+        context.profile_id.to_string(),
+        context.profile_version,
+        context.phase,
+        context.capability_set.clone(),
+        context.limits.clone(),
+        context.locality,
+        context.mandate_ref.to_string(),
+    )
+    .map_err(|_| invalid("contexte inventory non qualifié"))?;
+    if context.phase != unleash_protocol::ProviderTestPhase::Inventory
+        || context.inventory_limits.as_ref() != Some(&bounds(profile, &wire)?)
+        || context.request_digest != request_digest_for(profile, &wire)?
+    {
+        return Err(invalid(
+            "bornes ou empreinte inventory divergentes du profil exact",
+        ));
+    }
+    Ok(())
 }
 
 /// Read-only resolution, not a dispatch permission or a published observation.
@@ -233,6 +266,22 @@ impl ProviderProbeInventoryClaim {
     ) -> &unleash_protocol::provider_profile::ProviderEndpointDestination {
         self.inner.destination()
     }
+
+    fn permission(&self) -> InventoryPhasePermission {
+        InventoryPhasePermission {
+            inner: self.inner.permission(),
+        }
+    }
+}
+
+pub(crate) struct InventoryPhasePermission {
+    inner: transport::ConnectPhasePermission,
+}
+
+impl InventoryPhasePermission {
+    pub(crate) const fn inner(&self) -> &transport::ConnectPhasePermission {
+        &self.inner
+    }
 }
 
 /// A repeated claim is inspection, including after an uncertain acknowledgement.
@@ -249,15 +298,31 @@ impl UnleashStore {
     /// The generic journal never grants this access, including on exact replay.
     ///
     /// # Errors
-    /// Closed until original-owner phase validation and V008 admission are wired.
+    /// Rejects stale or divergent ownership, phase, mandate or V008 reservation.
+    /// Observation stays closed until the specialized native proof is available.
     pub fn commit_provider_probe_inventory_phase(
         &self,
-        _claim: &ProviderProbeInventoryClaim,
-        _request: crate::BrokerPhaseRequest,
+        claim: &ProviderProbeInventoryClaim,
+        request: crate::BrokerPhaseRequest,
     ) -> Result<crate::BrokerPhaseCommit, StoreError> {
-        Err(StoreError::EvidenceUnavailable(
-            "inventory exige son port de phase et son admission qualifiés".to_owned(),
-        ))
+        let permission = claim.permission();
+        let cutpoint = match &request.phase {
+            crate::BrokerPhase::Authorizing { .. } => {
+                Some(crate::StoreCutpoint::C3AfterBrokerIntentCommit)
+            }
+            crate::BrokerPhase::Dispatch { .. } => {
+                Some(crate::StoreCutpoint::C4AfterBrokerDispatchCommit)
+            }
+            _ => None,
+        };
+        let config = self.config().clone();
+        let committed = self.execute_in_writer_tx(WriteCriticality::Normal, move |tx, now| {
+            crate::broker_writer::commit_inventory_phase_tx(tx, &config, now, &request, &permission)
+        })?;
+        if let Some(cutpoint) = cutpoint {
+            self.config().cutpoints.hit(cutpoint)?;
+        }
+        Ok(committed)
     }
 
     /// Resolve the exact authenticated inventory mandate/profile without effect.
