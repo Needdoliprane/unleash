@@ -1,5 +1,8 @@
 //! Real configuration/mandate receipts; no action or model parent is fabricated.
 
+#[path = "provider_probe_inventory_admission.rs"]
+mod admission;
+
 use super::{TestResult, fixture};
 use serde_json::{Value, json};
 use std::sync::atomic::Ordering;

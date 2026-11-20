@@ -245,6 +245,21 @@ pub enum ProviderProbeInventoryClaimOutcome {
 }
 
 impl UnleashStore {
+    /// Append only for the orchestrator retaining its original inventory claim.
+    /// The generic journal never grants this access, including on exact replay.
+    ///
+    /// # Errors
+    /// Closed until original-owner phase validation and V008 admission are wired.
+    pub fn commit_provider_probe_inventory_phase(
+        &self,
+        _claim: &ProviderProbeInventoryClaim,
+        _request: crate::BrokerPhaseRequest,
+    ) -> Result<crate::BrokerPhaseCommit, StoreError> {
+        Err(StoreError::EvidenceUnavailable(
+            "inventory exige son port de phase et son admission qualifiés".to_owned(),
+        ))
+    }
+
     /// Resolve the exact authenticated inventory mandate/profile without effect.
     /// # Errors
     /// Rejects stale scope, identity, bytes, limits or unsupported native target.
