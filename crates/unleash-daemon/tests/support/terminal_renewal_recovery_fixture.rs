@@ -23,6 +23,8 @@ const ARM: &str = "UNLEASH_RENEWAL_RECOVERY_ARM";
 const BARRIER: &str = "UNLEASH_RENEWAL_RECOVERY_BARRIER";
 const HANDSHAKE: &[u8] = b"HANDSHAKE_APPLIED\n";
 const DISPATCH: &[u8] = b"DISPATCH_COMMITTED\n";
+const RESIZE: &[u8] = b"RESIZE_ATTEMPTED\n";
+const RESIZE_EOF: &[u8] = b"RESIZE_REPLY_EOF\n";
 
 #[derive(Clone)]
 struct Paths {
@@ -40,6 +42,18 @@ impl Paths {
     }
     fn armed(&self) -> bool {
         self.arm.try_exists().unwrap()
+    }
+    fn resize_counter(&self) -> PathBuf {
+        self.counter.with_extension("resize-count")
+    }
+    fn resize_arm(&self) -> PathBuf {
+        self.arm.with_extension("resize-armed")
+    }
+    fn resize_eof(&self) -> PathBuf {
+        self.counter.with_extension("resize-eof")
+    }
+    fn host_identity(&self) -> PathBuf {
+        self.counter.with_extension("host-identity")
     }
 }
 
@@ -75,6 +89,7 @@ impl CutpointObserver for BeforeNativeHandshake {
 struct NativeCounter {
     paths: Paths,
     count: Mutex<usize>,
+    resize_count: Mutex<u64>,
 }
 impl HostCutpointObserver for NativeCounter {
     fn hit(&self, point: HostInputCutpoint) -> Result<(), ProcessHostError> {
@@ -94,6 +109,31 @@ impl HostCutpointObserver for NativeCounter {
         }
         if self.paths.armed() {
             barrier(&self.paths.barrier, HANDSHAKE)?;
+        }
+        Ok(())
+    }
+
+    fn after_resize_attempt(&self, attempt: u64) -> Result<(), ProcessHostError> {
+        {
+            let mut count = self.resize_count.lock().unwrap();
+            assert!((1..=1024).contains(&attempt), "bounded native resize count");
+            *count = (*count).max(attempt);
+            unleash_platform::write_private_file_atomic(
+                &self.paths.resize_counter(),
+                count.to_string().as_bytes(),
+            )?;
+        }
+        if self.paths.resize_arm().try_exists()? {
+            let outcome = barrier(&self.paths.barrier, RESIZE);
+            if outcome
+                .as_ref()
+                .is_err_and(|error| error.kind() == std::io::ErrorKind::UnexpectedEof)
+            {
+                // This fact is written only after the owned controller really
+                // closed the retained response, not after a polling timeout.
+                unleash_platform::write_private_file_atomic(&self.paths.resize_eof(), RESIZE_EOF)?;
+            }
+            outcome?;
         }
         Ok(())
     }
@@ -128,15 +168,23 @@ fn native_host_fixture() {
         .unwrap()
         .unwrap();
     let spec: unleash_process_host::HostBootstrapSpec = serde_json::from_str(&raw).unwrap();
+    let paths = Paths::from_env();
     let observer = NativeCounter {
-        paths: Paths::from_env(),
+        paths: paths.clone(),
         count: Mutex::new(0),
+        resize_count: Mutex::new(0),
     };
     let server = unleash_process_host::ProcessHostServer::start(
         &spec,
         &unleash_process_host::OsIsolationBackendProbe::new(),
         Box::new(unleash_process_host::OsProcessInspector),
         Some(Arc::new(observer)),
+    )
+    .unwrap();
+    let identity = unleash_platform::current_process_identity().unwrap();
+    unleash_platform::write_private_file_atomic(
+        &paths.host_identity(),
+        &serde_json::to_vec(&identity).unwrap(),
     )
     .unwrap();
     server.serve_until_shutdown().unwrap();

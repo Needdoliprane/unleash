@@ -110,7 +110,7 @@ fn dispatch_count(fixture: &LiveFixture, command: CommandId) -> i64 {
     ).unwrap()
 }
 
-fn stored_dimensions(fixture: &LiveFixture, terminal: Uuid) -> (u16, u16) {
+pub(super) fn stored_dimensions(fixture: &LiveFixture, terminal: Uuid) -> (u16, u16) {
     let conn = rusqlite::Connection::open_with_flags(
         fixture.data.path().join("unleash-authority.db"),
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
@@ -124,7 +124,7 @@ fn stored_dimensions(fixture: &LiveFixture, terminal: Uuid) -> (u16, u16) {
     .unwrap()
 }
 
-async fn wait_for_native_size(fixture: &mut LiveFixture, terminal: Uuid, size: &str) {
+pub(super) async fn wait_for_native_size(fixture: &mut LiveFixture, terminal: Uuid, size: &str) {
     let deadline = Instant::now() + DEADLINE;
     let marker = format!("native-pty-size={size}");
     let query = QueryEnvelope {
@@ -160,7 +160,7 @@ async fn wait_for_native_size(fixture: &mut LiveFixture, terminal: Uuid, size: &
     }
 }
 
-async fn acquire_resize_worker(fixture: &mut LiveFixture) -> TerminalAcquisitionResult {
+pub(super) async fn acquire_resize_worker(fixture: &mut LiveFixture) -> TerminalAcquisitionResult {
     let mut acquire = fixture.allocation(0xf011_4105);
     acquire.payload.insert(
         "arguments".into(),
@@ -203,7 +203,7 @@ async fn observed_acquisition(
     }
 }
 
-fn resize_request(
+pub(super) fn resize_request(
     fixture: &LiveFixture,
     acquired: &TerminalAcquisitionResult,
     id: u128,

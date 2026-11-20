@@ -3,6 +3,9 @@
 use super::*;
 use unleash_protocol::CommandReceipt;
 
+#[path = "terminal_resize_recovery_scenarios.rs"]
+mod resize_scenarios;
+
 struct Harness {
     fixture: LiveFixture,
     paths: Paths,
@@ -12,6 +15,7 @@ struct Harness {
 impl Drop for Harness {
     fn drop(&mut self) {
         let _ = std::fs::remove_file(&self.paths.arm);
+        let _ = std::fs::remove_file(self.paths.resize_arm());
         // Release even an unaccepted queued barrier before authenticated host
         // cleanup; runtime credentials/counter files remain alive until last.
         drop(self.listener.take());
