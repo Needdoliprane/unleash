@@ -1217,6 +1217,7 @@ async fn handle_command_frame(
                     | CommandMutation::RequestBackup { .. }
                     | CommandMutation::PrepareTerminalAllocation { .. }
                     | CommandMutation::PrepareTerminalControl { .. }
+                    | CommandMutation::PrepareTerminalRelease { .. }
             ) && let Err(ipc) = ensure_principal_registered(&state.store, session).await
             {
                 let _ = write_json_frame_timeout(stream, &ipc, RESPONSE_WRITE_TIMEOUT).await;
@@ -1303,6 +1304,10 @@ async fn handle_command_frame(
                 unleash_domain::TerminalId::from_uuid(cmd.aggregate_id),
             );
         }
+    }
+
+    if newly_committed && cmd.command_type == "ReleaseTerminal" {
+        crate::terminal_service::start_release(state, session.actor_id.clone(), cmd.command_id);
     }
 
     if newly_committed
@@ -1498,6 +1503,11 @@ async fn prepare_command_request(
         }),
         "SendTerminalInput" => Ok(PreparedCommand {
             req: crate::terminal_service::prepare_input(session, cmd)?,
+            stop_reason: None,
+            stop_drain_timeout: None,
+        }),
+        "ReleaseTerminal" => Ok(PreparedCommand {
+            req: crate::terminal_service::prepare_release(session, cmd)?,
             stop_reason: None,
             stop_drain_timeout: None,
         }),

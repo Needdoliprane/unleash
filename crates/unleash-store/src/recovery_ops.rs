@@ -622,7 +622,9 @@ pub(crate) fn tx_reconcile_action(
     }
 
     if outcome == ReconcileOutcome::ConfirmedSuccess
-        && action_type == crate::terminal_allocations::TERMINAL_CONTROL_VERB
+        && (action_type == crate::terminal_allocations::TERMINAL_CONTROL_VERB
+            || action_type
+                == crate::terminal_allocations::terminal_release_types::TERMINAL_RELEASE_VERB)
     {
         // A digest supplied to generic reconciliation is not the correlated
         // native observation required by the terminal control writer. In

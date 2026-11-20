@@ -6,6 +6,9 @@ use unleash_protocol::CommandReceipt;
 #[path = "terminal_resize_recovery_scenarios.rs"]
 mod resize_scenarios;
 
+#[path = "terminal_release_scenarios.rs"]
+mod release_scenarios;
+
 struct Harness {
     fixture: LiveFixture,
     paths: Paths,
@@ -16,6 +19,7 @@ impl Drop for Harness {
     fn drop(&mut self) {
         let _ = std::fs::remove_file(&self.paths.arm);
         let _ = std::fs::remove_file(self.paths.resize_arm());
+        let _ = std::fs::remove_file(self.paths.release_arm());
         // Release even an unaccepted queued barrier before authenticated host
         // cleanup; runtime credentials/counter files remain alive until last.
         drop(self.listener.take());
@@ -104,7 +108,7 @@ fn registered(fixture: &LiveFixture, before: &Value, n: u128) -> CommandEnvelope
     )
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 struct State {
     intent: String,
     action: String,

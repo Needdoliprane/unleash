@@ -62,7 +62,7 @@ async fn resize_result(fixture: &LiveFixture, receipt: &CommandReceipt) -> Value
     result.clone()
 }
 
-async fn terminal_event(
+pub(super) async fn terminal_event(
     fixture: &LiveFixture,
     receipt: &CommandReceipt,
     matches: impl Fn(&EventEnvelope) -> bool,
@@ -173,7 +173,7 @@ pub(super) async fn acquire_resize_worker(fixture: &mut LiveFixture) -> Terminal
     observed_acquisition(fixture, &original).await
 }
 
-async fn observed_acquisition(
+pub(super) async fn observed_acquisition(
     fixture: &mut LiveFixture,
     receipt: &CommandReceipt,
 ) -> TerminalAcquisitionResult {

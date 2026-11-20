@@ -16,6 +16,15 @@ mod validation;
 #[path = "terminal_control_history_writer.rs"]
 mod writer;
 
+pub(super) fn observed_launch_environment(
+    conn: &rusqlite::Connection,
+    config: &crate::StoreConfig,
+    record: &super::TerminalControlRecord,
+    allocation: &super::TerminalAllocationRecord,
+) -> Result<Sha256Digest, StoreError> {
+    validation::observed_environment(conn, config, record, allocation)
+}
+
 /// Append-only observation event; it is never a broker success phase.
 pub const TERMINAL_CONTROL_HISTORY_EVENT: &str = "TerminalControlHistoricalAttested";
 

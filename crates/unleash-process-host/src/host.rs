@@ -25,6 +25,7 @@ use unleash_platform::{
     ensure_private_rendezvous_dir, validate_rendezvous_dir, verify_same_uid_peer,
 };
 use unleash_protocol::codec::{read_frame, write_frame};
+use zeroize::Zeroize;
 
 use crate::anchor::{
     OwnedChildAnchor, OwnedChildHandle, ProcessInspector, configure_setsid_pre_exec,
@@ -52,6 +53,9 @@ pub const HOST_READY_PREFIX: &str = "UNLEASH_HOST_READY:";
 #[cfg(test)]
 #[path = "host_control_tests.rs"]
 mod control_tests;
+
+#[path = "host_release.rs"]
+mod release;
 
 const IO_CHUNK_BYTES: usize = 8192;
 const SOCKET_IO_TIMEOUT: Duration = Duration::from_secs(15);
@@ -235,6 +239,9 @@ impl ProcessHostServer {
             worktree_id: spec.worktree_id,
             command_digest,
             effective_environment_digest,
+            control_state: Some(crate::HostControlState::Active {
+                last_reacquisition: None,
+            }),
             allocation_context_digest: if spec.environment_mode.is_some() {
                 spec.allocation_context_digest
             } else {
@@ -613,7 +620,7 @@ fn handle_connection(mut stream: UnixStream, shared: &Arc<ServerShared>) {
         if shared.shutdown.load(Ordering::SeqCst) {
             break;
         }
-        let frame = match read_frame(&mut stream) {
+        let mut frame = match read_frame(&mut stream) {
             Ok(Some(bytes)) => bytes,
             Ok(None) => break,
             Err(err) => {
@@ -634,32 +641,15 @@ fn handle_connection(mut stream: UnixStream, shared: &Arc<ServerShared>) {
             }
         };
 
-        if let Ok(crate::control_transfer::TransferEnvelope::TransferControlV1(request)) =
-            serde_json::from_slice(&frame)
-        {
-            let response = {
-                let _operation = lock_operation(shared);
-                let response = match process_control_transfer(&request, shared) {
-                    Ok(ack) => crate::ControlTransferResponse::Ack { ack: Box::new(ack) },
-                    Err(error) => crate::ControlTransferResponse::Refused {
-                        error: error.to_ipc_error(Some(request.header.command_id)),
-                    },
-                };
-                if matches!(response, crate::ControlTransferResponse::Ack { .. }) {
-                    bound_auth_gen = shared.auth_generation.load(Ordering::SeqCst);
-                }
-                response
-            };
-            let Ok(payload) = serde_json::to_vec(&response) else {
-                break;
-            };
-            if write_frame(&mut stream, &payload).is_err() {
-                break;
-            }
-            continue;
+        match handle_private_control(&mut stream, &mut frame, shared, &mut bound_auth_gen) {
+            Ok(true) => continue,
+            Ok(false) => {}
+            Err(_) => break,
         }
 
-        let req: HostRequest = match serde_json::from_slice(&frame) {
+        let decoded = serde_json::from_slice::<HostRequest>(&frame);
+        frame.zeroize();
+        let req: HostRequest = match decoded {
             Ok(r) => r,
             Err(err) => {
                 let ipc = ProcessHostError::Json(err).to_ipc_error(None);
@@ -783,11 +773,58 @@ fn validate_new_transfer(
     Ok(())
 }
 
+fn respond_to_control_transfer(
+    stream: &mut UnixStream,
+    request: &crate::ControlTransferRequest,
+    shared: &ServerShared,
+    bound_auth_gen: &mut u64,
+) -> Result<(), ProcessHostError> {
+    let response = {
+        let _operation = lock_operation(shared);
+        let response = match process_control_transfer(request, shared) {
+            Ok(ack) => crate::ControlTransferResponse::Ack { ack: Box::new(ack) },
+            Err(error) => crate::ControlTransferResponse::Refused {
+                error: error.to_ipc_error(Some(request.header.command_id)),
+            },
+        };
+        if matches!(response, crate::ControlTransferResponse::Ack { .. }) {
+            *bound_auth_gen = shared.auth_generation.load(Ordering::SeqCst);
+        }
+        response
+    };
+    let payload = serde_json::to_vec(&response)?;
+    write_frame(stream, &payload)?;
+    Ok(())
+}
+
+fn handle_private_control(
+    stream: &mut UnixStream,
+    frame: &mut Vec<u8>,
+    shared: &ServerShared,
+    bound_auth_gen: &mut u64,
+) -> Result<bool, ProcessHostError> {
+    if let Ok(crate::control_transfer::TransferEnvelope::TransferControlV1(request)) =
+        serde_json::from_slice(frame)
+    {
+        frame.zeroize();
+        respond_to_control_transfer(stream, &request, shared, bound_auth_gen)?;
+        return Ok(true);
+    }
+    if let Ok(request) = serde_json::from_slice::<crate::control_release::ReleaseEnvelope>(frame) {
+        frame.zeroize();
+        release::respond(stream, &request, shared, bound_auth_gen)?;
+        return Ok(true);
+    }
+    Ok(false)
+}
+
 fn process_control_transfer(
     request: &crate::ControlTransferRequest,
     shared: &ServerShared,
 ) -> Result<crate::ControlTransferAck, ProcessHostError> {
     verify_secret(shared, &request.current_secret)?;
+    // A historical ACK is not an activation path after explicit retirement.
+    release::require_input(shared)?;
     {
         let previous = shared
             .last_transfer
@@ -919,6 +956,9 @@ fn process_request(req: HostRequest, shared: &ServerShared) -> HostResponse {
             rotate_to_secret,
             require_higher_epoch,
         } => verify_secret(shared, &current_secret).and_then(|()| {
+            if rotate_to_secret.is_some() {
+                release::require_input(shared)?;
+            }
             let mut fencing = shared
                 .fencing
                 .lock()
@@ -937,6 +977,15 @@ fn process_request(req: HostRequest, shared: &ServerShared) -> HostResponse {
                     .unwrap_or_else(std::sync::PoisonError::into_inner) = new_secret;
                 shared.auth_generation.fetch_add(1, Ordering::SeqCst);
                 secret_rotated = true;
+                if let Some(crate::HostControlState::Active { last_reacquisition }) = shared
+                    .manifest
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .control_state
+                    .as_mut()
+                {
+                    *last_reacquisition = None;
+                }
             }
 
             shared.inputs.reconcile_in_flight()?;
@@ -981,6 +1030,7 @@ fn process_request(req: HostRequest, shared: &ServerShared) -> HostResponse {
             payload_bytes,
             now_ms,
         } => verify_secret(shared, &secret).and_then(|()| {
+            release::require_input(shared)?;
             {
                 let mut fencing = shared
                     .fencing
@@ -1023,6 +1073,7 @@ fn process_request(req: HostRequest, shared: &ServerShared) -> HostResponse {
             rows,
             cols,
         } => verify_secret(shared, &secret).and_then(|()| {
+            release::require_input(shared)?;
             if rows == 0 || cols == 0 || rows > 500 || cols > 1000 {
                 return Err(ProcessHostError::InvalidArgument {
                     reason: format!("dimensions PTY hors bornes ({rows}x{cols})"),
@@ -1312,6 +1363,63 @@ impl std::fmt::Debug for HostClient {
 }
 
 impl HostClient {
+    /// Retire one exact terminal control. No legacy handshake fallback exists.
+    /// # Errors
+    /// Refuses client-coordinate mismatches, transport errors and missing ACKs.
+    pub fn release_control(
+        &mut self,
+        request: &crate::ControlReleaseRequest,
+    ) -> Result<crate::ControlReleaseResponse, ProcessHostError> {
+        self.check_control_coordinates(&request.key.header)?;
+        let response = self.control_release_call(
+            &crate::control_release::ReleaseEnvelope::ReleaseControlV1(request.clone()),
+        )?;
+        Ok(serde_json::from_slice(&response)?)
+    }
+
+    /// Activate the same physical resource from an exact qualified retirement.
+    /// # Errors
+    /// Refuses coordinate mismatches, absent source facts and ambiguous responses.
+    pub fn reacquire_released_control(
+        &mut self,
+        request: &crate::ControlReacquisitionRequest,
+    ) -> Result<crate::ControlReacquisitionResponse, ProcessHostError> {
+        self.check_control_coordinates(&request.transfer.header)?;
+        let response = self.control_release_call(
+            &crate::control_release::ReleaseEnvelope::AcquireReleasedControlV1(request.clone()),
+        )?;
+        Ok(serde_json::from_slice(&response)?)
+    }
+
+    fn check_control_coordinates(
+        &self,
+        header: &HostCommandHeader,
+    ) -> Result<(), ProcessHostError> {
+        if header.process_run_uuid != self.process_run_uuid
+            || header.authority_generation != self.authority_generation
+            || header.daemon_epoch != self.daemon_epoch
+            || header.resource_fence != self.fence
+        {
+            return Err(ProcessHostError::InvalidArgument {
+                reason: "native control request differs from client coordinates".into(),
+            });
+        }
+        Ok(())
+    }
+
+    fn control_release_call(
+        &mut self,
+        request: &crate::control_release::ReleaseEnvelope,
+    ) -> Result<Vec<u8>, ProcessHostError> {
+        let mut bytes = serde_json::to_vec(request)?;
+        let result = write_frame(&mut self.stream, &bytes);
+        bytes.zeroize();
+        result?;
+        read_frame(&mut self.stream)?.ok_or_else(|| ProcessHostError::LaunchOutcomeUnknown {
+            reason: "native control disposition response was lost".into(),
+        })
+    }
+
     /// Send a correlated control transfer to an existing host. No legacy fallback exists.
     /// # Errors
     /// Refuses mismatched client coordinates, transport failure or an unsupported response.
@@ -1446,6 +1554,10 @@ impl StdioBarrierCutpointObserver {
             "ResizeAttemptedBeforeReply" => Some(Self {
                 target: HostInputCutpoint::ResizeAttemptedBeforeReply,
                 label: "ResizeAttemptedBeforeReply",
+            }),
+            "ReleaseAppliedBeforeAck" => Some(Self {
+                target: HostInputCutpoint::ReleaseAppliedBeforeAck,
+                label: "ReleaseAppliedBeforeAck",
             }),
             _ => None,
         }

@@ -29,6 +29,9 @@ type TerminalInputObservationSlot = std::sync::Mutex<
 type TerminalRenewalObservationSlot = std::sync::Mutex<
     Option<unleash_store::terminal_allocations::terminal_renewal_types::TerminalRenewalObservation>,
 >;
+type TerminalReleaseObservationSlot = std::sync::Mutex<
+    Option<unleash_store::terminal_allocations::terminal_release_types::TerminalReleaseObservation>,
+>;
 
 /// Broker journal backed by a durable Store port.
 pub(crate) struct SqliteBrokerJournal {
@@ -38,6 +41,7 @@ pub(crate) struct SqliteBrokerJournal {
     terminal_control_observation: Option<Arc<TerminalControlObservationSlot>>,
     terminal_input_observation: Option<Arc<TerminalInputObservationSlot>>,
     terminal_renewal_observation: Option<Arc<TerminalRenewalObservationSlot>>,
+    terminal_release_observation: Option<Arc<TerminalReleaseObservationSlot>>,
 }
 
 impl SqliteBrokerJournal {
@@ -51,6 +55,7 @@ impl SqliteBrokerJournal {
             terminal_control_observation: None,
             terminal_input_observation: None,
             terminal_renewal_observation: None,
+            terminal_release_observation: None,
         }
     }
 
@@ -63,6 +68,7 @@ impl SqliteBrokerJournal {
             terminal_control_observation: None,
             terminal_input_observation: None,
             terminal_renewal_observation: None,
+            terminal_release_observation: None,
         }
     }
 
@@ -102,6 +108,15 @@ impl SqliteBrokerJournal {
         journal
     }
 
+    pub(crate) fn with_terminal_release_observation(
+        runtime: &Arc<DaemonRuntimeState>,
+        slot: Arc<TerminalReleaseObservationSlot>,
+    ) -> Self {
+        let mut journal = Self::new(runtime);
+        journal.terminal_release_observation = Some(slot);
+        journal
+    }
+
     fn project_entry(
         &self,
         entry: &BrokerJournalEntry,
@@ -110,6 +125,7 @@ impl SqliteBrokerJournal {
             || self.terminal_control_observation.is_some()
             || self.terminal_input_observation.is_some()
             || self.terminal_renewal_observation.is_some()
+            || self.terminal_release_observation.is_some()
         {
             project_terminal(entry)
         } else {
@@ -358,6 +374,7 @@ fn commit_journal_phase(
     control_slot: Option<&TerminalControlObservationSlot>,
     input_slot: Option<&TerminalInputObservationSlot>,
     renewal_slot: Option<&TerminalRenewalObservationSlot>,
+    release_slot: Option<&TerminalReleaseObservationSlot>,
 ) -> Result<unleash_store::BrokerPhaseCommit, BrokerJournalError> {
     let phase_name = match &request.phase {
         BrokerPhase::Authorizing { .. } => "authorizing",
@@ -382,7 +399,14 @@ fn commit_journal_phase(
         } else {
             (None, None, None, None)
         };
-    let committed = if let Some(observation) = renewal_observation {
+    let release_observation = if successful_observation {
+        release_slot.and_then(|slot| slot.lock().ok()?.clone())
+    } else {
+        None
+    };
+    let committed = if let Some(observation) = release_observation {
+        store.commit_terminal_release_observation(observation, request)
+    } else if let Some(observation) = renewal_observation {
         store.commit_terminal_renewal_observation(observation, request)
     } else if let Some(observation) = input_observation {
         store.commit_terminal_input_observation(observation, request)
@@ -417,6 +441,7 @@ impl BrokerJournalPort for SqliteBrokerJournal {
             let control_slot = self.terminal_control_observation.clone();
             let input_slot = self.terminal_input_observation.clone();
             let renewal_slot = self.terminal_renewal_observation.clone();
+            let release_slot = self.terminal_release_observation.clone();
             let activity = match &runtime {
                 Some(runtime) => Some(Arc::new(
                     runtime
@@ -455,6 +480,7 @@ impl BrokerJournalPort for SqliteBrokerJournal {
                         control_slot.as_deref(),
                         input_slot.as_deref(),
                         renewal_slot.as_deref(),
+                        release_slot.as_deref(),
                     )?;
                     Ok::<_, BrokerJournalError>((commit, dispatch, intent.action_id))
                 })
@@ -531,7 +557,9 @@ fn project_terminal(
             || intent.verb
                 == unleash_store::terminal_allocations::terminal_renewal_types::TERMINAL_RENEWAL_VERB
             || intent.verb
-                == unleash_store::terminal_allocations::terminal_renewal_types::TERMINAL_RESIZE_VERB)
+                == unleash_store::terminal_allocations::terminal_renewal_types::TERMINAL_RESIZE_VERB
+            || intent.verb
+                == unleash_store::terminal_allocations::terminal_release_types::TERMINAL_RELEASE_VERB)
         && matches!(
             &intent.resource_refs[..],
             [unleash_action_broker::NormalizedResourceRef::Terminal(_)]

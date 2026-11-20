@@ -226,7 +226,9 @@ pub fn authorize_command(
         | "SetProviderProfile"
         | "TestProviderProfile" => Capability::Administer,
         "AssignMission" | "PauseMission" | "ResumeMission" | "CancelMission"
-        | "AcquireTerminal" | "SendTerminalInput" | "ResizeTerminal" => Capability::ManageMissions,
+        | "AcquireTerminal" | "SendTerminalInput" | "ResizeTerminal" | "ReleaseTerminal" => {
+            Capability::ManageMissions
+        }
         "StopDaemon" => Capability::StopDaemon,
         "RecordClaim" | "RecordObservation" | "RecordJudgment" => Capability::WorkerReport,
         _ => {

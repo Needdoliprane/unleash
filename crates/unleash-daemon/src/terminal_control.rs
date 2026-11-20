@@ -7,10 +7,10 @@ use std::{
 use unleash_action_broker::{
     ActionBroker, ActionExecutionFailure, ActionExecutionResult, ActionExecutorPort, ActionIntent,
     ActionProvenance, ActionSubject, AuthorityLayer, AuthorizationDecision, AuthorizationOutcome,
-    BoxFuture, BrokerConfig, EffectiveAuthority, EffectsClass, HostIsolationProbe, IsolationMode,
-    IsolationRequirements, LocalAuthorityFallbackPolicy, NormalizedResourceRef,
-    PlatformKeyringSecretStore, ResolvedSecret, ScopeKind, StrictNoneAcceptedObligationChecker,
-    SystemClockAndTimer, compute_effective_authority,
+    BoxFuture, BrokerConfig, EffectiveAuthority, EffectsClass, GuardMode, HostIsolationProbe,
+    InitialEffectivePolicy, IsolationMode, IsolationRequirements, LocalAuthorityFallbackPolicy,
+    NormalizedResourceRef, PlatformKeyringSecretStore, ResolvedSecret, ScopeKind,
+    StrictNoneAcceptedObligationChecker, SystemClockAndTimer, compute_effective_authority,
 };
 use unleash_domain::{
     ActorId, CommandId, DataLocality, DispatchId, Fence, LineageFence, ModelPolicy,
@@ -166,7 +166,7 @@ async fn run(
     let slot = Arc::new(Mutex::new(None));
     let timer = Arc::new(SystemClockAndTimer::new());
     let wait_timer = Arc::clone(&timer);
-    let broker = ActionBroker::new(
+    let broker = ActionBroker::new_with_policy_snapshot(
         Arc::clone(&state.store.config().clock),
         wait_timer,
         timer,
@@ -188,8 +188,17 @@ async fn run(
                 Arc::clone(&slot),
             ),
         ),
-    );
-    broker.bump_scope_revision(Some(project), c.scope_revision);
+        InitialEffectivePolicy {
+            project_id: Some(project),
+            policy_revision: c.policy_revision,
+            scope_revision: c.scope_revision,
+            policy_digest: c.security_policy_digest,
+            isolation_mode: IsolationMode::Standard,
+            guard_mode: GuardMode::BrokerOnly,
+            lineage_fence: fence,
+        },
+    )
+    .map_err(|_| ())?;
     let AuthorizationOutcome::Authorized(decision) = broker
         .authorize_action(intent, &authority)
         .await
@@ -374,6 +383,9 @@ fn transfer_and_observe(
     record: &TerminalControlRecord,
     dispatch: DispatchId,
 ) -> Result<TerminalControlObservation, ControlError> {
+    if record.context.release_source.is_some() {
+        return reacquire_and_observe(state, record, dispatch);
+    }
     let c = &record.context;
     // One-use permit. A missing ACK never authorizes another call or spawn.
     state
@@ -454,6 +466,153 @@ fn transfer_and_observe(
     };
     publish(state, &observation)?;
     Ok(observation)
+}
+
+fn reacquire_and_observe(
+    state: &DaemonRuntimeState,
+    record: &TerminalControlRecord,
+    dispatch: DispatchId,
+) -> Result<TerminalControlObservation, ControlError> {
+    let c = &record.context;
+    let source = c
+        .release_source
+        .as_ref()
+        .ok_or("terminal reactivation source missing")?;
+    let (runtime, expected) = validate_initial_rendezvous(state, record)?;
+    let before = HostManifest::load_private(&runtime.join(HOST_MANIFEST_FILENAME))?;
+    if !matches!(&before.control_state,Some(unleash_process_host::HostControlState::Released {ack}) if ack.key.dispatch_id==source.dispatch_id && ack.key.header.payload_hash==source.context_digest && ack.key.header.action_id==source.action_id && ack.key.lease_id==c.previous_lease_id && ack.key.header.resource_fence==c.previous_fence)
+        || identity(&unleash_platform::inspect_process_identity(
+            c.expected_os_identity.pid,
+        )?)? != c.expected_os_identity
+    {
+        return Err("terminal reactivation is not the same retired native control".into());
+    }
+    reactivation_permission(state, c)?;
+    state
+        .store
+        .resolve_terminal_control(ResolveTerminalControlRequest {
+            action_id: c.action_id,
+            dispatch_id: dispatch,
+            authority_generation: c.authority_generation,
+            expected_revision: record.revision,
+            context_digest: record.context_digest,
+            caller: CallerAuthority {
+                actor_id: c.actor_id.clone(),
+                role: CallerRole::PolicyAdmin,
+            },
+        })?;
+    let secret = load_control_secret(&runtime.join(CONTROL_SECRET_FILENAME))?;
+    let next = HostControlSecret::generate();
+    reactivation_permission(state, c)?;
+    let mut client = HostClient::connect(
+        &runtime.join(HOST_SOCKET_FILENAME),
+        c.process_run_uuid,
+        c.authority_generation,
+        c.daemon_epoch,
+        c.next_fence,
+    )?;
+    let header = client.make_header(c.command_id, c.action_id, record.context_digest);
+    reactivation_permission(state, c)?;
+    let response =
+        client.reacquire_released_control(&unleash_process_host::ControlReacquisitionRequest {
+            released_by: source.dispatch_id,
+            transfer: ControlTransferRequest {
+                header: header.clone(),
+                dispatch_id: dispatch,
+                initial_context_digest: c.initial_context_digest,
+                current_secret: secret.expose_secret().into(),
+                next_secret: next.expose_secret().into(),
+            },
+        })?;
+    let unleash_process_host::ControlReacquisitionResponse::Ack { ack } = response else {
+        return Err("terminal reactivation has no native acknowledgement".into());
+    };
+    let facts = &ack.transfer;
+    if ack.released_by != source.dispatch_id
+        || facts.header != header
+        || facts.dispatch_id != dispatch
+        || facts.initial_context_digest != c.initial_context_digest
+        || facts.effective_environment_digest != expected
+        || identity(&facts.os_identity)? != c.expected_os_identity
+        || !facts.unknown_input_seqs.is_empty()
+    {
+        return Err("terminal reactivation native ACK differs".into());
+    }
+    let manifest = HostManifest::load_private(&runtime.join(HOST_MANIFEST_FILENAME))?;
+    validate_manifest(&manifest, record)?;
+    if manifest.daemon_epoch != c.daemon_epoch
+        || manifest.highest_fence != c.next_fence
+        || !matches!(&manifest.control_state,Some(unleash_process_host::HostControlState::Active {last_reacquisition:Some(stored)}) if stored.as_ref()==ack.as_ref())
+    {
+        return Err("terminal reactivation published native state differs".into());
+    }
+    let ack_digest = publish_reactivation_ack(state, c.action_id, dispatch, ack.as_ref())?;
+    let observation = TerminalControlObservation {
+        action_id: c.action_id,
+        dispatch_id: dispatch,
+        context_digest: record.context_digest,
+        terminal_id: c.terminal_id,
+        host_id: c.host_id,
+        process_run_uuid: c.process_run_uuid,
+        os_identity: identity(&facts.os_identity)?,
+        daemon_epoch: c.daemon_epoch,
+        resource_fence: c.next_fence,
+        transfer_ack_digest: ack_digest,
+        manifest_digest: unleash_protocol::canonical_sha256(&manifest)?,
+        effective_environment_digest: expected,
+        durable_log_seq: facts.durable_log_seq,
+        last_confirmed_input_seq: facts.last_confirmed_input_seq,
+        unknown_input_seqs: facts.unknown_input_seqs.clone(),
+        observed_at_ms: state.store.config().clock.now_ms(),
+    };
+    publish(state, &observation)?;
+    Ok(observation)
+}
+
+fn reactivation_permission(
+    state: &DaemonRuntimeState,
+    c: &TerminalControlContext,
+) -> Result<(), ControlError> {
+    if !state.is_accepting()
+        || state
+            .store
+            .config()
+            .clock_uncertain
+            .load(std::sync::atomic::Ordering::Acquire)
+        || state.store.config().clock.now_ms() >= c.expires_at_ms
+    {
+        return Err("terminal reactivation permission elapsed".into());
+    }
+    Ok(())
+}
+
+fn publish_reactivation_ack(
+    state: &DaemonRuntimeState,
+    action: unleash_domain::ActionId,
+    dispatch: DispatchId,
+    ack: &unleash_process_host::ControlReacquisitionAck,
+) -> Result<Sha256Digest, ControlError> {
+    let bytes = unleash_protocol::canonicalize_to_vec(ack)?;
+    let hash = unleash_protocol::canonical_sha256(ack)?;
+    let object = state.store.prepare_object(PrepareObjectRequest {
+        object_hash: hash,
+        byte_length: u64::try_from(bytes.len())?,
+        media_type: "application/json".into(),
+        owner_kind: "terminal_reacquisition_ack".into(),
+        owner_id: action.to_string(),
+    })?;
+    state.store.write_prepared_object_bytes(&object, &bytes)?;
+    state
+        .store
+        .publish_object_reference(PublishObjectReferenceRequest {
+            pin_id: object.pin_id,
+            object_hash: hash,
+            owner_kind: "terminal_reacquisition_ack".into(),
+            owner_id: action.to_string(),
+            object_generation: object.object_generation,
+            source_field: dispatch.to_string(),
+        })?;
+    Ok(hash)
 }
 
 fn validate_manifest(

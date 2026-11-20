@@ -29,10 +29,14 @@ pub(crate) use metadata::read_terminal_metadata;
 mod control;
 #[path = "terminal_input.rs"]
 mod input;
+#[path = "terminal_release.rs"]
+mod release;
 #[path = "terminal_renewal.rs"]
 mod renewal;
 pub(crate) use input::{decode as decode_input, prepare as prepare_input, start as start_input};
 pub(crate) use renewal::{prepare_resize, start_resize};
+
+pub(crate) use release::{prepare as prepare_release, start as start_release};
 
 pub(crate) fn start_registered(
     state: &Arc<DaemonRuntimeState>,

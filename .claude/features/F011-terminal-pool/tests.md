@@ -34,3 +34,24 @@ Pour un redimensionnement, observer la taille du vrai PTY depuis le processus en
 À la coupure C2 après commit du reçu de redimensionnement et avant lancement de son exécuteur, vérifier zéro dispatch et l’échéance inchangée. Après redémarrage, le transfert qualifié doit rendre le même processus sous un fence supérieur. Un rejeu conserve le reçu sans produire d’effet. Tester aussi les deux ordres de course dans le Store. Le refus interdit un marqueur tardif même après la purge Q-12 de son payload. Avec un marqueur déjà commis, le refus certain est interdit et la barrière persiste en cas d’issue inconnue.
 
 Pour V017, peupler V016 avec un renouvellement préparé et sa preuve de lancement synthétique. Faire une sauvegarde `db_and_objects`, interrompre la migration à C11 puis réouvrir V016. Une nouvelle tentative doit appliquer V017 en préservant les seize checksums, les reçus et le contexte immuable. Contrôler les clés étrangères et le refus d’ouverture par un exécutable limité à V016.
+
+Pour la tranche Release de T-F011-010, acquérir un vrai PTY puis retirer son
+contrôle avec les acteur, projet, génération, bail et fence exacts. Lire le
+résultat causal et le reçu initial, rejouer la commande puis drainer le writer.
+Exiger une seule observation et un seul dispatch. Les anciens canaux et une
+nouvelle connexion avec l'ancien secret doivent recevoir un refus typé avant
+effet, sans accepter EOF comme preuve d'absence d'effet. Les anciennes commandes
+publiques d'entrée et de redimensionnement sont refusées, même avec la révision
+de contrôle courante. Conserver processus, host, génération, PTY, échéance et les
+trois réservations physiques. Une acquisition explicite distincte doit ensuite
+obtenir un nouveau bail et un fence supérieur sur le même PTY, sans spawn.
+
+Tester séparément mauvaise portée, acteur usurpé, génération et fence divergents,
+puis un marqueur d'effet retenu à C4 et une issue inconnue après restart. Vérifier
+zéro reçu Release et l'intégrité de l'action, du dispatch, du contexte, des preuves
+et de la barrière initialement inconnus. Tester la perte de l'ACK natif de retrait
+sans seconde rotation, son inspection exacte et les refus de preuve absente ou
+divergente. Une libération logique de bail seule ne qualifie pas ce parcours.
+Après acquisition sous Standard, engager une politique Strict puis demander
+le retrait. Vérifier un refus avant reçu et l’intégrité du contrôle natif,
+du bail, de la révision et des réservations.

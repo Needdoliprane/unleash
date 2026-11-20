@@ -25,6 +25,9 @@ const HANDSHAKE: &[u8] = b"HANDSHAKE_APPLIED\n";
 const DISPATCH: &[u8] = b"DISPATCH_COMMITTED\n";
 const RESIZE: &[u8] = b"RESIZE_ATTEMPTED\n";
 const RESIZE_EOF: &[u8] = b"RESIZE_REPLY_EOF\n";
+const RELEASE: &[u8] = b"RELEASE_APPLIED\n";
+const RELEASE_EOF: &[u8] = b"RELEASE_REPLY_EOF\n";
+const RELEASE_DONE: &[u8] = b"RELEASE_REPLY_FINISHED\n";
 
 #[derive(Clone)]
 struct Paths {
@@ -51,6 +54,18 @@ impl Paths {
     }
     fn resize_eof(&self) -> PathBuf {
         self.counter.with_extension("resize-eof")
+    }
+    fn release_counter(&self) -> PathBuf {
+        self.counter.with_extension("release-count")
+    }
+    fn release_arm(&self) -> PathBuf {
+        self.arm.with_extension("release-armed")
+    }
+    fn release_eof(&self) -> PathBuf {
+        self.counter.with_extension("release-eof")
+    }
+    fn release_done(&self) -> PathBuf {
+        self.counter.with_extension("release-done")
     }
     fn host_identity(&self) -> PathBuf {
         self.counter.with_extension("host-identity")
@@ -90,9 +105,13 @@ struct NativeCounter {
     paths: Paths,
     count: Mutex<usize>,
     resize_count: Mutex<u64>,
+    release_count: Mutex<usize>,
 }
 impl HostCutpointObserver for NativeCounter {
     fn hit(&self, point: HostInputCutpoint) -> Result<(), ProcessHostError> {
+        if point == HostInputCutpoint::ReleaseAppliedBeforeAck {
+            return self.after_release();
+        }
         if point != HostInputCutpoint::HandshakeAppliedBeforeAck {
             return Ok(());
         }
@@ -139,6 +158,39 @@ impl HostCutpointObserver for NativeCounter {
     }
 }
 
+impl NativeCounter {
+    fn after_release(&self) -> Result<(), ProcessHostError> {
+        {
+            let mut count = self.release_count.lock().unwrap();
+            *count = count.checked_add(1).unwrap();
+            assert!(*count <= 1024, "bounded owned retirement counter");
+            unleash_platform::write_private_file_atomic(
+                &self.paths.release_counter(),
+                count.to_string().as_bytes(),
+            )?;
+        }
+        // Product invokes this callback after native revocation/persistence and
+        // after dropping operation_gate. Do not retain the counter lock either.
+        if self.paths.release_arm().try_exists()? {
+            let outcome = barrier(&self.paths.barrier, RELEASE);
+            if outcome
+                .as_ref()
+                .is_err_and(|error| error.kind() == std::io::ErrorKind::UnexpectedEof)
+            {
+                unleash_platform::write_private_file_atomic(
+                    &self.paths.release_eof(),
+                    RELEASE_EOF,
+                )?;
+            }
+            // Completion on timeout/error is distinct from observed EOF. The
+            // test requires this file absent before it kills the daemon.
+            unleash_platform::write_private_file_atomic(&self.paths.release_done(), RELEASE_DONE)?;
+            outcome?;
+        }
+        Ok(())
+    }
+}
+
 struct InstrumentedHostLauncher(Paths);
 impl unleash_daemon::terminal_host_launcher::TerminalHostLauncher for InstrumentedHostLauncher {
     fn spawn(&self, _packaged: &Path, bootstrap: &Path) -> std::io::Result<Child> {
@@ -173,6 +225,7 @@ fn native_host_fixture() {
         paths: paths.clone(),
         count: Mutex::new(0),
         resize_count: Mutex::new(0),
+        release_count: Mutex::new(0),
     };
     let server = unleash_process_host::ProcessHostServer::start(
         &spec,

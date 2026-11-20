@@ -31,6 +31,9 @@ pub enum HostInputCutpoint {
     /// A native resize was attempted, before sending its ACK or error response.
     /// Both the operation gate and the PTY master guard have been released.
     ResizeAttemptedBeforeReply,
+    /// Native retirement and its ACK were persisted, before the response is
+    /// sent. The native operation gate is released before this callback.
+    ReleaseAppliedBeforeAck,
 }
 
 /// Observateur injectable des points de coupure d'entrée PTY (sans dépendance testkit en production).
@@ -447,7 +450,8 @@ mod tests {
                 HostInputCutpoint::C5AfterPtyWriteBeforeReceipt => Cutpoint::C5,
                 // Input tests keep their existing C3/C4/C5 counters and scope.
                 HostInputCutpoint::HandshakeAppliedBeforeAck
-                | HostInputCutpoint::ResizeAttemptedBeforeReply => return Ok(()),
+                | HostInputCutpoint::ResizeAttemptedBeforeReply
+                | HostInputCutpoint::ReleaseAppliedBeforeAck => return Ok(()),
             };
             self.0
                 .hit(mapped)

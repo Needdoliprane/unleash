@@ -92,6 +92,7 @@ pub(crate) fn prepare_tx(
     command: &InputCommand<'_>,
     events: &mut Vec<EventAppendSpec>,
 ) -> Result<Revision, StoreError> {
+    super::terminal_release::guard_pending(tx, daemon, command.request.terminal_id)?;
     super::terminal_renewal::guard_pending(tx, daemon, command.request.terminal_id)?;
     if daemon.schema_version < 14
         || daemon.mode != DaemonMode::Ready

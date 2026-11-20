@@ -1246,3 +1246,6 @@ fn publish_disposition_fixture(
         .unwrap();
     hash
 }
+
+#[path = "support/terminal_release_migration_scenarios.rs"]
+mod release_migration_scenarios;

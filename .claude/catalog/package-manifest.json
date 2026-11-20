@@ -14,7 +14,7 @@
     "cache/"
   ],
   "hash_algorithm": "sha256",
-  "source_tree_digest": "61c011e86d9b708046e560c7b0c65e654128325d1aa0dbb99e996955baf183e2",
+  "source_tree_digest": "9d63e5d10390bd85ccbd37ef4ae45d75a0046a2e284ffa1bd3fca4c63fc4c02c",
   "files": [
     {
       "path": "INDEX.md",
@@ -396,8 +396,8 @@
     },
     {
       "path": "architecture/sqlite-design.md",
-      "sha256": "50b5b8410e6aac59c29454e234329dd1e8706da932cafece7e8b8733a1467d1d",
-      "bytes": 73813,
+      "sha256": "f164d735a2a3fd8f65b174fca4a3f0676bfd93362138208d55a1ed7588f4768b",
+      "bytes": 75892,
       "media_type": "text/markdown"
     },
     {
@@ -1500,8 +1500,8 @@
     },
     {
       "path": "features/F011-terminal-pool/interfaces.md",
-      "sha256": "c99905bb4800d6063a3e9e7c2324c2e48e98ddef34da58ebed6a69c2ee027291",
-      "bytes": 17210,
+      "sha256": "7e2424a49d093680d150d7056300ebdf8d7a2d6bc7097e5828df0eff6bff92ac",
+      "bytes": 20382,
       "media_type": "text/markdown"
     },
     {
@@ -1518,8 +1518,8 @@
     },
     {
       "path": "features/F011-terminal-pool/tests.md",
-      "sha256": "4cd807f08cb45449fc971171f7387d4c6f0f04a266744047293530dce6bd8b64",
-      "bytes": 7335,
+      "sha256": "a15f18a0ac93f7d8b291252a41734398904843ef98a9a2d29089acd33d47487c",
+      "bytes": 8849,
       "media_type": "text/markdown"
     },
     {
@@ -2046,8 +2046,8 @@
     },
     {
       "path": "schemas/event.schema.json",
-      "sha256": "4a4c5af0da1f8ea21385844857a54fdb885c14ff76a0349c6a298fc3b7452e20",
-      "bytes": 10710,
+      "sha256": "92920bdddc8ab0cda7ee5e3c8542c26e15269beb2a2b57e89ee8ea15cf30a8db",
+      "bytes": 11923,
       "media_type": "application/json"
     },
     {
@@ -2070,8 +2070,8 @@
     },
     {
       "path": "schemas/ipc-command.schema.json",
-      "sha256": "17af6376e4c5b2aaaae7795fea2ebcd6e49aa0e44dac40a54928027770f096d7",
-      "bytes": 22772,
+      "sha256": "5da7fcef670428a8b041f36e0e4e8d1a89420d732484d2cbba0fde763cbc6100",
+      "bytes": 23777,
       "media_type": "application/json"
     },
     {

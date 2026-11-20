@@ -883,6 +883,12 @@ fn commit_phase_tx_inner(
     if let Some(result) = terminal_proof.and_then(|proof| proof.resize_result.as_ref()) {
         payload.insert("terminal_resize".into(), serde_json::to_value(result)?);
     }
+    if state == ActionState::ObservedSuccess
+        && let Some(result) =
+            crate::terminal_allocations::terminal_release_observation::observed_result(tx, action)?
+    {
+        payload.insert("terminal_release".into(), serde_json::to_value(result)?);
+    }
     let (event_id, sequence) = append_phase_event_tx(
         tx,
         config,
