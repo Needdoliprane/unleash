@@ -3,6 +3,9 @@
 use super::*;
 use std::os::unix::process::ExitStatusExt;
 
+#[path = "terminal_release_history_native_scenarios.rs"]
+mod history_native_scenarios;
+
 #[derive(Debug, PartialEq, Eq)]
 struct ReleaseSnapshot {
     action_id: String,
