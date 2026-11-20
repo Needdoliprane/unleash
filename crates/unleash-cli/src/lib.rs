@@ -34,9 +34,11 @@ use unleash_protocol::{
 use uuid::Uuid;
 
 pub mod configuration;
+pub mod provider;
 pub mod terminal;
 
 use configuration::{ConfigurationArgs, ConfigurationTarget};
+use provider::ProviderCommand;
 use terminal::ProcessCommand;
 
 static UUID_COUNTER: AtomicU64 = AtomicU64::new(1);
@@ -173,6 +175,12 @@ pub enum Commands {
         /// Action sur un terminal.
         #[command(subcommand)]
         action: ProcessCommand,
+    },
+    /// Consulte les profils fournisseurs enregistrés.
+    Provider {
+        /// Action sur un profil fournisseur.
+        #[command(subcommand)]
+        action: ProviderCommand,
     },
     /// Rapport de récupération durable.
     Recovery,
@@ -441,6 +449,7 @@ pub async fn run_cli(cli: &Cli) -> Result<Value, CliError> {
         Commands::Backup { action } => run_backup_command(&mut client, action).await,
         Commands::Project { action } => run_project_command(&mut client, action).await,
         Commands::Process { action } => terminal::run_process_command(&mut client, action).await,
+        Commands::Provider { action } => provider::run_provider_command(&mut client, action).await,
         Commands::Mission { action } => run_mission_command(&mut client, action).await,
         Commands::Daemon { action } => run_daemon_command(&mut client, action).await,
         Commands::Tui { .. } => Ok(json!({ "status": "exited" })),

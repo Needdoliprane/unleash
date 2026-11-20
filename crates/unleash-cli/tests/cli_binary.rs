@@ -67,6 +67,24 @@ fn cli_binary_exposes_terminal_release() {
 }
 
 #[test]
+fn cli_binary_exposes_provider_show() {
+    let output = Command::new(env!("CARGO_BIN_EXE_unleash"))
+        .args(["provider", "show", "--help"])
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "provider show help: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let help = String::from_utf8(output.stdout).unwrap();
+    for flag in ["--profile-id", "--profile-version", "--project-id"] {
+        assert!(help.contains(flag), "missing provider option {flag}");
+    }
+}
+
+#[test]
 fn cli_binary_help_lists_tui_and_non_tty_tui_refuses_raw_mode() {
     let bin = env!("CARGO_BIN_EXE_unleash");
 

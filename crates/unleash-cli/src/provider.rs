@@ -1,0 +1,137 @@
+// SPDX-License-Identifier: Apache-2.0
+//! Consultation d'une version exacte de profil fournisseur.
+
+use clap::{Args, Subcommand};
+use serde_json::{Map, Value, json};
+use unleash_client::UnleashClient;
+use unleash_domain::{ProjectId, RequestId};
+use unleash_protocol::{ProtocolVersion, QueryEnvelope};
+use uuid::Uuid;
+
+use crate::{CliError, next_uuid};
+
+/// Sous-commandes de `unleash provider`.
+#[derive(Debug, Subcommand)]
+pub enum ProviderCommand {
+    /// Affiche le profil versionné et les observations enregistrées par le daemon.
+    Show(ProviderProfileArgs),
+}
+
+/// Version du profil à consulter et portée de sa configuration.
+#[derive(Debug, Args)]
+pub struct ProviderProfileArgs {
+    /// Identité stable du profil renvoyée par la configuration.
+    #[arg(long, value_parser = parse_profile_id)]
+    profile_id: Uuid,
+    /// Version exacte du profil.
+    #[arg(long, value_parser = clap::value_parser!(u64).range(1..=9_007_199_254_740_991))]
+    profile_version: u64,
+    /// Projet du profil. Omettre pour un profil utilisateur.
+    #[arg(long)]
+    project_id: Option<Uuid>,
+}
+
+fn parse_profile_id(value: &str) -> Result<Uuid, String> {
+    let id: Uuid = value
+        .parse()
+        .map_err(|error: uuid::Error| error.to_string())?;
+    if id.is_nil() {
+        return Err("Le profil exige un UUID non nul".into());
+    }
+    Ok(id)
+}
+
+impl ProviderProfileArgs {
+    fn query(&self) -> QueryEnvelope {
+        QueryEnvelope {
+            protocol_version: ProtocolVersion,
+            request_id: RequestId::from_uuid(next_uuid()),
+            query_type: "GetProviderProfile".into(),
+            project_id: self.project_id.map(ProjectId::from_uuid),
+            payload: Map::from_iter([
+                ("profile_id".into(), json!(self.profile_id)),
+                ("profile_version".into(), json!(self.profile_version)),
+            ]),
+        }
+    }
+}
+
+pub(super) async fn run_provider_command(
+    client: &mut UnleashClient,
+    action: &ProviderCommand,
+) -> Result<Value, CliError> {
+    match action {
+        ProviderCommand::Show(profile) => {
+            let response = client.query(&profile.query()).await?;
+            Ok(json!({"watermark": response.watermark, "result": response.result}))
+        }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+    use crate::{Cli, Commands};
+    use clap::Parser;
+
+    const PROFILE: &str = "00000000-0000-4000-8000-000000000051";
+    const PROJECT: &str = "00000000-0000-4000-8000-000000000052";
+
+    #[test]
+    fn show_queries_exact_profile_version_and_scope() {
+        let base = [
+            "unleash",
+            "provider",
+            "show",
+            "--profile-id",
+            PROFILE,
+            "--profile-version",
+            "3",
+        ];
+        for scope in [None, Some(PROJECT)] {
+            let arguments = base
+                .into_iter()
+                .chain(scope.into_iter().flat_map(|id| ["--project-id", id]));
+            let cli = Cli::try_parse_from(arguments).unwrap();
+            let Commands::Provider {
+                action: ProviderCommand::Show(profile),
+            } = cli.command
+            else {
+                unreachable!("provider show must parse");
+            };
+            let query = profile.query();
+            assert_eq!(query.query_type, "GetProviderProfile");
+            assert_eq!(
+                query.project_id,
+                scope.map(|id| ProjectId::from_uuid(id.parse().unwrap())),
+            );
+            assert_eq!(
+                json!(query.payload),
+                json!({"profile_id": PROFILE, "profile_version": 3})
+            );
+        }
+    }
+
+    #[test]
+    fn show_requires_a_non_nil_profile_and_exact_version() {
+        for (profile, version) in [
+            ("00000000-0000-0000-0000-000000000000", "1"),
+            (PROFILE, "0"),
+            (PROFILE, "9007199254740992"),
+        ] {
+            assert!(
+                Cli::try_parse_from([
+                    "unleash",
+                    "provider",
+                    "show",
+                    "--profile-id",
+                    profile,
+                    "--profile-version",
+                    version,
+                ])
+                .is_err()
+            );
+        }
+    }
+}
