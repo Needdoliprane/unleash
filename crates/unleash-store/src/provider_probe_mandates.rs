@@ -485,7 +485,7 @@ pub(crate) fn resolve_transport_grant(
             project_id: envelope.project_id,
             wire,
             profile,
-            phase: *phase,
+            phase: phase.wire(),
         },
     )
 }
@@ -495,7 +495,30 @@ struct ConnectGrantBinding<'a> {
     project_id: Option<ProjectId>,
     wire: &'a TestProviderProfilePayload,
     profile: &'a crate::ConfiguredProviderProfile,
-    phase: crate::provider_probe_connect::TransportPhase,
+    phase: ProviderTestPhase,
+}
+
+pub(crate) fn resolve_generation_grant(
+    tx: &Transaction<'_>,
+    daemon: &DaemonStateRow,
+    now: TimestampMs,
+    actor_id: &ActorId,
+    project_id: Option<ProjectId>,
+    wire: &TestProviderProfilePayload,
+    profile: &crate::ConfiguredProviderProfile,
+) -> Result<ResolvedConnectGrant, StoreError> {
+    resolve_connect_binding(
+        tx,
+        daemon,
+        now,
+        &ConnectGrantBinding {
+            actor_id,
+            project_id,
+            wire,
+            profile,
+            phase: ProviderTestPhase::GenerationProbe,
+        },
+    )
 }
 
 /// Checks the already authorized context's facts for admission. This does not
@@ -544,7 +567,7 @@ pub(crate) fn revalidate_transport_grant(
             project_id: context.project_id,
             wire: &wire,
             profile,
-            phase,
+            phase: phase.wire(),
         },
     )
 }
@@ -576,8 +599,8 @@ fn resolve_connect_binding(
     let target = project(grant.scope_kind, &grant.scope_id)?;
     if stored.revocation.is_some()
         || grant.authority_generation != daemon.authority_generation
-        || grant.permission.phase != phase.wire()
-        || wire.phase() != phase.wire()
+        || grant.permission.phase != *phase
+        || wire.phase() != *phase
         || grant.permission.expires_at_ms <= now
         || grant.issued_at_ms > now
         || !current_principal
@@ -619,11 +642,11 @@ fn validate_connect_bounds(
     wire: &TestProviderProfilePayload,
     permission: &ProviderProbeMandateIssue,
     profile: &crate::ConfiguredProviderProfile,
-    phase: crate::provider_probe_connect::TransportPhase,
+    phase: ProviderTestPhase,
 ) -> Result<(), StoreError> {
     let limits = wire.limits();
     if limits.timeout_ms() > permission.limits.timeout_ms()
-        || (phase == crate::provider_probe_connect::TransportPhase::Connect
+        || (phase == ProviderTestPhase::Connect
             && limits.timeout_ms() > profile.configuration.payload.limits().connect_timeout_ms)
         || limits.max_calls() > permission.limits.max_calls()
         || limits.max_output_tokens() > permission.limits.max_output_tokens()

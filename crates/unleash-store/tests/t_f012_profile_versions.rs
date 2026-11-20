@@ -6,9 +6,11 @@
 
 use serde_json::json;
 use std::sync::{
-    Arc, Barrier,
+    Arc, Barrier, Mutex,
     atomic::{AtomicBool, Ordering},
+    mpsc,
 };
+use std::time::Duration;
 use unleash_domain::{ActorId, CommandId, ProjectId, RequestId, Revision, SecretRef, Sha256Digest};
 use unleash_protocol::{
     CommandEnvelope, ProtocolVersion, ReceiptState, SetProviderProfilePayload, canonicalize_to_vec,
@@ -356,6 +358,183 @@ fn probe_command(
     command
 }
 
+fn generation_permission(
+    store: &UnleashStore,
+    caller: &CallerAuthority,
+) -> unleash_domain::ReceiptId {
+    use unleash_domain::{DataLocality, MicrosAmount, TimestampMs};
+    use unleash_protocol::{ProviderTestLimits, ProviderTestPhase};
+    use unleash_store::{ProviderProbeMandateChange, ProviderProbeMandateIssue};
+    let grant = ProviderProbeMandateChange::Issue(ProviderProbeMandateIssue {
+        principal_id: ActorId::new("profile-user").unwrap(),
+        profile_id: PROFILE,
+        profile_version: 1,
+        phase: ProviderTestPhase::GenerationProbe,
+        locality: DataLocality::LocalOnly,
+        capability_set: vec!["text".to_owned()],
+        limits: ProviderTestLimits::new(1000, 1, 1, MicrosAmount::ZERO),
+        expires_at_ms: TimestampMs::new(store.config().clock.now_ms().as_i64() + 30_000),
+    });
+    generation_policy(store, caller, grant, 604, Revision::INITIAL)
+}
+
+fn generation_policy(
+    store: &UnleashStore,
+    caller: &CallerAuthority,
+    grant: unleash_store::ProviderProbeMandateChange,
+    id: u128,
+    expected: Revision,
+) -> unleash_domain::ReceiptId {
+    use unleash_store::{PolicyIsolationMode, PolicyScopeKind};
+    let authority = store.active_authority_generation().unwrap();
+    store
+        .commit_command(CommitCommandRequest {
+            actor_id: caller.actor_id.clone(),
+            envelope: CommandEnvelope {
+                protocol_version: ProtocolVersion,
+                request_id: RequestId::from_u128(id),
+                command_id: CommandId::from_u128(id),
+                authority_generation: authority,
+                actor_ref: Some(caller.actor_id.to_string()),
+                project_id: None,
+                aggregate_id: authority.as_uuid(),
+                expected_revision: expected,
+                command_type: "SetPolicy".to_owned(),
+                payload:
+                    json!({"scope_kind":"global","scope_id":"global","isolation_mode":"standard",
+                "policy_version":"generation-profile-test","reason":"synthetic profile permission",
+                "provider_probe_mandate":grant})
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            },
+            target_aggregate: AggregateKind::SecurityPolicy,
+            operation_id: None,
+            receipt_state: ReceiptState::Completed,
+            result_ref: None,
+            retention_days_override: None,
+            fence_assertion: None,
+            mutation: CommandMutation::SetPolicyWithProviderProbeMandate {
+                scope_kind: PolicyScopeKind::Global,
+                scope_id: "global".to_owned(),
+                isolation_mode: PolicyIsolationMode::Standard,
+                policy_version: "generation-profile-test".to_owned(),
+                reason: "synthetic profile permission".to_owned(),
+                caller: caller.clone(),
+                mandate: grant,
+            },
+            events: vec![],
+            capacity_reservations: vec![],
+            budget_reservations: vec![],
+        })
+        .unwrap()
+        .receipt()
+        .receipt_id
+}
+
+struct PauseGenerationBeforeCommit {
+    armed: AtomicBool,
+    entered: mpsc::SyncSender<()>,
+    proceed: Mutex<mpsc::Receiver<()>>,
+}
+
+impl CutpointObserver for PauseGenerationBeforeCommit {
+    fn hit(&self, point: StoreCutpoint) -> Result<(), StoreError> {
+        if point == StoreCutpoint::C0BeforeCommandTx && self.armed.swap(false, Ordering::SeqCst) {
+            let error = || StoreError::CutpointInjected {
+                cutpoint: "C0".to_owned(),
+                message: "generation test synchronization".to_owned(),
+            };
+            self.entered.send(()).map_err(|_| error())?;
+            self.proceed
+                .lock()
+                .map_err(|_| error())?
+                .recv_timeout(Duration::from_secs(8))
+                .map_err(|_| error())?;
+        }
+        Ok(())
+    }
+}
+
+#[test]
+fn t_f012_generation_revocation_between_artifact_publication_and_commit() {
+    let (arrived, wait) = mpsc::sync_channel(0);
+    let (proceed, resume) = mpsc::sync_channel(1);
+    let fault = Arc::new(PauseGenerationBeforeCommit {
+        armed: AtomicBool::new(false),
+        entered: arrived,
+        proceed: Mutex::new(resume),
+    });
+    let (store, _directory) = fixture(fault.clone());
+    store
+        .commit_command(request(
+            &store,
+            prepare(&store, 1, None, "exact-model"),
+            605,
+        ))
+        .unwrap();
+    let caller = CallerAuthority {
+        actor_id: actor(),
+        role: CallerRole::HumanOperator,
+    };
+    let mandate = generation_permission(&store, &caller);
+    let profile = store
+        .resolve_provider_profile_snapshot(PROFILE, 1)
+        .unwrap()
+        .value
+        .unwrap();
+    let mut envelope = probe_command(
+        &store,
+        &profile.profile_version_ref,
+        &PROFILE.to_string(),
+        "exact-model",
+        606,
+    )
+    .envelope;
+    envelope
+        .payload
+        .insert("mandate_ref".to_owned(), json!(mandate));
+    fault.armed.store(true, Ordering::SeqCst);
+    std::thread::scope(|scope| {
+        let in_flight =
+            scope.spawn(|| store.commit_provider_generation_preparation(&envelope, &caller));
+        wait.recv_timeout(Duration::from_secs(8)).unwrap();
+        let candidates = store.read_snapshot(|conn, _| Ok(conn.query_row(
+            "SELECT COUNT(*) FROM object_references WHERE owner_kind='provider_generation_preparation' AND state='live'",
+            [], |row| row.get::<_,i64>(0),
+        )?)).unwrap();
+        assert_eq!(candidates, 5);
+        generation_policy(
+            &store,
+            &caller,
+            unleash_store::ProviderProbeMandateChange::Revoke {
+                mandate_ref: mandate,
+            },
+            607,
+            Revision::new(1),
+        );
+        proceed.send(()).unwrap();
+        assert!(matches!(
+            in_flight.join().unwrap(),
+            Err(StoreError::NotFound(_))
+        ));
+    });
+    assert!(
+        store
+            .lookup_provider_validation_command(&envelope, &caller)
+            .unwrap()
+            .is_none()
+    );
+    let residues = store.read_snapshot(|conn, _| Ok(conn.query_row(
+        "SELECT
+            (SELECT COUNT(*) FROM provider_probe_contexts) +
+            (SELECT COUNT(*) FROM object_references WHERE owner_kind IN ('provider_generation_preparation','provider_probe') AND state='live') +
+            (SELECT COUNT(*) FROM action_dispatches)",
+        [], |row| row.get::<_,i64>(0),
+    )?)).unwrap();
+    assert_eq!(residues, 0);
+}
+
 #[test]
 fn t_f012_002_probe_cannot_substitute_configured_uuid_version_model_or_scope() {
     let (store, _directory) = fixture(Arc::new(NoopCutpointObserver));
@@ -390,14 +569,28 @@ fn t_f012_002_probe_cannot_substitute_configured_uuid_version_model_or_scope() {
         602,
     );
     assert!(store.commit_command(wrong).is_err());
+    let raw = probe_command(
+        &store,
+        &record.profile_version_ref,
+        &PROFILE.to_string(),
+        "exact-model",
+        603,
+    );
+    assert!(matches!(
+        store.commit_command(raw.clone()),
+        Err(StoreError::EvidenceUnavailable(_))
+    ));
+    let caller = CallerAuthority {
+        actor_id: actor(),
+        role: CallerRole::HumanOperator,
+    };
+    let mandate = generation_permission(&store, &caller);
+    let mut envelope = raw.envelope;
+    envelope
+        .payload
+        .insert("mandate_ref".to_owned(), json!(mandate));
     store
-        .commit_command(probe_command(
-            &store,
-            &record.profile_version_ref,
-            &PROFILE.to_string(),
-            "exact-model",
-            603,
-        ))
+        .commit_provider_generation_preparation(&envelope, &caller)
         .unwrap();
 }
 

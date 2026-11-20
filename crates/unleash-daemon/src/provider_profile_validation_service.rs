@@ -79,7 +79,11 @@ pub(crate) async fn commit(
     if payload.phase() == ProviderTestPhase::Connect {
         return Err(unresolved_effect_mandate(&command));
     }
-    if payload.phase() != ProviderTestPhase::ValidateConfig {
+    let phase = payload.phase();
+    if !matches!(
+        phase,
+        ProviderTestPhase::ValidateConfig | ProviderTestPhase::GenerationProbe
+    ) {
         return Err(IpcError::new(
             ErrorCode::InvalidArgument,
             None,
@@ -95,10 +99,16 @@ pub(crate) async fn commit(
         return Err(error);
     }
     let id = command.command_id;
-    tokio::task::spawn_blocking(move || commit_blocking(&store, &command, &caller))
-        .await
-        .map_err(|_| unavailable().with_command_id(id))?
-        .map_err(|error| crate::error::store_error_to_ipc_error(&error, Some(id)))
+    tokio::task::spawn_blocking(move || {
+        if phase == ProviderTestPhase::GenerationProbe {
+            store.commit_provider_generation_preparation(&command, &caller)
+        } else {
+            commit_blocking(&store, &command, &caller)
+        }
+    })
+    .await
+    .map_err(|_| unavailable().with_command_id(id))?
+    .map_err(|error| crate::error::store_error_to_ipc_error(&error, Some(id)))
 }
 
 fn commit_blocking(

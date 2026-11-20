@@ -197,6 +197,13 @@ pub enum CommandMutation {
         /// Références et bornes résolues côté service.
         preparation: crate::ProviderProbePreparation,
     },
+    /// Commits a configured generation probe after resolving its active mandate.
+    PrepareAuthenticatedProviderGeneration {
+        /// Authority derived from the authenticated session.
+        caller: CallerAuthority,
+        /// Resolved, immutable, verified context and its exact artifact references.
+        preparation: Box<crate::AuthenticatedGenerationPreparation>,
+    },
     /// Réserve une sauvegarde manuelle gérée, sans I/O filesystem.
     RequestBackup {
         /// Identité client stable égale à l'agrégat de l'enveloppe.
@@ -1177,7 +1184,8 @@ pub(crate) fn tx_commit_command(
     let prepared_probe = match &req.mutation {
         CommandMutation::PrepareProviderProbe { probe_id, .. } => Some(*probe_id),
         CommandMutation::PrepareProviderProbeConnect { .. }
-        | CommandMutation::PrepareProviderProbeInventory { .. } => Some(
+        | CommandMutation::PrepareProviderProbeInventory { .. }
+        | CommandMutation::PrepareAuthenticatedProviderGeneration { .. } => Some(
             unleash_domain::ProviderProbeId::from_uuid(req.envelope.aggregate_id),
         ),
         _ => None,
@@ -1579,6 +1587,23 @@ fn apply_command_mutation(
             actor_id,
             envelope.project_id,
             preparation,
+            None,
+            generated_events,
+        ),
+        CommandMutation::PrepareAuthenticatedProviderGeneration {
+            caller,
+            preparation,
+        } => crate::provider_probe_generation::commit_tx(
+            tx,
+            config,
+            daemon,
+            now_ms,
+            &crate::provider_probe_generation::GenerationCommit {
+                command: envelope,
+                caller,
+                receipt: receipt_id,
+                preparation,
+            },
             generated_events,
         ),
         CommandMutation::RequestBackup { backup_id } => crate::backup_requests::reserve_backup_tx(

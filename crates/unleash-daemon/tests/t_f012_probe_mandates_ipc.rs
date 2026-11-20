@@ -235,6 +235,133 @@ fn issue(profile: &Profile, phase: &str, expires: u64) -> Value {
     json!({"kind":"issue","principal_id":profile.principal,"profile_id":profile.id,"profile_version":1,"phase":phase,"locality":"local_only","capability_set":[],"limits":limits(),"expires_at_ms":expires})
 }
 
+fn generation_limits() -> Value {
+    json!({"timeout_ms":1_000,"max_calls":1,"max_output_tokens":32,"max_cost_usd_micros":0})
+}
+
+fn generation_request(
+    client: &UnleashClient,
+    profile: &Profile,
+    grant: &CommandReceipt,
+    id: u128,
+) -> CommandEnvelope {
+    command(
+        client,
+        id,
+        "TestProviderProfile",
+        Uuid::from_u128(id),
+        json!({"profile_id":profile.id,"profile_version":1,"phase":"generation_probe",
+               "locality":"local_only","capability_set":["text"],"limits":generation_limits(),
+               "mandate_ref":grant.receipt_id}),
+    )
+}
+
+fn assert_retained_generation_inputs(fixture: &Fixture, probe: Uuid) {
+    let db = fixture.db();
+    let (inputs, temporary): (i64, i64) = db.query_row(
+        "SELECT
+          (SELECT COUNT(*) FROM object_references WHERE owner_kind='provider_probe' AND owner_id=?1 AND state='live'),
+          (SELECT COUNT(*) FROM object_references WHERE owner_kind='provider_generation_preparation' AND state='live')",
+        [probe.to_string()], |row| Ok((row.get(0)?, row.get(1)?)),
+    ).unwrap();
+    assert_eq!((inputs, temporary), (5, 0));
+    let (path, hash): (String, String) = db
+        .query_row(
+            "SELECT o.relative_path,o.object_hash FROM provider_probe_contexts c
+         JOIN object_references r ON r.owner_kind='provider_probe' AND r.owner_id=c.probe_id
+             AND r.source_field='capabilities' AND r.state='live'
+         JOIN object_records o ON o.object_hash=r.object_hash
+             AND o.object_hash=json_extract(c.context_json,'$.preparation.capability_snapshot_hash')
+         WHERE c.probe_id=?1",
+            [probe.to_string()],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    let bytes = std::fs::read(fixture.data.path().join("artifacts").join(path)).unwrap();
+    assert_eq!(Sha256Digest::from_bytes(&bytes).to_string(), hash);
+    let parsed: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(
+        parsed,
+        json!({"schema_version":1,"requested":["text"],"declared":["text"],"observed":[],"unknown":["text"]})
+    );
+}
+
+#[tokio::test]
+async fn t_f012_generation_exact_mandate_prepares_the_autonomous_context_once() {
+    let (fixture, mut admin) = Fixture::start().await;
+    let profile = fixture
+        .configure(&mut admin, Uuid::from_u128(0xf012_9e01), None, 310)
+        .await
+        .unwrap();
+    let grant = json!({
+        "kind":"issue","principal_id":profile.principal,"profile_id":profile.id,"profile_version":1,
+        "phase":"generation_probe","locality":"local_only","capability_set":["text"],
+        "limits":generation_limits(),"expires_at_ms":expires_at(),
+    });
+    let issued = admin
+        .send_command(&policy(&admin, 312, None, 0, Some(grant)))
+        .await
+        .unwrap();
+    fixture.assert_no_effect();
+    let request = generation_request(&admin, &profile, &issued, 313);
+    let response = admin.send_command(&request).await;
+    let replay = admin.send_command(&request).await;
+    fixture.shutdown().await;
+    let receipt = response.expect("un mandat de génération exact doit préparer le contexte");
+    assert_eq!(receipt.state, unleash_protocol::ReceiptState::Accepted);
+    assert_eq!(
+        receipt.result_ref,
+        Some(format!("provider-probe:{}", request.aggregate_id))
+    );
+    assert_eq!(replay.unwrap(), receipt);
+    let db = fixture.db();
+    let prepared: i64 = db.query_row(
+        "SELECT COUNT(*) FROM provider_probe_contexts c JOIN provider_probes p USING(probe_id)
+         WHERE c.probe_id=?1 AND c.receipt_id=?2 AND p.phase='generation_probe'
+          AND json_extract(c.context_json,'$.preparation.mandate_ref')=?3
+          AND json_extract(c.context_json,'$.preparation.limits.max_output_tokens')=32
+          AND json_extract(c.context_json,'$.preparation.resolved_model_id')='synthetic-mandate-profile'
+          AND json_extract(c.context_json,'$.preparation.source_run_id') IS NULL",
+        [request.aggregate_id.to_string(), receipt.receipt_id.to_string(), issued.receipt_id.to_string()],
+        |row| row.get(0),
+    ).unwrap();
+    assert_eq!(prepared, 1);
+    assert_retained_generation_inputs(&fixture, request.aggregate_id);
+    assert!(
+        matches!(fixture.endpoint.accept(), Err(error) if error.kind() == ErrorKind::WouldBlock)
+    );
+    let dispatches: i64 = db
+        .query_row(
+            "SELECT (SELECT COUNT(*) FROM action_dispatches)+(SELECT COUNT(*) FROM model_calls)",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(dispatches, 0);
+}
+
+#[tokio::test]
+async fn t_f012_generation_inventory_mandate_is_hidden_before_preparation() {
+    let (fixture, mut admin) = Fixture::start().await;
+    let profile = fixture
+        .configure(&mut admin, Uuid::from_u128(0xf012_9e02), None, 320)
+        .await
+        .unwrap();
+    let permission = issue(&profile, "inventory", expires_at());
+    let issued = admin
+        .send_command(&policy(&admin, 322, None, 0, Some(permission)))
+        .await
+        .unwrap();
+    let request = generation_request(&admin, &profile, &issued, 323);
+    let result = admin.send_command(&request).await;
+    fixture.shutdown().await;
+    fixture.assert_no_effect();
+    assert!(
+        matches!(&result, Err(ClientError::Remote(error)) if error.code == ErrorCode::NotFoundOrHidden),
+        "un mandat Inventory doit rester caché pour la génération : {result:?}",
+    );
+}
+
 fn expires_at() -> u64 {
     u64::try_from(
         SystemTime::now()

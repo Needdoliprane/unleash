@@ -272,16 +272,24 @@ pub(crate) fn validate_command(
     tx: &Transaction<'_>,
     request: &CommitCommandRequest,
 ) -> Result<(), StoreError> {
-    let CommandMutation::PrepareProviderProbe {
-        probe_id,
-        caller,
-        preparation,
-    } = &request.mutation
-    else {
-        if request.envelope.command_type == "TestProviderProfile" {
+    let (probe_id, caller, preparation) = match &request.mutation {
+        CommandMutation::PrepareProviderProbe {
+            probe_id,
+            caller,
+            preparation,
+        } => (*probe_id, caller, preparation),
+        CommandMutation::PrepareAuthenticatedProviderGeneration {
+            caller,
+            preparation,
+        } => (
+            ProviderProbeId::from_uuid(request.envelope.aggregate_id),
+            caller,
+            &preparation.preparation,
+        ),
+        _ if request.envelope.command_type == "TestProviderProfile" => {
             return Err(invalid("mutation de probe absente"));
         }
-        return Ok(());
+        _ => return Ok(()),
     };
     require_security_admin(caller, "TestProviderProfile")?;
     if caller.actor_id != request.actor_id
@@ -462,11 +470,23 @@ pub(crate) fn prepare_tx(
     actor: &ActorId,
     project: Option<ProjectId>,
     preparation: &ProviderProbePreparation,
+    grant: Option<&crate::provider_probe_mandates::ResolvedConnectGrant>,
     events: &mut Vec<EventAppendSpec>,
 ) -> Result<Revision, StoreError> {
     validate_preparation_tx(tx, daemon, preparation)?;
     if daemon.schema_version >= 11 {
         crate::provider_profiles::validate_probe_use(tx, preparation, project)?;
+    }
+    if daemon.schema_version >= 15
+        && preparation
+            .requested_profile_id
+            .parse::<uuid::Uuid>()
+            .is_ok()
+        && grant.is_none()
+    {
+        return Err(StoreError::EvidenceUnavailable(
+            "préparation configurée sans mandat de génération vérifié".into(),
+        ));
     }
     ensure_scope_not_frozen_tx(tx, project, None, None)?;
     let prior:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM provider_probes WHERE probe_id=?1) OR EXISTS(SELECT 1 FROM command_receipts WHERE aggregate_id=?1)",[probe.to_string()],|row|row.get(0))?;
@@ -477,7 +497,11 @@ pub(crate) fn prepare_tx(
             command_id: None,
         });
     }
-    let principal:String=tx.query_row("SELECT principal_id FROM principals WHERE actor_id=?1 AND state='active' AND principal_kind IN ('user','service','system')",[actor.as_str()],|row|row.get(0)).optional()?.ok_or_else(||invalid("principal authentifié absent"))?;
+    let principal: String = if let Some(grant) = grant {
+        grant.principal_id.to_string()
+    } else {
+        tx.query_row("SELECT principal_id FROM principals WHERE actor_id=?1 AND state='active' AND principal_kind IN ('user','service','system')",[actor.as_str()],|row|row.get(0)).optional()?.ok_or_else(||invalid("principal authentifié absent"))?
+    };
     for subject in [&principal, actor.as_str()] {
         ensure_subject_not_blocked_tx(tx, SubjectKind::Actor, subject, project)?;
     }
@@ -497,6 +521,7 @@ pub(crate) fn prepare_tx(
         .as_i64()
         .checked_add(integer(preparation.limits.timeout_ms)?)
         .ok_or_else(|| invalid("deadline probe hors plage"))?;
+    let deadline = grant.map_or(deadline, |grant| deadline.min(grant.expires_at_ms.as_i64()));
     if profile.declared_locality == DataLocality::ApprovedRemote
         && profile
             .price_valid_until_ms
@@ -517,20 +542,8 @@ pub(crate) fn prepare_tx(
     } else {
         tx.query_row("SELECT COALESCE((SELECT revision FROM settings WHERE scope_kind='user' AND scope_id='default'),0)",[],|row|row.get(0))?
     };
-    let summary = read_policy_summary_conn(tx, project)?;
-    let policy_revision = summary
-        .global_policy
-        .as_ref()
-        .map_or(Revision::INITIAL, |policy| policy.revision)
-        .max(
-            summary
-                .project_policy
-                .as_ref()
-                .map_or(Revision::INITIAL, |policy| policy.revision),
-        );
-    let security_policy_digest = canonical_sha256(
-        &json!({"schema_version":1,"global_policy":summary.global_policy,"project_policy":summary.project_policy,"guard_config":summary.guard_config}),
-    )?;
+    let (policy_revision, security_policy_digest) =
+        crate::provider_probe_connect::policy(tx, project)?;
     let context = ProviderProbeContext {
         schema_version: 1,
         probe_id: probe,
