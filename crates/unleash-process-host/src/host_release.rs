@@ -4,6 +4,7 @@ use crate::control_release::ReleaseEnvelope;
 use crate::{
     ControlReacquisitionAck, ControlReacquisitionRequest, ControlReacquisitionResponse,
     ControlReleaseAck, ControlReleaseRequest, ControlReleaseResponse, HostControlState,
+    OsProcessInspector,
 };
 
 enum ReleaseOutcome {
