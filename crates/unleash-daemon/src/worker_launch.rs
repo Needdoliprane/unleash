@@ -79,8 +79,23 @@ impl PendingInvocationWorker {
     /// # Errors
     /// Returns an error if the transition or permit cannot be established.
     pub async fn activate(
+        self,
+        store: Arc<UnleashStore>,
+    ) -> Result<RunningInvocationWorker, WorkerLaunchError> {
+        self.activate_until_shutdown(store, std::future::pending())
+            .await
+    }
+
+    /// Commit the start, then observe controller shutdown during permit exchange.
+    /// Shutdown takes precedence over sending more bytes or accepting an acknowledgement.
+    /// On an interrupted exchange the reservation stays held for reconciliation.
+    ///
+    /// # Errors
+    /// Returns the exact durable start cursor if the continuation was not established.
+    pub async fn activate_until_shutdown(
         mut self,
         store: Arc<UnleashStore>,
+        shutdown: impl Future<Output = ()>,
     ) -> Result<RunningInvocationWorker, WorkerLaunchError> {
         let permit = encode_frame(&WorkerPermit {
             wire_version: WorkerWireVersion::V1,
@@ -89,7 +104,7 @@ impl PendingInvocationWorker {
         .map_err(|_| WorkerLaunchError::Readiness)?;
         let identity = self.identity.clone();
         let preparation = self.preparation.clone();
-        let start_cursor = tokio::task::spawn_blocking(move || {
+        let start = tokio::task::spawn_blocking(move || {
             if !matches!(
                 verify_process_identity(&identity),
                 Ok(ProcessVerification::Match)
@@ -107,29 +122,46 @@ impl PendingInvocationWorker {
             )?)
         })
         .await
-        .map_err(|_| WorkerLaunchError::NativeProcess)??;
-
-        let unconfirmed = WorkerLaunchError::ContinuationUnknown { start_cursor };
-        if !matches!(self.child.try_wait(), Ok(None)) {
-            return Err(unconfirmed);
-        }
-        let Ok(Ok(acknowledgement)) =
-            tokio::time::timeout(STARTUP_TIMEOUT, exchange_worker(&mut self.child, &permit)).await
-        else {
-            return Err(unconfirmed);
+        .unwrap_or(Err(WorkerLaunchError::NativeProcess));
+        let start_cursor = match start {
+            Ok(cursor) => cursor,
+            Err(error) => {
+                self.close_after_failed_activation().await;
+                return Err(error);
+            }
         };
-        if acknowledgement.kind != WorkerReplyKind::Activated
-            || acknowledgement.wire_version != self.ready.wire_version
-            || acknowledgement.pid != self.ready.pid
-            || acknowledgement.binding != self.ready.binding
-        {
-            return Err(unconfirmed);
-        }
+
+        let reply = if matches!(self.child.try_wait(), Ok(None)) {
+            tokio::select! {
+                biased;
+                () = shutdown => None,
+                result = tokio::time::timeout(STARTUP_TIMEOUT, exchange_worker(&mut self.child, &permit)) => {
+                    result.ok().and_then(Result::ok)
+                }
+            }
+        } else {
+            None
+        };
+        let Some(acknowledgement) = reply.filter(|reply| {
+            reply.kind == WorkerReplyKind::Activated
+                && reply.wire_version == self.ready.wire_version
+                && reply.pid == self.ready.pid
+                && reply.binding == self.ready.binding
+        }) else {
+            self.close_after_failed_activation().await;
+            return Err(WorkerLaunchError::ContinuationUnknown { start_cursor });
+        };
         Ok(RunningInvocationWorker {
             pending: self,
             acknowledgement,
             start_cursor,
         })
+    }
+
+    async fn close_after_failed_activation(self) {
+        if let Err(error) = self.close().await {
+            tracing::warn!(%error, "Worker activation cleanup did not finish normally");
+        }
     }
 
     /// Close the controller and reap the still-gated worker.

@@ -637,6 +637,7 @@ fn t_f003_006_worker_start_event_failure_rolls_back_both_states() {
             &executable,
         ))
         .unwrap();
+    let identity = pending.identity().clone();
     let before = worker_preparation_state(&store, &grant);
     store
         .execute_in_writer_tx(WriteCriticality::Critical, |tx, _| {
@@ -653,6 +654,10 @@ fn t_f003_006_worker_start_event_failure_rolls_back_both_states() {
         rejected,
         Err(WorkerLaunchError::Admission(error)) if error.to_string().contains("fixture_worker_start_aborted")
     ));
+    assert_eq!(
+        verify_process_identity(&identity).unwrap(),
+        ProcessVerification::Exited
+    );
     assert_eq!(worker_preparation_state(&store, &grant), before);
     assert_eq!(
         store.execution_pool_state(POOL).unwrap().current_occupation,
@@ -697,6 +702,107 @@ fn t_f003_006_worker_start_rejects_out_of_range_event_sequence() {
         Ok(_) => panic!("worker started despite the out-of-range event sequence"),
     }
     assert_eq!(worker_preparation_state(&store, &grant), before);
+    assert_eq!(
+        store.execution_pool_state(POOL).unwrap().current_occupation,
+        1
+    );
+    Arc::try_unwrap(store).ok().unwrap().shutdown().unwrap();
+}
+
+#[test]
+#[ignore = "requires the packaged Rust worker via UNLEASH_TEST_AGENT_WORKER_BIN"]
+fn t_f003_006_shutdown_after_worker_start_preserves_the_single_attempt() {
+    let executable = worker_test_executable();
+    let data = local_test_dir("f003-running-before-permit").unwrap();
+    let store = worker_test_store(data.path());
+    let runtime = worker_test_runtime();
+    let (grant, _) = admit_worker_fixture(&store);
+    let pending = runtime
+        .block_on(prepare_invocation_worker(
+            Arc::clone(&store),
+            grant.clone(),
+            &executable,
+        ))
+        .unwrap();
+    let identity = pending.identity().clone();
+    let prepared = pending.preparation().event_cursor;
+    let revision = i64::try_from(pending.preparation().prepared_revision.as_u64()).unwrap() + 1;
+    let durable_start = || {
+        store
+            .read_snapshot(|conn, _| {
+                Ok(conn.query_row(
+                    "SELECT sequence,payload_json FROM events
+                 WHERE aggregate_id=?1 AND event_type='InvocationStarted'",
+                    [grant.unit.id().to_string()],
+                    |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
+                )?)
+            })
+            .unwrap()
+    };
+    let shutdown = async {
+        let (sequence, _) = durable_start();
+        assert!(u64::try_from(sequence).unwrap() > prepared.sequence.as_u64());
+    };
+    let start =
+        match runtime.block_on(pending.activate_until_shutdown(Arc::clone(&store), shutdown)) {
+            Err(WorkerLaunchError::ContinuationUnknown { start_cursor }) => start_cursor,
+            Err(error) => panic!("unexpected shutdown result: {error:?}"),
+            Ok(worker) => {
+                runtime.block_on(worker.close()).unwrap();
+                panic!("worker received a permit despite the controller shutdown");
+            }
+        };
+    assert_eq!(
+        verify_process_identity(&identity).unwrap(),
+        ProcessVerification::Exited
+    );
+    assert_eq!(start.stream_id, prepared.stream_id);
+    let (sequence, raw) = durable_start();
+    assert_eq!(start.sequence.as_u64(), u64::try_from(sequence).unwrap());
+    let payload: serde_json::Value = serde_json::from_str(&raw).unwrap();
+    assert_eq!(
+        payload.get("attempt_id"),
+        Some(&serde_json::json!(grant.attempt_id.unwrap()))
+    );
+    assert_eq!(
+        payload.get("reservation_id"),
+        Some(&serde_json::json!(grant.reservation_id))
+    );
+    assert_eq!(
+        payload.get("fence"),
+        Some(&serde_json::json!(grant.lease.fence))
+    );
+    assert_eq!(
+        payload.pointer("/process_identity/pid"),
+        Some(&serde_json::json!(identity.pid))
+    );
+    assert_eq!(
+        payload.pointer("/process_identity/start_identity"),
+        Some(&serde_json::json!(identity.start_identity))
+    );
+    assert!(
+        runtime
+            .block_on(prepare_invocation_worker(
+                Arc::clone(&store),
+                grant.clone(),
+                &executable,
+            ))
+            .is_err()
+    );
+    assert_eq!(
+        worker_preparation_state(&store, &grant),
+        ("running".to_owned(), "running".to_owned(), revision, 1)
+    );
+    let counts: (i64, i64) = store.read_snapshot(|conn, _| {
+        let id = grant.unit.id().to_string();
+        Ok(conn.query_row(
+            "SELECT (SELECT count(*) FROM invocation_attempts WHERE invocation_id=?1),
+             (SELECT count(*) FROM events WHERE aggregate_id=?1 AND event_type='InvocationStarted')",
+            [id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?)
+    }).unwrap();
+    assert_eq!(counts, (1, 1));
     assert_eq!(
         store.execution_pool_state(POOL).unwrap().current_occupation,
         1
