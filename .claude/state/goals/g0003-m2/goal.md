@@ -40,6 +40,16 @@ Raccorder l’admission durable, les adaptateurs de modèles et le process-host 
 
 Le Store a un seul écrivain par phase. Les connexions F011 et F012 au daemon se coordonnent sur les mêmes points IPC et de composition. Les appels payants, environnements externes et validations d’OS restent soumis au mandat et aux preuves distinctes du programme.
 
+### Actions de clôture ouvertes
+
+| Périmètre | Prochain résultat observable | Dépendance immédiate |
+| --- | --- | --- |
+| F003 | Le chemin `AssignTask` / `StartRun` produit une unité que le tour déjà intégré peut admettre, avec une seule tentative et la preuve durable attendue | Mise en file Store compilée, qualification fonctionnelle non vérifiée. ROOT conserve ce candidat et les contrôles signalés clos. |
+| F011 | L'autorité confirme la disposition du contrôle et la conservation ou libération des ressources prévues après réconciliation | ROOT part des preuves intégrées `64ea50c` et `abb030e`. Le scénario CLI/PTY signalé reste non vérifié dans son propre périmètre. |
+| F012, profils | Les parcours CLI de fiche de profil ont chacun un verdict de revue et des preuves attachées au candidat | Tests locaux disponibles. Les revues liste et validation se sont arrêtées avant leur premier tour. Leurs remises restent non vérifiées. |
+| F012, génération | Le transport consomme le corps publié et la décision durable lie l'instance admise à ce transport, avant tout envoi | Corps et destination testés localement. ROOT traite la liaison dans ce périmètre indépendant des revues CLI. L'essai moteur réel relève de Q-19. |
+| Sortie M2 | Une campagne de composition couvre les lots revus, puis un rapport regroupe les résultats et les limites de F003, F011, F012 et Q-19 | L'acceptation et la publication du jalon exigent leurs gates et le contrôle de CI. L'accès à la CI distante a échoué avec HTTP 404. |
+
 ## Résultat acquis
 
 `5a16c4a` intègre la politique F003 et les flux F012. Leur campagne combinée a passé 249 tests Rust. La fusion `cdb16bd` réunit ces lots et le socle M1 publié. Cargo accepte le verrou hors ligne et le dossier validé compte 0 erreur et 0 avertissement. Le rejeu de la fusion passe avec 406 tests Rust (doctest compris). Les raccords à SQLite, à l’IPC et au vrai daemon restent ouverts.

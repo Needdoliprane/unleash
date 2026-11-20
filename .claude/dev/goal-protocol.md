@@ -46,6 +46,8 @@ Découper en tâches indépendantes et vérifiables :
 
 Écrire le plan dans `goal.md`. Pour un goal large ou ambigu, faire relire le plan par un agent de niveau `frontier` avant d'exécuter.
 
+Pour chaque lot en cours, le plan nomme l'opération qui permet de l'accepter, sa dépendance immédiate et le responsable de la prochaine action. Séparer dès le découpage les parcours livrables dont les critères et les fichiers peuvent être figés séparément. Quand un lot dispose d'un candidat testable, prioriser sa revue et son intégration avant d'étendre ce lot.
+
 ### 3. Exécution déléguée
 
 Pour chaque tâche prête, l'agent root choisit le rôle et le modèle selon le [routage](model-routing.md), puis lance un sous-agent dans **son propre worktree** `.claude/worktrees/<goal-id>-<task-id>` (branche `task/<goal-id>/<task-id>` ou branche native de l'outil). Le prompt de délégation est autonome : objectif, fichiers autorisés en écriture, documents à lire (feature, exigences, tests, contrats), critère de terminé, commandes de vérification, interdits, format du compte rendu.
@@ -69,15 +71,17 @@ Compte rendu attendu de chaque sous-agent : branche et commit, fichiers modifié
 #### Travaux de sécurité informatique
 
 Cette règle s’applique au root comme aux sous-agents, y compris lors d’une
-reprise ou d’une revue en lecture seule. Avant de déléguer ou d’exécuter,
-consigner les quatre éléments suivants dans le mandat existant. Une
+reprise ou d’une revue en lecture seule. Avant de déléguer, d’écrire le
+scénario ou d’exécuter le contrôle, consigner les quatre éléments suivants
+dans le mandat existant. Une
 demande porte sur une seule propriété de sécurité. Si un élément manque ou
 reste ambigu, suspendre cette exécution jusqu’à clarification du périmètre.
 
 - **Finalité défensive** — propriété à vérifier ou défaut de code à corriger,
   raison pour laquelle ce contrôle est nécessaire et résultat observable.
 - **Périmètre autorisé** — checkout et SHA, fichiers ou suite de tests,
-  environnement et données. Privilégier la lecture du diff et les fixtures
+  environnement, données et composants réellement démarrés. Décrire les
+  écritures de la fixture et sa durée de vie. Privilégier la lecture du diff et les fixtures
   synthétiques locales du dépôt. Identifier expressément tout accès réseau
   nécessaire, sa destination et son autorisation avant l’appel.
 - **Commande exacte** — répertoire de travail, exécutable, arguments, filtre
@@ -102,13 +106,17 @@ ni transférée à un autre agent ou outil. Les autres lots autorisés continuen
 
 ### 4. Vérification indépendante
 
-Une tâche n'est intégrée qu'après vérification par un **autre** agent (rôle `verifier`, contexte neuf) qui relance les commandes, lit le diff contre les exigences et la [définition de terminé](definition-of-done.md), et cherche les tests complaisants. Échec → la tâche retourne à son implémenteur avec les constats précis.
+Une tâche n'est intégrée qu'après vérification par un **autre** agent (rôle `verifier`, contexte neuf) qui relance les commandes autorisées, lit le diff contre les exigences et la [définition de terminé](definition-of-done.md), et cherche les tests complaisants. Un contrôle masqué suit la [règle d’arrêt ci-dessus](#travaux-de-sécurité-informatique). Échec → la tâche retourne à son implémenteur avec les constats précis.
 
-Escalade : deux échecs de vérification au même niveau de modèle → relancer au niveau supérieur ; trois échecs au niveau `frontier` → marquer la tâche `blocked`, consigner le diagnostic et continuer les autres tâches.
+Le vérificateur relance les contrôles ciblés du lot. Une exécution des gates complètes peut couvrir plusieurs lots revus indépendamment, sur la même composition. L'intégrateur identifie les entrées vérifiées et réutilise une preuve lorsque les sources, la configuration, la commande et l'environnement pertinents sont identiques. Un conflit ou une modification invalide les preuves qu'il affecte. Les gates complètes restent requises sur la composition finale du goal et après fusion sur `dev`.
+
+Un résultat rouge retourne au responsable avec le défaut observé. Une revue indisponible laisse le candidat et son lot ouverts, avec la cause, le contrôle manquant et la condition de reprise dans le journal. Un refus ou un masquage suit la règle d'arrêt de la section précédente. L'agent root réaffecte la capacité aux lots réellement indépendants, dans le même jalon ou dans un jalon ultérieur dont les contrats nécessaires sont figés.
+
+Escalade pour un désaccord de fond sur un contrôle autorisé : deux échecs au même niveau de modèle → faire arbitrer au niveau supérieur. Après trois échecs au niveau `frontier`, marquer la tâche `blocked` et consigner le diagnostic.
 
 ### 5. Intégration
 
-Le rôle `integrator` fusionne chaque tâche vérifiée dans `goal/<goal-id>` (`git merge --no-ff`), rejoue les gates complètes sur la branche du goal, résout les conflits triviaux et renvoie les conflits sémantiques à l'implémenteur. Après intégration : `git worktree remove`, suppression de la branche de tâche.
+Le rôle `integrator` compose les tâches revues dans `goal/<goal-id>` (`git merge --no-ff`). Il exécute les gates applicables sur cette composition avant acceptation, résout les conflits triviaux et renvoie les conflits sémantiques à l'implémenteur. Un changement purement documentaire passe les contrôles du dossier. Après intégration acceptée, clôturer les worktrees selon la règle du projet et supprimer les branches de tâche devenues inutiles.
 
 Si un contrat a changé, le rôle `doc-keeper` propage le changement dans `.claude/` selon les [règles du dossier](../rules/design-dossier.md), lance `regen.py` puis `validate.py` ; le goal n'est pas terminé tant que le validateur n'est pas à zéro erreur.
 

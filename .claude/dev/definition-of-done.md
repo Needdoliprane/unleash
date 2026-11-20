@@ -6,11 +6,11 @@
 
 1. Le comportement demandé est implémenté dans le périmètre de fichiers de la tâche, sans modification hors périmètre non justifiée.
 2. Les tests `T-…` des exigences visées existent, portent leur identifiant, couvrent le cas positif et les rejets significatifs, et passent.
-3. `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets --all-features -- -D warnings`, `cargo test --workspace --all-features` et `cargo doc --workspace --no-deps` passent sur la branche de la tâche.
+3. `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets --all-features -- -D warnings`, `cargo test --workspace --all-features` et `cargo doc --workspace --no-deps` passent sur la composition contenant les tâches dont les diffs ont été revus. Le journal relie chaque lot au SHA contrôlé.
 4. Les [règles Rust](../rules/rust.md) sont respectées : pas d'`unwrap`/`panic` hors tests, pas d'`unsafe` hors adaptateurs recensés, erreurs typées, pas de logique métier dans les clients.
 5. Si les dépendances changent : `cargo deny check` passe et la justification figure dans le commit.
 6. Si un contrat change (DTO, schéma, état, erreur, opération, migration) : le dossier `.claude/` est mis à jour selon les [règles du dossier](../rules/design-dossier.md) et `python3 tools/design-package/validate.py .` termine sans erreur.
-7. Un `verifier` distinct de l'implémenteur a relancé les commandes et accepté le diff.
+7. Un `verifier` distinct de l'implémenteur a relancé les contrôles ciblés du lot et accepté le diff. Les résultats communs des gates sont rattachés à la composition selon le [protocole](goal-protocol.md#4-vérification-indépendante).
 8. Le commit est sur la branche de la tâche, avec un message Conventional Commits qui cite les `REQ-…` couverts.
 
 ## Goal
