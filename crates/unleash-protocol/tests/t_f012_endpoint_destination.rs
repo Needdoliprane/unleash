@@ -8,7 +8,7 @@ use serde_json::{Value, json};
 use unleash_protocol::{SetProviderProfilePayload, canonical_sha256};
 
 fn wire(endpoint: &str) -> Value {
-    json!({"provider_kind":"lmstudio","dialect":{"kind":"openai_chat_completions","version":1},"endpoint":endpoint,"model":"synthetic-endpoint","locality":"local_only","server_management":"user_managed","auth":{"kind":"none"},"limits":{"max_inflight":1,"connect_timeout_ms":2000,"queue_timeout_ms":1000,"load_timeout_ms":180000,"first_token_timeout_ms":60000,"generation_timeout_ms":60000},"declared_capabilities":["text"],"pricing":{"kind":"none_local"}})
+    json!({"provider_kind":"lmstudio","dialect":{"kind":"openai_chat_completions","version":1},"endpoint":endpoint,"model":"synthetic-endpoint","locality":"local_only","server_management":"user_managed","auth":{"kind":"none"},"limits":{"max_inflight":1,"connect_timeout_ms":2000,"queue_timeout_ms":1000,"load_timeout_ms":180_000,"first_token_timeout_ms":60000,"generation_timeout_ms":60000},"declared_capabilities":["text"],"pricing":{"kind":"none_local"}})
 }
 
 fn payload(endpoint: &str) -> SetProviderProfilePayload {

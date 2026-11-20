@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio_rustls::{TlsConnector, rustls};
@@ -17,19 +17,22 @@ use unleash_action_broker::{
     NormalizedResourceRef, ResolvedSecret,
 };
 use unleash_domain::{ActionId, ActionState, ClockPort, DispatchId, Sha256Digest, TimestampMs};
+use unleash_protocol::provider_inventory::{MAX_INVENTORY_FACT_BYTES, MAX_INVENTORY_LIST_BYTES};
+pub use unleash_protocol::provider_inventory::{
+    OllamaInventory, OllamaListedModel, OllamaModelDetails,
+};
 use unleash_protocol::{canonical_sha256, canonicalize_to_vec};
 
 use crate::connect_transport::{
     CertificateValidation, FrozenConnectRequest, SystemResolver, TlsValidation,
     resolve_loopback_peer, system_tls_validation,
 };
-use crate::transport::{BrokerDispatch, MAX_RESPONSE, ProfileRef};
+use crate::transport::{BrokerDispatch, ProfileRef};
 
 mod http;
 
 /// This is metadata retrieval, not model generation or a connection-only proof.
 pub const INVENTORY_VERB: &str = "model.provider.inventory";
-const MAX_OBSERVATION_BYTES: usize = 16_384;
 
 /// Closed local failures contain no response, model name or credential value.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
@@ -143,7 +146,9 @@ impl FrozenOllamaInventoryRequest {
         max_response_bytes: usize,
     ) -> Result<Self, InventoryError> {
         let url = reqwest::Url::parse(endpoint).map_err(|_| InventoryError::InvalidRequest)?;
-        if url.path() != "/api/tags" || !(1..=MAX_RESPONSE).contains(&max_response_bytes) {
+        if url.path() != "/api/tags"
+            || !(1..=MAX_INVENTORY_LIST_BYTES).contains(&max_response_bytes)
+        {
             return Err(InventoryError::InvalidRequest);
         }
         let schema = if connect_timeout_ms.is_some() {
@@ -185,69 +190,6 @@ impl FrozenOllamaInventoryRequest {
     #[must_use]
     pub fn resource(&self) -> NormalizedResourceRef {
         self.target.resource()
-    }
-}
-
-/// Native list, including an explicitly empty list. It asserts no capability,
-/// placement, model readiness or identity of weights beyond the observed fields.
-#[derive(Clone, PartialEq, Eq, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct OllamaInventory {
-    /// Models actually returned by the list endpoint.
-    pub models: Vec<OllamaListedModel>,
-}
-
-impl fmt::Debug for OllamaInventory {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("OllamaInventory")
-            .field("model_count", &self.models.len())
-            .finish_non_exhaustive()
-    }
-}
-
-/// Native declarations are retained as observed; missing metadata stays absent.
-#[derive(Clone, PartialEq, Eq, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct OllamaListedModel {
-    /// Native model name, not a qualified identity.
-    pub name: String,
-    /// Native alias if present.
-    pub model: Option<String>,
-    /// Timestamp supplied by the backend, without fabrication or conversion.
-    pub modified_at: Option<String>,
-    /// Size supplied by the backend.
-    pub size: Option<u64>,
-    /// Opaque digest declared by the backend, not a locally verified weights hash.
-    pub digest: Option<String>,
-    /// Native details if supplied.
-    pub details: Option<OllamaModelDetails>,
-}
-
-impl fmt::Debug for OllamaListedModel {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("OllamaListedModel").finish_non_exhaustive()
-    }
-}
-
-/// Details reported by `/api/tags`, distinct from tested capabilities.
-#[derive(Clone, PartialEq, Eq, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct OllamaModelDetails {
-    /// Declared format.
-    pub format: Option<String>,
-    /// Declared primary family.
-    pub family: Option<String>,
-    /// Declared families.
-    pub families: Option<Vec<String>>,
-    /// Declared parameter-size label.
-    pub parameter_size: Option<String>,
-    /// Declared quantization label.
-    pub quantization_level: Option<String>,
-}
-
-impl fmt::Debug for OllamaModelDetails {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("OllamaModelDetails").finish_non_exhaustive()
     }
 }
 
@@ -484,10 +426,10 @@ impl InventoryExecutor {
             status_code: response.status,
             response_digest: Sha256Digest::from_bytes(&response.body),
             response_body_bytes: response.body.len(),
-            inventory_digest: self.observation_digest(&inventory, MAX_RESPONSE)?,
+            inventory_digest: self.observation_digest(&inventory, MAX_INVENTORY_LIST_BYTES)?,
             observed_at_ms: self.clock.now_ms(),
         };
-        let digest = self.observation_digest(&observation, MAX_OBSERVATION_BYTES)?;
+        let digest = self.observation_digest(&observation, MAX_INVENTORY_FACT_BYTES)?;
         Ok(ObservedInventory {
             inventory,
             observation,
@@ -687,7 +629,9 @@ pub async fn execute_ollama_inventory_with_observation(
 
 #[cfg(test)]
 mod request_tests {
-    use super::{FrozenOllamaInventoryRequest, InventoryError, MAX_RESPONSE};
+    use super::{
+        FrozenOllamaInventoryRequest, InventoryError, MAX_INVENTORY_LIST_BYTES as MAX_RESPONSE,
+    };
     use crate::transport::ProfileRef;
     use unleash_domain::Sha256Digest;
 

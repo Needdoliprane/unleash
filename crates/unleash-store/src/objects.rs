@@ -119,6 +119,12 @@ pub struct PublishedObjectReference {
     authority_generation: AuthorityGeneration,
 }
 
+impl PublishedObjectReference {
+    pub(crate) const fn object_hash(&self) -> Sha256Digest {
+        self.object_hash
+    }
+}
+
 /// Enregistrement lu depuis `object_records`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ObjectRecordView {

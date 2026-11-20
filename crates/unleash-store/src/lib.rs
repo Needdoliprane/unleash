@@ -29,6 +29,7 @@ pub mod provider_probe_connect;
 mod provider_probe_connect_disposition;
 mod provider_probe_connect_observation;
 pub mod provider_probe_inventory;
+mod provider_probe_inventory_observation;
 mod provider_probe_mandates;
 pub mod provider_probes;
 mod provider_profile_validation;
@@ -115,6 +116,10 @@ pub use provider_probe_inventory::{
     ClaimProviderProbeInventoryRequest, InventoryTransportLimits, ProviderProbeInventoryClaim,
     ProviderProbeInventoryClaimOutcome, ProviderProbeInventoryPreparation,
     ProviderProbeInventoryRecord,
+};
+pub use provider_probe_inventory_observation::{
+    AdoptProviderInventoryObservation, AdoptedProviderInventoryObservation,
+    INVENTORY_OBSERVER_PRINCIPAL, INVENTORY_PRODUCER_KIND,
 };
 pub use provider_probe_mandates::{
     ProviderProbeMandateChange, ProviderProbeMandateIssue, ProviderProbeMandateStatus,

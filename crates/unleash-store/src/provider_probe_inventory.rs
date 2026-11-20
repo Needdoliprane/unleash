@@ -14,7 +14,8 @@ use crate::provider_probe_connect::{self as transport, TransportPhase};
 use crate::{CallerAuthority, SnapshotProjection, StoreError, UnleashStore, WriteCriticality};
 
 /// Native and canonical list ceiling, shared by the inventory contract.
-pub const INVENTORY_MAX_RESPONSE_BYTES: u64 = 1_048_576;
+pub const INVENTORY_MAX_RESPONSE_BYTES: u64 =
+    unleash_protocol::provider_inventory::MAX_INVENTORY_LIST_BYTES as u64;
 /// Total native exchange ceiling; no generation timeout is substituted.
 pub const INVENTORY_MAX_TIMEOUT_MS: u64 = 60_000;
 
@@ -267,7 +268,7 @@ impl ProviderProbeInventoryClaim {
         self.inner.destination()
     }
 
-    fn permission(&self) -> InventoryPhasePermission {
+    pub(crate) fn permission(&self) -> InventoryPhasePermission {
         InventoryPhasePermission {
             inner: self.inner.permission(),
         }

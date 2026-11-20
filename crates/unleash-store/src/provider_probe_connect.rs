@@ -320,6 +320,15 @@ pub(crate) fn fact_context(
     daemon: &crate::DaemonStateRow,
     permission: &ConnectPhasePermission,
 ) -> Result<ProviderProbeConnectRecord, StoreError> {
+    fact_transport_context(tx, daemon, permission, TransportPhase::Connect)
+}
+
+pub(crate) fn fact_transport_context(
+    tx: &Connection,
+    daemon: &crate::DaemonStateRow,
+    permission: &ConnectPhasePermission,
+    phase: TransportPhase,
+) -> Result<ProviderProbeConnectRecord, StoreError> {
     let original = &permission.record;
     let request = &permission.request;
     crate::provider_profile_validation::validate_envelope_identity(
@@ -345,10 +354,10 @@ pub(crate) fn fact_context(
             )
     {
         return Err(StoreError::StaleFence {
-            message: "fait connect d'une autre incarnation".to_owned(),
+            message: format!("fait {} d'une autre incarnation", phase.name()),
         });
     }
-    let current = read_context(tx, context.probe_id)?.ok_or_else(hidden)?;
+    let current = read_transport_context(tx, context.probe_id, phase)?.ok_or_else(hidden)?;
     if &current != original
         || current.claim.is_none()
         || request.receipt_id != context.receipt_id
@@ -357,7 +366,7 @@ pub(crate) fn fact_context(
         || unleash_protocol::compute_command_digest_v2(&request.envelope)? != context.command_digest
     {
         return Err(StoreError::StaleFence {
-            message: "fait connect sans sa claim originale".to_owned(),
+            message: format!("fait {} sans sa claim originale", phase.name()),
         });
     }
     let attributed:bool=tx.query_row(

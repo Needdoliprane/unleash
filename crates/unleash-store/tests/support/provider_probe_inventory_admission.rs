@@ -23,6 +23,9 @@ use unleash_store::{
 
 const OBSERVER: &str = "fixture:inventory-admission-observer";
 
+#[path = "provider_probe_inventory_adoption.rs"]
+mod adoption;
+
 fn initialize_pool(store: &UnleashStore) -> TestResult<PoolId> {
     let execution_pool = ExecutionPoolSettings::default();
     store.commit_command(command(

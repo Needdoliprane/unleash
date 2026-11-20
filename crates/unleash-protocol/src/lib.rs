@@ -20,6 +20,7 @@ pub mod codec;
 pub mod envelopes;
 pub mod errors;
 pub mod operations;
+pub mod provider_inventory;
 pub mod provider_probe;
 pub mod provider_profile;
 pub mod strict_json;

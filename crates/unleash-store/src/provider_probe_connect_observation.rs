@@ -186,29 +186,45 @@ fn validate_document(
 ) -> Result<(), StoreError> {
     let context = &record.context;
     let document = &input.document;
-    let destination = permission.destination();
-    let address_matches = destination.host() == "localhost"
-        || destination.host().parse::<std::net::IpAddr>().ok() == Some(document.peer.ip());
-    let certificate_matches = match destination.scheme() {
-        "http" => document.certificate_validation == ConnectCertificateValidation::NotTls,
-        "https" => {
-            document.certificate_validation == ConnectCertificateValidation::OfflineSystemRoots
-        }
-        _ => false,
-    };
+    validate_observed_peer(
+        permission,
+        record,
+        document.peer,
+        document.certificate_validation,
+    )?;
     if document.schema_version != 1
         || document.action_id != context.action_id
         || document.request_digest != context.request_digest
-        || !document.peer.ip().is_loopback()
-        || !address_matches
-        || document.peer.port() != destination.port()
-        || !certificate_matches
-        || destination.normalized_endpoint() != context.destination
         || document.revocation_checked
         || document.http_application_bytes_sent != 0
         || canonical_sha256(document)? != input.content_hash
     {
         return Err(invalid("fait natif divergent du contexte"));
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_observed_peer(
+    permission: &ConnectPhasePermission,
+    record: &ProviderProbeConnectRecord,
+    peer: std::net::SocketAddr,
+    certificate_validation: ConnectCertificateValidation,
+) -> Result<(), StoreError> {
+    let destination = permission.destination();
+    let address_matches = destination.host() == "localhost"
+        || destination.host().parse::<std::net::IpAddr>().ok() == Some(peer.ip());
+    let certificate_matches = matches!(
+        (destination.scheme(), certificate_validation),
+        ("http", ConnectCertificateValidation::NotTls)
+            | ("https", ConnectCertificateValidation::OfflineSystemRoots)
+    );
+    if !peer.ip().is_loopback()
+        || !address_matches
+        || peer.port() != destination.port()
+        || !certificate_matches
+        || destination.normalized_endpoint() != record.context.destination
+    {
+        return Err(invalid("pair natif divergent du contexte"));
     }
     Ok(())
 }
@@ -240,16 +256,16 @@ pub(crate) fn validate_continuation(
     Ok(())
 }
 
-fn validate_native_dispatch(
+pub(crate) fn validate_native_dispatch(
     tx: &Transaction<'_>,
     record: &ProviderProbeConnectRecord,
-    document: &ProviderConnectObservation,
+    dispatch: DispatchId,
     permission: &ConnectPhasePermission,
 ) -> Result<(), StoreError> {
     let c = &record.context;
     let valid:bool=tx.query_row(
         "SELECT EXISTS(SELECT 1 FROM action_dispatches d JOIN broker_dispatches b ON b.dispatch_id=d.dispatch_id JOIN actions a ON a.action_id=d.action_id JOIN broker_intents i ON i.action_id=a.action_id WHERE d.dispatch_id=?1 AND d.action_id=?2 AND a.state IN ('dispatching','in_flight') AND a.authority_generation=?3 AND a.daemon_epoch=?4 AND a.fence=0 AND b.authority_generation=?3 AND b.daemon_epoch=?4 AND b.fence=0 AND json_extract(i.intent_json,'$.payload_digest')=?5)",
-        params![document.dispatch_id.to_string(),c.action_id.to_string(),c.authority_generation.to_string(),integer(c.daemon_epoch.as_u64())?,c.request_digest.to_string()],|row|row.get(0),
+        params![dispatch.to_string(),c.action_id.to_string(),c.authority_generation.to_string(),integer(c.daemon_epoch.as_u64())?,c.request_digest.to_string()],|row|row.get(0),
     )?;
     if !valid {
         return Err(invalid("fait natif sans dispatch ou temps admissible"));
@@ -261,7 +277,7 @@ fn validate_native_dispatch(
     )?;
     let intent: crate::BrokerIntent = serde_json::from_str(&encoded)?;
     crate::provider_probe_connect::validate_fact_intent(permission, &intent)?;
-    crate::broker_writer::validate_recorded_dispatch_binding_tx(tx, &intent, document.dispatch_id)?;
+    crate::broker_writer::validate_recorded_dispatch_binding_tx(tx, &intent, dispatch)?;
     Ok(())
 }
 
@@ -360,7 +376,7 @@ fn adopt_tx(
     // Attribution is retained even when UTC is uncertain. Completion separately
     // requires an admissible chronology and a live lease before any release.
     validate_continuation(tx, &daemon, now, &record, &input.continuation, false)?;
-    validate_native_dispatch(tx, &record, &input.document, permission)?;
+    validate_native_dispatch(tx, &record, input.document.dispatch_id, permission)?;
     let producer:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM principals WHERE principal_id=?1 AND actor_id=?1 AND principal_kind='system' AND state='active')",[CONNECT_OBSERVER_PRINCIPAL],|row|row.get(0))?;
     if !producer {
         return Err(invalid("observateur natif non qualifié"));
@@ -540,7 +556,12 @@ pub(crate) fn validate_completion(
                 return Err(invalid("preuve native d'une autre admission"));
             }
             validate_continuation(tx, daemon, now, &record, &permission.continuation, true)?;
-            validate_native_dispatch(tx, &record, &fact.binding.document, &permission.original)?;
+            validate_native_dispatch(
+                tx,
+                &record,
+                fact.binding.document.dispatch_id,
+                &permission.original,
+            )?;
             validate_success_fact(tx, config, daemon, now, &record, fact, receipt)?;
             Some(fact.clone())
         }
