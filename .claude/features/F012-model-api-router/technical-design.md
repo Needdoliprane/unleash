@@ -85,6 +85,22 @@ l’autorité de placement et la vérification du FD utilisé par le transport.
 
 HTTP sans TLS est une exception explicite pour le loopback qualifié, limitée à l’endpoint enregistré ; redirections et proxies implicites ne doivent pas transférer le contexte ailleurs. Les endpoints non loopback suivent authentification et TLS qualifiés. Le mode sans secret n’est admis que lorsque le backend et la politique le permettent. Les credentials éventuels restent des SecretRef.
 
+Dans la variante interne à pair géré de Connect et Inventory, l’appelant
+fournit l’adresse loopback exacte et l’identité OS complète du processus
+attendu. La requête gelée lie ces deux données à l’empreinte du transport
+sous `unleash.owned_loopback_request.v1`. L’intention et la décision du
+broker autorisent cette empreinte. La variante passive garde son empreinte
+propre.
+
+L’exécuteur observe le listener avant l’unique connexion. Il vérifie
+ensuite le FD client et le socket accepté de l’autre côté avant TLS ou
+HTTP. En attendant `accept`, il réessaie l’observation sur le même FD
+dans le délai d’origine. Les écarts d’identité, de listener ou de
+descripteur et la fin du délai ferment la connexion. Un échec après
+dispatch reste à réconcilier. Le rapprochement du service avec le profil
+durable appartient au daemon qui détient le lancement. La qualification
+Q-19 exige en plus les preuves de serveur, de modèle et de confinement.
+
 Erreurs Unleash supplémentaires : ModelPolicyForbidden (wire `CapabilityDenied/MODEL_CALLS_FORBIDDEN`, raison transverse d'[ipc-and-apis](../../architecture/ipc-and-apis.md), même raison que F019, never), DataLocalityViolation (CapabilityDenied/DATA_LOCALITY_VIOLATION, never), InferenceLocalityUnknown (CapabilityDenied/INFERENCE_LOCALITY_UNKNOWN, after_human_decision), CapabilitySnapshotStale (ContractViolation/CAPABILITY_SNAPSHOT_STALE, after_human_decision : probe explicite), LocalModelUnavailable (ResourceBusy/LOCAL_MODEL_UNAVAILABLE, after_backoff), LocalQueueFull (ResourceBusy/LOCAL_QUEUE_FULL, after_backoff), LocalLoadTimeout (ResourceBusy/LOCAL_LOAD_TIMEOUT, after_backoff) et LocalResourceExhausted (ResourceBusy/LOCAL_RESOURCE_EXHAUSTED, after_human_decision). Elles ne sont pas présentées comme des codes retournés uniformément par les fournisseurs. L’adaptateur conserve le code observé et la raison de normalisation. Une annulation sans preuve d’arrêt reste incertaine, même pour un processus situé sur la même machine.
 
 Le manifest conserve build/modèle/configuration observés et leurs absences. Les compteurs, coûts et durées manquants restent inconnus. La facturation fournisseur éventuellement nulle ne mesure pas le coût matériel. Les fixtures et gates réels sont dans [local-model-tests](../../testing/local-model-tests.md) ; aucun essai local n’a été exécuté dans ce dossier.

@@ -12,6 +12,7 @@ use serde::Serialize;
 use serde_json::json;
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
+use tokio::time::Instant;
 use tokio_rustls::{TlsConnector, rustls};
 use unleash_action_broker::{
     ActionBrokerError, ActionExecutionFailure, ActionExecutionResult, ActionExecutorPort,
@@ -19,8 +20,10 @@ use unleash_action_broker::{
     NormalizedResourceRef, ResolvedSecret,
 };
 use unleash_domain::{ActionId, ActionState, ClockPort, DispatchId, Sha256Digest, TimestampMs};
+use unleash_platform::OsProcessIdentity;
 use unleash_protocol::canonical_sha256;
 
+use crate::owned_loopback_socket;
 use crate::transport::{BrokerDispatch, ProfileRef};
 
 /// Exact verb of the passive transport component, not a model dispatch.
@@ -52,9 +55,47 @@ pub enum ConnectError {
     /// The single TCP/TLS attempt did not establish the expected peer.
     #[error("provider connect transport unavailable")]
     TransportUnavailable,
+    /// The expected native listener or accepted connection could not be verified.
+    #[error("owned loopback socket unavailable")]
+    OwnershipUnavailable,
     /// The action/decision or total monotonic timeout has expired.
     #[error("provider connect deadline expired")]
     DeadlineExpired,
+}
+
+/// Exact loopback endpoint and native process expected by the owning caller.
+///
+/// This input is not a claim of service ownership, confinement, or placement.
+/// The caller must obtain the identity from its managed process authority.
+pub struct OwnedLoopbackPeer {
+    endpoint: SocketAddr,
+    process: OsProcessIdentity,
+}
+
+impl OwnedLoopbackPeer {
+    /// Pin an already selected loopback address and the expected process identity.
+    ///
+    /// # Errors
+    /// Rejects a wildcard, a non-loopback address, a zero port, or scoped IPv6.
+    pub fn new(endpoint: SocketAddr, process: OsProcessIdentity) -> Result<Self, ConnectError> {
+        if !endpoint.ip().is_loopback()
+            || endpoint.port() == 0
+            || matches!(endpoint, SocketAddr::V6(addr) if addr.scope_id() != 0 || addr.flowinfo() != 0)
+        {
+            return Err(ConnectError::DestinationRejected);
+        }
+        Ok(Self { endpoint, process })
+    }
+
+    pub(crate) fn bind_digest(&self, passive: Sha256Digest) -> Result<Sha256Digest, ConnectError> {
+        canonical_sha256(&json!({
+            "schema": "unleash.owned_loopback_request.v1",
+            "transport_request_digest": passive,
+            "endpoint": self.endpoint,
+            "process_identity": self.process,
+        }))
+        .map_err(|_| ConnectError::Digest)
+    }
 }
 
 /// Immutable input for the first, explicitly loopback-only connect component.
@@ -64,6 +105,7 @@ pub struct FrozenConnectRequest {
     port: u16,
     profile: ProfileRef,
     timeout_ms: u64,
+    owned_peer: Option<OwnedLoopbackPeer>,
 }
 
 impl fmt::Debug for FrozenConnectRequest {
@@ -113,7 +155,25 @@ impl FrozenConnectRequest {
             port,
             profile,
             timeout_ms,
+            owned_peer: None,
         })
+    }
+
+    /// Require native listener and connection verification for this request.
+    /// The same requirement is included in the digest authorized by the broker.
+    ///
+    /// # Errors
+    /// Rejects a different endpoint or a second binding.
+    pub fn with_owned_peer(mut self, owned: OwnedLoopbackPeer) -> Result<Self, ConnectError> {
+        if self.owned_peer.is_some()
+            || owned.endpoint.port() != self.port
+            || (self.host != "localhost"
+                && self.host.parse::<IpAddr>().ok() != Some(owned.endpoint.ip()))
+        {
+            return Err(ConnectError::DestinationRejected);
+        }
+        self.owned_peer = Some(owned);
+        Ok(self)
     }
 
     /// Exact digest required by the action intent and authorization decision.
@@ -121,11 +181,14 @@ impl FrozenConnectRequest {
     /// # Errors
     /// Returns `Digest` when canonical serialization is unavailable.
     pub fn payload_digest(&self) -> Result<Sha256Digest, ConnectError> {
-        canonical_sha256(&json!({"schema":"unleash.provider_connect.v1","endpoint":self.endpoint.as_str(),
+        let passive = canonical_sha256(&json!({"schema":"unleash.provider_connect.v1","endpoint":self.endpoint.as_str(),
             "profile_id":self.profile.id,"profile_version":self.profile.version,"profile_digest":self.profile.digest,
             "destination_scope":"loopback_only","timeout_ms":self.timeout_ms,"http_application_bytes":0,
             "tls_validation":"offline_system_roots_chain_name","revocation":"unavailable"}))
-            .map_err(|_|ConnectError::Digest)
+            .map_err(|_|ConnectError::Digest)?;
+        self.owned_peer
+            .as_ref()
+            .map_or(Ok(passive), |owned| owned.bind_digest(passive))
     }
 
     /// Resource that the outer broker must authorize. The hint is not DNS proof.
@@ -149,6 +212,44 @@ impl FrozenConnectRequest {
 
     pub(crate) const fn timeout_ms(&self) -> u64 {
         self.timeout_ms
+    }
+
+    pub(crate) async fn open_socket(
+        &self,
+        peer: SocketAddr,
+        deadline: Instant,
+        is_live: impl Fn() -> bool,
+    ) -> Result<TcpStream, ConnectError> {
+        let listener = if let Some(owned) = &self.owned_peer {
+            if peer != owned.endpoint {
+                return Err(ConnectError::DestinationRejected);
+            }
+            Some(owned_loopback_socket::listener(owned.process.clone(), peer).await?)
+        } else {
+            None
+        };
+        if !is_live() || Instant::now() >= deadline {
+            return Err(ConnectError::DeadlineExpired);
+        }
+        // A literal sockaddr is the only dial target, including for TLS names.
+        let socket = TcpStream::connect(peer)
+            .await
+            .map_err(|_| ConnectError::TransportUnavailable)?;
+        if socket
+            .peer_addr()
+            .map_err(|_| ConnectError::TransportUnavailable)?
+            != peer
+        {
+            return Err(ConnectError::DestinationRejected);
+        }
+        if Instant::now() >= deadline {
+            return Err(ConnectError::DeadlineExpired);
+        }
+        if let Some(listener) = listener {
+            owned_loopback_socket::check(socket, listener, deadline).await
+        } else {
+            Ok(socket)
+        }
     }
 
     pub(crate) fn http_authority(&self) -> String {
@@ -360,6 +461,12 @@ pub(crate) async fn resolve_loopback_peer(
     {
         return Err(ConnectError::DestinationRejected);
     }
+    if let Some(owned) = &request.owned_peer {
+        return addresses
+            .contains(&owned.endpoint)
+            .then_some(owned.endpoint)
+            .ok_or(ConnectError::DestinationRejected);
+    }
     addresses
         .first()
         .copied()
@@ -435,6 +542,7 @@ impl ConnectExecutor {
         &self,
         intent: &ActionIntent,
         decision: &AuthorizationDecision,
+        deadline: Instant,
     ) -> Result<(SocketAddr, CertificateValidation), ConnectError> {
         let tls = if self.request.endpoint.scheme() == "https" {
             Some(self.tls().await?)
@@ -445,19 +553,11 @@ impl ConnectExecutor {
         if !self.live(intent, decision) {
             return Err(ConnectError::DeadlineExpired);
         }
-        // A sockaddr, never the hostname, is passed to TCP: no second resolution,
-        // fallback address, proxy, redirect or automatic reconnect exists here.
-        let socket = TcpStream::connect(peer)
-            .await
-            .map_err(|_| ConnectError::TransportUnavailable)?;
-        if socket
-            .peer_addr()
-            .map_err(|_| ConnectError::TransportUnavailable)?
-            != peer
-        {
-            return Err(ConnectError::TransportUnavailable);
-        }
-        if !self.live(intent, decision) {
+        let socket = self
+            .request
+            .open_socket(peer, deadline, || self.live(intent, decision))
+            .await?;
+        if !self.live(intent, decision) || Instant::now() >= deadline {
             return Err(ConnectError::DeadlineExpired);
         }
         let source = if let Some(tls) = tls {
@@ -557,8 +657,12 @@ impl ActionExecutorPort for ConnectExecutor {
                 return Err(unknown());
             }
             let remaining = self.remaining_ms(intent, decision).map_err(|_| unknown())?;
-            let result = tokio::time::timeout(Duration::from_millis(remaining), async {
-                let (peer, source) = self.connect(intent, decision).await?;
+            let deadline = Instant::now() + Duration::from_millis(remaining);
+            let result = tokio::time::timeout_at(deadline, async {
+                let (peer, source) = self.connect(intent, decision, deadline).await?;
+                if Instant::now() >= deadline {
+                    return Err(ConnectError::DeadlineExpired);
+                }
                 self.observe(dispatch_id, peer, source).await
             })
             .await

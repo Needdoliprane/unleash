@@ -790,3 +790,111 @@ fn t_f012_013_inventory_constructor_rejects_generation_route_and_remote_http() -
     }
     Ok(())
 }
+
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn t_f012_015_owned_inventory_waits_for_accept_before_http() -> TestResult {
+    use crate::connect_transport::OwnedLoopbackPeer;
+    use unleash_platform::inspect_process_identity;
+
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let peer = listener.local_addr()?;
+    let process = inspect_process_identity(std::process::id())?;
+    let request = FrozenOllamaInventoryRequest::new_loopback_with_limits(
+        &format!("http://{peer}/api/tags"),
+        inventory_profile()?,
+        250,
+        500,
+        1024,
+    )?
+    .with_owned_peer(OwnedLoopbackPeer::new(peer, process)?)?;
+    let harness = Harness::new();
+    let observer = Arc::new(ObservationProbe::new(false));
+    let execution = harness.run_observed(request, observer.clone()).await?;
+
+    assert_unknown(&execution);
+    assert_eq!(observer.attempts.load(Ordering::SeqCst), 0);
+    harness.assert_one_dispatch_no_secret();
+    let (mut client, _) = tokio::time::timeout(Duration::from_secs(2), listener.accept()).await??;
+    let bytes = tokio::time::timeout(Duration::from_secs(2), client.read(&mut [0_u8; 1])).await??;
+    assert_eq!(
+        bytes, 0,
+        "GET reached a socket before native accept could be observed"
+    );
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), listener.accept())
+            .await
+            .is_err()
+    );
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn t_f012_015_owned_inventory_gets_only_from_verified_peer() -> TestResult {
+    use crate::connect_transport::OwnedLoopbackPeer;
+    use unleash_platform::inspect_process_identity;
+
+    let harness = Harness::new();
+    let observer = Arc::new(ObservationProbe::new(false));
+    let mut fixture = Fixture::with_close_signal(
+        json_response(br#"{"models":[]}"#),
+        Arc::clone(&harness.dispatches),
+        false,
+        Some(observer.closed.clone()),
+    )
+    .await?;
+    let peer = std::net::SocketAddr::from(([127, 0, 0, 1], fixture.port));
+    let process = inspect_process_identity(std::process::id())?;
+    let request = FrozenOllamaInventoryRequest::new_loopback_with_limits(
+        &format!("http://{peer}/api/tags"),
+        inventory_profile()?,
+        1_000,
+        2_000,
+        1024,
+    )?
+    .with_owned_peer(OwnedLoopbackPeer::new(peer, process)?)?;
+    observer.acknowledge.notify_one();
+    let execution = harness.run_observed(request, observer.clone()).await?;
+    assert!(execution.observation.is_some());
+    assert!(listed(execution)?.models.is_empty());
+    assert_eq!(observer.attempts.load(Ordering::SeqCst), 1);
+    harness.assert_one_dispatch_no_secret();
+    assert_get_only(&fixture.capture().await?, fixture.port)
+}
+
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn t_f012_015_owned_inventory_refuses_changed_identity_without_connecting() -> TestResult {
+    use crate::connect_transport::OwnedLoopbackPeer;
+    use unleash_platform::inspect_process_identity;
+
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let peer = listener.local_addr()?;
+    let mut process = inspect_process_identity(std::process::id())?;
+    process.owner_uid ^= 1;
+    let request = FrozenOllamaInventoryRequest::new_loopback_with_limits(
+        &format!("http://{peer}/api/tags"),
+        inventory_profile()?,
+        1_000,
+        2_000,
+        1024,
+    )?
+    .with_owned_peer(OwnedLoopbackPeer::new(peer, process)?)?;
+    let harness = Harness::new();
+    let observer = Arc::new(ObservationProbe::new(false));
+    let execution = harness.run_observed(request, observer.clone()).await?;
+    assert_unknown(&execution);
+    assert!(matches!(
+        execution.outcome,
+        InventoryOutcome::Failed(InventoryError::OwnershipUnavailable)
+    ));
+    assert_eq!(observer.attempts.load(Ordering::SeqCst), 0);
+    harness.assert_one_dispatch_no_secret();
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), listener.accept())
+            .await
+            .is_err()
+    );
+    Ok(())
+}

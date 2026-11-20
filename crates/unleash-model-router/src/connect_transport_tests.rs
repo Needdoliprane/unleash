@@ -852,3 +852,130 @@ fn only_handshake_records(mut bytes: &[u8]) -> bool {
     }
     true
 }
+
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn t_f012_015_owned_connect_waits_for_accept_before_tls() -> TestResult {
+    use crate::connect_transport::OwnedLoopbackPeer;
+    use unleash_platform::inspect_process_identity;
+
+    let tls = TlsFixture::new()?;
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let peer = listener.local_addr()?;
+    let process = inspect_process_identity(std::process::id())?;
+    let broker = ConnectHarness::new();
+    let authority = authority();
+    let request = request("https", "localhost", peer.port(), 300)?
+        .with_owned_peer(OwnedLoopbackPeer::new(peer, process)?)?;
+    let action = intent(&request, &broker, &authority)?;
+    let decision = authorize(&broker, action.clone(), &authority).await?;
+    let observer = Arc::new(ObservationPublisher::new(false, None, None));
+
+    // Delay accept until the transport's original deadline closes this attempt.
+    // The kernel still completes TCP. The raw witness detects any ClientHello.
+    let execution = execute_fixture(
+        request,
+        broker.dispatch(&action, &decision, &authority),
+        FixtureOptions {
+            resolver: Resolver::pinned(peer.port()),
+            ca_der: Some(tls.ca_der.clone()),
+            observation_port: observer.clone(),
+            closed_probe: None,
+        },
+    )
+    .await?;
+    assert!(matches!(
+        execution.receipt,
+        Err(ActionBrokerError::OutcomeUnknown { .. })
+    ));
+    assert_eq!(broker.dispatches.load(Ordering::SeqCst), 1);
+    assert_eq!(observer.attempted.load(Ordering::SeqCst), 0);
+    assert!(execution.observation?.is_none());
+    let (mut client, _) = tokio::time::timeout(Duration::from_secs(2), listener.accept()).await??;
+    let bytes = tokio::time::timeout(Duration::from_secs(2), client.read(&mut [0_u8; 1])).await??;
+    assert_eq!(
+        bytes, 0,
+        "TLS record reached a socket before native accept could be observed"
+    );
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), listener.accept())
+            .await
+            .is_err()
+    );
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn t_f012_015_owned_connect_accepts_verified_tls_peer() -> TestResult {
+    use crate::connect_transport::OwnedLoopbackPeer;
+    use unleash_platform::inspect_process_identity;
+
+    let tls = TlsFixture::new()?;
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let peer = listener.local_addr()?;
+    let worker = serve(listener, Some(tls.server.clone()));
+    let process = inspect_process_identity(std::process::id())?;
+    let broker = ConnectHarness::new();
+    let authority = authority();
+    let request = request("https", "localhost", peer.port(), 2000)?
+        .with_owned_peer(OwnedLoopbackPeer::new(peer, process)?)?;
+    let action = intent(&request, &broker, &authority)?;
+    let decision = authorize(&broker, action.clone(), &authority).await?;
+    let execution = execute_fixture(
+        request,
+        broker.dispatch(&action, &decision, &authority),
+        FixtureOptions {
+            resolver: Resolver::pinned(peer.port()),
+            ca_der: Some(tls.ca_der.clone()),
+            observation_port: memory_observation(),
+            closed_probe: None,
+        },
+    )
+    .await?;
+    assert_eq!(execution.receipt?.state, ActionState::ObservedSuccess);
+    assert!(execution.observation?.is_some());
+    assert_eq!(broker.dispatches.load(Ordering::SeqCst), 1);
+    let captured = worker.await?.map_err(|error| error.to_string())?;
+    assert!(captured.tls);
+    assert_eq!(captured.server_name.as_deref(), Some("localhost"));
+    assert!(captured.bytes.is_empty() && !captured.extra_connection);
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn t_f012_015_owned_connect_cannot_reuse_passive_authorization() -> TestResult {
+    use crate::connect_transport::OwnedLoopbackPeer;
+    use unleash_platform::inspect_process_identity;
+
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let peer = listener.local_addr()?;
+    let process = inspect_process_identity(std::process::id())?;
+    let broker = ConnectHarness::new();
+    let authority = authority();
+    let passive = request("http", "127.0.0.1", peer.port(), 1000)?;
+    let action = intent(&passive, &broker, &authority)?;
+    let decision = authorize(&broker, action.clone(), &authority).await?;
+    let guarded = passive.with_owned_peer(OwnedLoopbackPeer::new(peer, process)?)?;
+    assert_ne!(guarded.payload_digest()?, action.payload_digest);
+    let result = execute_fixture(
+        guarded,
+        broker.dispatch(&action, &decision, &authority),
+        FixtureOptions {
+            resolver: Resolver::pinned(peer.port()),
+            ca_der: None,
+            observation_port: memory_observation(),
+            closed_probe: None,
+        },
+    )
+    .await;
+    assert!(matches!(result, Err(ConnectError::InvalidRequest)));
+    assert_eq!(broker.dispatches.load(Ordering::SeqCst), 0);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), listener.accept())
+            .await
+            .is_err()
+    );
+    Ok(())
+}

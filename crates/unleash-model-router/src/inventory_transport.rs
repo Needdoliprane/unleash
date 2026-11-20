@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use serde::Serialize;
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
-use tokio::net::TcpStream;
+use tokio::time::Instant;
 use tokio_rustls::{TlsConnector, rustls};
 use unleash_action_broker::{
     ActionBrokerError, ActionExecutionFailure, ActionExecutionResult, ActionExecutorPort,
@@ -24,8 +24,8 @@ pub use unleash_protocol::provider_inventory::{
 use unleash_protocol::{canonical_sha256, canonicalize_to_vec};
 
 use crate::connect_transport::{
-    CertificateValidation, FrozenConnectRequest, SystemResolver, TlsValidation,
-    resolve_loopback_peer, system_tls_validation,
+    CertificateValidation, ConnectError, FrozenConnectRequest, OwnedLoopbackPeer, SystemResolver,
+    TlsValidation, resolve_loopback_peer, system_tls_validation,
 };
 use crate::transport::{BrokerDispatch, ProfileRef};
 
@@ -46,6 +46,9 @@ pub enum InventoryError {
     /// The effect path has not supplied a usable result.
     #[error("inventory transport unavailable")]
     Unavailable,
+    /// The expected native listener or accepted connection could not be verified.
+    #[error("owned inventory loopback socket unavailable")]
+    OwnershipUnavailable,
     /// A response exceeds the exact frozen body bound.
     #[error("inventory response too large")]
     ResponseTooLarge,
@@ -178,6 +181,25 @@ impl FrozenOllamaInventoryRequest {
             max_response_bytes,
             connect_timeout_ms,
         })
+    }
+
+    /// Require a pinned native peer for a bounded inventory with an observation port.
+    ///
+    /// # Errors
+    /// Rejects a legacy request, a different endpoint, or a second binding.
+    pub fn with_owned_peer(mut self, owned: OwnedLoopbackPeer) -> Result<Self, InventoryError> {
+        if self.connect_timeout_ms.is_none() {
+            return Err(InventoryError::InvalidRequest);
+        }
+        let digest = owned
+            .bind_digest(self.digest)
+            .map_err(|_| InventoryError::DigestUnavailable)?;
+        self.target = self
+            .target
+            .with_owned_peer(owned)
+            .map_err(|_| InventoryError::InvalidRequest)?;
+        self.digest = digest;
+        Ok(self)
     }
 
     /// Identity that the actual broker intent and decision must both bind.
@@ -327,6 +349,7 @@ impl InventoryExecutor {
         &self,
         intent: &ActionIntent,
         decision: &AuthorizationDecision,
+        total_deadline: Instant,
     ) -> Result<(Box<dyn Channel>, SocketAddr, CertificateValidation), InventoryError> {
         let tls = if self.request.target.endpoint().scheme() == "https" {
             Some(
@@ -344,16 +367,19 @@ impl InventoryExecutor {
         if !self.live(intent, decision) {
             return Err(InventoryError::DeadlineExpired);
         }
-        let connect = self.connect_channel(peer, tls);
-        let (channel, source) = if let Some(bound) = self.request.connect_timeout_ms {
+        let deadline = if let Some(bound) = self.request.connect_timeout_ms {
             let window = bound.min(self.remaining(intent, decision)?);
-            tokio::time::timeout(Duration::from_millis(window), connect)
-                .await
-                .map_err(|_| InventoryError::DeadlineExpired)??
+            (Instant::now() + Duration::from_millis(window)).min(total_deadline)
         } else {
-            connect.await?
+            total_deadline
         };
-        if !self.live(intent, decision) {
+        let (channel, source) = tokio::time::timeout_at(
+            deadline,
+            self.connect_channel(peer, tls, deadline, intent, decision),
+        )
+        .await
+        .map_err(|_| InventoryError::DeadlineExpired)??;
+        if !self.live(intent, decision) || Instant::now() >= deadline {
             return Err(InventoryError::DeadlineExpired);
         }
         Ok((channel, peer, source))
@@ -363,18 +389,23 @@ impl InventoryExecutor {
         &self,
         peer: SocketAddr,
         tls: Option<TlsValidation>,
+        deadline: Instant,
+        intent: &ActionIntent,
+        decision: &AuthorizationDecision,
     ) -> Result<(Box<dyn Channel>, CertificateValidation), InventoryError> {
-        // The already validated sockaddr, never a hostname, selects this single
-        // attempt. Recouple the actual peer BEFORE any HTTP application bytes.
-        let socket = TcpStream::connect(peer)
+        let socket = self
+            .request
+            .target
+            .open_socket(peer, deadline, || self.live(intent, decision))
             .await
-            .map_err(|_| InventoryError::Unavailable)?;
-        if socket
-            .peer_addr()
-            .map_err(|_| InventoryError::Unavailable)?
-            != peer
-        {
-            return Err(InventoryError::InvalidRequest);
+            .map_err(|error| match error {
+                ConnectError::OwnershipUnavailable => InventoryError::OwnershipUnavailable,
+                ConnectError::DestinationRejected => InventoryError::InvalidRequest,
+                ConnectError::DeadlineExpired => InventoryError::DeadlineExpired,
+                _ => InventoryError::Unavailable,
+            })?;
+        if !self.live(intent, decision) || Instant::now() >= deadline {
+            return Err(InventoryError::DeadlineExpired);
         }
         let (channel, source): (Box<dyn Channel>, _) = if let Some(tls) = tls {
             let name =
@@ -396,8 +427,13 @@ impl InventoryExecutor {
         dispatch: DispatchId,
         intent: &ActionIntent,
         decision: &AuthorizationDecision,
+        deadline: Instant,
     ) -> Result<ObservedInventory, InventoryError> {
-        let (mut channel, peer, certificate_validation) = self.channel(intent, decision).await?;
+        let (mut channel, peer, certificate_validation) =
+            self.channel(intent, decision, deadline).await?;
+        if !self.live(intent, decision) || Instant::now() >= deadline {
+            return Err(InventoryError::DeadlineExpired);
+        }
         let authority = self.request.target.http_authority();
         let request = format!(
             "GET /api/tags HTTP/1.1\r\nHost: {authority}\r\nAccept: application/json\r\nConnection: close\r\n\r\n"
@@ -473,12 +509,13 @@ impl ActionExecutorPort for InventoryExecutor {
                 return Err(unknown());
             }
             let remaining = self.remaining(intent, decision).map_err(|_| unknown())?;
-            let started = tokio::time::Instant::now();
-            let duration = Duration::from_millis(remaining);
-            let observed = tokio::time::timeout(duration, async {
-                let observed = self.observe(dispatch_id, intent, decision).await?;
+            let deadline = Instant::now() + Duration::from_millis(remaining);
+            let observed = tokio::time::timeout_at(deadline, async {
+                let observed = self
+                    .observe(dispatch_id, intent, decision, deadline)
+                    .await?;
                 if let Some(port) = &self.observation_port {
-                    if !self.live(intent, decision) || started.elapsed() >= duration {
+                    if !self.live(intent, decision) || Instant::now() >= deadline {
                         return Err(InventoryError::DeadlineExpired);
                     }
                     port.persist(&observed.observation, &observed.inventory)
@@ -489,7 +526,7 @@ impl ActionExecutorPort for InventoryExecutor {
             })
             .await
             .unwrap_or(Err(InventoryError::DeadlineExpired));
-            let observed = if self.live(intent, decision) && started.elapsed() < duration {
+            let observed = if self.live(intent, decision) && Instant::now() < deadline {
                 observed
             } else {
                 Err(InventoryError::DeadlineExpired)

@@ -22,6 +22,7 @@ pub mod connect_transport;
 pub mod inventory_transport;
 /// Bounded, explicitly restricted OpenAI Responses SSE dialect.
 pub mod openai;
+mod owned_loopback_socket;
 /// One-attempt Responses executor for the action-broker port.
 pub mod transport;
 
