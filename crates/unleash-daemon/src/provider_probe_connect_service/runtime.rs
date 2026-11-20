@@ -7,9 +7,9 @@ use std::sync::Arc;
 use std::time::Duration;
 use unleash_action_broker::{
     ActionBroker, ActionIntent, ActionProvenance, ActionSubject, AuthorityLayer,
-    AuthorizationOutcome, BrokerConfig, EffectsClass, GuardMode, HostIsolationProbe,
-    InitialEffectivePolicy, IsolationMode, IsolationRequirements, LocalAuthorityFallbackPolicy,
-    NormalizedResourceRef, PlatformKeyringSecretStore, ScopeKind,
+    AuthorizationOutcome, BrokerConfig, EffectiveAuthority, EffectsClass, GuardMode,
+    HostIsolationProbe, InitialEffectivePolicy, IsolationMode, IsolationRequirements,
+    LocalAuthorityFallbackPolicy, NormalizedResourceRef, PlatformKeyringSecretStore, ScopeKind,
     StrictNoneAcceptedObligationChecker, SystemClockAndTimer, compute_effective_authority,
 };
 use unleash_domain::{Fence, LineageFence, ModelPolicy, ReceiptId, ReconcileStrategy};
@@ -73,87 +73,17 @@ async fn run(
     activity: Arc<BrokerActivityGuard>,
 ) -> Result<(), ()> {
     let c = claim.context();
-    let endpoint = claim.destination();
-    let frozen = FrozenConnectRequest::new_loopback(
-        &c.destination,
-        ProfileRef::new(
-            &c.profile_id.to_string(),
-            c.profile_version,
-            c.configuration_digest,
-        )
-        .map_err(|_| failed("profile_reference"))?,
-        c.limits.timeout_ms(),
-    )
-    .map_err(|error| {
-        tracing::warn!(stage="frozen_request", code=?error,"Connect preparation refused");
-        ()
-    })?;
-    if frozen
-        .payload_digest()
-        .map_err(|_| failed("frozen_digest"))?
-        != c.request_digest
-    {
-        return Err(failed("request_digest_binding"));
-    }
+    let frozen = freeze_request(&claim)?;
     let store = Arc::clone(&state.store);
     let policy_claim = Arc::clone(&claim);
     let policy = tokio::task::spawn_blocking(move || store.provider_probe_connect_policy_snapshot(&policy_claim))
         .await
         .map_err(|_| failed("policy_reader_task"))?
-        .map_err(|error| {tracing::warn!(stage="policy_reader",code=%error.error_code(),reason=?error.reason_code(),"Connect preparation refused");()})?;
+        .map_err(|error| {tracing::warn!(stage="policy_reader",code=%error.error_code(),reason=?error.reason_code(),"Connect preparation refused");})?;
     let initial_policy = initial_policy(c, policy)?;
-    let authority = compute_effective_authority(
-        c.project_id,
-        c.policy_revision,
-        c.scope_revision,
-        &[AuthorityLayer {
-            layer_name: "provider_probe_connect_mandate".into(),
-            allowed_effects: Some(BTreeSet::from([EffectsClass::NetworkEgress])),
-            denied_effects: BTreeSet::new(),
-            allowed_verbs: Some(BTreeSet::from([connect_transport::CONNECT_VERB.into()])),
-            denied_verbs: BTreeSet::new(),
-            allowed_roots: Some(vec![]),
-            allowed_network_hosts: Some(BTreeSet::from([endpoint.host().to_owned()])),
-            allowed_secret_refs: Some(BTreeSet::new()),
-            model_policy: ModelPolicy::Forbidden,
-            data_locality: c.locality,
-            isolation_mode: IsolationMode::Standard,
-            require_action_isolation: false,
-            max_scope_kind: if c.project_id.is_some() {
-                ScopeKind::Project
-            } else {
-                ScopeKind::Global
-            },
-            allow_delegation: false,
-            allow_cross_repository: false,
-        }],
-    );
+    let authority = claim_authority(&claim);
     let control_fence = LineageFence::new(c.authority_generation, c.daemon_epoch, Fence::ZERO);
-    let intent = ActionIntent {
-        action_id: c.action_id,
-        subject: ActionSubject::new_control_plane(
-            c.principal_id.clone(),
-            format!("receipt:{}", c.receipt_id),
-        )
-        .map_err(|_| failed("subject"))?,
-        project_id: c.project_id,
-        verb: connect_transport::CONNECT_VERB.into(),
-        resource_refs: vec![NormalizedResourceRef::NetworkEndpoint {
-            host: endpoint.host().into(),
-            port: Some(endpoint.port()),
-            is_private_or_loopback: true,
-        }],
-        payload_digest: c.request_digest,
-        reconcile_strategy: ReconcileStrategy::ObserveThenDecide,
-        effects_class: EffectsClass::NetworkEgress,
-        scope_revision: c.scope_revision,
-        policy_revision: c.policy_revision,
-        lineage_fence: control_fence,
-        action_deadline: c.deadline,
-        isolation_requirements: IsolationRequirements::from_authority(&authority),
-        secret_refs: vec![],
-        provenance: ActionProvenance::EngineInternal,
-    };
+    let intent = claim_intent(&claim, &authority, control_fence)?;
     let journal = Arc::new(super::admission::ConnectJournal::new(
         state,
         Arc::clone(&claim),
@@ -179,14 +109,17 @@ async fn run(
         },
         journal.clone(),
         initial_policy,
-    ).map_err(|error| {tracing::warn!(stage="policy_initialization",code=%error.error_code(),reason=?error.reason_code(),"Connect preparation refused");()})?;
+    ).map_err(|error| {tracing::warn!(stage="policy_initialization",code=%error.error_code(),reason=?error.reason_code(),"Connect preparation refused");})?;
     let decision = match broker
         .authorize_action(intent, &authority)
         .await
-        .map_err(|error| {tracing::warn!(stage="authorization",code=%error.error_code(),reason=?error.reason_code(),"Connect authorization refused");()})?
+        .map_err(|error| {tracing::warn!(stage="authorization",code=%error.error_code(),reason=?error.reason_code(),"Connect authorization refused");})?
     {
         AuthorizationOutcome::Authorized(decision) => decision,
-        AuthorizationOutcome::ApprovalRequired { .. } => return Err(failed("human_approval_required")),
+        AuthorizationOutcome::ApprovalRequired { .. } => {
+            failed("human_approval_required");
+            return Err(());
+        },
     };
     let observation = Arc::new(super::observation::ObservationAdapter {
         store: Arc::clone(&state.store),
@@ -222,6 +155,96 @@ async fn run(
     outcome
 }
 
+fn freeze_request(claim: &ProviderProbeConnectClaim) -> Result<FrozenConnectRequest, ()> {
+    let context = claim.context();
+    let frozen = FrozenConnectRequest::new_loopback(
+        &context.destination,
+        ProfileRef::new(
+            &context.profile_id.to_string(),
+            context.profile_version,
+            context.configuration_digest,
+        )
+        .map_err(|_| failed("profile_reference"))?,
+        context.limits.timeout_ms(),
+    )
+    .map_err(|error| {
+        tracing::warn!(stage="frozen_request",code=?error,"Connect preparation refused");
+    })?;
+    if frozen
+        .payload_digest()
+        .map_err(|_| failed("frozen_digest"))?
+        != context.request_digest
+    {
+        failed("request_digest_binding");
+        return Err(());
+    }
+    Ok(frozen)
+}
+
+fn claim_authority(claim: &ProviderProbeConnectClaim) -> EffectiveAuthority {
+    let context = claim.context();
+    compute_effective_authority(
+        context.project_id,
+        context.policy_revision,
+        context.scope_revision,
+        &[AuthorityLayer {
+            layer_name: "provider_probe_connect_mandate".into(),
+            allowed_effects: Some(BTreeSet::from([EffectsClass::NetworkEgress])),
+            denied_effects: BTreeSet::new(),
+            allowed_verbs: Some(BTreeSet::from([connect_transport::CONNECT_VERB.into()])),
+            denied_verbs: BTreeSet::new(),
+            allowed_roots: Some(vec![]),
+            allowed_network_hosts: Some(BTreeSet::from([claim.destination().host().to_owned()])),
+            allowed_secret_refs: Some(BTreeSet::new()),
+            model_policy: ModelPolicy::Forbidden,
+            data_locality: context.locality,
+            isolation_mode: IsolationMode::Standard,
+            require_action_isolation: false,
+            max_scope_kind: if context.project_id.is_some() {
+                ScopeKind::Project
+            } else {
+                ScopeKind::Global
+            },
+            allow_delegation: false,
+            allow_cross_repository: false,
+        }],
+    )
+}
+
+fn claim_intent(
+    claim: &ProviderProbeConnectClaim,
+    authority: &EffectiveAuthority,
+    control_fence: LineageFence,
+) -> Result<ActionIntent, ()> {
+    let context = claim.context();
+    let endpoint = claim.destination();
+    Ok(ActionIntent {
+        action_id: context.action_id,
+        subject: ActionSubject::new_control_plane(
+            context.principal_id.clone(),
+            format!("receipt:{}", context.receipt_id),
+        )
+        .map_err(|_| failed("subject"))?,
+        project_id: context.project_id,
+        verb: connect_transport::CONNECT_VERB.into(),
+        resource_refs: vec![NormalizedResourceRef::NetworkEndpoint {
+            host: endpoint.host().into(),
+            port: Some(endpoint.port()),
+            is_private_or_loopback: true,
+        }],
+        payload_digest: context.request_digest,
+        reconcile_strategy: ReconcileStrategy::ObserveThenDecide,
+        effects_class: EffectsClass::NetworkEgress,
+        scope_revision: context.scope_revision,
+        policy_revision: context.policy_revision,
+        lineage_fence: control_fence,
+        action_deadline: context.deadline,
+        isolation_requirements: IsolationRequirements::from_authority(authority),
+        secret_refs: vec![],
+        provenance: ActionProvenance::EngineInternal,
+    })
+}
+
 fn failed(stage: &'static str) {
     tracing::warn!(stage, "Connect preparation refused");
 }
@@ -241,21 +264,23 @@ fn initial_policy(
         || policy.policy_digest != context.policy_digest
         || policy.control_fence != control_fence
     {
-        return Err(failed("policy_snapshot_binding"));
+        failed("policy_snapshot_binding");
+        return Err(());
     }
     if policy.isolation_mode != unleash_store::PolicyIsolationMode::Standard {
-        return Err(failed("policy_executor_profile"));
+        failed("policy_executor_profile");
+        return Err(());
     }
-    if let Some(guard) = policy.guard_config {
-        if guard.guard_mode != unleash_store::GuardPolicyMode::BrokerOnly
+    if let Some(guard) = policy.guard_config
+        && (guard.guard_mode != unleash_store::GuardPolicyMode::BrokerOnly
             || guard.endpoint.is_some()
             || guard.transport != unleash_store::GuardTransport::None
             || guard.secret_ref_id.is_some()
             || guard.fallback_policy_ref.is_some()
-            || guard.guard_mapping_profile != unleash_action_broker::NONE_ACCEPTED_PROFILE_ID
-        {
-            return Err(failed("guard_profile_unqualified"));
-        }
+            || guard.guard_mapping_profile != unleash_action_broker::NONE_ACCEPTED_PROFILE_ID)
+    {
+        failed("guard_profile_unqualified");
+        return Err(());
     }
     // Absence is the canonical BrokerOnly default. NetworkEgress still requires
     // Evaluate whenever Guard is configured; no such port is qualified here.

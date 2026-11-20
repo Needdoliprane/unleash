@@ -185,7 +185,7 @@ impl ConnectJournal {
                 tokio::select! {
                     biased;
                     _=draining.changed()=>return Err(BrokerJournalError),
-                    changed=changes.changed()=>changed.map_err(|()|BrokerJournalError)?,
+                    notification=changes.changed()=>notification.map_err(|()|BrokerJournalError)?,
                 }
             }
         })
@@ -293,9 +293,8 @@ impl BrokerJournalPort for ConnectJournal {
     ) -> BoxFuture<'a, Result<(), BrokerJournalError>> {
         Box::pin(async move {
             let state = self.runtime.upgrade().ok_or(BrokerJournalError)?;
-            let (evaluation, intent, phase) = project(entry).map_err(|error| {
+            let (evaluation, intent, phase) = project(entry).inspect_err(|_| {
                 tracing::warn!(stage = "broker_projection", "Connect journal refused");
-                error
             })?;
             let phase_name = match &phase {
                 unleash_store::BrokerPhase::Authorizing { .. } => "authorizing",
@@ -345,17 +344,16 @@ impl BrokerJournalPort for ConnectJournal {
                 }
             })
             .await;
-            let cursor = match &result {
-                Ok(Ok(commit)) => Some(commit.event_cursor),
-                _ => {
-                    let store = Arc::clone(&state.store);
-                    tokio::task::spawn_blocking(move || store.inspect_broker_action(action))
-                        .await
-                        .ok()
-                        .and_then(Result::ok)
-                        .flatten()
-                        .map(|s| s.last_event_cursor)
-                }
+            let cursor = if let Ok(Ok(commit)) = &result {
+                Some(commit.event_cursor)
+            } else {
+                let store = Arc::clone(&state.store);
+                tokio::task::spawn_blocking(move || store.inspect_broker_action(action))
+                    .await
+                    .ok()
+                    .and_then(Result::ok)
+                    .flatten()
+                    .map(|s| s.last_event_cursor)
             };
             if let Some(cursor) = cursor
                 && cursor.stream_id == state.stream_id
@@ -373,9 +371,8 @@ impl BrokerJournalPort for ConnectJournal {
                 .map_err(|_| {tracing::warn!(phase=phase_name,stage="phase_writer_task","Connect journal refused");BrokerJournalError})?
                 .map_err(|error| {tracing::warn!(phase=phase_name,stage="phase_writer",probe_id=%self.claim.context().probe_id,code=%error.error_code(),reason=?error.reason_code(),refusal=closed_refusal(&error),"Connect journal refused");BrokerJournalError})?;
             if authorizing {
-                self.await_admission(&state).await.map_err(|error| {
+                self.await_admission(&state).await.inspect_err(|_| {
                     tracing::warn!(stage = "v008_gate", "Connect journal refused");
-                    error
                 })?;
             }
             Ok(())

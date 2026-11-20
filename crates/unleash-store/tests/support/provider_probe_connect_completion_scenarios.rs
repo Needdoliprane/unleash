@@ -1,4 +1,4 @@
-//! Trusted-observer injection tests for SQLite only. No socket closure is
+//! Trusted-observer injection tests for `SQLite` only. No socket closure is
 //! attested by this fixture; the real native producer is tested separately by UDS.
 
 use super::*;
@@ -113,9 +113,12 @@ fn final_request(
     execution: &Dispatched,
     fact: Option<AdoptedProviderConnectObservation>,
 ) -> CommitProviderConnectObservation {
+    let output_digest = fact
+        .as_ref()
+        .map(AdoptedProviderConnectObservation::content_hash);
     CommitProviderConnectObservation {
         continuation: execution.continuation.clone(),
-        fact: fact.clone(),
+        fact,
         request: phase(
             &execution.ready,
             3,
@@ -128,9 +131,7 @@ fn final_request(
                     dispatch_id: execution.dispatch,
                     decision_ref: execution.decision.decision_ref.clone(),
                     state: ActionState::ObservedSuccess,
-                    output_digest: fact
-                        .as_ref()
-                        .map(AdoptedProviderConnectObservation::content_hash),
+                    output_digest,
                     enforcement_refs: vec![],
                     remote_audit_ref: None,
                     remote_audit_unavailable: true,
