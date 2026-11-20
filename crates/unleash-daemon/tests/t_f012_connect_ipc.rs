@@ -11,6 +11,7 @@ use serde_json::{Value, json};
 use std::future::Future;
 use std::io::ErrorKind;
 use std::net::TcpListener;
+use std::os::unix::fs::PermissionsExt;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::io::AsyncReadExt;
@@ -32,7 +33,7 @@ mod observation_scenarios;
 mod connect_trace;
 
 struct ConnectFixture {
-    _rendezvous: tempfile::TempDir,
+    rendezvous: tempfile::TempDir,
     data: tempfile::TempDir,
     handle: unleash_daemon::DaemonHandle,
     endpoint: TcpListener,
@@ -100,7 +101,6 @@ impl ConnectFixture {
         cutpoints: Option<Arc<dyn CutpointObserver>>,
     ) -> (Self, UnleashClient) {
         connect_trace::install();
-        use std::os::unix::fs::PermissionsExt;
         let rendezvous = local_test_dir("f012-connect-rdv").unwrap();
         std::fs::set_permissions(rendezvous.path(), std::fs::Permissions::from_mode(0o700))
             .unwrap();
@@ -129,7 +129,7 @@ impl ConnectFixture {
         .unwrap();
         (
             Self {
-                _rendezvous: rendezvous,
+                rendezvous,
                 data,
                 handle,
                 endpoint,
@@ -297,8 +297,11 @@ fn policy_command(
         client.hello().authority_generation.as_uuid(),
         id,
         "SetPolicy",
-        json!({"scope_kind":"global","scope_id":"global","isolation_mode":"standard","policy_version":"connect-fixture-v1","reason":"local transport fixture permission","provider_probe_mandate":change}),
+        json!({"scope_kind":"global","scope_id":"global","isolation_mode":"standard","policy_version":"connect-fixture-v1","reason":"local transport fixture permission","provider_probe_mandate":null}),
     );
+    request
+        .payload
+        .insert("provider_probe_mandate".into(), change);
     request.expected_revision = Revision::new(revision);
     request
 }
@@ -460,8 +463,10 @@ async fn assert_connect_observation(
                 })
                 .await
                 .unwrap();
-            if result.result["observations"]
-                .as_array()
+            if result
+                .result
+                .get("observations")
+                .and_then(Value::as_array)
                 .unwrap()
                 .iter()
                 .any(|entry| entry["phase"] == "connect")
@@ -477,10 +482,15 @@ async fn assert_connect_observation(
     .await
     .unwrap();
     assert_eq!(
-        result.result["qualification"], "required",
+        result.result.get("qualification").unwrap_or(&Value::Null),
+        "required",
         "TCP ne prouve pas une capacité de génération"
     );
-    let observations = result.result["observations"].as_array().unwrap();
+    let observations = result
+        .result
+        .get("observations")
+        .and_then(Value::as_array)
+        .unwrap();
     assert_eq!(observations.len(), 1, "seul connect a été exécuté");
     let observed = observations
         .iter()
@@ -598,7 +608,10 @@ WHERE a.state='observed_success'
             .to_string(),
         proof.output_digest
     );
-    let native_observed = document["observed_at_ms"].as_i64().unwrap();
+    let native_observed = document
+        .get("observed_at_ms")
+        .and_then(Value::as_i64)
+        .unwrap();
     assert!(proof.started_at_ms <= native_observed);
     assert!(native_observed <= proof.observed_at_ms);
     assert_eq!(

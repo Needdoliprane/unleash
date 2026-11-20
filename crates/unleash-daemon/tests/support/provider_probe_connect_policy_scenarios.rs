@@ -145,16 +145,21 @@ async fn policy_state(
             request_id: RequestId::from_u128(id),
             query_type: "ReadPolicySummary".into(),
             project_id: Some(project),
-            payload: Default::default(),
+            payload: serde_json::Map::default(),
         })
         .await
         .unwrap()
         .result;
-    let revision = view["global_policy"]["revision"]
-        .as_u64()
+    let revision = view
+        .pointer("/global_policy/revision")
+        .and_then(Value::as_u64)
         .unwrap()
-        .max(view["project_policy"]["revision"].as_u64().unwrap());
-    let digest = canonical_sha256(&json!({"schema_version":1,"global_policy":view["global_policy"],"project_policy":view["project_policy"],"guard_config":view["guard_config"]})).unwrap();
+        .max(
+            view.pointer("/project_policy/revision")
+                .and_then(Value::as_u64)
+                .unwrap(),
+        );
+    let digest = canonical_sha256(&json!({"schema_version":1,"global_policy":view.get("global_policy"),"project_policy":view.get("project_policy"),"guard_config":view.get("guard_config")})).unwrap();
     (revision, digest)
 }
 

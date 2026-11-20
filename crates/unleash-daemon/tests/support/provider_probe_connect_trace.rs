@@ -2,6 +2,7 @@
 
 use std::{
     collections::BTreeSet,
+    io::{self, Write as _},
     sync::{Mutex, OnceLock},
     time::Duration,
 };
@@ -111,7 +112,7 @@ impl tracing::Subscriber for ConnectTrace {
             waits.dispatch_refusals.lock().unwrap().insert(probe);
             waits.changed.notify_waiters();
         }
-        eprintln!("connect_trace{}", fields.log);
+        writeln!(io::stderr().lock(), "connect_trace{}", fields.log).unwrap();
     }
     fn enter(&self, _: &tracing::span::Id) {}
     fn exit(&self, _: &tracing::span::Id) {}

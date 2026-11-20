@@ -602,32 +602,29 @@ async fn assert_unknown_after_restart(
     let mut restarted = restart_after_unknown(fixture).await;
     assert!(fixture.handle.daemon_epoch().as_u64() > epoch.as_u64());
     assert_eq!(
-        restarted.send_command(&first_request).await.unwrap(),
+        restarted.send_command(first_request).await.unwrap(),
         *first_receipt
     );
     assert_eq!(
-        restarted.send_command(&second_request).await.unwrap(),
+        restarted.send_command(second_request).await.unwrap(),
         *second_receipt
     );
     assert_eq!(
-        action_state(&fixture, first_request.aggregate_id).as_deref(),
+        action_state(fixture, first_request.aggregate_id).as_deref(),
         Some("outcome_unknown")
     );
-    assert_eq!(
-        permanent_fact_count(&fixture, first_request.aggregate_id),
-        1
-    );
+    assert_eq!(permanent_fact_count(fixture, first_request.aggregate_id), 1);
     assert_alias_retained(
-        &fixture,
+        fixture,
         first_request.aggregate_id,
         second_request.aggregate_id,
     );
-    let mut recovery_events = subscribe(&restarted, &second_receipt).await;
+    let mut recovery_events = subscribe(&restarted, second_receipt).await;
     let fresh_request = request_for(&restarted, target, 229, mandate);
     let fresh_receipt = restarted.send_command(&fresh_request).await.unwrap();
     assert_eq!(fresh_receipt.state, ReceiptState::Accepted);
     wait_state(
-        &fixture,
+        fixture,
         fresh_request.aggregate_id,
         "authorizing",
         &mut recovery_events,
@@ -635,7 +632,7 @@ async fn assert_unknown_after_restart(
     .await;
     super::connect_trace::wait_for_capacity_blocked(fresh_request.aggregate_id).await;
     assert_alias_retained(
-        &fixture,
+        fixture,
         first_request.aggregate_id,
         fresh_request.aggregate_id,
     );
@@ -646,12 +643,12 @@ async fn assert_unknown_after_restart(
         .await
         .unwrap();
     assert_alias_retained(
-        &fixture,
+        fixture,
         first_request.aggregate_id,
         second_request.aggregate_id,
     );
     assert_alias_retained(
-        &fixture,
+        fixture,
         first_request.aggregate_id,
         fresh_request.aggregate_id,
     );
@@ -660,7 +657,7 @@ async fn assert_unknown_after_restart(
 async fn restart_after_unknown(fixture: &mut ConnectFixture) -> UnleashClient {
     let DaemonStartOutcome::Started(handle) = UnleashDaemon::start(DaemonConfig {
         data_root: Some(fixture.data.path().to_path_buf()),
-        rendezvous_dir: Some(fixture._rendezvous.path().to_path_buf()),
+        rendezvous_dir: Some(fixture.rendezvous.path().to_path_buf()),
         ..DaemonConfig::default()
     })
     .await
