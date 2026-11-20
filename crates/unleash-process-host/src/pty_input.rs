@@ -31,6 +31,9 @@ pub enum HostInputCutpoint {
     /// A fresh control rotation and its exact cached ACK are published, before
     /// sending the ACK. Cached inspection does not hit this cutpoint.
     TransferAppliedBeforeAck,
+    /// A native resize was attempted, before sending its ACK or error response.
+    /// Both the operation gate and the PTY master guard have been released.
+    ResizeAttemptedBeforeReply,
 }
 
 /// Observateur injectable des points de coupure d'entrée PTY (sans dépendance testkit en production).
@@ -40,6 +43,19 @@ pub trait HostCutpointObserver: Send + Sync {
     /// # Errors
     /// Retourne [`ProcessHostError`] si le point de coupure déclenche une panne ou barrière annulée.
     fn hit(&self, cutpoint: HostInputCutpoint) -> Result<(), ProcessHostError>;
+
+    /// Reports the one-based host-local resize attempt count after releasing
+    /// native guards, including attempts whose ioctl or size read failed.
+    /// Requests rejected before the ioctl do not call this hook. The count is
+    /// an in-memory fixture observation, never a durable effect receipt.
+    /// Concurrent callbacks may arrive out of order; retain their maximum or
+    /// count each notification rather than treating delivery order as IO order.
+    ///
+    /// # Errors
+    /// An injected error closes this response without repeating the resize.
+    fn after_resize_attempt(&self, _attempt: u64) -> Result<(), ProcessHostError> {
+        self.hit(HostInputCutpoint::ResizeAttemptedBeforeReply)
+    }
 }
 
 /// Observateur neutre sans effet.
@@ -434,7 +450,8 @@ mod tests {
                 HostInputCutpoint::C5AfterPtyWriteBeforeReceipt => Cutpoint::C5,
                 // Input tests keep their existing C3/C4/C5 counters and scope.
                 HostInputCutpoint::HandshakeAppliedBeforeAck
-                | HostInputCutpoint::TransferAppliedBeforeAck => return Ok(()),
+                | HostInputCutpoint::TransferAppliedBeforeAck
+                | HostInputCutpoint::ResizeAttemptedBeforeReply => return Ok(()),
             };
             self.0
                 .hit(mapped)

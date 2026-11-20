@@ -79,6 +79,7 @@ struct ServerShared {
     // Socket reads/writes are outside this gate and cannot pin its owner.
     operation_gate: Mutex<()>,
     last_transfer: Mutex<Option<ControlTransferAttempt>>,
+    resize_attempts: AtomicU64,
     #[cfg(test)]
     operation_contentions: AtomicU64,
     manifest_path: PathBuf,
@@ -400,6 +401,7 @@ impl ProcessHostServer {
         let shared = Arc::new(ServerShared {
             operation_gate: Mutex::new(()),
             last_transfer: Mutex::new(None),
+            resize_attempts: AtomicU64::new(0),
             #[cfg(test)]
             operation_contentions: AtomicU64::new(0),
             manifest_path,
@@ -678,7 +680,9 @@ fn handle_connection(mut stream: UnixStream, shared: &Arc<ServerShared>) {
             break;
         }
 
+        let resize_before = shared.resize_attempts.load(Ordering::SeqCst);
         let resp = process_request(req, shared);
+        let resize_after = shared.resize_attempts.load(Ordering::SeqCst);
         if matches!(
             resp,
             HostResponse::HandshakeAck {
@@ -690,6 +694,11 @@ fn handle_connection(mut stream: UnixStream, shared: &Arc<ServerShared>) {
         }
         let is_shutdown = matches!(resp, HostResponse::ShutdownAck);
         drop(operation);
+        if resize_after != resize_before
+            && shared.cutpoints.after_resize_attempt(resize_after).is_err()
+        {
+            break;
+        }
         if matches!(resp, HostResponse::HandshakeAck { .. })
             && shared
                 .cutpoints
@@ -1064,6 +1073,14 @@ fn process_request(req: HostRequest, shared: &ServerShared) -> HostResponse {
                     .ok_or_else(|| ProcessHostError::InvalidArgument {
                         reason: String::from("Resize interdit sur ressource non-PTY"),
                     })?;
+            shared
+                .resize_attempts
+                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |count| {
+                    count.checked_add(1)
+                })
+                .map_err(|_| ProcessHostError::TerminalUnavailable {
+                    reason: String::from("native resize attempt counter exhausted"),
+                })?;
             master
                 .resize(PtySize {
                     rows,
@@ -1432,8 +1449,9 @@ pub struct StdioBarrierCutpointObserver {
 }
 
 impl StdioBarrierCutpointObserver {
-    /// Selects C3/C4/C5, `HandshakeAppliedBeforeAck` or `TransferAppliedBeforeAck` for an
-    /// exclusively owned native crash fixture. Normal launch clears this variable.
+    /// Selects C3/C4/C5, `HandshakeAppliedBeforeAck`, `TransferAppliedBeforeAck` or
+    /// `ResizeAttemptedBeforeReply` for an exclusively owned native crash fixture.
+    /// Normal launch clears this variable.
     #[must_use]
     pub fn from_env() -> Option<Self> {
         let val = std::env::var("UNLEASH_HOST_CUTPOINT_TARGET").ok()?;
@@ -1457,6 +1475,10 @@ impl StdioBarrierCutpointObserver {
             "TransferAppliedBeforeAck" => Some(Self {
                 target: HostInputCutpoint::TransferAppliedBeforeAck,
                 label: "TransferAppliedBeforeAck",
+            }),
+            "ResizeAttemptedBeforeReply" => Some(Self {
+                target: HostInputCutpoint::ResizeAttemptedBeforeReply,
+                label: "ResizeAttemptedBeforeReply",
             }),
             _ => None,
         }
