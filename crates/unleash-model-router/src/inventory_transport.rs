@@ -12,9 +12,9 @@ use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio_rustls::{TlsConnector, rustls};
 use unleash_action_broker::{
-    ActionExecutionFailure, ActionExecutionResult, ActionExecutorPort, ActionIntent, ActionReceipt,
-    AuthorizationDecision, BoxFuture, EffectsClass, ExecutorKind, NormalizedResourceRef,
-    ResolvedSecret,
+    ActionBrokerError, ActionExecutionFailure, ActionExecutionResult, ActionExecutorPort,
+    ActionIntent, ActionReceipt, AuthorizationDecision, BoxFuture, EffectsClass, ExecutorKind,
+    NormalizedResourceRef, ResolvedSecret,
 };
 use unleash_domain::{ActionId, ActionState, ClockPort, DispatchId, Sha256Digest, TimestampMs};
 use unleash_protocol::canonical_sha256;
@@ -207,6 +207,20 @@ impl fmt::Debug for InventoryObservation {
     }
 }
 
+impl InventoryObservation {
+    /// Native owner; this grants no execution or durable adoption authority.
+    #[must_use]
+    pub const fn action_id(&self) -> ActionId {
+        self.action_id
+    }
+
+    /// Native dispatch associated with the exact response.
+    #[must_use]
+    pub const fn dispatch_id(&self) -> DispatchId {
+        self.dispatch_id
+    }
+}
+
 /// The local result is not a durable inventory observation.
 #[derive(Debug)]
 pub enum InventoryOutcome {
@@ -220,7 +234,10 @@ pub enum InventoryOutcome {
 #[derive(Debug)]
 pub struct InventoryExecution {
     /// Actual result of the caller's broker.
-    pub receipt: ActionReceipt,
+    pub receipt: Result<ActionReceipt, ActionBrokerError>,
+    /// Current state read on that same action after the broker returned. In
+    /// particular, Dispatching is not a committed OutcomeUnknown observation.
+    pub state: ActionState,
     /// Correlated native list or closed local failure.
     pub outcome: InventoryOutcome,
     /// The exact local fact matching the broker's output digest, if successful.
@@ -491,21 +508,28 @@ pub async fn execute_ollama_inventory(
             &executor,
             dispatch.secrets,
         )
-        .await
-        .map_err(|_| InventoryError::Unavailable)?;
+        .await;
+    let state = dispatch
+        .broker
+        .action_state(dispatch.action)
+        .ok_or(InventoryError::Unavailable)?;
     let result = stage
         .lock()
         .map_err(|_| InventoryError::Unavailable)?
         .take();
     match result {
         Some(Ok(observed))
-            if receipt.state == ActionState::ObservedSuccess
-                && receipt.action_id == observed.observation.action_id
-                && receipt.dispatch_id == observed.observation.dispatch_id
-                && receipt.output_digest == Some(observed.digest) =>
+            if state == ActionState::ObservedSuccess
+                && receipt.as_ref().is_ok_and(|receipt| {
+                    receipt.state == ActionState::ObservedSuccess
+                        && receipt.action_id == observed.observation.action_id
+                        && receipt.dispatch_id == observed.observation.dispatch_id
+                        && receipt.output_digest == Some(observed.digest)
+                }) =>
         {
             Ok(InventoryExecution {
                 receipt,
+                state,
                 outcome: InventoryOutcome::Listed(observed.inventory),
                 observation: Some(observed.observation),
             })
@@ -517,6 +541,7 @@ pub async fn execute_ollama_inventory(
             };
             Ok(InventoryExecution {
                 receipt,
+                state,
                 outcome: InventoryOutcome::Failed(error),
                 observation: None,
             })

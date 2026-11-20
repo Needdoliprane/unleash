@@ -12,7 +12,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
 use unleash_action_broker::{
-    ActionBroker, ActionIntent, ActionProvenance, ActionSubject, AuthorityLayer,
+    ActionBroker, ActionBrokerError, ActionIntent, ActionProvenance, ActionSubject, AuthorityLayer,
     AuthorizationDecision, AuthorizationOutcome, BoxFuture, BrokerConfig, BrokerJournalEntry,
     BrokerJournalError, BrokerJournalPort, EffectiveAuthority, EffectsClass, IsolationMode,
     IsolationRequirements, LocalAuthorityFallbackPolicy, ScopeKind, compute_effective_authority,
@@ -312,11 +312,30 @@ fn assert_get_only(capture: &Capture, port: u16) -> TestResult {
 }
 
 fn listed(execution: InventoryExecution) -> Result<OllamaInventory, Box<dyn Error>> {
-    assert_eq!(execution.receipt.state, ActionState::ObservedSuccess);
+    assert_eq!(execution.state, ActionState::ObservedSuccess);
+    let receipt = execution.receipt?;
+    assert_eq!(receipt.state, ActionState::ObservedSuccess);
+    let observation = execution
+        .observation
+        .ok_or("missing native inventory fact")?;
+    assert_eq!(receipt.action_id, observation.action_id());
+    assert_eq!(receipt.dispatch_id, observation.dispatch_id());
+    assert_eq!(
+        receipt.output_digest,
+        Some(unleash_protocol::canonical_sha256(&observation)?)
+    );
     match execution.outcome {
         InventoryOutcome::Listed(list) => Ok(list),
         InventoryOutcome::Failed(error) => Err(error.into()),
     }
+}
+
+fn assert_unknown(execution: &InventoryExecution) {
+    assert_eq!(execution.state, ActionState::OutcomeUnknown);
+    assert!(
+        matches!(&execution.receipt, Err(ActionBrokerError::OutcomeUnknown { action_id, .. }) if *action_id == ActionId::from_u128(303))
+    );
+    assert!(execution.observation.is_none());
 }
 
 async fn rejected_response(
@@ -327,7 +346,7 @@ async fn rejected_response(
     let harness = Harness::new();
     let mut fixture = Fixture::new(response, Arc::clone(&harness.dispatches)).await?;
     let execution = harness.run(request(fixture.port, 1000, max_bytes)?).await?;
-    assert_eq!(execution.receipt.state, ActionState::OutcomeUnknown);
+    assert_unknown(&execution);
     assert!(matches!(execution.outcome, InventoryOutcome::Failed(error) if error == expected));
     harness.assert_one_dispatch_no_secret();
     assert_get_only(&fixture.capture().await?, fixture.port)
@@ -407,7 +426,7 @@ async fn t_f012_013_inventory_deadline_closes_one_attempt() -> TestResult {
     let started = tokio::time::Instant::now();
     let execution = harness.run(request(fixture.port, 80, 128)?).await?;
     assert!(started.elapsed() < Duration::from_secs(1));
-    assert_eq!(execution.receipt.state, ActionState::OutcomeUnknown);
+    assert_unknown(&execution);
     assert!(matches!(
         execution.outcome,
         InventoryOutcome::Failed(InventoryError::DeadlineExpired)
