@@ -404,7 +404,7 @@ fn assert_unknown(execution: &InventoryExecution) {
 
 struct ObservationProbe {
     closed: Arc<tokio::sync::Notify>,
-    entered: tokio::sync::Notify,
+    ready_to_ack: tokio::sync::Notify,
     acknowledge: tokio::sync::Notify,
     attempts: AtomicUsize,
     fail: bool,
@@ -414,7 +414,7 @@ impl ObservationProbe {
     fn new(fail: bool) -> Self {
         Self {
             closed: Arc::new(tokio::sync::Notify::new()),
-            entered: tokio::sync::Notify::new(),
+            ready_to_ack: tokio::sync::Notify::new(),
             acknowledge: tokio::sync::Notify::new(),
             attempts: AtomicUsize::new(0),
             fail,
@@ -429,6 +429,8 @@ impl InventoryObservationPort for ObservationProbe {
         inventory: &'a OllamaInventory,
     ) -> BoxFuture<'a, Result<(), InventoryObservationError>> {
         Box::pin(async move {
+            // Count entry even if a repeated, invalid publication later times out.
+            self.attempts.fetch_add(1, Ordering::SeqCst);
             tokio::time::timeout(Duration::from_secs(1), self.closed.notified())
                 .await
                 .map_err(|_| InventoryObservationError::Unavailable)?;
@@ -441,8 +443,7 @@ impl InventoryObservationPort for ObservationProbe {
             {
                 return Err(InventoryObservationError::Unavailable);
             }
-            self.attempts.fetch_add(1, Ordering::SeqCst);
-            self.entered.notify_one();
+            self.ready_to_ack.notify_one();
             if self.fail {
                 return Err(InventoryObservationError::Unavailable);
             }
@@ -464,7 +465,7 @@ async fn inventory_durable_observation_waits_for_closed_channel_and_ack() -> Tes
     )
     .await?;
     let check = async {
-        tokio::time::timeout(Duration::from_secs(1), observer.entered.notified()).await?;
+        tokio::time::timeout(Duration::from_secs(1), observer.ready_to_ack.notified()).await?;
         assert_eq!(observer.attempts.load(Ordering::SeqCst), 1);
         assert_eq!(
             harness.broker.action_state(ActionId::from_u128(303)),
