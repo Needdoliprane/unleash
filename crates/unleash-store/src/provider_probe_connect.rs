@@ -1225,7 +1225,7 @@ impl UnleashStore {
             crate::BrokerPhase::Dispatch { .. } => {
                 Some(crate::StoreCutpoint::C4AfterBrokerDispatchCommit)
             }
-            _ => None,
+            crate::BrokerPhase::Observation { .. } => None,
         };
         let config = self.config().clone();
         let committed = self.execute_in_writer_tx(WriteCriticality::Normal, move |tx, now| {

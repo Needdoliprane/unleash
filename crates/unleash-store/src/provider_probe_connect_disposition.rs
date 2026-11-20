@@ -87,14 +87,20 @@ fn read_input(
         params![context.action_id.to_string(), action.evaluation_id.to_string()], |row| Ok((row.get(0)?,row.get(1)?)),
     )?;
     let exact: serde_json::Value = serde_json::from_str(&encoded)?;
-    let authorization: BrokerPhase = serde_json::from_value(exact["phase"].clone())?;
+    let authorization: BrokerPhase = serde_json::from_value(
+        exact
+            .get("phase")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null),
+    )?;
     let BrokerPhase::Authorization { intent_digest, .. } = &authorization else {
         return Err(invalid("résultat d'autorisation absent de sa phase"));
     };
     if canonical_sha256(&exact)?.as_prefixed_str() != digest
         || *intent_digest != intent.intent_digest
         || authorization.action_id() != context.action_id
-        || exact["evaluation"]["evaluation_id"] != serde_json::json!(action.evaluation_id)
+        || exact.pointer("/evaluation/evaluation_id")
+            != Some(&serde_json::json!(action.evaluation_id))
     {
         return Err(invalid("autorisation de disposition incohérente"));
     }

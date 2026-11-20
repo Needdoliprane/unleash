@@ -453,15 +453,14 @@ impl UnleashStore {
         if let Some(replay) = self.lookup_connect_observation(&original, &input.request)? {
             return Ok(replay);
         }
-        if let Some(fact) = &input.fact {
-            if let Err(error) =
+        if let Some(fact) = &input.fact
+            && let Err(error) =
                 verify_document_bytes(self, &fact.binding.document, fact.binding.content_hash)
-            {
-                if let Some(replay) = self.lookup_connect_observation(&original, &input.request)? {
-                    return Ok(replay);
-                }
-                return Err(error);
+        {
+            if let Some(replay) = self.lookup_connect_observation(&original, &input.request)? {
+                return Ok(replay);
             }
+            return Err(error);
         }
         let permission = ConnectObservationPermission {
             original,
