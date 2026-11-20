@@ -97,6 +97,37 @@ marqueur de dispatch ou d’observation. La transaction engage
 les réservations physiques sont conservés. Le bail suit la règle de reprise
 ordinaire et le PTY conserve son état natif.
 
+### Attestation d’un retrait historique
+
+La variante `attest_terminal_release` de `ReconcileProcess` exige le projet
+exact et utilise le terminal comme agrégat. `expected_revision` désigne la
+révision de contrôle inscrite dans le retrait historique. Le
+[schéma de commande](../../schemas/ipc-command.schema.json) ferme le payload à
+`kind`, `terminal_id`, `process_run_uuid`, `source_action_id` et
+`source_dispatch_id`. Le daemon rattache cette cible au principal authentifié,
+au reçu d’origine et à son unique dispatch.
+
+Le host doit présenter l’accusé historique complet et la génération physique
+attendue. L’inspection n’accorde aucun contrôle. Le writer engage ensemble le
+fait historique, la liaison causale et le nouveau reçu `Completed`.
+`TerminalReleaseHistoryObserved` garde pour cause le reçu de
+`ReleaseTerminal`. `TerminalReleaseHistoryReferenced` lie le reçu de
+`ReconcileProcess` au premier fait, y compris si une autre commande l’a déjà
+scellé. L’action source reste `OutcomeUnknown`. Le bail, les réservations,
+la révision de contrôle et la barrière de concurrence sont conservés.
+
+Le reçu porte `terminal-release-history:<action_id>:<dispatch_id>`. Le rejeu
+exact restitue le même reçu depuis SQLite. Une commande divergente sous la
+même clé retourne `IdempotencyConflict` avant toute inspection du host.
+`GetCommandReceipt` avec le `command_id` de `ReconcileProcess`, la référence
+exacte du reçu et son projet lit le
+[résultat fermé](../../schemas/ipc-query-response.schema.json#/$defs/terminal_release_history_response).
+Le `cursor` du résultat situe le fait historique et celui du reçu situe
+l’événement de liaison. Le `watermark` appartient au snapshot de lecture.
+Les deux versions du reçu et les coordonnées du retrait sont des faits
+consultables. L’attestation laisse une éventuelle disposition à sa propre
+transition.
+
 Une nouvelle commande enregistrée `AcquireTerminal` peut reprendre le même PTY
 après un retrait qualifié. Cette branche est distincte du renouvellement : elle
 crée un nouveau bail et un fence strictement supérieur, même dans la même époque.

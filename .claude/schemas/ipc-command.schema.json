@@ -17,6 +17,38 @@
     "payload"
   ],
   "$defs": {
+    "terminal_release_reconcile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "terminal_id",
+        "process_run_uuid",
+        "source_action_id",
+        "source_dispatch_id"
+      ],
+      "properties": {
+        "kind": {
+          "const": "attest_terminal_release"
+        },
+        "terminal_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "process_run_uuid": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "source_action_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "source_dispatch_id": {
+          "type": "string",
+          "format": "uuid"
+        }
+      }
+    },
     "terminal_release": {
       "type": "object",
       "additionalProperties": false,
@@ -462,6 +494,29 @@
     }
   },
   "allOf": [
+    {
+      "if": {
+        "properties": {
+          "command_type": {
+            "const": "ReconcileProcess"
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "project_id"
+        ],
+        "properties": {
+          "project_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "payload": {
+            "$ref": "#/$defs/terminal_release_reconcile"
+          }
+        }
+      }
+    },
     {
       "if": {
         "properties": {

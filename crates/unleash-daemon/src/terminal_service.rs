@@ -36,7 +36,9 @@ mod renewal;
 pub(crate) use input::{decode as decode_input, prepare as prepare_input, start as start_input};
 pub(crate) use renewal::{prepare_resize, start_resize};
 
-pub(crate) use release::{prepare as prepare_release, start as start_release};
+pub(crate) use release::{
+    prepare as prepare_release, reconcile as reconcile_release, start as start_release,
+};
 
 pub(crate) fn start_registered(
     state: &Arc<DaemonRuntimeState>,

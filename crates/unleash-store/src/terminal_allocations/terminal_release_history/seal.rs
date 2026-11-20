@@ -49,6 +49,8 @@ pub struct TerminalReleaseHistoryFact {
     pub observation_object_hash: Sha256Digest,
     /// Epoch that sealed the first observation.
     pub inspected_by_epoch: DaemonEpoch,
+    /// Timestamp of the retained first inspection.
+    pub observed_at_ms: TimestampMs,
     /// Exact cursor of the attestation event.
     pub event_cursor: EventCursor,
 }
@@ -76,34 +78,20 @@ impl UnleashStore {
             let source =
                 qualify_terminal_release_history_source(tx, &request.caller, request.target)?;
             let daemon = read_daemon_state_conn(tx)?;
-            let context = SealContext {
-                config: &config,
-                daemon: &daemon,
-                now,
-                source: &source,
-            };
-            let publication = publication(&request);
-            let prior = read_sealed(tx, &context, &publication)?;
-            if let Some(sealed) = prior {
-                return replay(tx, &context, &request.prepared_proof, &publication, sealed);
-            }
-            let observation =
-                prepared_observation(tx, &context, &request.prepared_proof, &publication)?;
-            tx_publish_owned_reference(
+            let commit = seal_tx(
                 tx,
-                config.id_generator.as_ref(),
+                &config,
+                &daemon,
                 now,
-                &publication,
-                daemon.authority_generation,
+                &source,
+                Some(&request.prepared_proof),
             )?;
-            let fact = append_fact(tx, &context, &observation, &publication)?;
-            config.cutpoints.hit(StoreCutpoint::C1BeforeCommandCommit)?;
-            reliable_clock(&config, now, observation.captured_at_ms)?;
-            qualify_terminal_release_history_source(tx, &request.caller, request.target)?;
-            Ok(TerminalReleaseHistoryCommit {
-                fact,
-                replayed: false,
-            })
+            if !commit.replayed {
+                config.cutpoints.hit(StoreCutpoint::C1BeforeCommandCommit)?;
+                reliable_clock(&config, now, commit.fact.observed_at_ms)?;
+                qualify_terminal_release_history_source(tx, &request.caller, request.target)?;
+            }
+            Ok(commit)
         })?;
         if !committed.replayed {
             self.config()
@@ -146,6 +134,7 @@ impl HistoryPayload {
             native_ack_digest: self.native_ack_digest,
             observation_object_hash: self.observation_object_hash,
             inspected_by_epoch: self.inspected_by_epoch,
+            observed_at_ms: self.captured_at_ms,
             event_cursor: cursor,
         }
     }
@@ -161,15 +150,77 @@ fn unavailable(detail: &'static str) -> StoreError {
     StoreError::EvidenceUnavailable(detail.into())
 }
 
-fn publication(request: &SealTerminalReleaseHistoryRequest) -> PublishObjectReferenceRequest {
-    PublishObjectReferenceRequest {
-        pin_id: request.prepared_proof.pin_id.clone(),
-        object_hash: request.prepared_proof.object_hash,
-        object_generation: request.prepared_proof.object_generation,
-        owner_kind: "action".into(),
-        owner_id: request.target.action_id.to_string(),
-        source_field: format!("terminal_release_history:{}", request.target.dispatch_id),
+pub(super) fn seal_tx(
+    tx: &Transaction<'_>,
+    config: &StoreConfig,
+    daemon: &DaemonStateRow,
+    now: TimestampMs,
+    source: &TerminalReleaseHistorySource,
+    prepared: Option<&PreparedObjectHandle>,
+) -> Result<TerminalReleaseHistoryCommit, StoreError> {
+    let context = SealContext {
+        config,
+        daemon,
+        now,
+        source,
+    };
+    let prior = read_sealed(tx, config, daemon, source)?;
+    match (prior, prepared) {
+        (Some(sealed), Some(handle)) => {
+            replay(tx, &context, handle, &publication(source, handle), sealed)
+        }
+        (Some(sealed), None) => Ok(TerminalReleaseHistoryCommit {
+            fact: sealed.fact,
+            replayed: true,
+        }),
+        (None, Some(handle)) => {
+            let publication = publication(source, handle);
+            let observation = prepared_observation(tx, &context, handle, &publication)?;
+            tx_publish_owned_reference(
+                tx,
+                config.id_generator.as_ref(),
+                now,
+                &publication,
+                daemon.authority_generation,
+            )?;
+            let fact = append_fact(tx, &context, &observation, &publication)?;
+            reliable_clock(config, now, observation.captured_at_ms)?;
+            Ok(TerminalReleaseHistoryCommit {
+                fact,
+                replayed: false,
+            })
+        }
+        (None, None) => Err(unavailable(
+            "historical release inspection has not been sealed",
+        )),
     }
+}
+
+fn source_field(source: &TerminalReleaseHistorySource) -> String {
+    format!("terminal_release_history:{}", source.key.dispatch_id)
+}
+
+fn publication(
+    source: &TerminalReleaseHistorySource,
+    handle: &PreparedObjectHandle,
+) -> PublishObjectReferenceRequest {
+    PublishObjectReferenceRequest {
+        pin_id: handle.pin_id.clone(),
+        object_hash: handle.object_hash,
+        object_generation: handle.object_generation,
+        owner_kind: "action".into(),
+        owner_id: source.context.action_id.to_string(),
+        source_field: source_field(source),
+    }
+}
+
+pub(super) fn inspect_sealed(
+    conn: &Connection,
+    config: &StoreConfig,
+    daemon: &DaemonStateRow,
+    source: &TerminalReleaseHistorySource,
+) -> Result<Option<TerminalReleaseHistoryFact>, StoreError> {
+    Ok(read_sealed(conn, config, daemon, source)?.map(|sealed| sealed.fact))
 }
 
 fn decode_observation(
@@ -249,10 +300,13 @@ fn replay(
 
 fn read_sealed(
     conn: &Connection,
-    context: &SealContext<'_>,
-    publication: &PublishObjectReferenceRequest,
+    config: &StoreConfig,
+    daemon: &DaemonStateRow,
+    source: &TerminalReleaseHistorySource,
 ) -> Result<Option<Sealed>, StoreError> {
-    let c = &context.source.context;
+    let c = &source.context;
+    let action = c.action_id.to_string();
+    let field = source_field(source);
     let count: i64 = conn.query_row(
         "SELECT COUNT(*) FROM events WHERE aggregate_type='action' AND aggregate_id=?1 AND event_type=?2",
         params![c.action_id.to_string(), TERMINAL_RELEASE_HISTORY_EVENT],
@@ -260,7 +314,7 @@ fn read_sealed(
     )?;
     let refs: i64 = conn.query_row(
         "SELECT COUNT(*) FROM object_references WHERE owner_kind=?1 AND owner_id=?2 AND source_field=?3",
-        params![publication.owner_kind, publication.owner_id, publication.source_field],
+        params!["action", action, field],
         |row| row.get(0)
     )?;
     match (count, refs) {
@@ -282,8 +336,8 @@ fn read_sealed(
             params![
                 c.action_id.to_string(),
                 TERMINAL_RELEASE_HISTORY_EVENT,
-                context.daemon.stream_id.to_string(),
-                super::super::integer(context.source.action_revision.as_u64())?,
+                daemon.stream_id.to_string(),
+                super::super::integer(source.action_revision.as_u64())?,
                 c.actor_id.as_str(),
                 c.project_id.to_string(),
                 c.receipt_id.to_string(),
@@ -304,11 +358,11 @@ fn read_sealed(
     let payload: HistoryPayload = serde_json::from_str(&encoded)
         .map_err(|_| unavailable("historical release event payload is invalid"))?;
     if payload.schema_version != 1
-        || payload.dispatch_id != context.source.key.dispatch_id
-        || payload.context_digest != context.source.key.header.payload_hash
+        || payload.dispatch_id != source.key.dispatch_id
+        || payload.context_digest != source.key.header.payload_hash
         || payload.producer_pin_id.is_empty()
         || payload.inspected_by_epoch < c.daemon_epoch
-        || payload.inspected_by_epoch > context.daemon.daemon_epoch
+        || payload.inspected_by_epoch > daemon.daemon_epoch
         || payload.captured_at_ms.as_i64() != occurred
         || canonical_sha256(&payload)?.as_prefixed_str() != digest
     {
@@ -320,7 +374,7 @@ fn read_sealed(
         "SELECT EXISTS(SELECT 1 FROM object_references f JOIN object_records o ON o.object_hash=f.object_hash
          WHERE f.owner_kind=?1 AND f.owner_id=?2 AND f.source_field=?3 AND f.object_hash=?4
            AND f.state='live' AND o.state='live' AND o.object_generation=?5)",
-        params![publication.owner_kind, publication.owner_id, publication.source_field,
+        params!["action", action, field,
             payload.observation_object_hash.to_string(),payload.object_generation],|row|row.get(0),
     )?;
     if !live {
@@ -330,11 +384,11 @@ fn read_sealed(
     }
     let bytes = read_verified_evidence_bytes_bounded(
         conn,
-        context.config,
+        config,
         payload.observation_object_hash,
         MAX_PROOF_BYTES,
     )?;
-    let observation = decode_observation(&bytes, context.source, TimestampMs::new(recorded))?;
+    let observation = decode_observation(&bytes, source, TimestampMs::new(recorded))?;
     if observation.captured_at_ms != payload.captured_at_ms
         || canonical_sha256(&observation.ack)? != payload.native_ack_digest
     {
@@ -342,9 +396,9 @@ fn read_sealed(
             "historical release proof differs from its event",
         ));
     }
-    let cursor = event_cursor(context.daemon, sequence)?;
+    let cursor = event_cursor(daemon, sequence)?;
     Ok(Some(Sealed {
-        fact: payload.fact(context.source, cursor),
+        fact: payload.fact(source, cursor),
         ack: observation.ack,
         producer_pin_id: payload.producer_pin_id,
     }))

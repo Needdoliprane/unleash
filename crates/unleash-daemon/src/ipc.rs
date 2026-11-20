@@ -979,19 +979,17 @@ async fn query_state_snapshot(
 #[serde(deny_unknown_fields)]
 struct ReceiptQueryPayload {
     command_id: CommandId,
-    #[serde(default, deserialize_with = "deserialize_acquisition_reference")]
+    #[serde(default, deserialize_with = "deserialize_result_reference")]
     result_ref: Option<String>,
 }
 
-fn deserialize_acquisition_reference<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+fn deserialize_result_reference<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
     let reference = String::deserialize(deserializer)?;
     if reference.is_empty() || reference.len() > 128 || reference.chars().any(char::is_control) {
-        return Err(serde::de::Error::custom(
-            "invalid acquisition result reference",
-        ));
+        return Err(serde::de::Error::custom("invalid result reference"));
     }
     Ok(Some(reference))
 }
@@ -1054,6 +1052,29 @@ async fn query_command_receipt(
         })?;
     let cmd_id = payload.command_id;
     if let Some(reference) = payload.result_ref {
+        if reference.starts_with(
+            unleash_store::terminal_allocations::terminal_release_history::TERMINAL_RELEASE_HISTORY_PREFIX
+        ) {
+            let project = query.project_id.ok_or_else(|| {
+                IpcError::new(ErrorCode::InvalidArgument, None,
+                    "Historical release result requires its exact project", RetryClass::Never)
+                    .with_command_id(cmd_id)
+            })?;
+            let store = Arc::clone(&state.store);
+            let caller = unleash_store::CallerAuthority {
+                actor_id: session.actor_id.clone(),
+                role: unleash_store::CallerRole::PolicyAdmin,
+            };
+            let snapshot = tokio::task::spawn_blocking(move || {
+                store.inspect_terminal_release_reconciliation_result(&caller, cmd_id, &reference, project)
+            }).await
+            .map_err(|_| internal_ipc_error("Historical release result inspection task failed", Some(cmd_id)))?
+            .map_err(|error| store_error_to_ipc_error(&error, Some(cmd_id)))?;
+            let result = serde_json::to_value(snapshot.value).map_err(|_| {
+                internal_ipc_error("Historical release result serialization failed", Some(cmd_id))
+            })?;
+            return Ok(QueryResponse { request_id: query.request_id, watermark: Some(snapshot.cursor), result });
+        }
         return query_terminal_acquisition_result(
             state,
             session,
@@ -1172,117 +1193,125 @@ async fn handle_command_frame(
         return false;
     };
 
-    let (outcome, num_events, mut stop_reason, mut stop_drain_timeout) =
-        if is_provider_profile_command(&cmd) {
-            let committed = if cmd.command_type == "SetProviderProfile" {
-                crate::provider_profile_service::commit(
-                    Arc::clone(&state.store),
-                    session.clone(),
-                    cmd.clone(),
-                )
-                .await
-            } else if matches!(
-                cmd.payload.get("phase").and_then(serde_json::Value::as_str),
-                Some("connect" | "inventory")
-            ) {
-                crate::provider_probe_connect_service::commit(state, session.clone(), cmd.clone())
-                    .await
-            } else {
-                crate::provider_profile_validation_service::commit(
-                    Arc::clone(&state.store),
-                    session.clone(),
-                    cmd.clone(),
-                )
-                .await
-            };
-            let outcome = match committed {
-                Ok(outcome) => outcome,
-                Err(error) => {
-                    let _ = write_json_frame_timeout(stream, &error, RESPONSE_WRITE_TIMEOUT).await;
-                    return false;
-                }
-            };
-            if cmd.command_type == "TestProviderProfile"
-                && cmd.payload.get("phase").and_then(serde_json::Value::as_str)
-                    == Some("generation_probe")
-            {
-                crate::provider_probe_generation_service::start(state, session, &cmd);
+    let (outcome, num_events, mut stop_reason, mut stop_drain_timeout) = if cmd.command_type
+        == "ReconcileProcess"
+    {
+        match crate::terminal_service::reconcile_release(state, session, cmd.clone()).await {
+            Ok(outcome) => (outcome, 2, None, None),
+            Err(error) => {
+                let _ = write_json_frame_timeout(stream, &error, RESPONSE_WRITE_TIMEOUT).await;
+                return false;
             }
-            (outcome, 1, None, None)
+        }
+    } else if is_provider_profile_command(&cmd) {
+        let committed = if cmd.command_type == "SetProviderProfile" {
+            crate::provider_profile_service::commit(
+                Arc::clone(&state.store),
+                session.clone(),
+                cmd.clone(),
+            )
+            .await
+        } else if matches!(
+            cmd.payload.get("phase").and_then(serde_json::Value::as_str),
+            Some("connect" | "inventory")
+        ) {
+            crate::provider_probe_connect_service::commit(state, session.clone(), cmd.clone()).await
         } else {
-            let mut prepared = match prepare_command_request(state, session, cmd.clone()).await {
-                Ok(p) => p,
-                Err(ipc) => {
-                    let _ = write_json_frame_timeout(stream, &ipc, RESPONSE_WRITE_TIMEOUT).await;
-                    return false;
-                }
-            };
-
-            if matches!(
-                prepared.req.mutation,
-                CommandMutation::CreateMission { .. }
-                    | CommandMutation::RequestBackup { .. }
-                    | CommandMutation::PrepareTerminalAllocation { .. }
-                    | CommandMutation::PrepareTerminalControl { .. }
-                    | CommandMutation::PrepareTerminalRelease { .. }
-            ) && let Err(ipc) = ensure_principal_registered(&state.store, session).await
-            {
+            crate::provider_profile_validation_service::commit(
+                Arc::clone(&state.store),
+                session.clone(),
+                cmd.clone(),
+            )
+            .await
+        };
+        let outcome = match committed {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                let _ = write_json_frame_timeout(stream, &error, RESPONSE_WRITE_TIMEOUT).await;
+                return false;
+            }
+        };
+        if cmd.command_type == "TestProviderProfile"
+            && cmd.payload.get("phase").and_then(serde_json::Value::as_str)
+                == Some("generation_probe")
+        {
+            crate::provider_probe_generation_service::start(state, session, &cmd);
+        }
+        (outcome, 1, None, None)
+    } else {
+        let mut prepared = match prepare_command_request(state, session, cmd.clone()).await {
+            Ok(p) => p,
+            Err(ipc) => {
                 let _ = write_json_frame_timeout(stream, &ipc, RESPONSE_WRITE_TIMEOUT).await;
                 return false;
             }
-
-            let num_events = prepared.req.events.len();
-            let store_ref = Arc::clone(&state.store);
-            let req_to_commit = prepared.req;
-            let outcome = match tokio::task::spawn_blocking(move || {
-                store_ref.commit_command(req_to_commit)
-            })
-            .await
-            {
-                Ok(Ok(o)) => o,
-                Ok(Err(err)) => {
-                    let mut ipc = store_error_to_ipc_error(&err, Some(cmd.command_id));
-                    if matches!(cmd.command_type.as_str(), "PurgeHistory" | "RequestBackup")
-                        && matches!(
-                            err,
-                            StoreError::StorageBusy(_)
-                                | StoreError::StorageFull(_)
-                                | StoreError::StorageUnavailable(_)
-                                | StoreError::StorageCorrupt(_)
-                                | StoreError::Io(_)
-                                | StoreError::CutpointInjected { .. }
-                        )
-                    {
-                        // Le Store peut avoir committé avant une erreur de finalisation physique.
-                        // La recherche ci-dessous ne change pas la réponse en succès.
-                        publish_existing_receipt_cursor(state, session, cmd.command_id).await;
-                        if cmd.command_type == "RequestBackup" {
-                            reconcile_accepted_backup(state, session, &cmd).await;
-                        }
-                        ipc.retry_class = RetryClass::AfterReconciliation;
-                        ipc.message = String::from(
-                            "Issue de commande indéterminée ; inspecter le reçu et la récupération",
-                        );
-                    }
-                    let _ = write_json_frame_timeout(stream, &ipc, RESPONSE_WRITE_TIMEOUT).await;
-                    return false;
-                }
-                Err(join_err) => {
-                    let ipc = internal_ipc_error(
-                        &format!("Join error commit_command: {join_err}"),
-                        Some(cmd.command_id),
-                    );
-                    let _ = write_json_frame_timeout(stream, &ipc, RESPONSE_WRITE_TIMEOUT).await;
-                    return false;
-                }
-            };
-            (
-                outcome,
-                num_events,
-                prepared.stop_reason.take(),
-                prepared.stop_drain_timeout.take(),
-            )
         };
+
+        if matches!(
+            prepared.req.mutation,
+            CommandMutation::CreateMission { .. }
+                | CommandMutation::RequestBackup { .. }
+                | CommandMutation::PrepareTerminalAllocation { .. }
+                | CommandMutation::PrepareTerminalControl { .. }
+                | CommandMutation::PrepareTerminalRelease { .. }
+        ) && let Err(ipc) = ensure_principal_registered(&state.store, session).await
+        {
+            let _ = write_json_frame_timeout(stream, &ipc, RESPONSE_WRITE_TIMEOUT).await;
+            return false;
+        }
+
+        let num_events = prepared.req.events.len();
+        let store_ref = Arc::clone(&state.store);
+        let req_to_commit = prepared.req;
+        let outcome = match tokio::task::spawn_blocking(move || {
+            store_ref.commit_command(req_to_commit)
+        })
+        .await
+        {
+            Ok(Ok(o)) => o,
+            Ok(Err(err)) => {
+                let mut ipc = store_error_to_ipc_error(&err, Some(cmd.command_id));
+                if matches!(cmd.command_type.as_str(), "PurgeHistory" | "RequestBackup")
+                    && matches!(
+                        err,
+                        StoreError::StorageBusy(_)
+                            | StoreError::StorageFull(_)
+                            | StoreError::StorageUnavailable(_)
+                            | StoreError::StorageCorrupt(_)
+                            | StoreError::Io(_)
+                            | StoreError::CutpointInjected { .. }
+                    )
+                {
+                    // Le Store peut avoir committé avant une erreur de finalisation physique.
+                    // La recherche ci-dessous ne change pas la réponse en succès.
+                    publish_existing_receipt_cursor(state, session, cmd.command_id).await;
+                    if cmd.command_type == "RequestBackup" {
+                        reconcile_accepted_backup(state, session, &cmd).await;
+                    }
+                    ipc.retry_class = RetryClass::AfterReconciliation;
+                    ipc.message = String::from(
+                        "Issue de commande indéterminée ; inspecter le reçu et la récupération",
+                    );
+                }
+                let _ = write_json_frame_timeout(stream, &ipc, RESPONSE_WRITE_TIMEOUT).await;
+                return false;
+            }
+            Err(join_err) => {
+                let ipc = internal_ipc_error(
+                    &format!("Join error commit_command: {join_err}"),
+                    Some(cmd.command_id),
+                );
+                let _ = write_json_frame_timeout(stream, &ipc, RESPONSE_WRITE_TIMEOUT).await;
+                return false;
+            }
+        };
+        (
+            outcome,
+            num_events,
+            prepared.stop_reason.take(),
+            prepared.stop_drain_timeout.take(),
+        )
+    };
 
     let (receipt, newly_committed) = match outcome {
         CommitOutcome::Committed(r) => (r, true),

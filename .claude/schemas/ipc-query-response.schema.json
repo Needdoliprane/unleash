@@ -115,6 +115,119 @@
         }
       }
     },
+    "terminal_release_history_response": {
+      "$ref": "#",
+      "required": [
+        "watermark"
+      ],
+      "properties": {
+        "watermark": {
+          "type": "object"
+        },
+        "result": {
+          "$ref": "#/$defs/terminal_release_history_result"
+        }
+      }
+    },
+    "terminal_release_history_result": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "command_id",
+        "receipt_id",
+        "terminal_id",
+        "process_run_uuid",
+        "source_command_id",
+        "source_receipt_id",
+        "source_action_id",
+        "source_dispatch_id",
+        "source_evaluation_id",
+        "result_ref",
+        "source_intent_digest",
+        "source_context_digest",
+        "native_ack_digest",
+        "observation_object_hash",
+        "retirement_epoch",
+        "retirement_fence",
+        "inspected_by_epoch",
+        "observed_at_ms",
+        "inspected_by",
+        "cursor"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "command_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "receipt_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "terminal_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "process_run_uuid": {
+          "$ref": "#/$defs/uuid"
+        },
+        "source_command_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "source_receipt_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "source_action_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "source_dispatch_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "source_evaluation_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "result_ref": {
+          "type": "string",
+          "pattern": "^terminal-release-history:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+        },
+        "source_intent_digest": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        "source_context_digest": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        "native_ack_digest": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        "observation_object_hash": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        "retirement_epoch": {
+          "$ref": "#/$defs/wire_uint"
+        },
+        "retirement_fence": {
+          "$ref": "#/$defs/wire_uint"
+        },
+        "inspected_by_epoch": {
+          "$ref": "#/$defs/wire_uint"
+        },
+        "observed_at_ms": {
+          "$ref": "#/$defs/wire_uint"
+        },
+        "inspected_by": {
+          "type": "string",
+          "minLength": 1
+        },
+        "cursor": {
+          "$ref": "#/properties/watermark",
+          "type": "object"
+        }
+      }
+    },
     "terminal_acquisition_response": {
       "$ref": "#",
       "required": ["watermark"],

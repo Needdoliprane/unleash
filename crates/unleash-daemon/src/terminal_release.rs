@@ -24,10 +24,11 @@ use unleash_process_host::{
 };
 use unleash_protocol::{CommandEnvelope, ErrorCode, IpcError, ReceiptState, RetryClass};
 use unleash_store::{
-    CallerAuthority, CallerRole, CommandMutation, CommitCommandRequest, PrepareObjectRequest,
-    PublishObjectReferenceRequest,
+    CallerAuthority, CallerRole, CommandMutation, CommitCommandRequest, CommitOutcome,
+    PrepareObjectRequest, PreparedObjectHandle, PublishObjectReferenceRequest, StoreError,
     terminal_allocations::{
         TerminalIdentityBackend, TerminalProcessIdentity,
+        terminal_release_history::{TerminalReleaseHistorySource, TerminalReleaseReconcilePlan},
         terminal_release_types::{
             ResolveTerminalReleaseRequest, TERMINAL_RELEASE_VERB, TerminalReleaseContext,
             TerminalReleaseObservation, TerminalReleaseRecord, TerminalReleaseRequest,
@@ -37,6 +38,120 @@ use unleash_store::{
 };
 type Slot = Arc<Mutex<Option<TerminalReleaseObservation>>>;
 type ReleaseError = Box<dyn std::error::Error + Send + Sync>;
+
+pub(crate) async fn reconcile(
+    state: &Arc<DaemonRuntimeState>,
+    session: &crate::auth::AuthenticatedSession,
+    envelope: CommandEnvelope,
+) -> Result<CommitOutcome, IpcError> {
+    let command = envelope.command_id;
+    if !matches!(
+        session.client_kind,
+        unleash_protocol::ClientKind::Cli
+            | unleash_protocol::ClientKind::Tui
+            | unleash_protocol::ClientKind::Gui
+    ) {
+        return Err(IpcError::from_reason(
+            unleash_protocol::ReasonCode::OperationNotAuthorized,
+            "Human terminal authority required",
+        )
+        .with_command_id(command));
+    }
+    let activity = state.broker_activity.admit().ok_or_else(|| {
+        IpcError::new(
+            ErrorCode::ResourceBusy,
+            None,
+            "Daemon is draining",
+            RetryClass::Never,
+        )
+        .with_command_id(command)
+    })?;
+    let caller = CallerAuthority {
+        actor_id: session.actor_id.clone(),
+        role: CallerRole::PolicyAdmin,
+    };
+    let state = Arc::clone(state);
+    tokio::task::spawn_blocking(move || {
+        let _activity = activity;
+        commit_reconciliation(&state, caller, envelope)
+    })
+    .await
+    .map_err(|_| {
+        IpcError::new(
+            ErrorCode::InternalFailure,
+            None,
+            "Historical release inspection task failed",
+            RetryClass::AfterReconciliation,
+        )
+        .with_command_id(command)
+    })?
+}
+
+fn commit_reconciliation(
+    state: &DaemonRuntimeState,
+    caller: CallerAuthority,
+    envelope: CommandEnvelope,
+) -> Result<CommitOutcome, IpcError> {
+    let command = envelope.command_id;
+    let ipc_error =
+        |error: StoreError| crate::error::store_error_to_ipc_error(&error, Some(command));
+    let proof = match state
+        .store
+        .plan_terminal_release_reconciliation(&caller, &envelope)
+        .map_err(ipc_error)?
+    {
+        TerminalReleaseReconcilePlan::Replay(receipt) => {
+            return Ok(CommitOutcome::IdempotentReplay(receipt));
+        }
+        TerminalReleaseReconcilePlan::ReferenceSealed => None,
+        TerminalReleaseReconcilePlan::Inspect(source) => {
+            let observation = observe_historical(state, &source).map_err(|_| {
+                IpcError::new(
+                    ErrorCode::OutcomeUnknown,
+                    None,
+                    "Historical native Release proof is unavailable",
+                    RetryClass::AfterReconciliation,
+                )
+                .with_command_id(command)
+            })?;
+            Some(prepare_historical_proof(state, &observation).map_err(ipc_error)?)
+        }
+    };
+    let pin = proof.as_ref().map(|handle| handle.pin_id.clone());
+    let result = state
+        .store
+        .commit_terminal_release_reconciliation(caller, envelope, proof);
+    if !matches!(result, Ok(CommitOutcome::Committed(_)))
+        && let Some(pin) = pin
+        && state.store.release_pin(&pin).is_err()
+    {
+        tracing::warn!("Historical Release preparation pin could not be released");
+    }
+    result.map_err(ipc_error)
+}
+
+fn prepare_historical_proof(
+    state: &DaemonRuntimeState,
+    observation: &TerminalReleaseObservation,
+) -> Result<PreparedObjectHandle, StoreError> {
+    let bytes = unleash_protocol::canonicalize_to_vec(observation)?;
+    let handle = state.store.prepare_object(PrepareObjectRequest {
+        object_hash: unleash_domain::Sha256Digest::from_bytes(&bytes),
+        byte_length: u64::try_from(bytes.len()).map_err(|_| {
+            StoreError::InvariantViolation("Historical proof size is invalid".into())
+        })?,
+        media_type: "application/json".into(),
+        owner_kind: "action".into(),
+        owner_id: observation.ack.key.header.action_id.to_string(),
+    })?;
+    if let Err(error) = state.store.write_prepared_object_bytes(&handle, &bytes) {
+        if state.store.release_pin(&handle.pin_id).is_err() {
+            tracing::warn!("Unwritten historical Release preparation pin could not be released");
+        }
+        return Err(error);
+    }
+    Ok(handle)
+}
 
 pub(crate) fn prepare(
     session: &crate::auth::AuthenticatedSession,
@@ -377,7 +492,20 @@ fn rendezvous(
     state: &DaemonRuntimeState,
     record: &TerminalReleaseRecord,
 ) -> Result<PathBuf, ReleaseError> {
-    let c = &record.context;
+    let (runtime, manifest) = bound_rendezvous(state, &record.context)?;
+    if !matches!(
+        manifest.control_state,
+        Some(HostControlState::Active { .. })
+    ) {
+        return Err("native host does not attest active retirement support".into());
+    }
+    Ok(runtime)
+}
+
+fn bound_rendezvous(
+    state: &DaemonRuntimeState,
+    c: &TerminalReleaseContext,
+) -> Result<(PathBuf, HostManifest), ReleaseError> {
     let allocation = state
         .store
         .inspect_terminal_allocation_snapshot(c.terminal_id)?
@@ -400,17 +528,65 @@ fn rendezvous(
     }
     unleash_platform::validate_rendezvous_dir(&runtime)?;
     let m = HostManifest::load_private(&runtime.join(HOST_MANIFEST_FILENAME))?;
-    validate_manifest(&m, c)?;
-    if !matches!(m.control_state, Some(HostControlState::Active { .. })) {
-        return Err("native host does not attest active retirement support".into());
-    }
+    validate_identity(&m, c)?;
+    Ok((runtime, m))
+}
+
+fn validate_identity(m: &HostManifest, c: &TerminalReleaseContext) -> Result<(), ReleaseError> {
+    validate_manifest(m, c)?;
     if identity(&unleash_platform::inspect_process_identity(
         c.expected_os_identity.pid,
     )?)? != c.expected_os_identity
     {
         return Err("terminal release fresh OS identity differs".into());
     }
-    Ok(runtime)
+    Ok(())
+}
+
+fn observe_historical(
+    state: &DaemonRuntimeState,
+    source: &TerminalReleaseHistorySource,
+) -> Result<TerminalReleaseObservation, ReleaseError> {
+    let c = &source.context;
+    let (runtime, manifest) = bound_rendezvous(state, c)?;
+    let key: ControlReleaseKey = serde_json::from_value(serde_json::to_value(&source.key)?)?;
+    let Some(HostControlState::Released { ack: cached }) = manifest.control_state else {
+        return Err("historical Release acknowledgement not published".into());
+    };
+    if cached.key != key || !state.is_accepting() {
+        return Err("historical Release key or daemon admission changed".into());
+    }
+    let secret = load_control_secret(&runtime.join(CONTROL_SECRET_FILENAME))?;
+    let mut client = HostClient::connect(
+        &runtime.join(HOST_SOCKET_FILENAME),
+        c.process_run_uuid,
+        c.authority_generation,
+        c.daemon_epoch,
+        c.resource_fence,
+    )?;
+    // An equal pair can inspect the cached acknowledgement but cannot retire
+    // active control, even if the host changes state before receiving it.
+    let response = client.release_control(&ControlReleaseRequest {
+        key,
+        current_secret: secret.expose_secret().into(),
+        next_secret: secret.expose_secret().into(),
+    })?;
+    let ControlReleaseResponse::Ack { ack } = response else {
+        return Err("historical Release acknowledgement refused".into());
+    };
+    let manifest = HostManifest::load_private(&runtime.join(HOST_MANIFEST_FILENAME))?;
+    validate_identity(&manifest, c)?;
+    if ack != cached
+        || !matches!(&manifest.control_state, Some(HostControlState::Released { ack: current }) if current == &ack)
+    {
+        return Err("historical Release native acknowledgement changed".into());
+    }
+    Ok(TerminalReleaseObservation {
+        schema_version: 1,
+        ack: serde_json::from_value(serde_json::to_value(&ack)?)?,
+        manifest_digest: unleash_protocol::canonical_sha256(&manifest)?,
+        captured_at_ms: state.store.config().clock.now_ms(),
+    })
 }
 
 fn before_effect(

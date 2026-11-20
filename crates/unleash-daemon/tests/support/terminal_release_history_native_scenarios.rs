@@ -1,6 +1,7 @@
 //! Native prerequisite of historical Release reconciliation, with no proposed wire.
 //! The observed historical ACK grants no current terminal capability.
 use super::*;
+use unleash_client::{ClientError, UnleashClient};
 use unleash_process_host::{ControlReleaseAck, ControlReleaseRequest, ControlReleaseResponse};
 use unleash_store::terminal_allocations::terminal_release_history::{
     SealTerminalReleaseHistoryRequest, TERMINAL_RELEASE_HISTORY_EVENT,
@@ -487,4 +488,139 @@ async fn t_f011_010_historical_native_release_ack_is_exact_after_restart_without
     drain(&mut lost.harness.fixture).await;
     exact_native_ack(&mut client, &request, &lost.ack);
     assert_quarantined(&lost);
+}
+
+#[tokio::test]
+async fn t_f011_010_reconcile_process_publishes_the_release_history_receipt() {
+    let mut lost = lose_native_ack().await;
+    let (_, target, _) = history_target(&lost);
+    let envelope = command(
+        lost.harness.fixture.authority,
+        0xf011_8210,
+        target.project_id,
+        target.terminal_id.as_uuid(),
+        lost.acquired.control_revision.as_u64(),
+        "ReconcileProcess",
+        json!({
+            "kind":"attest_terminal_release",
+            "terminal_id":target.terminal_id,
+            "process_run_uuid":target.process_run_uuid,
+            "source_action_id":target.action_id,
+            "source_dispatch_id":target.dispatch_id,
+        }),
+    );
+    let mut wrong_revision = envelope.clone();
+    wrong_revision.expected_revision = envelope.expected_revision.next();
+    let client = &mut lost.harness.fixture.client;
+    let rejection = client.send_command(&wrong_revision).await.unwrap_err();
+    assert!(
+        matches!(&rejection, ClientError::Remote(error) if error.code == ErrorCode::RevisionConflict),
+        "{rejection:?}"
+    );
+    let receipt = client.send_command(&envelope).await.unwrap();
+    let reference = format!(
+        "terminal-release-history:{}:{}",
+        target.action_id, target.dispatch_id
+    );
+    assert_eq!(receipt.result_ref.as_deref(), Some(reference.as_str()));
+    assert_eq!(receipt.state, ReceiptState::Completed);
+    assert_eq!(receipt.new_revision, lost.acquired.control_revision);
+    let query = unleash_protocol::QueryEnvelope {
+        protocol_version: ProtocolVersion,
+        request_id: RequestId::from_u128(0xf011_8211),
+        query_type: "GetCommandReceipt".into(),
+        project_id: Some(target.project_id),
+        payload: object(json!({"command_id":receipt.command_id,"result_ref":reference})),
+    };
+    let first = client.query(&query).await.unwrap();
+    assert_release_history_projection(&lost, &receipt, &first);
+    let original = lost.receipt.command_id;
+    let client = &mut lost.harness.fixture.client;
+    assert_reconciliation_refusals(client, &envelope, &query, original).await;
+    assert_reconciliation_replay(client, &envelope, &query, &receipt, &first.result).await;
+
+    let mut another = envelope.clone();
+    another.command_id = CommandId::from_u128(0xf011_8214);
+    let referenced = client.send_command(&another).await.unwrap();
+    assert_ne!(referenced.receipt_id, receipt.receipt_id);
+    assert_eq!(referenced.result_ref, receipt.result_ref);
+    assert_eq!(referenced.state, ReceiptState::Completed);
+
+    assert_quarantined(&lost);
+    lost.harness.fixture.daemon.kill_for_restart();
+    lost.harness.fixture.start_successor().await;
+    assert_reconciliation_replay(
+        &mut lost.harness.fixture.client,
+        &envelope,
+        &query,
+        &receipt,
+        &first.result,
+    )
+    .await;
+    assert_quarantined(&lost);
+    drain(&mut lost.harness.fixture).await;
+}
+
+fn assert_release_history_projection(
+    lost: &LostRelease,
+    receipt: &CommandReceipt,
+    response: &unleash_protocol::QueryResponse,
+) {
+    let result = &response.result;
+    assert_eq!(result.get("receipt_id"), Some(&json!(receipt.receipt_id)));
+    assert_eq!(
+        result.get("source_receipt_id"),
+        Some(&json!(lost.receipt.receipt_id))
+    );
+    assert_eq!(
+        result.get("native_ack_digest"),
+        Some(&json!(
+            unleash_protocol::canonical_sha256(&lost.ack).unwrap()
+        ))
+    );
+    let fact_cursor: unleash_protocol::EventCursor =
+        serde_json::from_value(result.get("cursor").unwrap().clone()).unwrap();
+    assert_eq!(fact_cursor.stream_id, receipt.event_cursor.stream_id);
+    assert!(fact_cursor.sequence < receipt.event_cursor.sequence);
+    assert!(
+        response
+            .watermark
+            .is_some_and(|cursor| cursor.sequence >= receipt.event_cursor.sequence)
+    );
+}
+
+async fn assert_reconciliation_refusals(
+    client: &mut UnleashClient,
+    envelope: &CommandEnvelope,
+    query: &unleash_protocol::QueryEnvelope,
+    original: CommandId,
+) {
+    let mut conflicting = envelope.clone();
+    conflicting.payload.insert(
+        "source_dispatch_id".into(),
+        json!(unleash_domain::DispatchId::from_u128(0xf011_8212)),
+    );
+    assert!(matches!(
+        client.send_command(&conflicting).await,
+        Err(ClientError::Remote(error)) if error.code == ErrorCode::IdempotencyConflict
+    ));
+    let mut foreign_query = query.clone();
+    foreign_query.project_id = Some(unleash_domain::ProjectId::from_u128(0xf011_8213));
+    assert!(client.query(&foreign_query).await.is_err());
+    let mut old_receipt = query.clone();
+    old_receipt
+        .payload
+        .insert("command_id".into(), json!(original));
+    assert!(client.query(&old_receipt).await.is_err());
+}
+
+async fn assert_reconciliation_replay(
+    client: &mut UnleashClient,
+    envelope: &CommandEnvelope,
+    query: &unleash_protocol::QueryEnvelope,
+    receipt: &CommandReceipt,
+    result: &Value,
+) {
+    assert_eq!(client.send_command(envelope).await.unwrap(), *receipt);
+    assert_eq!(&client.query(query).await.unwrap().result, result);
 }

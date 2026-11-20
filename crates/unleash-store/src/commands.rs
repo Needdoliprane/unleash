@@ -123,6 +123,13 @@ impl AggregateKind {
 /// Mutation pure décidée par le domaine et exécutée atomiquement par [`CommitCommandRequest`].
 #[derive(Debug, Clone)]
 pub enum CommandMutation {
+    /// Seal or reference historical Release evidence without changing the original action.
+    AttestHistoricalTerminalRelease {
+        /// Reconciliation authority resolved by the authenticated daemon.
+        caller: CallerAuthority,
+        /// Optional prepared proof from an exact native inspection.
+        proof: Option<crate::PreparedObjectHandle>,
+    },
     /// Prepare explicit native control retirement without stopping the resource.
     PrepareTerminalRelease {
         /// Transport-authenticated human authority.
@@ -896,7 +903,7 @@ pub(crate) fn classify_command_replay(
     };
     let lineage_bound = matches!(
         envelope.command_type.as_str(),
-        "SetProviderProfile" | "TestProviderProfile" | "ResizeTerminal"
+        "SetProviderProfile" | "TestProviderProfile" | "ResizeTerminal" | "ReconcileProcess"
     ) || (envelope.command_type == "AcquireTerminal"
         && envelope.payload.contains_key("terminal_id"));
     let historical_command =
@@ -1429,6 +1436,23 @@ fn apply_command_mutation(
 ) -> Result<Revision, StoreError> {
     let exp_i64 = i64::try_from(expected_rev.as_u64()).unwrap_or(0);
     match mutation {
+        CommandMutation::AttestHistoricalTerminalRelease { caller, proof } => {
+            use crate::terminal_allocations::terminal_release_history::route::{
+                self, HistoryCommand,
+            };
+            route::commit_tx(
+                tx,
+                config,
+                daemon,
+                now_ms,
+                &HistoryCommand {
+                    caller,
+                    envelope,
+                    proof: proof.as_ref(),
+                },
+                generated_events,
+            )
+        }
         CommandMutation::PrepareTerminalRelease { request, .. } => {
             crate::terminal_allocations::terminal_release::prepare_tx(
                 tx,

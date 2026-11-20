@@ -1351,6 +1351,14 @@ pub(crate) fn validate_command(
     tx: &Transaction<'_>,
     req: &CommitCommandRequest,
 ) -> Result<(), StoreError> {
+    if let CommandMutation::AttestHistoricalTerminalRelease { caller, .. } = &req.mutation {
+        return terminal_release_history::route::validate_command(req, caller);
+    }
+    if req.envelope.command_type == "ReconcileProcess" {
+        return Err(invalid(
+            "historical release reconciliation mutation missing",
+        ));
+    }
     if let CommandMutation::PrepareTerminalRelease { caller, request } = &req.mutation {
         return terminal_release::validate_command(req, caller, request);
     }

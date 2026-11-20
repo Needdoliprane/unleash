@@ -22,7 +22,12 @@ use crate::{
     BrokerActionSnapshot, BrokerCause, BrokerIntent, CallerAuthority, DaemonStateRow, StoreError,
 };
 
+pub(crate) mod route;
 mod seal;
+pub use route::{
+    TERMINAL_RELEASE_HISTORY_PREFIX, TerminalReleaseReconcilePlan,
+    TerminalReleaseReconciliationResult,
+};
 pub use seal::{
     SealTerminalReleaseHistoryRequest, TERMINAL_RELEASE_HISTORY_EVENT,
     TerminalReleaseHistoryCommit, TerminalReleaseHistoryFact,
