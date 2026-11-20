@@ -162,7 +162,10 @@ fn descriptors(pid: u32) -> Result<Vec<Descriptor>, TcpListenerError> {
         });
     }
     result.sort_unstable();
-    if result.windows(2).any(|pair| pair[0].fd == pair[1].fd) {
+    if result
+        .windows(2)
+        .any(|pair| matches!(pair, [first, last] if first.fd == last.fd))
+    {
         return Err(TcpListenerError::AbiMismatch);
     }
     Ok(result)
