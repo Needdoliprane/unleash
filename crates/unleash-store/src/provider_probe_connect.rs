@@ -274,6 +274,7 @@ pub(crate) enum ConnectPhaseAccess<'a> {
     Live(&'a ConnectPhasePermission),
     Observation(&'a ConnectPhasePermission),
     InventoryLive(&'a crate::provider_probe_inventory::InventoryPhasePermission),
+    InventoryObservation(&'a crate::provider_probe_inventory::InventoryPhasePermission),
 }
 
 impl ProviderProbeConnectClaim {
@@ -521,7 +522,10 @@ pub(crate) fn guard_phase_access(
     phase: &crate::BrokerPhase,
     access: Option<ConnectPhaseAccess<'_>>,
 ) -> Result<bool, StoreError> {
-    let transport = if matches!(&access, Some(ConnectPhaseAccess::InventoryLive(_))) {
+    let transport = if matches!(
+        &access,
+        Some(ConnectPhaseAccess::InventoryLive(_) | ConnectPhaseAccess::InventoryObservation(_))
+    ) {
         TransportPhase::Inventory
     } else {
         TransportPhase::Connect
@@ -553,6 +557,7 @@ pub(crate) fn guard_phase_access(
         ConnectPhaseAccess::Live(permission) => (permission, false),
         ConnectPhaseAccess::Observation(permission) => (permission, true),
         ConnectPhaseAccess::InventoryLive(permission) => (permission.inner(), false),
+        ConnectPhaseAccess::InventoryObservation(permission) => (permission.inner(), true),
     };
     if observation != matches!(phase, crate::BrokerPhase::Observation { .. }) {
         return Err(StoreError::EvidenceUnavailable(
@@ -560,7 +565,7 @@ pub(crate) fn guard_phase_access(
         ));
     }
     let current = if observation {
-        fact_context(tx, daemon, permission)?
+        fact_transport_context(tx, daemon, permission, transport)?
     } else {
         claim_transport_identity(tx, daemon, &permission.request, transport)?
     };

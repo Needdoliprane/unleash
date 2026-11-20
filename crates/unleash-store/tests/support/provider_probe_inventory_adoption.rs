@@ -11,6 +11,40 @@ use unleash_store::{
 
 const PRODUCER: &str = "provider_probe_inventory_observation_preparation";
 
+#[path = "provider_probe_inventory_disposition.rs"]
+mod disposition;
+
+struct Dispatched {
+    dispatch_id: DispatchId,
+    continuation: ExecutionContinuation,
+    evaluation: BrokerEvaluation,
+    intent_digest: Sha256Digest,
+    decision_ref: String,
+}
+
+fn prepare_claim(store: &UnleashStore) -> TestResult<ProviderProbeInventoryClaim> {
+    initialize_pool(store)?;
+    store.register_principal(OBSERVER, "system", OBSERVER)?;
+    store.register_principal(
+        INVENTORY_OBSERVER_PRINCIPAL,
+        "system",
+        INVENTORY_OBSERVER_PRINCIPAL,
+    )?;
+    configure(store)?;
+    let wire = inventory(
+        store,
+        0xf012_2201,
+        issue(store, ProviderTestPhase::Inventory)?,
+    )?;
+    store.commit_command(prepare(store, &wire)?)?;
+    let ProviderProbeInventoryClaimOutcome::FreshClaim(claim) =
+        store.claim_provider_probe_inventory(claim_request(store, wire)?)?
+    else {
+        return Err("real original inventory claim required".into());
+    };
+    Ok(claim)
+}
+
 fn prepare_candidate(
     store: &UnleashStore,
     source_field: &str,
@@ -42,7 +76,7 @@ fn dispatch(
     store: &UnleashStore,
     claim: &ProviderProbeInventoryClaim,
     pool: PoolId,
-) -> TestResult<(DispatchId, ExecutionContinuation)> {
+) -> TestResult<Dispatched> {
     let authorizing = intent(claim)?;
     store.commit_provider_probe_inventory_phase(claim, authorizing.clone())?;
     publish_eligibility(store, claim, pool)?;
@@ -87,6 +121,7 @@ fn dispatch(
         ),
     )?;
     let dispatch_id = DispatchId::from_uuid(store.config().id_generator.new_uuid());
+    let decision_ref = decision.decision_ref.clone();
     store.commit_provider_probe_inventory_phase(
         claim,
         phase_request(
@@ -100,9 +135,12 @@ fn dispatch(
             },
         ),
     )?;
-    Ok((
+    Ok(Dispatched {
         dispatch_id,
-        ExecutionContinuation {
+        evaluation: authorizing.evaluation,
+        intent_digest: intent.intent_digest,
+        decision_ref,
+        continuation: ExecutionContinuation {
             reservation_id: commit.reservation_id,
             unit: commit.unit,
             unit_revision: commit.revision,
@@ -112,7 +150,23 @@ fn dispatch(
             fence: commit.lease.fence,
             boot_identity: commit.lease.boot_identity,
         },
-    ))
+    })
+}
+
+fn native_document(
+    store: &UnleashStore,
+    claim: &ProviderProbeInventoryClaim,
+    dispatch_id: DispatchId,
+    list: &[u8],
+) -> serde_json::Value {
+    let list_digest = Sha256Digest::from_bytes(list);
+    json!({
+        "schema_version":1,"action_id":claim.context().action_id,"dispatch_id":dispatch_id,
+        "request_digest":claim.context().request_digest,"peer":"127.0.0.1:11434",
+        "certificate_validation":"not_tls","revocation_checked":false,"status_code":200,
+        "response_digest":list_digest,"response_body_bytes":list.len(),
+        "inventory_digest":list_digest,"observed_at_ms":store.config().clock.now_ms(),
+    })
 }
 
 fn durable_state(
@@ -138,38 +192,13 @@ fn durable_state(
 fn t_f012_inventory_adopts_one_exact_fact_list_pair_without_disposing_dispatch() -> TestResult {
     let fixture = fixture()?;
     let store = &fixture.store;
-    let pool = initialize_pool(store)?;
-    store.register_principal(OBSERVER, "system", OBSERVER)?;
-    store.register_principal(
-        INVENTORY_OBSERVER_PRINCIPAL,
-        "system",
-        INVENTORY_OBSERVER_PRINCIPAL,
-    )?;
-    configure(store)?;
-    let wire = inventory(
-        store,
-        0xf012_2201,
-        issue(store, ProviderTestPhase::Inventory)?,
-    )?;
-    store.commit_command(prepare(store, &wire)?)?;
-    let ProviderProbeInventoryClaimOutcome::FreshClaim(claim) =
-        store.claim_provider_probe_inventory(claim_request(store, wire)?)?
-    else {
-        return Err("real original inventory claim required".into());
-    };
-    let (dispatch_id, continuation) = dispatch(store, &claim, pool)?;
+    let claim = prepare_claim(store)?;
+    let execution = dispatch(store, &claim, store.global_execution_pool_id()?)?;
     let list = br#"{"models":[]}"#;
-    let list_digest = Sha256Digest::from_bytes(list);
-    let document = json!({
-        "schema_version":1,"action_id":claim.context().action_id,"dispatch_id":dispatch_id,
-        "request_digest":claim.context().request_digest,"peer":"127.0.0.1:11434",
-        "certificate_validation":"not_tls","revocation_checked":false,"status_code":200,
-        "response_digest":list_digest,"response_body_bytes":list.len(),
-        "inventory_digest":list_digest,"observed_at_ms":store.config().clock.now_ms(),
-    });
+    let document = native_document(store, &claim, execution.dispatch_id, list);
     let fact = canonicalize_to_vec(&document)?;
     let input = AdoptProviderInventoryObservation {
-        continuation,
+        continuation: execution.continuation,
         fact: prepare_candidate(store, "fact", &fact)?,
         list: prepare_candidate(store, "list", list)?,
     };

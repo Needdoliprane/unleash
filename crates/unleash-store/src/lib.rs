@@ -119,7 +119,7 @@ pub use provider_probe_inventory::{
 };
 pub use provider_probe_inventory_observation::{
     AdoptProviderInventoryObservation, AdoptedProviderInventoryObservation,
-    INVENTORY_OBSERVER_PRINCIPAL, INVENTORY_PRODUCER_KIND,
+    CommitProviderInventoryObservation, INVENTORY_OBSERVER_PRINCIPAL, INVENTORY_PRODUCER_KIND,
 };
 pub use provider_probe_mandates::{
     ProviderProbeMandateChange, ProviderProbeMandateIssue, ProviderProbeMandateStatus,

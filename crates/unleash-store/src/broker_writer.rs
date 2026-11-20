@@ -461,24 +461,33 @@ pub(crate) fn commit_inventory_phase_tx(
     )
 }
 
-pub(crate) fn commit_connect_observation_tx(
+#[derive(Clone, Copy)]
+pub(crate) enum TransportObservation<'a> {
+    Connect(&'a crate::provider_probe_connect_observation::ConnectObservationPermission),
+    Inventory(&'a crate::provider_probe_inventory_observation::InventoryObservationPermission),
+}
+
+pub(crate) fn commit_transport_observation_tx(
     tx: &Transaction<'_>,
     config: &StoreConfig,
     now: TimestampMs,
     request: &BrokerPhaseRequest,
-    observation: &crate::provider_probe_connect_observation::ConnectObservationPermission,
+    observation: TransportObservation<'_>,
 ) -> Result<BrokerPhaseCommit, StoreError> {
+    use crate::provider_probe_connect::ConnectPhaseAccess;
+    let access = match &observation {
+        TransportObservation::Connect(proof) => ConnectPhaseAccess::Observation(proof.permission()),
+        TransportObservation::Inventory(proof) => {
+            ConnectPhaseAccess::InventoryObservation(proof.permission())
+        }
+    };
     commit_phase_tx_inner(
         tx,
         config,
         now,
         request,
         None,
-        Some(
-            crate::provider_probe_connect::ConnectPhaseAccess::Observation(
-                observation.permission(),
-            ),
-        ),
+        Some(access),
         Some(observation),
     )
 }
@@ -530,9 +539,7 @@ fn commit_phase_tx_inner(
     request: &BrokerPhaseRequest,
     terminal_proof: Option<&crate::terminal_allocations::TerminalObservationProof>,
     connect_access: Option<crate::provider_probe_connect::ConnectPhaseAccess<'_>>,
-    connect_observation: Option<
-        &crate::provider_probe_connect_observation::ConnectObservationPermission,
-    >,
+    transport_observation: Option<TransportObservation<'_>>,
 ) -> Result<BrokerPhaseCommit, StoreError> {
     let daemon = read_daemon_state_tx(tx)?;
     if daemon.authority_generation != request.authority_generation {
@@ -611,7 +618,7 @@ fn commit_phase_tx_inner(
     if intent_digest(&request.phase) != intent.intent_digest {
         return Err(invalid("digest intention broker divergent"));
     }
-    let mut connect_completion = None;
+    let mut transport_completion = None;
     let (state, event_name, extra) = match &request.phase {
         BrokerPhase::Authorizing { .. } => {
             validate_live_intent_with_connect(tx, &daemon, now, &intent, connect_authorized)?;
@@ -847,7 +854,7 @@ fn commit_phase_tx_inner(
                     |r| r.get(0),
                 )
                 .map_err(StoreError::from_rusqlite)?;
-            let unknown_clock = connect_observation.is_some()
+            let unknown_clock = transport_observation.is_some()
                 && receipt.state == ActionState::OutcomeUnknown
                 && config
                     .clock_uncertain
@@ -858,18 +865,19 @@ fn commit_phase_tx_inner(
             {
                 return Err(invalid("horodatage observation broker invalide"));
             }
-            if let Some(observation) = connect_observation {
-                connect_completion = Some(
+            transport_completion = match transport_observation {
+                Some(TransportObservation::Connect(proof)) => Some(
                     crate::provider_probe_connect_observation::validate_completion(
-                        tx,
-                        config,
-                        &daemon,
-                        now,
-                        request,
-                        observation,
+                        tx, config, &daemon, now, request, proof,
                     )?,
-                );
-            }
+                ),
+                Some(TransportObservation::Inventory(proof)) => Some(
+                    crate::provider_probe_inventory_observation::validate_completion(
+                        tx, config, &daemon, now, request, proof,
+                    )?,
+                ),
+                None => None,
+            };
             // Empreinte de la preuve LOCALE complète conservée dans phase_json, aucune attribution fournisseur.
             let local_hash = canonical_sha256(&exact)?;
             crate::backup_requests::validate_backup_observation_tx(tx, &daemon, receipt)?;
@@ -921,7 +929,7 @@ fn commit_phase_tx_inner(
         crate::provider_probes::materialize(tx, &intent, &event_id, now)?;
     }
     tx.execute("INSERT INTO broker_phase_records (action_id,evaluation_id,phase_key,phase_json,phase_digest,action_revision,event_id,event_sequence) VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",params![action.to_string(),request.evaluation.evaluation_id.to_string(),key,serde_json::to_string(&exact)?,digest.as_prefixed_str(),integer(revision.as_u64())?,event_id,sequence]).map_err(StoreError::from_rusqlite)?;
-    if let Some(completion) = connect_completion {
+    if let Some(completion) = transport_completion {
         crate::provider_probe_connect_observation::finish_completion(
             tx,
             config,

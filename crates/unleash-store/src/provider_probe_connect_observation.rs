@@ -3,7 +3,8 @@
 
 use crate::objects::{OwnedReferenceAdoption, PublishedObjectReference};
 use crate::provider_probe_connect::{
-    ConnectPhasePermission, ProviderProbeConnectClaim, ProviderProbeConnectRecord, fact_context,
+    ConnectPhasePermission, ProviderProbeConnectClaim, ProviderProbeConnectRecord, TransportPhase,
+    fact_context, fact_transport_context,
 };
 use crate::{ExecutionContinuation, StoreError, UnleashStore, WriteCriticality};
 use rusqlite::{Transaction, params};
@@ -114,12 +115,43 @@ impl ConnectObservationPermission {
     }
 }
 
-pub(crate) struct ConnectCompletion {
-    record: ProviderProbeConnectRecord,
+pub(crate) struct TransportCompletion {
+    phase: TransportPhase,
+    context: crate::ProviderProbeConnectContext,
     continuation: ExecutionContinuation,
-    fact: Option<AdoptedProviderConnectObservation>,
+    fact: Option<CompletionEvidence>,
     phase_digest: Sha256Digest,
     observed_at: TimestampMs,
+}
+
+pub(crate) struct CompletionEvidence {
+    pub(crate) id: uuid::Uuid,
+    pub(crate) binding: String,
+    pub(crate) hash: Sha256Digest,
+}
+
+impl TransportCompletion {
+    pub(crate) fn new(
+        phase: TransportPhase,
+        context: crate::ProviderProbeConnectContext,
+        continuation: &ExecutionContinuation,
+        fact: Option<CompletionEvidence>,
+        request: &crate::BrokerPhaseRequest,
+        observed_at: TimestampMs,
+    ) -> Result<Self, StoreError> {
+        let exact = serde_json::json!({
+            "schema_version":crate::broker_phases::BROKER_PHASE_SCHEMA_VERSION,
+            "evaluation":request.evaluation,"phase":request.phase,
+        });
+        Ok(Self {
+            phase,
+            context,
+            continuation: continuation.clone(),
+            fact,
+            phase_digest: canonical_sha256(&exact)?,
+            observed_at,
+        })
+    }
 }
 
 impl AdoptedProviderConnectObservation {
@@ -466,14 +498,20 @@ impl UnleashStore {
             return Err(invalid("phase d'observation connect requise"));
         }
         let original = claim.permission();
-        if let Some(replay) = self.lookup_connect_observation(&original, &input.request)? {
+        if let Some(replay) =
+            self.lookup_transport_observation(&original, TransportPhase::Connect, &input.request)?
+        {
             return Ok(replay);
         }
         if let Some(fact) = &input.fact
             && let Err(error) =
                 verify_document_bytes(self, &fact.binding.document, fact.binding.content_hash)
         {
-            if let Some(replay) = self.lookup_connect_observation(&original, &input.request)? {
+            if let Some(replay) = self.lookup_transport_observation(
+                &original,
+                TransportPhase::Connect,
+                &input.request,
+            )? {
                 return Ok(replay);
             }
             return Err(error);
@@ -485,19 +523,20 @@ impl UnleashStore {
         };
         let config = self.config().clone();
         self.execute_in_writer_tx(WriteCriticality::Normal, move |tx, now| {
-            crate::broker_writer::commit_connect_observation_tx(
+            crate::broker_writer::commit_transport_observation_tx(
                 tx,
                 &config,
                 now,
                 &input.request,
-                &permission,
+                crate::broker_writer::TransportObservation::Connect(&permission),
             )
         })
     }
 
-    fn lookup_connect_observation(
+    pub(crate) fn lookup_transport_observation(
         &self,
         permission: &ConnectPhasePermission,
+        phase: TransportPhase,
         request: &crate::BrokerPhaseRequest,
     ) -> Result<Option<crate::BrokerPhaseCommit>, StoreError> {
         self.read_snapshot(|conn, _| {
@@ -509,7 +548,7 @@ impl UnleashStore {
                     command_id: None,
                 });
             }
-            let record = fact_context(conn, &daemon, permission)?;
+            let record = fact_transport_context(conn, &daemon, permission, phase)?;
             if request.phase.action_id() != record.context.action_id {
                 return Err(invalid("rejeu d'observation d'une autre action"));
             }
@@ -518,15 +557,10 @@ impl UnleashStore {
     }
 }
 
-pub(crate) fn validate_completion(
-    tx: &Transaction<'_>,
-    config: &crate::StoreConfig,
-    daemon: &crate::DaemonStateRow,
-    now: TimestampMs,
-    request: &crate::BrokerPhaseRequest,
-    permission: &ConnectObservationPermission,
-) -> Result<ConnectCompletion, StoreError> {
-    let record = fact_context(tx, daemon, &permission.original)?;
+pub(crate) fn execution_receipt<'a>(
+    request: &'a crate::BrokerPhaseRequest,
+    record: &ProviderProbeConnectRecord,
+) -> Result<&'a crate::BrokerActionReceipt, StoreError> {
     let crate::BrokerPhase::Observation {
         receipt,
         cause,
@@ -534,7 +568,7 @@ pub(crate) fn validate_completion(
         ..
     } = &request.phase
     else {
-        return Err(invalid("observation d'exécution connect absente"));
+        return Err(invalid("observation d'exécution transport absente"));
     };
     if receipt.action_id != record.context.action_id
         || reason.is_some()
@@ -546,6 +580,19 @@ pub(crate) fn validate_completion(
             "phase native d'une autre cause ou d'un autre exécuteur",
         ));
     }
+    Ok(receipt)
+}
+
+pub(crate) fn validate_completion(
+    tx: &Transaction<'_>,
+    config: &crate::StoreConfig,
+    daemon: &crate::DaemonStateRow,
+    now: TimestampMs,
+    request: &crate::BrokerPhaseRequest,
+    permission: &ConnectObservationPermission,
+) -> Result<TransportCompletion, StoreError> {
+    let record = fact_context(tx, daemon, &permission.original)?;
+    let receipt = execution_receipt(request, &record)?;
     let fact = match receipt.state {
         ActionState::ObservedSuccess => {
             let fact = permission
@@ -563,7 +610,11 @@ pub(crate) fn validate_completion(
                 &permission.original,
             )?;
             validate_success_fact(tx, config, daemon, now, &record, fact, receipt)?;
-            Some(fact.clone())
+            Some(CompletionEvidence {
+                id: fact.evidence_id,
+                binding: snapshot_ref(&fact.binding)?,
+                hash: fact.binding.content_hash,
+            })
         }
         ActionState::OutcomeUnknown if receipt.output_digest.is_none() => {
             validate_continuation(tx, daemon, now, &record, &permission.continuation, false)?;
@@ -571,14 +622,14 @@ pub(crate) fn validate_completion(
         }
         _ => return Err(invalid("résultat natif sans disposition qualifiée")),
     };
-    let exact = serde_json::json!({"schema_version":crate::broker_phases::BROKER_PHASE_SCHEMA_VERSION,"evaluation":request.evaluation,"phase":request.phase});
-    Ok(ConnectCompletion {
-        record,
-        continuation: permission.continuation.clone(),
+    TransportCompletion::new(
+        TransportPhase::Connect,
+        record.context,
+        &permission.continuation,
         fact,
-        phase_digest: canonical_sha256(&exact)?,
-        observed_at: receipt.observed_at_ms,
-    })
+        request,
+        receipt.observed_at_ms,
+    )
 }
 
 fn validate_success_fact(
@@ -591,6 +642,38 @@ fn validate_success_fact(
     receipt: &crate::BrokerActionReceipt,
 ) -> Result<(), StoreError> {
     let binding = &fact.binding;
+    validate_success_timing(
+        tx,
+        config,
+        now,
+        record,
+        receipt,
+        binding.document.observed_at_ms,
+    )?;
+    if binding.context_digest != record.context_digest
+        || binding.probe_id != record.context.probe_id
+        || binding.document.action_id != receipt.action_id
+        || binding.document.dispatch_id != receipt.dispatch_id
+        || receipt.output_digest != Some(binding.content_hash)
+    {
+        return Err(invalid("preuve d'un autre faisceau de transport"));
+    }
+    crate::objects::tx_require_owned_reference(tx, &fact.reference, daemon.authority_generation)?;
+    let exact:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM evidence WHERE evidence_id=?1 AND action_id=?2 AND kind='observation' AND snapshot_ref=?3 AND object_hash=?4 AND producer_id=?5 AND observed_at_ms=?6 AND schema_version=1 AND availability='available')",params![fact.evidence_id.to_string(),receipt.action_id.to_string(),snapshot_ref(binding)?,binding.content_hash.to_string(),CONNECT_OBSERVER_PRINCIPAL,binding.document.observed_at_ms.as_i64()],|row|row.get(0))?;
+    if !exact {
+        return Err(invalid("preuve native absente ou remplacée"));
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_success_timing(
+    tx: &Transaction<'_>,
+    config: &crate::StoreConfig,
+    now: TimestampMs,
+    record: &ProviderProbeConnectRecord,
+    receipt: &crate::BrokerActionReceipt,
+    native_observed: TimestampMs,
+) -> Result<(), StoreError> {
     let started: i64 = tx.query_row(
         "SELECT started_at_ms FROM action_dispatches WHERE action_id=?1 AND dispatch_id=?2",
         params![
@@ -602,24 +685,12 @@ fn validate_success_fact(
     if config
         .clock_uncertain
         .load(std::sync::atomic::Ordering::Acquire)
-        || binding.context_digest != record.context_digest
-        || binding.probe_id != record.context.probe_id
-        || binding.document.action_id != receipt.action_id
-        || binding.document.dispatch_id != receipt.dispatch_id
-        || receipt.output_digest != Some(binding.content_hash)
-        || binding.document.observed_at_ms.as_i64() < started
-        || receipt.observed_at_ms < binding.document.observed_at_ms
+        || native_observed.as_i64() < started
+        || receipt.observed_at_ms < native_observed
         || receipt.observed_at_ms > now
         || receipt.observed_at_ms > record.context.deadline
     {
-        return Err(invalid(
-            "fin native non bornée ou preuve d'un autre faisceau",
-        ));
-    }
-    crate::objects::tx_require_owned_reference(tx, &fact.reference, daemon.authority_generation)?;
-    let exact:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM evidence WHERE evidence_id=?1 AND action_id=?2 AND kind='observation' AND snapshot_ref=?3 AND object_hash=?4 AND producer_id=?5 AND observed_at_ms=?6 AND schema_version=1 AND availability='available')",params![fact.evidence_id.to_string(),receipt.action_id.to_string(),snapshot_ref(binding)?,binding.content_hash.to_string(),CONNECT_OBSERVER_PRINCIPAL,binding.document.observed_at_ms.as_i64()],|row|row.get(0))?;
-    if !exact {
-        return Err(invalid("preuve native absente ou remplacée"));
+        return Err(invalid("fin native non bornée"));
     }
     Ok(())
 }
@@ -628,18 +699,23 @@ pub(crate) fn finish_completion(
     tx: &Transaction<'_>,
     config: &crate::StoreConfig,
     now: TimestampMs,
-    completion: &ConnectCompletion,
+    completion: &TransportCompletion,
     event_id: &str,
 ) -> Result<(), StoreError> {
-    let context = &completion.record.context;
+    let context = &completion.context;
     let continuation = &completion.continuation;
     if let Some(fact) = &completion.fact {
+        let phase = completion.phase.name();
+        let producer = match completion.phase {
+            TransportPhase::Connect => CONNECT_OBSERVER_PRINCIPAL,
+            TransportPhase::Inventory => crate::INVENTORY_OBSERVER_PRINCIPAL,
+        };
         let disposition = canonical_sha256(&serde_json::json!({
-            "schema":"unleash.provider_connect_disposition.v1","native_evidence_id":fact.evidence_id,
-            "native_binding":snapshot_ref(&fact.binding)?,"phase_digest":completion.phase_digest,
+            "schema":format!("unleash.provider_{phase}_disposition.v1"),"native_evidence_id":fact.id,
+            "native_binding":fact.binding,"phase_digest":completion.phase_digest,
             "action_observed_event_id":event_id,"continuation":continuation,
         }))?;
-        tx.execute("INSERT INTO evidence(evidence_id,kind,action_id,snapshot_ref,object_hash,producer_id,observed_at_ms,schema_version,availability) VALUES(?1,'observation',?2,?3,?4,?5,?6,1,'available')",params![config.id_generator.new_uuid().to_string(),context.action_id.to_string(),format!("provider-connect-disposition:v1:{disposition}:{event_id}"),fact.binding.content_hash.to_string(),CONNECT_OBSERVER_PRINCIPAL,completion.observed_at.as_i64()])?;
+        tx.execute("INSERT INTO evidence(evidence_id,kind,action_id,snapshot_ref,object_hash,producer_id,observed_at_ms,schema_version,availability) VALUES(?1,'observation',?2,?3,?4,?5,?6,1,'available')",params![config.id_generator.new_uuid().to_string(),context.action_id.to_string(),format!("provider-{phase}-disposition:v1:{disposition}:{event_id}"),fact.hash.to_string(),producer,completion.observed_at.as_i64()])?;
         transition_probe(tx, context, continuation, "ended")?;
         crate::leases::tx_release_lease(tx, continuation.lease_id)?;
         crate::budgets::tx_release_capacity_reservation_verified(
@@ -651,9 +727,11 @@ pub(crate) fn finish_completion(
         // An uncertain outcome is recorded but never treated as physical stop.
         transition_probe(tx, context, continuation, "reconciling")?;
     }
-    config
-        .cutpoints
-        .hit(crate::StoreCutpoint::C1BeforeProviderProbeConnectObservationCommit)?;
+    if completion.phase == TransportPhase::Connect {
+        config
+            .cutpoints
+            .hit(crate::StoreCutpoint::C1BeforeProviderProbeConnectObservationCommit)?;
+    }
     Ok(())
 }
 
