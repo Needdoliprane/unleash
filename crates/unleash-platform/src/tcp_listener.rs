@@ -9,6 +9,11 @@ use std::net::SocketAddr;
 
 use crate::OsProcessIdentity;
 
+#[cfg(target_os = "macos")]
+mod abi;
+#[cfg(target_os = "macos")]
+mod darwin;
+
 /// Closed native inspection failures; none permits a weaker fallback.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum TcpListenerError {
@@ -87,21 +92,26 @@ impl TcpListenerObservation {
 /// Observe only the expected process's exact loopback TCP listener.
 ///
 /// # Errors
-/// Rejects invalid endpoints and stays closed until the native ABI and
-/// complete identity/descriptor checks are implemented and qualified.
+/// Rejects invalid endpoints, inaccessible or incomplete native records,
+/// identity changes and ambiguous listeners. No process search or connection
+/// is performed. IPv6 endpoints must have zero scope and flow information.
 pub fn observe_owned_tcp_listener(
-    _expected: &OsProcessIdentity,
+    expected: &OsProcessIdentity,
     endpoint: SocketAddr,
 ) -> Result<TcpListenerObservation, TcpListenerError> {
-    if !endpoint.ip().is_loopback() || endpoint.port() == 0 {
+    if !endpoint.ip().is_loopback()
+        || endpoint.port() == 0
+        || matches!(endpoint,SocketAddr::V6(v6) if v6.scope_id()!=0 || v6.flowinfo()!=0)
+    {
         return Err(TcpListenerError::InvalidEndpoint);
     }
     #[cfg(target_os = "macos")]
     {
-        Err(TcpListenerError::Unavailable)
+        darwin::observe(expected, endpoint)
     }
     #[cfg(not(target_os = "macos"))]
     {
+        let _ = expected;
         Err(TcpListenerError::UnsupportedPlatform)
     }
 }
