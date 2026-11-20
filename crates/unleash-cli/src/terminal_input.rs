@@ -5,12 +5,12 @@
 use serde_json::{Value, json};
 use std::io::{IsTerminal, Read};
 use std::path::Path;
-use unleash_client::{ClientError, UnleashClient};
-use unleash_domain::{AuthorityGeneration, CommandId, ProjectId, RequestId, Revision};
-use unleash_protocol::{CommandEnvelope, ProtocolVersion};
+use unleash_client::UnleashClient;
+use unleash_domain::{AuthorityGeneration, ProjectId};
+use unleash_protocol::CommandEnvelope;
 
-use super::TerminalInputArgs;
-use crate::{CliError, next_uuid};
+use super::{TerminalInputArgs, send_terminal_intention};
+use crate::CliError;
 
 fn bounds_error() -> CliError {
     CliError::InvalidArgument("Terminal input must contain 1..=65536 bytes".into())
@@ -56,44 +56,12 @@ fn envelope(
     current: AuthorityGeneration,
     bytes: &[u8],
 ) -> Result<CommandEnvelope, CliError> {
-    if [args.terminal_id, args.process_run_uuid, args.lease_id]
-        .iter()
-        .any(uuid::Uuid::is_nil)
-        || args.command_id.is_some_and(|id| id.is_nil())
-        || args.authority_generation.is_some_and(|id| id.is_nil())
-    {
-        return Err(CliError::InvalidArgument(
-            "Terminal input identities must be non-nil UUIDs".into(),
-        ));
-    }
-    let (command_id, authority_generation) = match (args.command_id, args.authority_generation) {
-        (Some(command), Some(generation)) => (command, AuthorityGeneration::from_uuid(generation)),
-        (None, None) => (next_uuid(), current),
-        _ => {
-            return Err(CliError::InvalidArgument(
-                "An explicit replay requires --command-id and --authority-generation".into(),
-            ));
-        }
-    };
-    Ok(CommandEnvelope {
-        protocol_version: ProtocolVersion,
-        request_id: RequestId::from_uuid(next_uuid()),
-        command_id: CommandId::from_uuid(command_id),
-        authority_generation,
-        actor_ref: None,
-        project_id: Some(ProjectId::from_uuid(args.project_id)),
-        aggregate_id: args.terminal_id,
-        expected_revision: Revision::new(args.control_revision),
-        command_type: "SendTerminalInput".into(),
-        payload: serde_json::Map::from_iter([
-            ("terminal_id".into(), json!(args.terminal_id)),
-            ("process_run_uuid".into(), json!(args.process_run_uuid)),
-            ("lease_id".into(), json!(args.lease_id)),
-            ("fence".into(), json!(args.fence)),
-            ("input_seq".into(), json!(args.input_seq)),
-            ("payload_bytes".into(), json!(bytes)),
-        ]),
-    })
+    let mut command = args.control.envelope(current, "SendTerminalInput")?;
+    command
+        .payload
+        .insert("input_seq".into(), json!(args.input_seq));
+    command.payload.insert("payload_bytes".into(), json!(bytes));
+    Ok(command)
 }
 
 pub(super) async fn send(
@@ -102,29 +70,12 @@ pub(super) async fn send(
 ) -> Result<Value, CliError> {
     let bytes = read_input(&args.file)?;
     let command = envelope(args, client.hello().authority_generation, &bytes)?;
-    let project_id = ProjectId::from_uuid(args.project_id);
-    let receipt = client
-        .send_command(&command)
-        .await
-        .map_err(|source| match source {
-            ClientError::Remote(ref error)
-                if error.code != unleash_protocol::ErrorCode::OutcomeUnknown =>
-            {
-                CliError::Client(source)
-            }
-            source => CliError::TerminalReceiptMissing {
-                terminal_id: command.aggregate_id,
-                project_id,
-                command_id: command.command_id,
-                authority_generation: command.authority_generation,
-                source: Box::new(source),
-            },
-        })?;
-    // An accepted command is an intention receipt, not a claim of native effect.
-    Ok(
-        json!({ "project_id": project_id, "terminal_id": command.aggregate_id,
-        "authority_generation": command.authority_generation, "receipt": receipt }),
+    send_terminal_intention(
+        client,
+        ProjectId::from_uuid(args.control.project_id),
+        &command,
     )
+    .await
 }
 
 #[cfg(test)]
@@ -134,16 +85,18 @@ mod tests {
     #[test]
     fn nil_project_is_forwarded_to_writer() {
         let args = TerminalInputArgs {
-            project_id: uuid::Uuid::nil(),
-            terminal_id: uuid::Uuid::from_u128(1),
-            process_run_uuid: uuid::Uuid::from_u128(2),
-            lease_id: uuid::Uuid::from_u128(3),
-            fence: 1,
+            control: super::super::TerminalControlArgs {
+                project_id: uuid::Uuid::nil(),
+                terminal_id: uuid::Uuid::from_u128(1),
+                process_run_uuid: uuid::Uuid::from_u128(2),
+                lease_id: uuid::Uuid::from_u128(3),
+                fence: 1,
+                control_revision: 0,
+                command_id: None,
+                authority_generation: None,
+            },
             input_seq: 1,
-            control_revision: 0,
             file: std::path::PathBuf::new(),
-            command_id: None,
-            authority_generation: None,
         };
         let command = envelope(
             &args,

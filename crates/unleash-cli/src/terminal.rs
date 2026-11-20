@@ -23,6 +23,12 @@ pub enum ProcessCommand {
         #[command(flatten)]
         input: TerminalInputArgs,
     },
+    /// Demande la restitution du contrôle d'un terminal et affiche son reçu d'intention.
+    Release {
+        /// Coordonnées du contrôle déjà acquis.
+        #[command(flatten)]
+        control: TerminalControlArgs,
+    },
     /// Lit une page de sortie du terminal à partir d'un offset en octets.
     Log {
         /// Projet propriétaire du terminal.
@@ -57,6 +63,19 @@ pub enum ProcessCommand {
 /// Entrée binaire explicite ; le daemon reste l'autorité du bail et de l'effet.
 #[derive(Debug, Args)]
 pub struct TerminalInputArgs {
+    #[command(flatten)]
+    control: TerminalControlArgs,
+    /// Prochaine séquence explicite, après la dernière entrée native confirmée.
+    #[arg(long, value_parser = clap::value_parser!(u64).range(1..=9_007_199_254_740_991))]
+    input_seq: u64,
+    /// Fichier binaire de 1 à 65 536 octets, ou - pour stdin non interactif.
+    #[arg(long)]
+    file: std::path::PathBuf,
+}
+
+/// Coordonnées explicites d'un contrôle observé.
+#[derive(Debug, Args)]
+pub struct TerminalControlArgs {
     /// Projet du résultat d'acquisition observé.
     #[arg(long)]
     project_id: Uuid,
@@ -72,21 +91,63 @@ pub struct TerminalInputArgs {
     /// Fence courant, sans acquisition ni renouvellement implicite.
     #[arg(long, value_parser = clap::value_parser!(u64).range(1..=9_007_199_254_740_991))]
     fence: u64,
-    /// Prochaine séquence explicite, après la dernière entrée native confirmée.
-    #[arg(long, value_parser = clap::value_parser!(u64).range(1..=9_007_199_254_740_991))]
-    input_seq: u64,
     /// Révision courante du contrôle, initialement zéro.
     #[arg(long, value_parser = clap::value_parser!(u64).range(..=9_007_199_254_740_991))]
     control_revision: u64,
-    /// Fichier binaire de 1 à 65 536 octets, ou - pour stdin non interactif.
-    #[arg(long)]
-    file: std::path::PathBuf,
     /// Identité originale pour un envoi/rejeu demandé explicitement.
     #[arg(long, requires = "authority_generation")]
     command_id: Option<Uuid>,
     /// Lignée originale, obligatoire avec --command-id lors d'une reprise.
     #[arg(long, requires = "command_id")]
     authority_generation: Option<Uuid>,
+}
+
+impl TerminalControlArgs {
+    fn envelope(
+        &self,
+        current: AuthorityGeneration,
+        command_type: &str,
+    ) -> Result<CommandEnvelope, CliError> {
+        if [self.terminal_id, self.process_run_uuid, self.lease_id]
+            .iter()
+            .any(Uuid::is_nil)
+            || self.command_id.is_some_and(|id| id.is_nil())
+            || self.authority_generation.is_some_and(|id| id.is_nil())
+        {
+            return Err(CliError::InvalidArgument(
+                "Terminal control identities must be non-nil UUIDs".into(),
+            ));
+        }
+        let (command_id, authority_generation) = match (self.command_id, self.authority_generation)
+        {
+            (Some(command), Some(generation)) => {
+                (command, AuthorityGeneration::from_uuid(generation))
+            }
+            (None, None) => (next_uuid(), current),
+            _ => {
+                return Err(CliError::InvalidArgument(
+                    "An explicit replay requires --command-id and --authority-generation".into(),
+                ));
+            }
+        };
+        Ok(CommandEnvelope {
+            protocol_version: ProtocolVersion,
+            request_id: RequestId::from_uuid(next_uuid()),
+            command_id: CommandId::from_uuid(command_id),
+            authority_generation,
+            actor_ref: None,
+            project_id: Some(ProjectId::from_uuid(self.project_id)),
+            aggregate_id: self.terminal_id,
+            expected_revision: Revision::new(self.control_revision),
+            command_type: command_type.into(),
+            payload: Map::from_iter([
+                ("terminal_id".into(), json!(self.terminal_id)),
+                ("process_run_uuid".into(), json!(self.process_run_uuid)),
+                ("lease_id".into(), json!(self.lease_id)),
+                ("fence".into(), json!(self.fence)),
+            ]),
+        })
+    }
 }
 
 /// Cible d'une acquisition de terminal.
@@ -272,6 +333,12 @@ pub(super) async fn run_process_command(
 ) -> Result<Value, CliError> {
     match action {
         ProcessCommand::Input { input } => input::send(client, input).await,
+        ProcessCommand::Release { control } => {
+            let command =
+                control.envelope(client.hello().authority_generation, "ReleaseTerminal")?;
+            send_terminal_intention(client, ProjectId::from_uuid(control.project_id), &command)
+                .await
+        }
         ProcessCommand::Log {
             project_id,
             terminal_id,
@@ -307,8 +374,16 @@ async fn acquire(
     target: &AcquireTerminalTarget,
 ) -> Result<Value, CliError> {
     let (project_id, envelope) = target.envelope(client.hello().authority_generation)?;
+    send_terminal_intention(client, project_id, &envelope).await
+}
+
+async fn send_terminal_intention(
+    client: &mut UnleashClient,
+    project_id: ProjectId,
+    envelope: &CommandEnvelope,
+) -> Result<Value, CliError> {
     let receipt = client
-        .send_command(&envelope)
+        .send_command(envelope)
         .await
         .map_err(|source| match source {
             ClientError::Remote(ref error)
@@ -344,6 +419,77 @@ mod tests {
     const PROCESS_RUN: &str = "00000000-0000-4000-8000-000000000052";
     const COMMAND: &str = "00000000-0000-4000-8000-000000000053";
     const ORIGIN: &str = "00000000-0000-4000-8000-000000000054";
+    const LEASE: &str = "00000000-0000-4000-8000-000000000055";
+
+    const RELEASE_ARGS: [&str; 15] = [
+        "unleash",
+        "process",
+        "release",
+        "--project-id",
+        PROJECT,
+        "--terminal-id",
+        TERMINAL,
+        "--process-run-uuid",
+        PROCESS_RUN,
+        "--lease-id",
+        LEASE,
+        "--fence",
+        "4",
+        "--control-revision",
+        "8",
+    ];
+
+    #[test]
+    fn release_maps_observed_control_and_original_command() {
+        let cli = Cli::try_parse_from(RELEASE_ARGS.into_iter().chain([
+            "--command-id",
+            COMMAND,
+            "--authority-generation",
+            ORIGIN,
+        ]))
+        .unwrap();
+        let Commands::Process {
+            action: ProcessCommand::Release { control },
+        } = cli.command
+        else {
+            unreachable!("release arguments must parse");
+        };
+        let command = control
+            .envelope(
+                AuthorityGeneration::from_uuid(Uuid::from_u128(9)),
+                "ReleaseTerminal",
+            )
+            .unwrap();
+        assert_eq!(command.command_type, "ReleaseTerminal");
+        assert_eq!(command.command_id.to_string(), COMMAND);
+        assert_eq!(command.authority_generation.to_string(), ORIGIN);
+        assert_eq!(command.project_id.unwrap().to_string(), PROJECT);
+        assert_eq!(command.aggregate_id.to_string(), TERMINAL);
+        assert_eq!(command.expected_revision, Revision::new(8));
+        assert_eq!(command.actor_ref, None);
+        assert_eq!(
+            json!(command.payload),
+            json!({
+                "terminal_id": TERMINAL, "process_run_uuid": PROCESS_RUN,
+                "lease_id": LEASE, "fence": 4,
+            })
+        );
+    }
+
+    #[test]
+    fn release_requires_both_replay_coordinates() {
+        assert!(
+            Cli::try_parse_from(RELEASE_ARGS.into_iter().chain(["--command-id", COMMAND])).is_err()
+        );
+        assert!(
+            Cli::try_parse_from(
+                RELEASE_ARGS
+                    .into_iter()
+                    .chain(["--authority-generation", ORIGIN])
+            )
+            .is_err()
+        );
+    }
 
     fn target(arguments: impl IntoIterator<Item = &'static str>) -> AcquireTerminalTarget {
         let cli = Cli::try_parse_from(
