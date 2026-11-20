@@ -14,13 +14,12 @@ use crate::{
 
 use super::{adopt_candidate, hidden, limits, publish, resolve_tx, retire_candidates, unavailable};
 
-fn read_pending(
+pub(super) fn read_bound_record(
     tx: &Transaction<'_>,
     daemon: &DaemonStateRow,
-    now: TimestampMs,
     command: &CommandEnvelope,
     caller: &CallerAuthority,
-) -> Result<Option<PreparedProviderProbe>, StoreError> {
+) -> Result<PreparedProviderProbe, StoreError> {
     let receipt = crate::commands::classify_command_replay(
         tx,
         daemon,
@@ -41,9 +40,18 @@ fn read_pending(
     {
         return Err(hidden());
     }
-    if crate::broker_writer::inspect_action_conn(tx, context.action_id)?.is_some() {
-        return Ok(None);
-    }
+    Ok(record)
+}
+
+pub(super) fn verify_live_generation(
+    tx: &Transaction<'_>,
+    daemon: &DaemonStateRow,
+    now: TimestampMs,
+    command: &CommandEnvelope,
+    caller: &CallerAuthority,
+    record: &PreparedProviderProbe,
+) -> Result<super::Resolution, StoreError> {
+    let context = &record.context;
     let resolved = resolve_tx(tx, daemon, now, command, caller)?;
     if context.principal_id != resolved.grant.principal_id
         || context.preparation.mandate_ref != resolved.grant.mandate_ref.to_string()
@@ -53,10 +61,23 @@ fn read_pending(
         || context.deadline > resolved.grant.expires_at_ms
         || context.deadline <= now
     {
-        return Err(unavailable(
-            "génération modifiée ou expirée avant Authorizing",
-        ));
+        return Err(unavailable("préparation de génération modifiée ou expirée"));
     }
+    Ok(resolved)
+}
+
+fn read_pending(
+    tx: &Transaction<'_>,
+    daemon: &DaemonStateRow,
+    now: TimestampMs,
+    command: &CommandEnvelope,
+    caller: &CallerAuthority,
+) -> Result<Option<PreparedProviderProbe>, StoreError> {
+    let record = read_bound_record(tx, daemon, command, caller)?;
+    if crate::broker_writer::inspect_action_conn(tx, record.context.action_id)?.is_some() {
+        return Ok(None);
+    }
+    verify_live_generation(tx, daemon, now, command, caller, &record)?;
     Ok(Some(record))
 }
 

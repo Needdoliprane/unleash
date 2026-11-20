@@ -955,7 +955,12 @@ fn validate_candidate(
         }
         AdmissionUnit::Probe(id) => {
             if !crate::provider_probe_connect::validate_admission(tx, id, now)? {
-                crate::provider_probes::validate_admission(tx, id, now)?;
+                crate::provider_probes::validate_admission(
+                    tx,
+                    id,
+                    now,
+                    candidate.eligibility_evidence,
+                )?;
             }
             let valid:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM provider_probes p JOIN principals s ON s.principal_id=p.principal_id JOIN command_receipts c ON c.receipt_id=p.command_receipt_id JOIN provider_profiles f ON f.profile_version_ref=p.profile_version_ref WHERE p.probe_id=?1 AND s.state='active' AND c.actor_id=s.actor_id AND c.authority_generation=?2 AND c.state IN ('accepted','completed') AND p.authority_generation=?2 AND p.daemon_epoch=?3 AND p.admission_class='work' AND p.context_hash!='')",params![id.to_string(),daemon.authority_generation.to_string(),integer(daemon.daemon_epoch.as_u64())?],|row|row.get(0))?;
             if !valid {

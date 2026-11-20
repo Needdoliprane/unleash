@@ -1163,16 +1163,11 @@ pub(crate) fn validate_admission(
 }
 
 fn unresolved_connect_occupation(tx: &Transaction<'_>) -> Result<i64, StoreError> {
-    // No qualified server identity exists in this first transport. Both passive
-    // contexts share one conservative bound, independent of profile/locality,
-    // authority generation and epoch. This is not Q-19 server qualification.
-    Ok(tx.query_row(
-        "SELECT COUNT(*) FROM capacity_reservations r JOIN capacity_pools pool ON pool.pool_id=r.pool_id JOIN execution_reservation_owners o ON o.reservation_id=r.reservation_id JOIN provider_probe_transport_contexts c ON c.probe_id=o.provider_probe_id WHERE r.state IN ('held','reconciling') AND r.amount>0 AND r.owner_type='provider_probe' AND c.phase IN ('connect','inventory') AND pool.pool_kind='execution' AND pool.scope_key='global'",
-        [], |row| row.get(0),
-    )?)
+    // Passive probes have no qualified server identity.
+    crate::provider_probe_generation::placement::occupied_slots(tx, None)
 }
 
-fn validate_profile_capacity(
+pub(crate) fn validate_profile_capacity(
     tx: &Transaction<'_>,
     profile: &crate::ConfiguredProviderProfile,
 ) -> Result<(), StoreError> {

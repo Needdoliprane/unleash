@@ -37,7 +37,7 @@ const WIRE_KEYS: &[&str] = &[
     "locality",
     "mandate_ref",
 ];
-const WAIT_FOR_PLACEMENT: &str = "provider_probe_transport_unqualified";
+pub(crate) const WAIT_FOR_PLACEMENT: &str = "provider_probe_transport_unqualified";
 
 fn requires_generation_placement(
     schema_version: i64,
@@ -707,7 +707,7 @@ pub(crate) fn validate_intent(
     Ok(())
 }
 
-fn verify_frozen_inputs(
+pub(crate) fn verify_frozen_inputs(
     tx: &Transaction<'_>,
     record: &PreparedProviderProbe,
 ) -> Result<(), StoreError> {
@@ -798,7 +798,7 @@ pub(crate) fn materialize(
         |row| row.get(0),
     )?;
     if exists {
-        return validate_admission(tx, context.probe_id, now);
+        return validate_admission(tx, context.probe_id, now, None);
     }
     tx.execute("INSERT INTO model_calls(model_call_id,action_id,owner_kind,provider_probe_id,trigger_event_id,state,revision) VALUES(?1,?2,'provider_probe',?3,?4,'prepared',1)",params![context.model_call_id.to_string(),context.action_id.to_string(),context.probe_id.to_string(),trigger_event])?;
     tx.execute("INSERT INTO model_call_manifests(manifest_id,model_call_id,manifest_kind,ordinal,context_manifest_id,context_kind,provider_probe_context_id,provider_id,resolved_model_id,capabilities_hash,allowed_model_policy_hash,request_payload_hash,content_object_hash,created_at_ms) VALUES(?1,?2,'request',1,NULL,'provider_probe_context',?3,?4,?5,?6,?7,?8,?9,?10)",params![context.manifest_id.to_string(),context.model_call_id.to_string(),context.probe_id.to_string(),context.profile.provider_id,context.preparation.resolved_model_id,context.preparation.capability_snapshot_hash.to_string(),context.preparation.model_policy_hash.to_string(),context.preparation.payload_manifest_hash.to_string(),canonical_sha256(&record.request_manifest()?)?.to_string(),now.as_i64()])?;
@@ -818,6 +818,7 @@ pub(crate) fn validate_admission(
     tx: &Transaction<'_>,
     probe: ProviderProbeId,
     now: TimestampMs,
+    eligibility: Option<uuid::Uuid>,
 ) -> Result<(), StoreError> {
     let Some(record) = read_context(tx, probe)? else {
         if read_daemon_state_conn(tx)?.schema_version >= 9 {
@@ -828,11 +829,6 @@ pub(crate) fn validate_admission(
     let context = &record.context;
     let daemon = read_daemon_state_conn(tx)?;
     validate_incarnation(tx, &daemon, context.action_id)?;
-    if requires_generation_placement(daemon.schema_version, &context.preparation) {
-        return Err(StoreError::EvidenceUnavailable(
-            "placement natif du probe génération indisponible".into(),
-        ));
-    }
     if context.deadline.as_i64() <= now.as_i64() {
         return Err(invalid("deadline probe expirée avant admission"));
     }
@@ -842,6 +838,15 @@ pub(crate) fn validate_admission(
         return Err(invalid(
             "relation action/model_call/probe absente avant admission",
         ));
+    }
+    if requires_generation_placement(daemon.schema_version, &context.preparation) {
+        crate::provider_probe_generation::placement::validate_admission(
+            tx,
+            &daemon,
+            now,
+            &record,
+            eligibility,
+        )?;
     }
     Ok(())
 }

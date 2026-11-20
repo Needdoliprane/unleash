@@ -2,6 +2,7 @@
 //! The existing dispatch gate stays closed until the native producers are qualified.
 
 mod authorizing;
+pub(crate) mod placement;
 
 use crate::commands::{DaemonStateRow, EventAppendSpec, read_daemon_state_conn};
 use crate::objects::{OwnedReferenceAdoption, PublishedObjectReference, tx_adopt_owned_reference};

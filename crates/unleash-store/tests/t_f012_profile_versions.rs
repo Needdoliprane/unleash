@@ -29,6 +29,9 @@ use uuid::Uuid;
 
 const PROFILE: Uuid = Uuid::from_u128(0xf012);
 
+#[path = "support/provider_probe_generation_placement.rs"]
+mod generation_placement;
+
 #[test]
 fn t_f012_002_authenticated_command_lookup_needs_no_preparation() {
     let (store, _directory) = fixture(Arc::new(NoopCutpointObserver));
