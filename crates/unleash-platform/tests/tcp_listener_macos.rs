@@ -120,14 +120,14 @@ fn listener_fixture_child() -> TestResult {
     }
     let mut listener = Some(TcpListener::bind(SocketAddr::new(ip, 0))?);
     let endpoint = listener.as_ref().ok_or("listener missing")?.local_addr()?;
-    println!("{PREFIX}ready {endpoint}");
+    writeln!(std::io::stdout().lock(), "{PREFIX}ready {endpoint}")?;
     std::io::stdout().flush()?;
     for command in std::io::stdin().lock().lines() {
         match command?.as_str() {
             "replace" => {
                 drop(listener.take());
                 listener = Some(TcpListener::bind(endpoint)?);
-                println!("{PREFIX}replaced {endpoint}");
+                writeln!(std::io::stdout().lock(), "{PREFIX}replaced {endpoint}")?;
                 std::io::stdout().flush()?;
             }
             _ => return Err("unexpected fixture command".into()),
