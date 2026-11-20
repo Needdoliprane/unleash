@@ -15,7 +15,8 @@ use unleash_platform::{ProcessVerification, verify_process_identity};
 use unleash_scheduler::{CapacityWait, CheckpointEligibility, CheckpointRequest, Decision};
 use unleash_store::{
     AdmissionCommit, AdmissionOutcome, AdmissionUnit, PrepareObjectRequest,
-    PublishObjectReferenceRequest, StoreConfig, StoreError, UnleashStore, WriteCriticality,
+    PublishObjectReferenceRequest, StoreConfig, StoreError, UnleashStore, WorkerProcessObservation,
+    WriteCriticality,
 };
 use unleash_testkit::local_test_dir;
 use uuid::Uuid;
@@ -726,7 +727,7 @@ fn t_f003_006_shutdown_after_worker_start_preserves_the_single_attempt() {
         .unwrap();
     let identity = pending.identity().clone();
     let prepared = pending.preparation().event_cursor;
-    let revision = i64::try_from(pending.preparation().prepared_revision.as_u64()).unwrap() + 1;
+    let revision = i64::try_from(pending.preparation().prepared_revision.as_u64()).unwrap() + 2;
     let durable_start = || {
         store
             .read_snapshot(|conn, _| {
@@ -791,18 +792,212 @@ fn t_f003_006_shutdown_after_worker_start_preserves_the_single_attempt() {
     );
     assert_eq!(
         worker_preparation_state(&store, &grant),
-        ("running".to_owned(), "running".to_owned(), revision, 1)
+        (
+            "reconciling".to_owned(),
+            "reconciling".to_owned(),
+            revision,
+            1
+        )
     );
+    assert_continuation_unconfirmed(&store, &grant, start);
+    assert_eq!(
+        store.execution_pool_state(POOL).unwrap().current_occupation,
+        1
+    );
+    Arc::try_unwrap(store).ok().unwrap().shutdown().unwrap();
+}
+
+fn assert_continuation_unconfirmed(
+    store: &UnleashStore,
+    grant: &unleash_store::AdmissionCommit,
+    start: unleash_protocol::EventCursor,
+) {
     let counts: (i64, i64) = store.read_snapshot(|conn, _| {
-        let id = grant.unit.id().to_string();
         Ok(conn.query_row(
             "SELECT (SELECT count(*) FROM invocation_attempts WHERE invocation_id=?1),
              (SELECT count(*) FROM events WHERE aggregate_id=?1 AND event_type='InvocationStarted')",
-            [id],
+            [grant.unit.id().to_string()],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )?)
     }).unwrap();
     assert_eq!(counts, (1, 1));
+    let (count, sequence, exit_observed, outbox): (i64, i64, bool, i64) = store
+        .read_snapshot(|conn, _| {
+            Ok(conn.query_row(
+                "SELECT COUNT(*), json_extract(payload_json,'$.start_sequence'),
+                        json_extract(payload_json,'$.process_exit_observed'),
+                        (SELECT COUNT(*) FROM outbox WHERE event_id=events.event_id)
+                 FROM events WHERE aggregate_id=?1 AND event_type='InvocationReconciling'",
+                [grant.unit.id().to_string()],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )?)
+        })
+        .unwrap();
+    assert_eq!(count, 1);
+    assert_eq!(u64::try_from(sequence).unwrap(), start.sequence.as_u64());
+    assert!(exit_observed);
+    assert_eq!(outbox, 2);
+}
+
+fn reject_reconciliation_delivery(store: &UnleashStore) {
+    store.execute_in_writer_tx(WriteCriticality::Critical, |tx, _| {
+        tx.execute_batch(
+            "CREATE TRIGGER fixture_refuse_reconciliation_delivery BEFORE INSERT ON outbox
+             WHEN NEW.destination='harness' AND EXISTS(
+                SELECT 1 FROM events WHERE event_id=NEW.event_id AND event_type='InvocationReconciling')
+             BEGIN SELECT RAISE(ABORT, 'fixture_reconciliation_delivery_aborted'); END;",
+        )?;
+        Ok(())
+    }).unwrap();
+}
+
+fn allow_reconciliation_during_drain(store: &UnleashStore) {
+    store
+        .execute_in_writer_tx(WriteCriticality::Critical, |tx, _| {
+            tx.execute_batch(
+                "DROP TRIGGER fixture_refuse_reconciliation_delivery;
+             UPDATE daemon_state SET mode='draining' WHERE singleton=1;",
+            )?;
+            Ok(())
+        })
+        .unwrap();
+}
+
+fn invocation_worker_resources(
+    store: &UnleashStore,
+    grant: &AdmissionCommit,
+) -> (String, String, i64, i64, String, String, i64) {
+    store
+        .read_snapshot(|conn, _| {
+            Ok(conn.query_row(
+                "SELECT l.state,l.owner_id,l.fence,l.expires_at_ms,c.state,c.owner_id,c.amount
+             FROM resource_leases l, capacity_reservations c
+             WHERE l.lease_id=?1 AND c.reservation_id=?2",
+                rusqlite::params![
+                    grant.lease.lease_id.to_string(),
+                    grant.reservation_id.to_string()
+                ],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                        row.get(6)?,
+                    ))
+                },
+            )?)
+        })
+        .unwrap()
+}
+
+fn reconciliation_outbox_count(store: &UnleashStore) -> i64 {
+    store
+        .read_snapshot(|conn, _| {
+            Ok(conn.query_row("SELECT COUNT(*) FROM outbox", [], |r| r.get(0))?)
+        })
+        .unwrap()
+}
+
+#[test]
+#[ignore = "requires the packaged Rust worker via UNLEASH_TEST_AGENT_WORKER_BIN"]
+fn t_f003_006_reconciliation_outbox_rollback_then_exact_replay_during_drain() {
+    let executable = worker_test_executable();
+    let data = local_test_dir("f003-reconciliation-rollback").unwrap();
+    let store = worker_test_store(data.path());
+    let runtime = worker_test_runtime();
+    let (grant, _) = admit_worker_fixture(&store);
+    let pending = runtime
+        .block_on(prepare_invocation_worker(
+            Arc::clone(&store),
+            grant.clone(),
+            &executable,
+        ))
+        .unwrap();
+    let preparation = pending.preparation().clone();
+    let identity = pending.identity().clone();
+    let observation = WorkerProcessObservation {
+        pid: identity.pid,
+        owner_uid: identity.owner_uid,
+        boot_identity: identity.boot_identity.as_str().to_owned(),
+        start_identity: identity.start_identity.as_str().to_owned(),
+    };
+    let resources = invocation_worker_resources(&store, &grant);
+    let outbox_count = || reconciliation_outbox_count(&store);
+    let initial_outbox = outbox_count();
+    reject_reconciliation_delivery(&store);
+    let result = runtime
+        .block_on(pending.activate_until_shutdown(Arc::clone(&store), std::future::ready(())));
+    let Err(WorkerLaunchError::ContinuationNotRecorded { start_cursor }) = result else {
+        panic!("outbox refusal must expose the original start cursor");
+    };
+    assert_eq!(
+        verify_process_identity(&identity).unwrap(),
+        ProcessVerification::Exited
+    );
+    let running = i64::try_from(preparation.prepared_revision.as_u64()).unwrap() + 1;
+    assert_eq!(
+        worker_preparation_state(&store, &grant),
+        ("running".to_owned(), "running".to_owned(), running, 1)
+    );
+    assert_eq!(outbox_count(), initial_outbox + 2);
+    assert_eq!(invocation_worker_resources(&store, &grant), resources);
+    allow_reconciliation_during_drain(&store);
+    let mut other_process = observation.clone();
+    other_process.start_identity.push_str("-different");
+    for (cursor, identity) in [
+        (preparation.event_cursor, observation.clone()),
+        (start_cursor, other_process),
+    ] {
+        assert!(matches!(
+            store.record_invocation_worker_continuation_lost(
+                preparation.clone(),
+                cursor,
+                identity,
+                true,
+            ),
+            Err(StoreError::StaleFence { .. })
+        ));
+    }
+    assert_eq!(outbox_count(), initial_outbox + 2);
+    let record = || {
+        store
+            .record_invocation_worker_continuation_lost(
+                preparation.clone(),
+                start_cursor,
+                observation.clone(),
+                true,
+            )
+            .unwrap()
+    };
+    std::thread::scope(|scope| {
+        let first = scope.spawn(record);
+        let second = scope.spawn(record);
+        assert_eq!(first.join().unwrap(), second.join().unwrap());
+    });
+    assert!(matches!(
+        store.record_invocation_worker_continuation_lost(
+            preparation,
+            start_cursor,
+            observation,
+            false,
+        ),
+        Err(StoreError::StaleFence { .. })
+    ));
+    assert_continuation_unconfirmed(&store, &grant, start_cursor);
+    assert_eq!(
+        worker_preparation_state(&store, &grant),
+        (
+            "reconciling".to_owned(),
+            "reconciling".to_owned(),
+            running + 1,
+            1
+        )
+    );
+    assert_eq!(outbox_count(), initial_outbox + 4);
+    assert_eq!(invocation_worker_resources(&store, &grant), resources);
     assert_eq!(
         store.execution_pool_state(POOL).unwrap().current_occupation,
         1

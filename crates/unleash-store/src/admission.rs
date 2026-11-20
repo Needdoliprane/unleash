@@ -35,7 +35,9 @@ use crate::{StoreConfig, StoreError};
 mod worker;
 
 pub use worker::{WorkerLaunchPreparation, WorkerProcessObservation};
-pub(crate) use worker::{claim_worker_launch, commit_worker_running};
+pub(crate) use worker::{
+    claim_worker_launch, commit_worker_running, record_worker_continuation_lost,
+};
 
 /// Unité réelle projetée de sa table d'origine, sans agent fictif pour un probe.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -706,6 +708,18 @@ fn check_lineage(
     authority: AuthorityGeneration,
     epoch: DaemonEpoch,
 ) -> Result<(), StoreError> {
+    check_incarnation(daemon, authority, epoch)?;
+    if daemon.mode != DaemonMode::Ready {
+        return Err(invalid("admission interdite dans ce mode daemon"));
+    }
+    Ok(())
+}
+
+fn check_incarnation(
+    daemon: &DaemonStateRow,
+    authority: AuthorityGeneration,
+    epoch: DaemonEpoch,
+) -> Result<(), StoreError> {
     if daemon.authority_generation != authority {
         return Err(StoreError::StaleAuthorityGeneration {
             expected: daemon.authority_generation,
@@ -717,9 +731,6 @@ fn check_lineage(
         return Err(StoreError::StaleFence {
             message: "époque admission obsolète".to_owned(),
         });
-    }
-    if daemon.mode != DaemonMode::Ready {
-        return Err(invalid("admission interdite dans ce mode daemon"));
     }
     Ok(())
 }

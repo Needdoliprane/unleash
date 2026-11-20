@@ -1,5 +1,8 @@
 //! One-shot claim of the exact admitted worker launch, before native startup.
 
+mod continuation;
+pub(crate) use continuation::record_worker_continuation_lost;
+
 use rusqlite::{OptionalExtension, Transaction, named_params, params};
 use serde::Serialize;
 use serde_json::json;
@@ -47,7 +50,7 @@ pub struct WorkerLaunchPreparation {
 }
 
 /// Native identity observed by the daemon on its owned child after Ready.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct WorkerProcessObservation {
     /// PID of the owned child.
     pub pid: u32,
@@ -407,23 +410,31 @@ pub(crate) fn commit_worker_running(
         revision,
         context.project,
         "InvocationStarted",
-        &json!({
-            "attempt_id": attempt,
-            "reservation_id": admission.reservation_id,
-            "lease_id": admission.lease.lease_id,
-            "authority_generation": daemon.authority_generation,
-            "daemon_epoch": daemon.daemon_epoch,
-            "fence": admission.lease.fence,
-            "prepared_sequence": preparation.event_cursor.sequence,
-            "context_manifest_id": context.manifest,
-            "context_manifest_digest": context.digest,
-            "scope_id": context.scope,
-            "scope_revision": context.scope_revision,
-            "process_identity": identity
-        }),
+        &started_payload(preparation, identity),
     )?;
     validate_launch_sequence(cursor)?;
     Ok(cursor)
+}
+
+fn started_payload(
+    preparation: &WorkerLaunchPreparation,
+    identity: &WorkerProcessObservation,
+) -> serde_json::Value {
+    let admission = &preparation.admission;
+    json!({
+        "attempt_id": preparation.attempt_id,
+        "reservation_id": admission.reservation_id,
+        "lease_id": admission.lease.lease_id,
+        "authority_generation": admission.lease.authority_generation,
+        "daemon_epoch": admission.lease.daemon_epoch,
+        "fence": admission.lease.fence,
+        "prepared_sequence": preparation.event_cursor.sequence,
+        "context_manifest_id": preparation.context_manifest_id,
+        "context_manifest_digest": preparation.context_manifest_digest,
+        "scope_id": preparation.scope_id,
+        "scope_revision": preparation.scope_revision,
+        "process_identity": identity
+    })
 }
 
 fn mark_invocation_running(

@@ -1379,6 +1379,32 @@ impl UnleashStore {
         })
     }
 
+    /// Record unconfirmed continuation of the worker bound to this start event.
+    /// The attempt enters reconciliation with its exact lease and capacity still held.
+    ///
+    /// # Errors
+    /// Refuses a divergent start, identity, incarnation, owner or replay.
+    pub fn record_invocation_worker_continuation_lost(
+        &self,
+        preparation: crate::WorkerLaunchPreparation,
+        start: unleash_protocol::EventCursor,
+        identity: crate::WorkerProcessObservation,
+        process_exit_observed: bool,
+    ) -> Result<unleash_protocol::EventCursor, StoreError> {
+        let config = self.config.clone();
+        self.execute_in_writer_tx(WriteCriticality::Critical, move |tx, now| {
+            crate::admission::record_worker_continuation_lost(
+                tx,
+                &config,
+                now,
+                &preparation,
+                start,
+                &identity,
+                process_exit_observed,
+            )
+        })
+    }
+
     /// Journalise une demande coopérative ; ne rend aucune capacité.
     /// # Errors
     /// Refuse contrôle, cible ou faisceau obsolète et demande déjà présente.

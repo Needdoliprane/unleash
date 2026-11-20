@@ -48,6 +48,12 @@ pub enum WorkerLaunchError {
         /// Exact durable start event to reconcile.
         start_cursor: EventCursor,
     },
+    /// The start committed and recording reconciliation itself failed.
+    #[error("worker start committed but reconciliation could not be recorded")]
+    ContinuationNotRecorded {
+        /// Exact durable start event to reconcile after the writer is available.
+        start_cursor: EventCursor,
+    },
 }
 
 /// A child waiting for the separate running transition.
@@ -87,7 +93,7 @@ impl PendingInvocationWorker {
     }
 
     /// Commit the start, then observe controller shutdown during permit exchange.
-    /// Shutdown takes precedence over sending more bytes or accepting an acknowledgement.
+    /// A ready shutdown signal is polled before the permit exchange.
     /// On an interrupted exchange the reservation stays held for reconciliation.
     ///
     /// # Errors
@@ -104,6 +110,14 @@ impl PendingInvocationWorker {
         .map_err(|_| WorkerLaunchError::Readiness)?;
         let identity = self.identity.clone();
         let preparation = self.preparation.clone();
+        let observation = WorkerProcessObservation {
+            pid: identity.pid,
+            owner_uid: identity.owner_uid,
+            boot_identity: identity.boot_identity.as_str().to_owned(),
+            start_identity: identity.start_identity.as_str().to_owned(),
+        };
+        let start_observation = observation.clone();
+        let start_store = Arc::clone(&store);
         let start = tokio::task::spawn_blocking(move || {
             if !matches!(
                 verify_process_identity(&identity),
@@ -111,15 +125,7 @@ impl PendingInvocationWorker {
             ) {
                 return Err(WorkerLaunchError::Identity);
             }
-            Ok(store.commit_invocation_worker_running(
-                preparation,
-                WorkerProcessObservation {
-                    pid: identity.pid,
-                    owner_uid: identity.owner_uid,
-                    boot_identity: identity.boot_identity.as_str().to_owned(),
-                    start_identity: identity.start_identity.as_str().to_owned(),
-                },
-            )?)
+            Ok(start_store.commit_invocation_worker_running(preparation, start_observation)?)
         })
         .await
         .unwrap_or(Err(WorkerLaunchError::NativeProcess));
@@ -148,7 +154,20 @@ impl PendingInvocationWorker {
                 && reply.pid == self.ready.pid
                 && reply.binding == self.ready.binding
         }) else {
-            self.close_after_failed_activation().await;
+            let preparation = self.preparation.clone();
+            let process_exit_observed = self.close_after_failed_activation().await;
+            let written = tokio::task::spawn_blocking(move || {
+                let result = store.record_invocation_worker_continuation_lost(
+                    preparation, start_cursor, observation, process_exit_observed,
+                );
+                if let Err(error) = &result {
+                    tracing::warn!(code=%error.error_code(), "Recording worker reconciliation failed");
+                }
+                result
+            }).await;
+            if !matches!(written, Ok(Ok(_))) {
+                return Err(WorkerLaunchError::ContinuationNotRecorded { start_cursor });
+            }
             return Err(WorkerLaunchError::ContinuationUnknown { start_cursor });
         };
         Ok(RunningInvocationWorker {
@@ -158,9 +177,18 @@ impl PendingInvocationWorker {
         })
     }
 
-    async fn close_after_failed_activation(self) {
-        if let Err(error) = self.close().await {
-            tracing::warn!(%error, "Worker activation cleanup did not finish normally");
+    async fn close_after_failed_activation(self) -> bool {
+        match self.reap().await {
+            Ok(status) => {
+                if !status.success() {
+                    tracing::warn!(%status, "Worker exited abnormally during activation");
+                }
+                true
+            }
+            Err(error) => {
+                tracing::warn!(%error, "Worker activation cleanup did not finish normally");
+                false
+            }
         }
     }
 
@@ -168,17 +196,20 @@ impl PendingInvocationWorker {
     ///
     /// # Errors
     /// Returns an error if the exit cannot be established.
-    pub async fn close(mut self) -> Result<(), WorkerLaunchError> {
-        drop(self.child.stdin.take());
-        let status = tokio::time::timeout(STARTUP_TIMEOUT, self.child.wait())
-            .await
-            .map_err(|_| WorkerLaunchError::Deadline)?
-            .map_err(|_| WorkerLaunchError::NativeProcess)?;
-        if status.success() {
+    pub async fn close(self) -> Result<(), WorkerLaunchError> {
+        if self.reap().await?.success() {
             Ok(())
         } else {
             Err(WorkerLaunchError::NativeProcess)
         }
+    }
+
+    async fn reap(mut self) -> Result<std::process::ExitStatus, WorkerLaunchError> {
+        drop(self.child.stdin.take());
+        tokio::time::timeout(STARTUP_TIMEOUT, self.child.wait())
+            .await
+            .map_err(|_| WorkerLaunchError::Deadline)?
+            .map_err(|_| WorkerLaunchError::NativeProcess)
     }
 }
 
