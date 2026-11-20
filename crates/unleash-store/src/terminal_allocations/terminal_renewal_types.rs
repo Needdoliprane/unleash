@@ -10,6 +10,59 @@ use unleash_domain::{
 /// Internal broker verb; a renewal never launches or transfers control.
 pub const TERMINAL_RENEWAL_VERB: &str = "terminal.renew_registered";
 
+/// Internal broker verb for changing the size of the held PTY.
+pub const TERMINAL_RESIZE_VERB: &str = "terminal.resize";
+
+/// The size in character cells requested from or observed on the native PTY.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TerminalDimensions {
+    /// PTY rows.
+    pub rows: u16,
+    /// PTY columns.
+    pub cols: u16,
+}
+
+/// Closed command payload. Its identifiers grant no control without writer validation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TerminalResizeRequest {
+    /// Terminal addressed by the command envelope.
+    pub terminal_id: TerminalId,
+    /// Process generation observed on acquisition.
+    pub process_run_uuid: ProcessRunUuid,
+    /// Exact lease held by the caller.
+    pub lease_id: LeaseId,
+    /// Current terminal fence.
+    pub fence: Fence,
+    /// Requested PTY rows.
+    pub rows: u16,
+    /// Requested PTY columns.
+    pub cols: u16,
+}
+
+impl TerminalResizeRequest {
+    /// Check identity syntax and the same limits enforced by the process host.
+    #[must_use]
+    pub fn is_valid(&self) -> bool {
+        !self.terminal_id.as_uuid().is_nil()
+            && !self.process_run_uuid.as_uuid().is_nil()
+            && !self.lease_id.as_uuid().is_nil()
+            && (1..=9_007_199_254_740_991).contains(&self.fence.as_u64())
+            && (1..=500).contains(&self.rows)
+            && (1..=1000).contains(&self.cols)
+    }
+
+    /// Requested size, before any native observation.
+    #[must_use]
+    pub const fn dimensions(&self) -> TerminalDimensions {
+        TerminalDimensions {
+            rows: self.rows,
+            cols: self.cols,
+        }
+    }
+}
+
 /// Immutable writer-built intention. Its proposed deadline is stable across
 /// replay, but grants no time until its native observation is committed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -71,6 +124,21 @@ pub struct TerminalRenewalContext {
     pub proposed_expires_at_ms: TimestampMs,
     /// Actual registered identity, reobserved before the native handshake.
     pub expected_os_identity: TerminalProcessIdentity,
+    /// Resize target. Absent in registered acquisitions and their historical digests.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resize: Option<TerminalDimensions>,
+}
+
+impl TerminalRenewalContext {
+    /// The broker verb bound to this durable intention.
+    #[must_use]
+    pub const fn verb(&self) -> &'static str {
+        if self.resize.is_some() {
+            TERMINAL_RESIZE_VERB
+        } else {
+            TERMINAL_RENEWAL_VERB
+        }
+    }
 }
 
 /// Closed durable states; unknown never reopens a native permit.
@@ -79,6 +147,8 @@ pub struct TerminalRenewalContext {
 pub enum TerminalRenewalState {
     /// Accepted with no consumed dispatch.
     Prepared,
+    /// A durable local refusal proves this intention will never be dispatched.
+    Refused,
     /// One durable dispatch has been consumed.
     HandshakeResolved,
     /// Qualified proof and the deadline CAS committed atomically.
@@ -111,7 +181,7 @@ pub struct TerminalRenewalRecord {
     pub broker_dispatch_id: Option<DispatchId>,
 }
 
-/// Native facts captured after one authenticated, non-rotating handshake.
+/// Native facts captured after one authenticated operation on the held controller.
 /// Digests cover actual non-secret response/manifest bytes, never secret input.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -135,7 +205,11 @@ pub struct TerminalRenewalObservation {
     /// Same resource fence, without transfer.
     pub resource_fence: Fence,
     /// Canonical digest of the actual handshake response.
-    pub handshake_response_digest: Sha256Digest,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub handshake_response_digest: Option<Sha256Digest>,
+    /// Size actually read by the host after applying the resize, with its ACK digest.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resize_ack: Option<TerminalResizeAck>,
     /// Canonical digest of the actual post-handshake manifest.
     pub manifest_digest: Sha256Digest,
     /// Native applied environment digest, including host-managed temporary path.
@@ -148,6 +222,26 @@ pub struct TerminalRenewalObservation {
     pub unknown_input_seqs: Vec<u64>,
     /// Actual capture UTC, between dispatch and broker receipt.
     pub observed_at_ms: TimestampMs,
+}
+
+/// A size reported by the authenticated host, with the digest of its exact response.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TerminalResizeAck {
+    /// Values read back through the native PTY interface.
+    pub dimensions: TerminalDimensions,
+    /// Canonical digest of the native response.
+    pub response_digest: Sha256Digest,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct TerminalResizeResult {
+    pub command_id: unleash_domain::CommandId,
+    pub receipt_id: ReceiptId,
+    pub terminal_id: TerminalId,
+    pub process_run_uuid: ProcessRunUuid,
+    pub dimensions: TerminalDimensions,
+    pub lease_expires_at: TimestampMs,
 }
 
 /// Consume a renewal dispatch once, after identity preflight and before host I/O.

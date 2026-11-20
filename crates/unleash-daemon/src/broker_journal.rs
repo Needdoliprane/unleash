@@ -529,7 +529,9 @@ fn project_terminal(
             || intent.verb
                 == unleash_store::terminal_allocations::terminal_input_types::TERMINAL_INPUT_VERB
             || intent.verb
-                == unleash_store::terminal_allocations::terminal_renewal_types::TERMINAL_RENEWAL_VERB)
+                == unleash_store::terminal_allocations::terminal_renewal_types::TERMINAL_RENEWAL_VERB
+            || intent.verb
+                == unleash_store::terminal_allocations::terminal_renewal_types::TERMINAL_RESIZE_VERB)
         && matches!(
             &intent.resource_refs[..],
             [unleash_action_broker::NormalizedResourceRef::Terminal(_)]

@@ -116,6 +116,7 @@ fn commit_observation_tx(
     }
     let proof = TerminalObservationProof {
         phase_digest: canonical_sha256(&phase.phase)?,
+        resize_result: None,
     };
     crate::broker_writer::commit_terminal_observation_tx(tx, config, now, phase, &proof)
 }

@@ -385,7 +385,8 @@ fn renewal_binding(
 ) -> Result<AcquisitionBinding, StoreError> {
     use super::terminal_renewal_types::TerminalRenewalState;
     let c = &renewal.context;
-    if c.receipt_id != receipt
+    if c.resize.is_some()
+        || c.receipt_id != receipt
         || c.command_id != command
         || c.actor_id != *actor
         || c.project_id != project

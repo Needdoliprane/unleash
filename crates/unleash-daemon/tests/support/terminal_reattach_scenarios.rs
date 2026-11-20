@@ -11,6 +11,9 @@ mod cli_scenarios;
 #[path = "terminal_log_rotation_scenarios.rs"]
 mod log_rotation_scenarios;
 
+#[path = "terminal_resize_scenarios.rs"]
+mod resize_scenarios;
+
 #[path = "terminal_renewal_fixture.rs"]
 mod renewal_fixture;
 

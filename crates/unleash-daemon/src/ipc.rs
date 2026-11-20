@@ -1267,6 +1267,10 @@ async fn handle_command_frame(
         );
     }
 
+    if newly_committed && cmd.command_type == "ResizeTerminal" {
+        crate::terminal_service::start_resize(state, session.actor_id.clone(), cmd.command_id);
+    }
+
     if newly_committed && let Some(stop_reason) = stop_reason.take() {
         state.mark_draining();
         let _ = state.stop_tx.try_send(StopRequest {
@@ -1444,6 +1448,11 @@ async fn prepare_command_request(
         }),
         "SendTerminalInput" => Ok(PreparedCommand {
             req: crate::terminal_service::prepare_input(session, cmd)?,
+            stop_reason: None,
+            stop_drain_timeout: None,
+        }),
+        "ResizeTerminal" => Ok(PreparedCommand {
+            req: crate::terminal_service::prepare_resize(session, cmd)?,
             stop_reason: None,
             stop_drain_timeout: None,
         }),

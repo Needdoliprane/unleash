@@ -28,7 +28,7 @@ use unleash_store::terminal_allocations::{
 const TERMINAL: u128 = 0xf011_c001;
 const CONTROL: u128 = 0xf011_c002;
 
-fn registered_request(
+pub(super) fn registered_request(
     store: &UnleashStore,
     allocation: &TerminalAllocationRecord,
     n: u128,
@@ -117,25 +117,9 @@ fn observed_with_observer(
     impl std::fmt::Debug,
 ) {
     let (store, _cfg, clock, preparation, directory) = fixture(observer);
-    store
-        .commit_command(request(&store, preparation, TERMINAL))
-        .unwrap();
-    let allocation = read(&store, TERMINAL);
-    clock.set_utc_ms(100);
-    let marker = dispatch(&store, &allocation);
-    store
-        .resolve_terminal_launch(resolution(&allocation, marker))
-        .unwrap();
-    clock.set_utc_ms(105);
-    let (observation, phase) =
-        launch_observation_state_fixture(&store, &allocation, marker, 101, 103, false);
-    store
-        .commit_terminal_launch_observation(observation, phase)
-        .unwrap();
+    observe_fixture(&store, &clock, preparation);
     let store = Arc::try_unwrap(store).unwrap();
-    // SQLite-only successor fixture: preserve the physical boot identity.
-    // restart_same_lineage() is a legacy helper that invents a different boot,
-    // so it cannot represent a daemon-only restart with a surviving PTY.
+    // The successor advances the daemon epoch while the synthetic process stays in the same boot.
     if successor {
         store
             .execute_in_writer_tx(WriteCriticality::Critical, |tx, _| {
@@ -165,6 +149,29 @@ fn observed_with_observer(
     }
     let allocation = read(&store, TERMINAL);
     (store, clock, allocation, directory)
+}
+
+pub(super) fn observe_fixture(
+    store: &UnleashStore,
+    clock: &ManualClock,
+    preparation: TerminalAllocationPreparation,
+) -> TerminalAllocationRecord {
+    store
+        .commit_command(request(store, preparation, TERMINAL))
+        .unwrap();
+    let allocation = read(store, TERMINAL);
+    clock.set_utc_ms(100);
+    let marker = dispatch(store, &allocation);
+    store
+        .resolve_terminal_launch(resolution(&allocation, marker))
+        .unwrap();
+    clock.set_utc_ms(105);
+    let (observation, phase) =
+        launch_observation_state_fixture(store, &allocation, marker, 101, 103, false);
+    store
+        .commit_terminal_launch_observation(observation, phase)
+        .unwrap();
+    read(store, TERMINAL)
 }
 
 fn prepared() -> (

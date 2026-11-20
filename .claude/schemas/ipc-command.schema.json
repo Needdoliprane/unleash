@@ -35,6 +35,19 @@
         }
       }
     },
+    "terminal_resize": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["terminal_id", "process_run_uuid", "lease_id", "fence", "rows", "cols"],
+      "properties": {
+        "terminal_id": { "type": "string", "format": "uuid" },
+        "process_run_uuid": { "type": "string", "format": "uuid" },
+        "lease_id": { "type": "string", "format": "uuid" },
+        "fence": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
+        "rows": { "type": "integer", "minimum": 1, "maximum": 500 },
+        "cols": { "type": "integer", "minimum": 1, "maximum": 1000 }
+      }
+    },
     "registered_terminal_control": {
       "type": "object",
       "additionalProperties": false,
@@ -453,6 +466,15 @@
         "properties": {
           "project_id": { "type": "string", "format": "uuid" },
           "payload": { "$ref": "#/$defs/terminal_input" }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "command_type": { "const": "ResizeTerminal" } } },
+      "then": {
+        "properties": {
+          "project_id": { "type": "string", "format": "uuid" },
+          "payload": { "$ref": "#/$defs/terminal_resize" }
         }
       }
     },

@@ -23,6 +23,66 @@
     "payload",
     "sensitivity"
   ],
+  "allOf": [
+    {
+      "if": { "properties": { "event_type": { "const": "ActionObserved" } } },
+      "then": {
+        "properties": {
+          "payload": {
+            "properties": {
+              "terminal_resize": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["command_id", "receipt_id", "terminal_id", "process_run_uuid", "dimensions", "lease_expires_at"],
+                "properties": {
+                  "command_id": { "type": "string", "format": "uuid" },
+                  "receipt_id": { "type": "string", "format": "uuid" },
+                  "terminal_id": { "type": "string", "format": "uuid" },
+                  "process_run_uuid": { "type": "string", "format": "uuid" },
+                  "dimensions": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["rows", "cols"],
+                    "properties": {
+                      "rows": { "type": "integer", "minimum": 1, "maximum": 500 },
+                      "cols": { "type": "integer", "minimum": 1, "maximum": 1000 }
+                    }
+                  },
+                  "lease_expires_at": { "type": "integer" }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "event_type": { "const": "TerminalControlDispatchRefused" } } },
+      "then": {
+        "properties": {
+          "payload": {
+            "oneOf": [
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["action_id", "command_id", "receipt_id", "terminal_id", "context_digest", "reason", "operation"],
+                "properties": {
+                  "action_id": { "type": "string", "format": "uuid" },
+                  "command_id": { "type": "string", "format": "uuid" },
+                  "receipt_id": { "type": "string", "format": "uuid" },
+                  "terminal_id": { "type": "string", "format": "uuid" },
+                  "context_digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+                  "reason": { "enum": ["daemon_superseded", "policy_changed", "authorization_denied"] },
+                  "operation": { "enum": ["renewal", "resize"] }
+                }
+              },
+              { "const": { "tombstoned": true } }
+            ]
+          }
+        }
+      }
+    }
+  ],
   "properties": {
     "event_id": {
       "type": "string",

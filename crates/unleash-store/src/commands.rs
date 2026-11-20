@@ -123,6 +123,13 @@ impl AggregateKind {
 /// Mutation pure décidée par le domaine et exécutée atomiquement par [`CommitCommandRequest`].
 #[derive(Debug, Clone)]
 pub enum CommandMutation {
+    /// Accept a resize for the currently held terminal lease without contacting its host.
+    PrepareTerminalResize {
+        /// Actor and role of the authenticated human controller.
+        caller: CallerAuthority,
+        /// Requested dimensions and exact held control.
+        request: crate::terminal_allocations::terminal_renewal_types::TerminalResizeRequest,
+    },
     /// Accept an exact input intention without retaining its raw bytes or performing I/O.
     PrepareTerminalInput {
         /// Identity and role resolved by the authenticated daemon connection.
@@ -861,7 +868,7 @@ pub(crate) fn classify_command_replay(
     };
     let lineage_bound = matches!(
         envelope.command_type.as_str(),
-        "SetProviderProfile" | "TestProviderProfile"
+        "SetProviderProfile" | "TestProviderProfile" | "ResizeTerminal"
     ) || (envelope.command_type == "AcquireTerminal"
         && envelope.payload.contains_key("terminal_id"));
     let historical_command =
@@ -1159,6 +1166,7 @@ pub(crate) fn tx_commit_command(
             CommandMutation::PrepareTerminalAllocation { .. }
                 | CommandMutation::PrepareTerminalControl { .. }
                 | CommandMutation::PrepareTerminalInput { .. }
+                | CommandMutation::PrepareTerminalResize { .. }
         ) {
         ReceiptState::Accepted
     } else {
@@ -1377,6 +1385,21 @@ fn apply_command_mutation(
 ) -> Result<Revision, StoreError> {
     let exp_i64 = i64::try_from(expected_rev.as_u64()).unwrap_or(0);
     match mutation {
+        CommandMutation::PrepareTerminalResize { caller, request } => {
+            crate::terminal_allocations::terminal_renewal::prepare_resize_tx(
+                tx,
+                config,
+                daemon,
+                now_ms,
+                &crate::terminal_allocations::terminal_renewal::ResizeCommand {
+                    envelope,
+                    caller,
+                    request,
+                    receipt: receipt_id,
+                },
+                generated_events,
+            )
+        }
         CommandMutation::PrepareTerminalInput { request, .. } => {
             crate::terminal_allocations::terminal_input_writer::prepare_tx(
                 tx,

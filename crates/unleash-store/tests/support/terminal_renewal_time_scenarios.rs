@@ -7,7 +7,7 @@ use std::sync::{
 };
 use unleash_store::terminal_allocations::terminal_renewal_types::{
     ResolveTerminalRenewalRequest, TERMINAL_RENEWAL_VERB, TerminalRenewalObservation,
-    TerminalRenewalRecord,
+    TerminalRenewalRecord, TerminalRenewalState,
 };
 
 #[derive(Default)]
@@ -42,6 +42,223 @@ impl CutpointObserver for ClockCutpoint {
         }
         Ok(())
     }
+}
+
+fn set_global_policy(store: &UnleashStore, allocation: &TerminalAllocationRecord) {
+    let mut request = registered_request(store, allocation, 0xf011_1720);
+    request.target_aggregate = AggregateKind::SecurityPolicy;
+    request.envelope.project_id = None;
+    request.envelope.aggregate_id = request.envelope.authority_generation.as_uuid();
+    request.envelope.command_type = "SetPolicy".into();
+    request.envelope.payload.clone_from(
+        json!({"scope_kind":"global","scope_id":"global",
+            "isolation_mode":"standard","policy_version":"v017","reason":"fixture policy change"})
+        .as_object()
+        .unwrap(),
+    );
+    request.mutation = CommandMutation::SetPolicy {
+        caller: CallerAuthority {
+            actor_id: request.actor_id.clone(),
+            role: CallerRole::PolicyAdmin,
+        },
+        scope_kind: PolicyScopeKind::Global,
+        scope_id: "global".into(),
+        isolation_mode: PolicyIsolationMode::Standard,
+        policy_version: "v017".into(),
+        reason: "fixture policy change".into(),
+    };
+    assert_eq!(
+        store
+            .commit_command(request)
+            .unwrap()
+            .receipt()
+            .new_revision,
+        Revision::new(1)
+    );
+}
+
+fn pending_renewal(
+    store: &UnleashStore,
+    allocation: &TerminalAllocationRecord,
+) -> TerminalRenewalRecord {
+    let request = registered_request(store, allocation, 0xf011_1721);
+    store.commit_command(request.clone()).unwrap();
+    store
+        .inspect_terminal_renewal_request(&request.actor_id, request.envelope.command_id)
+        .unwrap()
+        .value
+        .unwrap()
+}
+
+#[test]
+fn t_f011_v017_refusal_blocks_late_dispatch_after_payload_purge() {
+    let (store, clock, allocation, _root) =
+        observed_with_observer(false, Arc::new(NoopCutpointObserver));
+    let renewal = pending_renewal(&store, &allocation);
+    store.commit_broker_phase(authorizing(&renewal)).unwrap();
+    set_global_policy(&store, &allocation);
+    let c = &renewal.context;
+    let disposed = || {
+        store
+            .dispose_undispatched_terminal_renewal(c.action_id, renewal.context_digest)
+            .unwrap()
+    };
+    let cursor = disposed().expect("a policy change makes the unstarted intent obsolete");
+    assert_eq!(disposed(), None);
+    let actual = store
+        .inspect_terminal_renewal_request(&c.actor_id, c.command_id)
+        .unwrap()
+        .value
+        .unwrap();
+    assert_eq!(actual.state, TerminalRenewalState::Refused);
+    assert_eq!(actual.broker_action_state, Some(ActionState::Cancelled));
+    assert!(actual.dispatch_id.is_none());
+
+    let expiry: i64 = store
+        .read_snapshot(|conn, _| {
+            Ok(conn.query_row(
+                "SELECT expires_at_ms FROM resource_leases WHERE lease_id=?1",
+                [c.lease_id.to_string()],
+                |r| r.get(0),
+            )?)
+        })
+        .unwrap();
+    assert_eq!(expiry, c.previous_expires_at_ms.as_i64());
+    store
+        .commit_command(registered_request(&store, &allocation, 0xf011_1722))
+        .unwrap();
+
+    let sequence = i64::try_from(cursor.sequence.as_u64()).unwrap();
+    let header: (String, String) = store.execute_in_writer_tx(WriteCriticality::Normal, move |tx,now| {
+        let header: (String, String) = tx.query_row(
+            "SELECT event_id,payload_hash FROM events WHERE sequence=?1 AND event_type='TerminalControlDispatchRefused'",
+            [sequence], |r| Ok((r.get(0)?,r.get(1)?)),
+        )?;
+        assert_eq!(tx.execute("UPDATE outbox SET state='acked',acked_at_ms=?2 WHERE event_id=?1",
+            rusqlite::params![header.0,now.as_i64()])?, 1);
+        assert!(tx.execute("UPDATE events SET payload_hash='forged' WHERE event_id=?1", [&header.0]).is_err());
+        Ok(header)
+    }).unwrap();
+    let elapsed = 8 * 24 * 60 * 60 * 1000;
+    clock.set_utc_ms(elapsed);
+    store.purge_history(TimestampMs::new(elapsed)).unwrap();
+    store.read_snapshot(|conn,_| {
+        assert!(conn.prepare("SELECT 1 FROM events WHERE event_id=?1 AND payload_hash=?2 AND payload_state='tombstone'")?
+            .exists([&header.0,&header.1])?);
+        Ok(())
+    }).unwrap();
+
+    let late = ActionDispatchInput {
+        dispatch_id: DispatchId::from_u128(0xf011_1723).to_string(),
+        action_id: c.action_id,
+        ordinal: 1,
+        adapter_id: "owned-fixture".into(),
+        request_hash: renewal.context_digest,
+        provider_request_id: None,
+        transport_state: "dispatched".into(),
+        receipt_hash: None,
+    };
+    let Err(error) = store.record_action_dispatch(late) else {
+        panic!("refused action got a marker")
+    };
+    assert!(
+        error
+            .to_string()
+            .contains("terminal refusal forbids a dispatch"),
+        "{error}"
+    );
+    assert_eq!(disposed(), None);
+}
+
+#[test]
+fn t_f011_v017_dispatch_wins_over_pre_dispatch_refusal() {
+    let (store, clock, allocation, _root) =
+        observed_with_observer(false, Arc::new(NoopCutpointObserver));
+    let renewal = pending_renewal(&store, &allocation);
+    let (_, unknown) = dispatch_authorizing(&store, &authorizing(&renewal));
+    set_global_policy(&store, &allocation);
+    let c = &renewal.context;
+    assert_eq!(
+        store
+            .dispose_undispatched_terminal_renewal(c.action_id, renewal.context_digest)
+            .unwrap(),
+        None
+    );
+    clock.set_utc_ms(110);
+    store.commit_broker_phase(unknown).unwrap();
+    let view = store
+        .inspect_terminal_renewal_request(&c.actor_id, c.command_id)
+        .unwrap()
+        .value
+        .unwrap();
+    assert_eq!(view.state, TerminalRenewalState::OutcomeUnknown);
+    assert!(view.dispatch_id.is_some());
+    assert!(matches!(
+        store.commit_command(registered_request(&store, &allocation, 0xf011_1724)),
+        Err(StoreError::CapacityBlocked(_))
+    ));
+}
+
+#[test]
+fn t_f011_v017_sql_cannot_dispose_unknown_without_a_marker() {
+    let (store, _clock, allocation, _root) =
+        observed_with_observer(false, Arc::new(NoopCutpointObserver));
+    let renewal = pending_renewal(&store, &allocation);
+    store.commit_broker_phase(authorizing(&renewal)).unwrap();
+    let action = renewal.context.action_id;
+    store
+        .execute_in_writer_tx(WriteCriticality::Normal, move |tx, _| {
+            assert_eq!(
+                tx.execute(
+                    "UPDATE actions SET state='outcome_unknown' WHERE action_id=?1",
+                    [action.to_string()]
+                )?,
+                1
+            );
+            Ok(())
+        })
+        .unwrap();
+    let stream = store.daemon_state().unwrap().stream_id;
+    let event = uuid::Uuid::from_u128(0xf011_1725).to_string();
+    let event_test = event.clone();
+    let attempt = store.execute_in_writer_tx(WriteCriticality::Normal, move |tx, now| {
+        use rusqlite::params;
+        let c = &renewal.context;
+        let payload = json!({"action_id":action,"command_id":c.command_id,
+            "receipt_id":c.receipt_id,"terminal_id":c.terminal_id,
+            "context_digest":renewal.context_digest,"operation":"renewal","reason":"policy_changed"});
+        tx.execute("INSERT INTO events(event_id,stream_id,aggregate_type,aggregate_id,aggregate_revision,event_ordinal,event_type,schema_version,project_id,actor_ref,actor_id,occurred_at_ms,recorded_at_ms,payload_json,payload_state,payload_hash,sensitivity,causation_kind,causation_id,causation_receipt_id,correlation_id) VALUES(?1,?2,'terminal_control_intent',?3,2,0,'TerminalControlDispatchRefused',1,?4,?5,?5,?6,?6,?7,'full',?8,'restricted','command',?9,?9,?10)",
+            params![event_test,stream.to_string(),action.to_string(),c.project_id.to_string(),c.actor_id.as_str(),now.as_i64(),serde_json::to_string(&payload)?,canonical_sha256(&payload)?.to_string(),c.receipt_id.to_string(),c.terminal_id.to_string()])?;
+        tx.execute("UPDATE terminal_renewal_intents SET revision=2,refusal_event_id=?2 WHERE action_id=?1",
+            params![action.to_string(),event_test])?;
+        Ok(())
+    });
+    let Err(error) = attempt else {
+        panic!("SQL allowed a refusal to erase the Unknown barrier")
+    };
+    assert!(
+        error
+            .to_string()
+            .contains("terminal renewal transition invalid"),
+        "{error}"
+    );
+    store
+        .read_snapshot(|conn, _| {
+            assert!(
+                !conn
+                    .prepare("SELECT 1 FROM events WHERE event_id=?1")?
+                    .exists([&event])?
+            );
+            assert!(
+                conn.prepare(
+                    "SELECT 1 FROM terminal_renewal_intents r JOIN actions a USING(action_id)
+           WHERE r.action_id=?1 AND r.refusal_event_id IS NULL AND a.state='outcome_unknown'"
+                )?
+                .exists([action.to_string()])?
+            );
+            Ok(())
+        })
+        .unwrap();
 }
 
 fn authorizing(record: &TerminalRenewalRecord) -> BrokerPhaseRequest {
@@ -98,9 +315,10 @@ fn publish(
         os_identity: c.expected_os_identity.clone(),
         daemon_epoch: c.daemon_epoch,
         resource_fence: c.resource_fence,
-        handshake_response_digest: Sha256Digest::from_bytes(
+        handshake_response_digest: Some(Sha256Digest::from_bytes(
             b"synthetic writer fixture; no native handshake",
-        ),
+        )),
+        resize_ack: None,
         manifest_digest: Sha256Digest::from_bytes(b"synthetic writer fixture manifest"),
         effective_environment_digest: Sha256Digest::from_bytes(
             b"synthetic writer fixture environment",

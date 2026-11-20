@@ -1,5 +1,4 @@
-//! One non-rotating native observation for an existing same-daemon controller.
-//! This path never launches, allocates, transfers, rotates or retries a host call.
+//! One authenticated renewal or resize on an existing same-daemon controller.
 use crate::ipc::DaemonRuntimeState;
 use std::{
     collections::BTreeSet,
@@ -9,32 +8,113 @@ use std::{
 use unleash_action_broker::{
     ActionBroker, ActionExecutionFailure, ActionExecutionResult, ActionExecutorPort, ActionIntent,
     ActionProvenance, ActionSubject, AuthorityLayer, AuthorizationDecision, AuthorizationOutcome,
-    BoxFuture, BrokerConfig, EffectiveAuthority, EffectsClass, HostIsolationProbe, IsolationMode,
-    IsolationRequirements, LocalAuthorityFallbackPolicy, NormalizedResourceRef,
-    PlatformKeyringSecretStore, ResolvedSecret, ScopeKind, StrictNoneAcceptedObligationChecker,
-    SystemClockAndTimer, compute_effective_authority,
+    BoxFuture, BrokerConfig, EffectiveAuthority, EffectsClass, GuardMode, HostIsolationProbe,
+    InitialEffectivePolicy, IsolationMode, IsolationRequirements, LocalAuthorityFallbackPolicy,
+    NormalizedResourceRef, PlatformKeyringSecretStore, ResolvedSecret, ScopeKind,
+    StrictNoneAcceptedObligationChecker, SystemClockAndTimer, compute_effective_authority,
 };
 use unleash_domain::{
-    DataLocality, DispatchId, Fence, LineageFence, ModelPolicy, ReconcileStrategy, Sha256Digest,
+    ActorId, CommandId, DataLocality, DispatchId, Fence, LineageFence, ModelPolicy,
+    ReconcileStrategy, Sha256Digest,
 };
 use unleash_process_host::{
     CONTROL_SECRET_FILENAME, HOST_MANIFEST_FILENAME, HOST_SOCKET_FILENAME, HostClient,
     HostManifest, HostRequest, HostResponse, effective_environment_digest_v1,
     explicit_environment_v1, load_control_secret,
 };
+use unleash_protocol::{
+    ClientKind, CommandEnvelope, ErrorCode, IpcError, ReceiptState, RetryClass,
+};
 use unleash_store::{
-    CallerAuthority, CallerRole, PrepareObjectRequest, PublishObjectReferenceRequest,
+    AggregateKind, CallerAuthority, CallerRole, CommandMutation, CommitCommandRequest,
+    PrepareObjectRequest, PublishObjectReferenceRequest,
     terminal_allocations::{
         TerminalIdentityBackend, TerminalProcessIdentity,
         terminal_renewal_types::{
-            ResolveTerminalRenewalRequest, TERMINAL_RENEWAL_VERB, TerminalRenewalContext,
-            TerminalRenewalObservation, TerminalRenewalRecord,
+            ResolveTerminalRenewalRequest, TerminalDimensions, TerminalRenewalContext,
+            TerminalRenewalObservation, TerminalRenewalRecord, TerminalRenewalState,
+            TerminalResizeAck, TerminalResizeRequest,
         },
     },
 };
 
 type ObservationSlot = Arc<Mutex<Option<TerminalRenewalObservation>>>;
 type RenewalError = Box<dyn std::error::Error + Send + Sync>;
+
+pub(crate) fn prepare_resize(
+    session: &crate::auth::AuthenticatedSession,
+    envelope: CommandEnvelope,
+) -> Result<CommitCommandRequest, IpcError> {
+    let invalid = || {
+        IpcError::new(
+            ErrorCode::InvalidArgument,
+            None,
+            "Terminal resize requires a closed request from a human client",
+            RetryClass::Never,
+        )
+        .with_command_id(envelope.command_id)
+    };
+    let request: TerminalResizeRequest =
+        serde_json::from_value(serde_json::Value::Object(envelope.payload.clone()))
+            .map_err(|_| invalid())?;
+    if !request.is_valid()
+        || envelope.project_id.is_none()
+        || envelope.aggregate_id != request.terminal_id.as_uuid()
+        || !matches!(
+            session.client_kind,
+            ClientKind::Cli | ClientKind::Tui | ClientKind::Gui
+        )
+    {
+        return Err(invalid());
+    }
+    Ok(CommitCommandRequest {
+        actor_id: session.actor_id.clone(),
+        envelope,
+        target_aggregate: AggregateKind::TerminalControl,
+        operation_id: None,
+        receipt_state: ReceiptState::Accepted,
+        result_ref: None,
+        retention_days_override: None,
+        fence_assertion: None,
+        mutation: CommandMutation::PrepareTerminalResize {
+            caller: CallerAuthority {
+                actor_id: session.actor_id.clone(),
+                role: CallerRole::PolicyAdmin,
+            },
+            request,
+        },
+        events: vec![],
+        capacity_reservations: vec![],
+        budget_reservations: vec![],
+    })
+}
+
+pub(crate) fn start_resize(state: &Arc<DaemonRuntimeState>, actor: ActorId, command: CommandId) {
+    let Some(activity) = state.broker_activity.admit() else {
+        return;
+    };
+    let state = Arc::clone(state);
+    let store = Arc::clone(&state.store);
+    tokio::spawn(async move {
+        let activity = Arc::new(activity);
+        let inspected = tokio::task::spawn_blocking(move || {
+            store.inspect_terminal_renewal_request(&actor, command)
+        })
+        .await;
+        let Ok(Ok(snapshot)) = inspected else {
+            return;
+        };
+        if let Some(record) = snapshot.value
+            && record.context.resize.is_some()
+            && record.state == TerminalRenewalState::Prepared
+            && record.broker_action_state.is_none()
+            && record.broker_dispatch_id.is_none()
+            && run(state, record, activity).await.is_err()
+        {
+            tracing::warn!("Terminal resize requires inspection of its durable outcome");
+        }
+    });
+}
 
 fn authority(c: &TerminalRenewalContext) -> EffectiveAuthority {
     compute_effective_authority(
@@ -45,7 +125,7 @@ fn authority(c: &TerminalRenewalContext) -> EffectiveAuthority {
             layer_name: "authenticated_human_terminal_renewal".into(),
             allowed_effects: Some(BTreeSet::from([EffectsClass::ProcessExec])),
             denied_effects: BTreeSet::new(),
-            allowed_verbs: Some(BTreeSet::from([TERMINAL_RENEWAL_VERB.into()])),
+            allowed_verbs: Some(BTreeSet::from([c.verb().into()])),
             denied_verbs: BTreeSet::new(),
             allowed_roots: Some(vec![]),
             allowed_network_hosts: Some(BTreeSet::new()),
@@ -75,7 +155,7 @@ fn renewal_intent(
         )
         .map_err(|_| ())?,
         project_id: Some(c.project_id),
-        verb: TERMINAL_RENEWAL_VERB.into(),
+        verb: c.verb().into(),
         resource_refs: vec![NormalizedResourceRef::Terminal(c.terminal_id)],
         payload_digest: record.context_digest,
         reconcile_strategy: ReconcileStrategy::ObserveThenDecide,
@@ -91,6 +171,35 @@ fn renewal_intent(
 }
 
 pub(super) async fn run(
+    state: Arc<DaemonRuntimeState>,
+    record: TerminalRenewalRecord,
+    activity: Arc<crate::broker_activity::BrokerActivityGuard>,
+) -> Result<(), ()> {
+    let action = record.context.action_id;
+    let digest = record.context_digest;
+    let result = run_once(Arc::clone(&state), record, Arc::clone(&activity)).await;
+    if result.is_err() {
+        let store = Arc::clone(&state.store);
+        let cursor = tokio::task::spawn_blocking(move || {
+            let _activity = activity;
+            store.dispose_undispatched_terminal_renewal(action, digest)
+        })
+        .await;
+        if let Ok(Ok(Some(cursor))) = cursor {
+            crate::ipc::publish_committed_events_ordered(
+                &state,
+                cursor.stream_id,
+                cursor.sequence.as_u64(),
+                1,
+                &[],
+            )
+            .await;
+        }
+    }
+    result
+}
+
+async fn run_once(
     state: Arc<DaemonRuntimeState>,
     record: TerminalRenewalRecord,
     activity: Arc<crate::broker_activity::BrokerActivityGuard>,
@@ -121,7 +230,7 @@ pub(super) async fn run(
     let intent = renewal_intent(&record, &authority, fence)?;
     let slot = Arc::new(Mutex::new(None));
     let timer = Arc::new(SystemClockAndTimer::new());
-    let broker = ActionBroker::new(
+    let broker = ActionBroker::new_with_policy_snapshot(
         Arc::clone(&state.store.config().clock),
         timer.clone(),
         timer,
@@ -143,8 +252,17 @@ pub(super) async fn run(
                 Arc::clone(&slot),
             ),
         ),
-    );
-    broker.bump_scope_revision(Some(project), c.scope_revision);
+        InitialEffectivePolicy {
+            project_id: Some(project),
+            policy_revision: c.policy_revision,
+            scope_revision: c.scope_revision,
+            policy_digest: c.security_policy_digest,
+            isolation_mode: IsolationMode::Standard,
+            guard_mode: GuardMode::BrokerOnly,
+            lineage_fence: fence,
+        },
+    )
+    .map_err(|_| ())?;
     let AuthorizationOutcome::Authorized(decision) = broker
         .authorize_action(intent, &authority)
         .await
@@ -384,15 +502,25 @@ fn observe_once(
         c.resource_fence,
     )?;
     before_effect(state, c)?;
-    // Handshake reconciles and writes the manifest: it occurs only after the
-    // unique durable dispatch and consumed permit, and is never retried here.
-    let response = client.call(&HostRequest::Handshake {
-        header: client.make_header(c.command_id, c.action_id, record.context_digest),
-        current_secret: secret.expose_secret().into(),
-        rotate_to_secret: None,
-        require_higher_epoch: false,
-    })?;
-    let observation = capture_response(state, record, dispatch, &runtime, environment, &response)?;
+    let header = client.make_header(c.command_id, c.action_id, record.context_digest);
+    let observation = if let Some(TerminalDimensions { rows, cols }) = c.resize {
+        let response = client.call(&HostRequest::Resize {
+            header,
+            secret: secret.expose_secret().into(),
+            rows,
+            cols,
+        })?;
+        capture_resize(state, record, dispatch, &runtime, environment, &response)?
+    } else {
+        // The non-rotating handshake may update the manifest, so it too runs only after dispatch.
+        let response = client.call(&HostRequest::Handshake {
+            header,
+            current_secret: secret.expose_secret().into(),
+            rotate_to_secret: None,
+            require_higher_epoch: false,
+        })?;
+        capture_response(state, record, dispatch, &runtime, environment, &response)?
+    };
     publish(state, &observation)?;
     Ok(observation)
 }
@@ -452,12 +580,62 @@ fn capture_response(
         os_identity: identity(os_identity)?,
         daemon_epoch: c.daemon_epoch,
         resource_fence: c.resource_fence,
-        handshake_response_digest: unleash_protocol::canonical_sha256(response)?,
+        handshake_response_digest: Some(unleash_protocol::canonical_sha256(response)?),
+        resize_ack: None,
         manifest_digest: unleash_protocol::canonical_sha256(&manifest)?,
         effective_environment_digest: environment,
         durable_log_seq: *durable_log_seq,
         last_confirmed_input_seq: *last_confirmed_input_seq,
         unknown_input_seqs: unknown_input_seqs.clone(),
+        observed_at_ms: state.store.config().clock.now_ms(),
+    })
+}
+
+fn capture_resize(
+    state: &DaemonRuntimeState,
+    record: &TerminalRenewalRecord,
+    dispatch: DispatchId,
+    runtime: &Path,
+    environment: Sha256Digest,
+    response: &HostResponse,
+) -> Result<TerminalRenewalObservation, RenewalError> {
+    let c = &record.context;
+    let HostResponse::ResizeAck { rows, cols } = *response else {
+        return Err("terminal resize was not acknowledged".into());
+    };
+    let dimensions = TerminalDimensions { rows, cols };
+    let os_identity = identity(&unleash_platform::inspect_process_identity(
+        c.expected_os_identity.pid,
+    )?)?;
+    let manifest = HostManifest::load_private(&runtime.join(HOST_MANIFEST_FILENAME))?;
+    validate_manifest(&manifest, c)?;
+    if Some(dimensions) != c.resize
+        || os_identity != c.expected_os_identity
+        || manifest.effective_environment_digest != Some(environment)
+        || manifest.in_flight_input_seq.is_some()
+    {
+        return Err("terminal resize native observation differs".into());
+    }
+    Ok(TerminalRenewalObservation {
+        action_id: c.action_id,
+        dispatch_id: dispatch,
+        context_digest: record.context_digest,
+        terminal_id: c.terminal_id,
+        host_id: c.host_id,
+        process_run_uuid: c.process_run_uuid,
+        os_identity,
+        daemon_epoch: c.daemon_epoch,
+        resource_fence: c.resource_fence,
+        handshake_response_digest: None,
+        resize_ack: Some(TerminalResizeAck {
+            dimensions,
+            response_digest: unleash_protocol::canonical_sha256(response)?,
+        }),
+        manifest_digest: unleash_protocol::canonical_sha256(&manifest)?,
+        effective_environment_digest: environment,
+        durable_log_seq: manifest.durable_log_seq,
+        last_confirmed_input_seq: manifest.last_confirmed_input_seq,
+        unknown_input_seqs: vec![],
         observed_at_ms: state.store.config().clock.now_ms(),
     })
 }

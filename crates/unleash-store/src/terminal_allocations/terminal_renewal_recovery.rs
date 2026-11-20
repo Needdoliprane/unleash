@@ -1,11 +1,12 @@
 //! A separate observed successor rotation lifts an old renewal quarantine.
 //! Neither preparing nor disposing that intent repeats its handshake or TTL.
-use super::terminal_renewal::read_renewal_conn;
+use super::terminal_renewal::{pending_renewal_id, read_renewal_conn};
+use super::terminal_renewal_refusal::{RefusalReason, refuse_tx};
 use super::terminal_renewal_types::{TerminalRenewalRecord, TerminalRenewalState};
 use super::{
     TerminalControlContext, TerminalControlObservation, TerminalControlRecord, integer, invalid,
 };
-use crate::{CallerAuthority, DaemonStateRow, EventAppendSpec, StoreError};
+use crate::{CallerAuthority, DaemonStateRow, EventAppendSpec, StoreConfig, StoreError};
 use rusqlite::{OptionalExtension, Transaction, params};
 use unleash_domain::{ActionState, ReconcileOutcome, TimestampMs};
 use unleash_protocol::canonical_sha256;
@@ -15,12 +16,8 @@ fn pending(
     d: &DaemonStateRow,
     c: &TerminalControlContext,
 ) -> Result<Option<TerminalRenewalRecord>, StoreError> {
-    if d.schema_version < 16 {
-        return Ok(None);
-    }
-    let id:Option<String>=tx.query_row("SELECT action_id FROM terminal_renewal_intents WHERE terminal_id=?1 AND state IN ('prepared','handshake_resolved','outcome_unknown')",
-        [c.terminal_id.to_string()],|row|row.get(0)).optional()?;
-    id.map(|id| read_renewal_conn(tx, id.parse()?))
+    pending_renewal_id(tx, d.schema_version, c.terminal_id)?
+        .map(|id| read_renewal_conn(tx, id))
         .transpose()
         .map(Option::flatten)
 }
@@ -56,18 +53,26 @@ fn same_source(old: &TerminalRenewalRecord, c: &TerminalControlContext) -> Resul
 
 pub(super) fn link_transfer_tx(
     tx: &Transaction<'_>,
-    d: &DaemonStateRow,
+    authority: (&StoreConfig, &DaemonStateRow),
     now: TimestampMs,
     c: &TerminalControlContext,
     caller: &CallerAuthority,
     events: &mut Vec<EventAppendSpec>,
 ) -> Result<(), StoreError> {
+    let (_, d) = authority;
     let Some(record) = pending(tx, d, c)? else {
         return Ok(());
     };
     same_source(&record, c)?;
     if caller.actor_id != c.actor_id || !caller.role.is_human_decision_maker() {
         return Err(invalid("renewal quarantine transfer caller differs"));
+    }
+    if d.schema_version >= 17
+        && record.state == TerminalRenewalState::Prepared
+        && record.broker_dispatch_id.is_none()
+    {
+        refuse_tx(tx, authority, now, &record, RefusalReason::DaemonSuperseded)?;
+        return Ok(());
     }
     let dispatch = record
         .broker_dispatch_id

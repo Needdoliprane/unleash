@@ -11,6 +11,7 @@ pub(crate) mod terminal_input_writer;
 pub(crate) mod terminal_renewal;
 mod terminal_renewal_observation;
 mod terminal_renewal_recovery;
+mod terminal_renewal_refusal;
 pub mod terminal_renewal_types;
 
 use crate::{CallerAuthority, FenceAssertion, StoreError};
@@ -430,7 +431,7 @@ impl crate::UnleashStore {
             }
             if tx.execute("UPDATE terminal_control_intents SET state='observed',revision=revision+1,observation_object_hash=?2 WHERE action_id=?1 AND state IN ('handshake_resolved','outcome_unknown') AND revision=?3 AND dispatch_id=?4",params![c.action_id.to_string(),digest.to_string(),integer(record.revision.as_u64())?,observation.dispatch_id.to_string()])?!=1 {return Err(invalid("terminal observation CAS lost"));}
             terminal_renewal_recovery::dispose_linked_transfer_tx(tx,&record,&observation)?;
-            let proof=TerminalObservationProof {phase_digest:canonical_sha256(&phase.phase)?};
+            let proof=TerminalObservationProof {phase_digest:canonical_sha256(&phase.phase)?,resize_result:None};
             crate::broker_writer::commit_terminal_observation_tx(tx,&config,now,&phase,&proof)
         })?;
         if !committed.replayed {
@@ -789,7 +790,7 @@ pub(crate) fn prepare_control_tx(
         expected_os_identity: identity,
     };
     let digest = canonical_sha256(&context)?;
-    terminal_renewal_recovery::link_transfer_tx(tx, d, now, &context, caller, events)?;
+    terminal_renewal_recovery::link_transfer_tx(tx, (config, d), now, &context, caller, events)?;
     tx.execute("INSERT INTO terminal_control_intents(action_id,terminal_id,receipt_id,command_id,actor_id,principal_id,authority_generation,daemon_epoch,context_digest,context_json,previous_lease_id,next_lease_id,next_fence,state,revision) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,'prepared',1)",params![context.action_id.to_string(),context.terminal_id.to_string(),receipt.to_string(),command.to_string(),actor.as_str(),context.principal_id.as_str(),d.authority_generation.to_string(),integer(d.daemon_epoch.as_u64())?,digest.to_string(),serde_json::to_string(&context)?,previous.lease_id.to_string(),context.next_lease_id.to_string(),integer(next_fence.as_u64())?])?;
     events.push(EventAppendSpec {event_type:"TerminalControlPrepared".into(),aggregate_type:AggregateKind::TerminalControlIntent,aggregate_id:context.action_id.as_uuid(),aggregate_revision:Revision::new(1),project_id:Some(project_id),correlation_id:request.terminal_id.as_uuid(),causation_kind:EventCausationKind::Command,causation_id:None,payload:json!({"terminal_id":request.terminal_id,"process_run_uuid":request.process_run_uuid,"control_revision":revision,"state":"preparing","reused":true}).as_object().cloned().ok_or_else(||invalid("terminal control event invalid"))?,sensitivity:Sensitivity::Project,outbox_destinations:vec!["clients".into(),"harness".into()]});
     Ok(revision)
@@ -1313,6 +1314,12 @@ pub(crate) fn validate_command(
     tx: &Transaction<'_>,
     req: &CommitCommandRequest,
 ) -> Result<(), StoreError> {
+    if let CommandMutation::PrepareTerminalResize { caller, request } = &req.mutation {
+        return terminal_renewal::validate_resize_command(req, caller, request);
+    }
+    if req.envelope.command_type == "ResizeTerminal" {
+        return Err(invalid("terminal resize mutation missing"));
+    }
     if let CommandMutation::PrepareTerminalInput { caller, request } = &req.mutation {
         return terminal_input_writer::validate_command(req, caller, request);
     }
@@ -2091,6 +2098,7 @@ pub struct TerminalLaunchObservation {
 
 pub(crate) struct TerminalObservationProof {
     phase_digest: Sha256Digest,
+    pub(crate) resize_result: Option<terminal_renewal_types::TerminalResizeResult>,
 }
 
 impl crate::UnleashStore {
@@ -2143,7 +2151,7 @@ impl crate::UnleashStore {
             let terminal_state=if observation.exited {"exited"}else{"ready"};
             tx.execute("INSERT INTO processes(process_id,action_id,process_run_uuid,authority_generation,host_id,pid,pgid,boot_identity,start_identity,identity_backend,owner_uid,cwd_ref,worktree_id,state,last_observed_at_ms,exit_code,exit_signal) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,NULL,?13,?14,?15,?16)",params![c.process_id.to_string(),c.action_id.to_string(),c.process_run_uuid.to_string(),c.authority_generation.to_string(),c.host_id.to_string(),observation.pid,observation.pgid,observation.boot_identity,observation.start_identity,observation.identity_backend,observation.owner_uid,c.preparation.process_spec.cwd_canonical,process_state,observation.observed_at_ms.as_i64(),observation.exit_code,observation.exit_signal])?;
             tx.execute("INSERT INTO terminal_sessions(terminal_id,process_id,owner_agent_id,mission_id,purpose_key,rows,cols,lease_id,input_seq,durable_log_seq,state) VALUES(?1,?2,NULL,?3,?4,?5,?6,?7,0,?8,?9)",params![c.terminal_id.to_string(),c.process_id.to_string(),c.preparation.mission_id.to_string(),c.preparation.purpose_key,c.preparation.process_spec.rows,c.preparation.process_spec.cols,c.lease_id.to_string(),integer(observation.durable_log_seq)?,terminal_state])?;
-            let proof=TerminalObservationProof {phase_digest:canonical_sha256(&phase.phase)?};
+            let proof=TerminalObservationProof {phase_digest:canonical_sha256(&phase.phase)?,resize_result:None};
             crate::broker_writer::commit_terminal_observation_tx(tx,&cfg,now,&phase,&proof)
         })?;
         if !committed.replayed {

@@ -79,14 +79,48 @@ fn append_resolution(
     dispatch: DispatchId,
 ) -> Result<(), StoreError> {
     let c = &record.context;
-    let event = config.id_generator.new_uuid().to_string();
     let payload = serde_json::json!({"terminal_id":c.terminal_id,"process_run_uuid":c.process_run_uuid,
         "action_id":c.action_id,"dispatch_id":dispatch,"state":"handshake_resolved","control_revision":c.control_revision});
-    tx.execute("INSERT INTO events(event_id,stream_id,aggregate_type,aggregate_id,aggregate_revision,event_ordinal,event_type,schema_version,project_id,actor_ref,actor_id,occurred_at_ms,recorded_at_ms,payload_json,payload_state,payload_hash,sensitivity,causation_kind,causation_id,causation_receipt_id,correlation_id) VALUES(?1,?2,'terminal_control_intent',?3,2,0,'TerminalRenewalHandshakePrepared',1,?4,?5,?5,?6,?6,?7,'full',?8,'restricted','command',?9,?9,?10)",
-        params![event,d.stream_id.to_string(),c.action_id.to_string(),c.project_id.to_string(),c.actor_id.as_str(),now.as_i64(),serde_json::to_string(&payload)?,canonical_sha256(&payload)?.to_string(),c.receipt_id.to_string(),c.terminal_id.to_string()])?;
+    append_intent_event(
+        tx,
+        config,
+        d,
+        now,
+        record,
+        "TerminalRenewalHandshakePrepared",
+        &payload,
+    )?;
+    Ok(())
+}
+
+pub(super) fn append_intent_event(
+    tx: &Transaction<'_>,
+    config: &StoreConfig,
+    d: &crate::DaemonStateRow,
+    now: TimestampMs,
+    record: &TerminalRenewalRecord,
+    event_type: &str,
+    payload: &serde_json::Value,
+) -> Result<(String, unleash_protocol::EventCursor), StoreError> {
+    let c = &record.context;
+    let event = config.id_generator.new_uuid().to_string();
+    let revision = integer(
+        record
+            .revision
+            .as_u64()
+            .checked_add(1)
+            .ok_or_else(|| invalid("terminal intention revision overflow"))?,
+    )?;
+    tx.execute("INSERT INTO events(event_id,stream_id,aggregate_type,aggregate_id,aggregate_revision,event_ordinal,event_type,schema_version,project_id,actor_ref,actor_id,occurred_at_ms,recorded_at_ms,payload_json,payload_state,payload_hash,sensitivity,causation_kind,causation_id,causation_receipt_id,correlation_id) VALUES(?1,?2,'terminal_control_intent',?3,?11,0,?12,1,?4,?5,?5,?6,?6,?7,'full',?8,'restricted','command',?9,?9,?10)",
+        params![event,d.stream_id.to_string(),c.action_id.to_string(),c.project_id.to_string(),c.actor_id.as_str(),now.as_i64(),serde_json::to_string(payload)?,canonical_sha256(payload)?.to_string(),c.receipt_id.to_string(),c.terminal_id.to_string(),revision,event_type])?;
+    let sequence = u64::try_from(tx.last_insert_rowid())
+        .map_err(|_| invalid("terminal event sequence invalid"))?;
     tx.execute("INSERT INTO outbox(event_id,destination,state,delivery_attempt,next_attempt_at_ms,authority_generation,consumer_version,delivery_key,rearm_count) VALUES(?1,'clients','pending',0,?2,?3,?4,?5,0)",
         params![event,now.as_i64(),d.authority_generation.to_string(),config.consumer_version,format!("{event}:clients")])?;
-    Ok(())
+    Ok((
+        event,
+        unleash_protocol::EventCursor::new(d.stream_id, unleash_domain::Sequence::new(sequence)),
+    ))
 }
 
 fn commit_tx(
@@ -173,6 +207,7 @@ fn commit_tx(
     if u64::try_from(input).ok() != Some(observation.last_confirmed_input_seq) {
         return Err(invalid("renewal native input state differs"));
     }
+    commit_observed_size(tx, &record, observation)?;
     if tx.execute("UPDATE resource_leases SET expires_at_ms=?2 WHERE lease_id=?1 AND state='held' AND authority_generation=?3 AND daemon_epoch=?4 AND fence=?5 AND boot_identity=?6 AND owner_type='principal' AND owner_id=?7 AND expires_at_ms=?8",
         params![c.lease_id.to_string(),c.proposed_expires_at_ms.as_i64(),c.authority_generation.to_string(),integer(c.daemon_epoch.as_u64())?,integer(c.resource_fence.as_u64())?,c.daemon_boot_identity,c.principal_id.as_str(),c.previous_expires_at_ms.as_i64()])?!=1 {return Err(invalid("terminal renewal deadline CAS lost"));}
     if tx.execute("UPDATE terminal_renewal_intents SET state='observed',revision=revision+1,observation_object_hash=?2 WHERE action_id=?1 AND state='handshake_resolved' AND revision=?3 AND dispatch_id=?4",
@@ -187,8 +222,54 @@ fn commit_tx(
     )?;
     let proof = TerminalObservationProof {
         phase_digest: canonical_sha256(&phase.phase)?,
+        resize_result: resize_result(&record, observation),
     };
     crate::broker_writer::commit_terminal_observation_tx(tx, config, final_now, phase, &proof)
+}
+
+fn commit_observed_size(
+    tx: &Transaction<'_>,
+    record: &TerminalRenewalRecord,
+    observation: &TerminalRenewalObservation,
+) -> Result<(), StoreError> {
+    let Some(ack) = &observation.resize_ack else {
+        return Ok(());
+    };
+    let c = &record.context;
+    let changed = tx.execute(
+        "UPDATE terminal_sessions SET rows=?2,cols=?3 WHERE terminal_id=?1
+          AND process_id=?4 AND control_revision=?5 AND lease_id=?6",
+        params![
+            c.terminal_id.to_string(),
+            ack.dimensions.rows,
+            ack.dimensions.cols,
+            c.process_id.to_string(),
+            integer(c.control_revision.as_u64())?,
+            c.lease_id.to_string()
+        ],
+    )?;
+    if changed != 1 {
+        return Err(invalid("terminal resize session CAS lost"));
+    }
+    Ok(())
+}
+
+fn resize_result(
+    record: &TerminalRenewalRecord,
+    observation: &TerminalRenewalObservation,
+) -> Option<super::terminal_renewal_types::TerminalResizeResult> {
+    let c = &record.context;
+    observation
+        .resize_ack
+        .as_ref()
+        .map(|ack| super::terminal_renewal_types::TerminalResizeResult {
+            command_id: c.command_id,
+            receipt_id: c.receipt_id,
+            terminal_id: c.terminal_id,
+            process_run_uuid: c.process_run_uuid,
+            dimensions: ack.dimensions,
+            lease_expires_at: c.proposed_expires_at_ms,
+        })
 }
 
 pub(super) fn validate_native(
@@ -208,6 +289,25 @@ pub(super) fn validate_native(
         || observation.last_confirmed_input_seq > 9_007_199_254_740_991
     {
         return Err(invalid("renewal native observation differs"));
+    }
+    match (
+        c.resize,
+        &observation.resize_ack,
+        observation.handshake_response_digest,
+    ) {
+        (None, None, Some(_)) => {}
+        (Some(size), Some(ack), None) if size == ack.dimensions => {
+            let response =
+                serde_json::json!({"kind":"resize_ack","rows":size.rows,"cols":size.cols});
+            if canonical_sha256(&response)? != ack.response_digest {
+                return Err(invalid("terminal resize acknowledgement digest differs"));
+            }
+        }
+        _ => {
+            return Err(invalid(
+                "terminal acknowledgement does not match the prepared operation",
+            ));
+        }
     }
     Ok(())
 }
@@ -248,6 +348,9 @@ pub(super) fn guard_observation(
     let Some(record) = read_renewal_conn(tx, *action_id)? else {
         return Ok(());
     };
+    if record.state == TerminalRenewalState::Refused {
+        return Err(invalid("terminal refusal forbids observation"));
+    }
     if receipt.state == ActionState::OutcomeUnknown {
         if record.broker_dispatch_id != Some(receipt.dispatch_id) {
             return Err(invalid("unknown renewal dispatch differs"));

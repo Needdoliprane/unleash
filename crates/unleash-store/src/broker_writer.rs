@@ -767,6 +767,9 @@ fn commit_phase_tx_inner(
     if let Some(fields) = extra.as_object() {
         payload.extend(fields.clone());
     }
+    if let Some(result) = terminal_proof.and_then(|proof| proof.resize_result.as_ref()) {
+        payload.insert("terminal_resize".into(), serde_json::to_value(result)?);
+    }
     let (event_id, sequence) = append_phase_event_tx(
         tx,
         config,
