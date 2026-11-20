@@ -28,7 +28,8 @@ use unleash_testkit::{
 
 use crate::inventory_transport::{
     FrozenOllamaInventoryRequest, INVENTORY_VERB, InventoryError, InventoryExecution,
-    InventoryOutcome, OllamaInventory, execute_ollama_inventory,
+    InventoryObservation, InventoryObservationError, InventoryObservationPort, InventoryOutcome,
+    OllamaInventory, execute_ollama_inventory, execute_ollama_inventory_with_observation,
 };
 use crate::transport::{BrokerDispatch, ProfileRef};
 
@@ -89,10 +90,10 @@ impl Harness {
         }
     }
 
-    async fn run(
+    async fn authorize(
         &self,
-        request: FrozenOllamaInventoryRequest,
-    ) -> Result<InventoryExecution, Box<dyn Error>> {
+        request: &FrozenOllamaInventoryRequest,
+    ) -> Result<(ActionId, AuthorizationDecision), Box<dyn Error>> {
         let action = ActionIntent {
             action_id: ActionId::from_u128(303),
             subject: ActionSubject::new_control_plane(
@@ -124,17 +125,47 @@ impl Harness {
             }
         };
         assert_eq!(self.dispatches.load(Ordering::SeqCst), 0);
+        Ok((action.action_id, decision))
+    }
+
+    async fn run(
+        &self,
+        request: FrozenOllamaInventoryRequest,
+    ) -> Result<InventoryExecution, Box<dyn Error>> {
+        let (action, decision) = self.authorize(&request).await?;
         Ok(execute_ollama_inventory(
             request,
             BrokerDispatch {
                 broker: &self.broker,
-                action: action.action_id,
+                action,
                 decision: &decision.decision_ref,
                 fence: self.fence,
                 authority: &self.authority,
                 clock: self.clock.clone(),
                 secrets: &self.secrets,
             },
+        )
+        .await?)
+    }
+
+    async fn run_observed(
+        &self,
+        request: FrozenOllamaInventoryRequest,
+        observation: Arc<dyn InventoryObservationPort>,
+    ) -> Result<InventoryExecution, Box<dyn Error>> {
+        let (action, decision) = self.authorize(&request).await?;
+        Ok(execute_ollama_inventory_with_observation(
+            request,
+            BrokerDispatch {
+                broker: &self.broker,
+                action,
+                decision: &decision.decision_ref,
+                fence: self.fence,
+                authority: &self.authority,
+                clock: self.clock.clone(),
+                secrets: &self.secrets,
+            },
+            observation,
         )
         .await?)
     }
@@ -178,15 +209,19 @@ fn request(
 ) -> Result<FrozenOllamaInventoryRequest, InventoryError> {
     FrozenOllamaInventoryRequest::new_loopback(
         &format!("http://127.0.0.1:{port}/api/tags"),
-        ProfileRef::new(
-            "synthetic-inventory-profile",
-            2,
-            Sha256Digest::from_bytes(b"inventory-profile"),
-        )
-        .map_err(|_| InventoryError::InvalidRequest)?,
+        inventory_profile()?,
         timeout_ms,
         max_bytes,
     )
+}
+
+fn inventory_profile() -> Result<ProfileRef, InventoryError> {
+    ProfileRef::new(
+        "synthetic-inventory-profile",
+        2,
+        Sha256Digest::from_bytes(b"inventory-profile"),
+    )
+    .map_err(|_| InventoryError::InvalidRequest)
 }
 
 struct Capture {
@@ -196,6 +231,7 @@ struct Capture {
 
 enum Response {
     Bytes(Vec<u8>),
+    DelayedBytes(Vec<u8>, Duration),
     HoldUntilClosed,
 }
 
@@ -222,6 +258,15 @@ impl Fixture {
         dispatches: Arc<AtomicUsize>,
         allow_response_reset: bool,
     ) -> io::Result<Self> {
+        Self::with_close_signal(response, dispatches, allow_response_reset, None).await
+    }
+
+    async fn with_close_signal(
+        response: Response,
+        dispatches: Arc<AtomicUsize>,
+        allow_response_reset: bool,
+        close_signal: Option<Arc<tokio::sync::Notify>>,
+    ) -> io::Result<Self> {
         let listener = TcpListener::bind("127.0.0.1:0").await?;
         let port = listener.local_addr()?.port();
         let task = tokio::spawn(async move {
@@ -243,7 +288,15 @@ impl Fixture {
                     return Err(io::Error::other("fixture request header exceeded bound"));
                 }
             }
-            let response_sent = if let Response::Bytes(response) = response {
+            let response = match response {
+                Response::Bytes(bytes) => Some(bytes),
+                Response::DelayedBytes(bytes, delay) => {
+                    tokio::time::sleep(delay).await;
+                    Some(bytes)
+                }
+                Response::HoldUntilClosed => None,
+            };
+            let response_sent = if let Some(response) = response {
                 socket.write_all(&response).await?;
                 socket.shutdown().await?;
                 true
@@ -267,6 +320,9 @@ impl Fixture {
                 return Err(error);
             }
             request.extend(remaining);
+            if let Some(signal) = close_signal {
+                signal.notify_one();
+            }
             let extra_connection =
                 tokio::time::timeout(Duration::from_millis(30), listener.accept())
                     .await
@@ -301,11 +357,15 @@ fn http(status: &str, headers: &str, body: &[u8]) -> Vec<u8> {
 }
 
 fn json_response(body: &[u8]) -> Response {
-    Response::Bytes(http(
+    Response::Bytes(json_reply(body))
+}
+
+fn json_reply(body: &[u8]) -> Vec<u8> {
+    http(
         "200 OK",
         &format!("Content-Length: {}\r\n", body.len()),
         body,
-    ))
+    )
 }
 
 fn assert_get_only(capture: &Capture, port: u16) -> TestResult {
@@ -357,6 +417,212 @@ fn assert_unknown(execution: &InventoryExecution) {
         matches!(&execution.receipt, Err(ActionBrokerError::OutcomeUnknown { action_id, .. }) if *action_id == ActionId::from_u128(303))
     );
     assert!(execution.observation.is_none());
+}
+
+struct ObservationProbe {
+    closed: Arc<tokio::sync::Notify>,
+    ready_to_ack: tokio::sync::Notify,
+    acknowledge: tokio::sync::Notify,
+    attempts: AtomicUsize,
+    fail: bool,
+}
+
+impl ObservationProbe {
+    fn new(fail: bool) -> Self {
+        Self {
+            closed: Arc::new(tokio::sync::Notify::new()),
+            ready_to_ack: tokio::sync::Notify::new(),
+            acknowledge: tokio::sync::Notify::new(),
+            attempts: AtomicUsize::new(0),
+            fail,
+        }
+    }
+}
+
+impl InventoryObservationPort for ObservationProbe {
+    fn persist<'a>(
+        &'a self,
+        observation: &'a InventoryObservation,
+        inventory: &'a OllamaInventory,
+    ) -> BoxFuture<'a, Result<(), InventoryObservationError>> {
+        Box::pin(async move {
+            // Count entry even if a repeated, invalid publication later times out.
+            self.attempts.fetch_add(1, Ordering::SeqCst);
+            tokio::time::timeout(Duration::from_secs(1), self.closed.notified())
+                .await
+                .map_err(|_| InventoryObservationError::Unavailable)?;
+            let inventory_digest = unleash_protocol::canonical_sha256(inventory)
+                .map_err(|_| InventoryObservationError::Unavailable)?;
+            let value = serde_json::to_value(observation)
+                .map_err(|_| InventoryObservationError::Unavailable)?;
+            if observation.action_id() != ActionId::from_u128(303)
+                || value.get("inventory_digest") != Some(&serde_json::json!(inventory_digest))
+            {
+                return Err(InventoryObservationError::Unavailable);
+            }
+            self.ready_to_ack.notify_one();
+            if self.fail {
+                return Err(InventoryObservationError::Unavailable);
+            }
+            self.acknowledge.notified().await;
+            Ok(())
+        })
+    }
+}
+
+#[tokio::test]
+async fn inventory_durable_observation_waits_for_closed_channel_and_ack() -> TestResult {
+    let harness = Harness::new();
+    let observer = Arc::new(ObservationProbe::new(false));
+    let mut fixture = Fixture::with_close_signal(
+        // Once the GET arrives, delay its response beyond the connection bound
+        // while keeping the whole exchange inside the independent total bound.
+        Response::DelayedBytes(json_reply(br#"{"models":[]}"#), Duration::from_millis(450)),
+        Arc::clone(&harness.dispatches),
+        false,
+        Some(Arc::clone(&observer.closed)),
+    )
+    .await?;
+    let check = async {
+        tokio::time::timeout(Duration::from_secs(2), observer.ready_to_ack.notified()).await?;
+        assert_eq!(observer.attempts.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            harness.broker.action_state(ActionId::from_u128(303)),
+            Some(ActionState::Dispatching)
+        );
+        harness.assert_one_dispatch_no_secret();
+        observer.acknowledge.notify_one();
+        Ok::<(), Box<dyn Error>>(())
+    };
+    let request = FrozenOllamaInventoryRequest::new_loopback_with_limits(
+        &format!("http://127.0.0.1:{}/api/tags", fixture.port),
+        inventory_profile()?,
+        300,
+        2500,
+        128,
+    )?;
+    let execution = harness.run_observed(request, observer.clone());
+    let (execution, witness) = tokio::join!(execution, check);
+    witness?;
+    assert!(listed(execution?)?.models.is_empty());
+    assert_eq!(observer.attempts.load(Ordering::SeqCst), 1);
+    assert_get_only(&fixture.capture().await?, fixture.port)
+}
+
+#[tokio::test]
+async fn inventory_v2_ends_a_stalled_tls_handshake_within_the_connection_window() -> TestResult {
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let endpoint = format!("https://{}/api/tags", listener.local_addr()?);
+    let request = FrozenOllamaInventoryRequest::new_loopback_with_limits(
+        &endpoint,
+        inventory_profile()?,
+        300,
+        3000,
+        128,
+    )?;
+    let harness = Harness::new();
+    let observer = Arc::new(ObservationProbe::new(false));
+    let witness = async {
+        let (socket, _) = tokio::time::timeout(Duration::from_secs(2), listener.accept()).await??;
+        let mut bytes = Vec::new();
+        // The peer never responds. Observe EOF before the whole-exchange deadline
+        // and require an actual ClientHello to rule out a pre-connect rejection.
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            socket.take(8192).read_to_end(&mut bytes),
+        )
+        .await??;
+        assert_eq!(bytes.first(), Some(&0x16));
+        assert!(bytes.len() < 8192, "read must reach peer EOF");
+        Ok::<(), Box<dyn Error>>(())
+    };
+    let (execution, witness) =
+        tokio::join!(harness.run_observed(request, observer.clone()), witness);
+    witness?;
+    let execution = execution?;
+    assert_unknown(&execution);
+    assert!(matches!(
+        execution.outcome,
+        InventoryOutcome::Failed(InventoryError::DeadlineExpired)
+    ));
+    assert_eq!(observer.attempts.load(Ordering::SeqCst), 0);
+    harness.assert_one_dispatch_no_secret();
+    Ok(())
+}
+
+#[tokio::test]
+async fn inventory_v2_requires_the_observation_port_before_dispatch() -> TestResult {
+    let harness = Harness::new();
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let endpoint = format!("http://{}/api/tags", listener.local_addr()?);
+    let request = FrozenOllamaInventoryRequest::new_loopback_with_limits(
+        &endpoint,
+        inventory_profile()?,
+        300,
+        2500,
+        128,
+    )?;
+    let outcome = harness.run(request).await;
+    assert!(matches!(
+        outcome
+            .as_ref()
+            .err()
+            .and_then(|error| error.downcast_ref::<InventoryError>()),
+        Some(InventoryError::ObservationUnavailable)
+    ));
+    assert_eq!(harness.dispatches.load(Ordering::SeqCst), 0);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(30), listener.accept())
+            .await
+            .is_err()
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn inventory_durable_observation_failure_is_unknown_without_second_get() -> TestResult {
+    let harness = Harness::new();
+    let observer = Arc::new(ObservationProbe::new(true));
+    let mut fixture = Fixture::with_close_signal(
+        json_response(br#"{"models":[]}"#),
+        Arc::clone(&harness.dispatches),
+        false,
+        Some(Arc::clone(&observer.closed)),
+    )
+    .await?;
+    let execution = harness
+        .run_observed(request(fixture.port, 2000, 128)?, observer.clone())
+        .await?;
+    assert_unknown(&execution);
+    assert!(matches!(
+        execution.outcome,
+        InventoryOutcome::Failed(InventoryError::ObservationUnavailable)
+    ));
+    assert_eq!(observer.attempts.load(Ordering::SeqCst), 1);
+    let decision = harness
+        .broker
+        .action_audit(ActionId::from_u128(303))
+        .and_then(|audit| audit.decision_ref)
+        .ok_or("missing decision after unknown")?;
+    let repeated = execute_ollama_inventory_with_observation(
+        request(fixture.port, 2000, 128)?,
+        BrokerDispatch {
+            broker: &harness.broker,
+            action: ActionId::from_u128(303),
+            decision: &decision,
+            fence: harness.fence,
+            authority: &harness.authority,
+            clock: harness.clock.clone(),
+            secrets: &harness.secrets,
+        },
+        observer.clone(),
+    )
+    .await?;
+    assert!(repeated.receipt.is_err());
+    assert_eq!(repeated.state, ActionState::OutcomeUnknown);
+    assert_eq!(observer.attempts.load(Ordering::SeqCst), 1);
+    harness.assert_one_dispatch_no_secret();
+    assert_get_only(&fixture.capture().await?, fixture.port)
 }
 
 async fn rejected_response(

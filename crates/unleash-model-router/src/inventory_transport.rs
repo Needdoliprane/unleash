@@ -17,11 +17,11 @@ use unleash_action_broker::{
     NormalizedResourceRef, ResolvedSecret,
 };
 use unleash_domain::{ActionId, ActionState, ClockPort, DispatchId, Sha256Digest, TimestampMs};
-use unleash_protocol::canonical_sha256;
+use unleash_protocol::{canonical_sha256, canonicalize_to_vec};
 
 use crate::connect_transport::{
-    CertificateValidation, FrozenConnectRequest, SystemResolver, resolve_loopback_peer,
-    system_tls_validation,
+    CertificateValidation, FrozenConnectRequest, SystemResolver, TlsValidation,
+    resolve_loopback_peer, system_tls_validation,
 };
 use crate::transport::{BrokerDispatch, MAX_RESPONSE, ProfileRef};
 
@@ -29,6 +29,7 @@ mod http;
 
 /// This is metadata retrieval, not model generation or a connection-only proof.
 pub const INVENTORY_VERB: &str = "model.provider.inventory";
+const MAX_OBSERVATION_BYTES: usize = 16_384;
 
 /// Closed local failures contain no response, model name or credential value.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
@@ -54,6 +55,28 @@ pub enum InventoryError {
     /// The total request deadline expired.
     #[error("inventory deadline expired")]
     DeadlineExpired,
+    /// The native producer did not receive an acknowledgement for its proof.
+    #[error("inventory observation unavailable")]
+    ObservationUnavailable,
+}
+
+/// Closed acknowledgement failure, without provider bytes or storage details.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum InventoryObservationError {
+    /// The caller must retain uncertainty after the already dispatched GET.
+    #[error("inventory observation acknowledgement unavailable")]
+    Unavailable,
+}
+
+/// Receives only the exact native fact and typed list after channel closure.
+/// An acknowledgement does not itself attest final resource disposition.
+pub trait InventoryObservationPort: Send + Sync {
+    /// Adopt this exact pair or fail without authorizing a retry.
+    fn persist<'a>(
+        &'a self,
+        observation: &'a InventoryObservation,
+        inventory: &'a OllamaInventory,
+    ) -> BoxFuture<'a, Result<(), InventoryObservationError>>;
 }
 
 /// Frozen GET identity. Bounds belong to the caller's authorized request; they
@@ -62,6 +85,7 @@ pub struct FrozenOllamaInventoryRequest {
     target: FrozenConnectRequest,
     digest: Sha256Digest,
     max_response_bytes: usize,
+    connect_timeout_ms: Option<u64>,
 }
 
 impl fmt::Debug for FrozenOllamaInventoryRequest {
@@ -72,6 +96,30 @@ impl fmt::Debug for FrozenOllamaInventoryRequest {
 }
 
 impl FrozenOllamaInventoryRequest {
+    /// Freeze separate connection and whole-exchange bounds for the durable
+    /// inventory producer. The older constructor retains its original digest.
+    ///
+    /// # Errors
+    /// Rejects missing, incompatible or unsupported connection and request bounds.
+    pub fn new_loopback_with_limits(
+        endpoint: &str,
+        profile: ProfileRef,
+        connect_timeout_ms: u64,
+        timeout_ms: u64,
+        max_response_bytes: usize,
+    ) -> Result<Self, InventoryError> {
+        if !(1..=timeout_ms).contains(&connect_timeout_ms) {
+            return Err(InventoryError::InvalidRequest);
+        }
+        Self::freeze(
+            endpoint,
+            profile,
+            Some(connect_timeout_ms),
+            timeout_ms,
+            max_response_bytes,
+        )
+    }
+
     /// Freeze the exact native `/api/tags` route on a loopback target. This does
     /// not perform resolution, I/O or authorization.
     ///
@@ -84,23 +132,46 @@ impl FrozenOllamaInventoryRequest {
         timeout_ms: u64,
         max_response_bytes: usize,
     ) -> Result<Self, InventoryError> {
+        Self::freeze(endpoint, profile, None, timeout_ms, max_response_bytes)
+    }
+
+    fn freeze(
+        endpoint: &str,
+        profile: ProfileRef,
+        connect_timeout_ms: Option<u64>,
+        timeout_ms: u64,
+        max_response_bytes: usize,
+    ) -> Result<Self, InventoryError> {
         let url = reqwest::Url::parse(endpoint).map_err(|_| InventoryError::InvalidRequest)?;
         if url.path() != "/api/tags" || !(1..=MAX_RESPONSE).contains(&max_response_bytes) {
             return Err(InventoryError::InvalidRequest);
         }
-        let digest = canonical_sha256(&serde_json::json!({
-            "schema":"unleash.ollama_inventory.v1", "method":"GET", "endpoint":url.as_str(),
+        let schema = if connect_timeout_ms.is_some() {
+            "unleash.ollama_inventory.v2"
+        } else {
+            "unleash.ollama_inventory.v1"
+        };
+        let mut commitment = serde_json::json!({
+            "schema":schema, "method":"GET", "endpoint":url.as_str(),
             "profile_id":profile.id, "profile_version":profile.version, "profile_digest":profile.digest,
             "timeout_ms":timeout_ms, "max_response_bytes":max_response_bytes,
             "request_body_bytes":0, "redirects":false, "retries":0,
-        }))
-        .map_err(|_| InventoryError::DigestUnavailable)?;
+        });
+        if let Some(bound) = connect_timeout_ms {
+            commitment
+                .as_object_mut()
+                .ok_or(InventoryError::DigestUnavailable)?
+                .insert("connect_timeout_ms".into(), serde_json::Value::from(bound));
+        }
+        let digest =
+            canonical_sha256(&commitment).map_err(|_| InventoryError::DigestUnavailable)?;
         let target = FrozenConnectRequest::new_loopback(endpoint, profile, timeout_ms)
             .map_err(|_| InventoryError::InvalidRequest)?;
         Ok(Self {
             target,
             digest,
             max_response_bytes,
+            connect_timeout_ms,
         })
     }
 
@@ -262,6 +333,7 @@ struct InventoryExecutor {
     clock: Arc<dyn ClockPort>,
     consumed: AtomicBool,
     stage: Stage,
+    observation_port: Option<Arc<dyn InventoryObservationPort>>,
 }
 
 impl InventoryExecutor {
@@ -330,6 +402,26 @@ impl InventoryExecutor {
         if !self.live(intent, decision) {
             return Err(InventoryError::DeadlineExpired);
         }
+        let connect = self.connect_channel(peer, tls);
+        let (channel, source) = if let Some(bound) = self.request.connect_timeout_ms {
+            let window = bound.min(self.remaining(intent, decision)?);
+            tokio::time::timeout(Duration::from_millis(window), connect)
+                .await
+                .map_err(|_| InventoryError::DeadlineExpired)??
+        } else {
+            connect.await?
+        };
+        if !self.live(intent, decision) {
+            return Err(InventoryError::DeadlineExpired);
+        }
+        Ok((channel, peer, source))
+    }
+
+    async fn connect_channel(
+        &self,
+        peer: SocketAddr,
+        tls: Option<TlsValidation>,
+    ) -> Result<(Box<dyn Channel>, CertificateValidation), InventoryError> {
         // The already validated sockaddr, never a hostname, selects this single
         // attempt. Recouple the actual peer BEFORE any HTTP application bytes.
         let socket = TcpStream::connect(peer)
@@ -354,10 +446,7 @@ impl InventoryExecutor {
         } else {
             (Box::new(socket), CertificateValidation::NotTls)
         };
-        if !self.live(intent, decision) {
-            return Err(InventoryError::DeadlineExpired);
-        }
-        Ok((channel, peer, source))
+        Ok((channel, source))
     }
 
     async fn observe(
@@ -395,17 +484,27 @@ impl InventoryExecutor {
             status_code: response.status,
             response_digest: Sha256Digest::from_bytes(&response.body),
             response_body_bytes: response.body.len(),
-            inventory_digest: canonical_sha256(&inventory)
-                .map_err(|_| InventoryError::DigestUnavailable)?,
+            inventory_digest: self.observation_digest(&inventory, MAX_RESPONSE)?,
             observed_at_ms: self.clock.now_ms(),
         };
-        let digest =
-            canonical_sha256(&observation).map_err(|_| InventoryError::DigestUnavailable)?;
+        let digest = self.observation_digest(&observation, MAX_OBSERVATION_BYTES)?;
         Ok(ObservedInventory {
             inventory,
             observation,
             digest,
         })
+    }
+
+    fn observation_digest<T: Serialize>(
+        &self,
+        value: &T,
+        maximum: usize,
+    ) -> Result<Sha256Digest, InventoryError> {
+        let bytes = canonicalize_to_vec(value).map_err(|_| InventoryError::DigestUnavailable)?;
+        if self.observation_port.is_some() && bytes.len() > maximum {
+            return Err(InventoryError::ResponseTooLarge);
+        }
+        Ok(Sha256Digest::from_bytes(&bytes))
     }
 }
 
@@ -434,10 +533,20 @@ impl ActionExecutorPort for InventoryExecutor {
             let remaining = self.remaining(intent, decision).map_err(|_| unknown())?;
             let started = tokio::time::Instant::now();
             let duration = Duration::from_millis(remaining);
-            let observed =
-                tokio::time::timeout(duration, self.observe(dispatch_id, intent, decision))
-                    .await
-                    .unwrap_or(Err(InventoryError::DeadlineExpired));
+            let observed = tokio::time::timeout(duration, async {
+                let observed = self.observe(dispatch_id, intent, decision).await?;
+                if let Some(port) = &self.observation_port {
+                    if !self.live(intent, decision) || started.elapsed() >= duration {
+                        return Err(InventoryError::DeadlineExpired);
+                    }
+                    port.persist(&observed.observation, &observed.inventory)
+                        .await
+                        .map_err(|_| InventoryError::ObservationUnavailable)?;
+                }
+                Ok(observed)
+            })
+            .await
+            .unwrap_or(Err(InventoryError::DeadlineExpired));
             let observed = if self.live(intent, decision) && started.elapsed() < duration {
                 observed
             } else {
@@ -479,6 +588,17 @@ pub async fn execute_ollama_inventory(
     request: FrozenOllamaInventoryRequest,
     dispatch: BrokerDispatch<'_>,
 ) -> Result<InventoryExecution, InventoryError> {
+    if request.connect_timeout_ms.is_some() {
+        return Err(InventoryError::ObservationUnavailable);
+    }
+    execute_inventory(request, dispatch, None).await
+}
+
+async fn execute_inventory(
+    request: FrozenOllamaInventoryRequest,
+    dispatch: BrokerDispatch<'_>,
+    observation_port: Option<Arc<dyn InventoryObservationPort>>,
+) -> Result<InventoryExecution, InventoryError> {
     if dispatch.broker.action_has_secret_refs(dispatch.action) != Some(false)
         || !dispatch
             .broker
@@ -497,6 +617,7 @@ pub async fn execute_ollama_inventory(
         clock: dispatch.clock,
         consumed: AtomicBool::new(false),
         stage: Arc::clone(&stage),
+        observation_port,
     };
     let receipt = dispatch
         .broker
@@ -549,6 +670,21 @@ pub async fn execute_ollama_inventory(
     }
 }
 
+/// Execute one broker-authorized GET and await adoption of both native objects
+/// after the response channel closes, before returning a successful result to
+/// the broker. The caller still owns admission and final resource disposition.
+///
+/// # Errors
+/// Rejects a divergent action or secret reference before network access. An
+/// adoption failure after dispatch preserves uncertainty and issues no retry.
+pub async fn execute_ollama_inventory_with_observation(
+    request: FrozenOllamaInventoryRequest,
+    dispatch: BrokerDispatch<'_>,
+    observation_port: Arc<dyn InventoryObservationPort>,
+) -> Result<InventoryExecution, InventoryError> {
+    execute_inventory(request, dispatch, Some(observation_port)).await
+}
+
 #[cfg(test)]
 mod request_tests {
     use super::{FrozenOllamaInventoryRequest, InventoryError, MAX_RESPONSE};
@@ -590,5 +726,56 @@ mod request_tests {
         let ipv4 = request("http://127.0.0.1:11434/api/tags", 128)?;
         assert_eq!(ipv4.target.http_authority(), "127.0.0.1:11434");
         Ok(())
+    }
+
+    fn bounded(
+        connect_timeout_ms: u64,
+        timeout_ms: u64,
+    ) -> Result<FrozenOllamaInventoryRequest, InventoryError> {
+        let profile = ProfileRef::new(
+            "synthetic-inventory-profile",
+            1,
+            Sha256Digest::from_bytes(b"profile"),
+        )
+        .map_err(|_| InventoryError::InvalidRequest)?;
+        FrozenOllamaInventoryRequest::new_loopback_with_limits(
+            "http://127.0.0.1:11434/api/tags",
+            profile,
+            connect_timeout_ms,
+            timeout_ms,
+            MAX_RESPONSE,
+        )
+    }
+
+    #[test]
+    fn inventory_v2_binds_connection_and_exchange_limits_separately() -> Result<(), InventoryError>
+    {
+        let frozen = bounded(250, 1000)?;
+        let expected = unleash_protocol::canonical_sha256(&serde_json::json!({
+            "schema":"unleash.ollama_inventory.v2","method":"GET","endpoint":"http://127.0.0.1:11434/api/tags",
+            "profile_id":"synthetic-inventory-profile","profile_version":1,"profile_digest":Sha256Digest::from_bytes(b"profile"),
+            "connect_timeout_ms":250,"timeout_ms":1000,"max_response_bytes":MAX_RESPONSE,
+            "request_body_bytes":0,"redirects":false,"retries":0,
+        })).map_err(|_| InventoryError::DigestUnavailable)?;
+        assert_eq!(frozen.payload_digest(), expected);
+        assert_ne!(
+            frozen.payload_digest(),
+            bounded(251, 1000)?.payload_digest()
+        );
+        assert_ne!(
+            frozen.payload_digest(),
+            bounded(250, 1001)?.payload_digest()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn inventory_v2_refuses_absent_or_incompatible_connection_bound() {
+        for (connect, exchange) in [(0, 1000), (1001, 1000), (1, 0), (1, 60001)] {
+            assert!(matches!(
+                bounded(connect, exchange),
+                Err(InventoryError::InvalidRequest)
+            ));
+        }
     }
 }
