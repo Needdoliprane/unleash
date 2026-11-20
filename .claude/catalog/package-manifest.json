@@ -14,7 +14,7 @@
     "cache/"
   ],
   "hash_algorithm": "sha256",
-  "source_tree_digest": "150405d2d29f261e30a166aed21b984aca3dbb4d996765fccfc6d358b9141108",
+  "source_tree_digest": "61c011e86d9b708046e560c7b0c65e654128325d1aa0dbb99e996955baf183e2",
   "files": [
     {
       "path": "INDEX.md",
@@ -1176,8 +1176,8 @@
     },
     {
       "path": "features/F003-agent-runtime/technical-design.md",
-      "sha256": "712aaf1638396f43bf35238620b8e03e8767eace28d1ce00a09777a8b38f4b5d",
-      "bytes": 7741,
+      "sha256": "7c5e3692159a54b448b963b6bd242fd57de198f44032fa15149deb364a40d472",
+      "bytes": 8488,
       "media_type": "text/markdown"
     },
     {
@@ -2046,8 +2046,8 @@
     },
     {
       "path": "schemas/event.schema.json",
-      "sha256": "a32ca840fe5b2711ee14682b76261873a73c970e003ee3e39c04ab428f541a1e",
-      "bytes": 8369,
+      "sha256": "4a4c5af0da1f8ea21385844857a54fdb885c14ff76a0349c6a298fc3b7452e20",
+      "bytes": 10710,
       "media_type": "application/json"
     },
     {

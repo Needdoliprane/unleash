@@ -1363,6 +1363,22 @@ impl UnleashStore {
         Ok((claim, manifest))
     }
 
+    /// Commit the start of the exact prepared invocation and its attempted worker.
+    /// The launch evidence comes from the daemon's owned child handle.
+    ///
+    /// # Errors
+    /// Refuses a stale, revoked or mismatched preparation and native observation.
+    pub fn commit_invocation_worker_running(
+        &self,
+        preparation: crate::WorkerLaunchPreparation,
+        identity: crate::WorkerProcessObservation,
+    ) -> Result<unleash_protocol::EventCursor, StoreError> {
+        let config = self.config.clone();
+        self.execute_in_writer_tx(WriteCriticality::Critical, move |tx, now| {
+            crate::admission::commit_worker_running(tx, &config, now, &preparation, &identity)
+        })
+    }
+
     /// Journalise une demande coopérative ; ne rend aucune capacité.
     /// # Errors
     /// Refuse contrôle, cible ou faisceau obsolète et demande déjà présente.

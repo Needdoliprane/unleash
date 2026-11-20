@@ -482,3 +482,224 @@ fn t_f003_006_worker_manifest_loss_keeps_claim_and_slot() {
     );
     Arc::try_unwrap(store).ok().unwrap().shutdown().unwrap();
 }
+
+#[test]
+#[ignore = "requires the matching packaged Rust worker via UNLEASH_TEST_AGENT_WORKER_BIN"]
+fn t_f003_001_worker_permit_requires_running_commit() {
+    let executable = worker_test_executable();
+    let data = local_test_dir("f003-worker-activation").unwrap();
+    let store = worker_test_store(data.path());
+    let runtime = worker_test_runtime();
+    let (grant, _) = admit_worker_fixture(&store);
+    let pending = runtime
+        .block_on(prepare_invocation_worker(
+            Arc::clone(&store),
+            grant.clone(),
+            &executable,
+        ))
+        .unwrap();
+    let identity = pending.identity().clone();
+    let binding = pending.ready().binding.clone();
+    let preparation = pending.preparation().event_cursor;
+    let rev = i64::try_from(pending.preparation().prepared_revision.as_u64()).unwrap();
+    let active = runtime
+        .block_on(pending.activate(Arc::clone(&store)))
+        .unwrap();
+    let reply = active.acknowledgement();
+    assert_eq!(reply.kind, unleash_agent_worker::WorkerReplyKind::Activated);
+    assert_eq!(reply.binding, binding);
+    assert_eq!(reply.pid, identity.pid);
+    let start = active.start_cursor();
+    assert_eq!(start.stream_id, preparation.stream_id);
+    assert!(start.sequence > preparation.sequence);
+    assert_eq!(
+        worker_preparation_state(&store, &grant),
+        ("running".to_owned(), "running".to_owned(), rev + 1, 1)
+    );
+    let payload: String = store
+        .read_snapshot(|conn, _| {
+            Ok(conn.query_row(
+                "SELECT payload_json FROM events
+                 WHERE aggregate_id=?1 AND sequence=?2 AND event_type='InvocationStarted'",
+                rusqlite::params![
+                    grant.unit.id().to_string(),
+                    i64::try_from(start.sequence.as_u64()).unwrap()
+                ],
+                |row| row.get(0),
+            )?)
+        })
+        .unwrap();
+    let payload: serde_json::Value = serde_json::from_str(&payload).unwrap();
+    assert_eq!(
+        payload.get("attempt_id"),
+        Some(&serde_json::json!(binding.attempt_id))
+    );
+    assert_eq!(
+        payload.get("reservation_id"),
+        Some(&serde_json::json!(binding.reservation_id))
+    );
+    assert_eq!(
+        payload.get("prepared_sequence"),
+        Some(&serde_json::json!(preparation.sequence))
+    );
+    assert_eq!(
+        payload.pointer("/process_identity/pid"),
+        Some(&serde_json::json!(identity.pid))
+    );
+    assert_eq!(
+        payload.pointer("/process_identity/start_identity"),
+        Some(&serde_json::json!(identity.start_identity))
+    );
+    runtime.block_on(active.close()).unwrap();
+    assert_eq!(
+        verify_process_identity(&identity).unwrap(),
+        ProcessVerification::Exited
+    );
+    assert_eq!(
+        store.execution_pool_state(POOL).unwrap().current_occupation,
+        1
+    );
+    Arc::try_unwrap(store).ok().unwrap().shutdown().unwrap();
+}
+
+#[test]
+#[ignore = "requires the matching packaged Rust worker via UNLEASH_TEST_AGENT_WORKER_BIN"]
+fn t_f003_006_worker_activation_refuses_a_stale_preparation() {
+    let executable = worker_test_executable();
+    let data = local_test_dir("f003-revoked-worker").unwrap();
+    let store = worker_test_store(data.path());
+    let runtime = worker_test_runtime();
+    let (grant, _) = admit_worker_fixture(&store);
+    let pending = runtime
+        .block_on(prepare_invocation_worker(
+            Arc::clone(&store),
+            grant.clone(),
+            &executable,
+        ))
+        .unwrap();
+    let id = grant.unit.id().to_string();
+    store
+        .execute_in_writer_tx(WriteCriticality::Critical, move |tx, _| {
+            assert_eq!(
+                tx.execute(
+                    "UPDATE invocations SET revision=revision+1 WHERE invocation_id=?1",
+                    [id]
+                )?,
+                1
+            );
+            Ok(())
+        })
+        .unwrap();
+    assert!(matches!(
+        runtime.block_on(pending.activate(Arc::clone(&store))),
+        Err(WorkerLaunchError::Admission(
+            StoreError::RevisionConflict { .. }
+        ))
+    ));
+    assert_eq!(
+        worker_preparation_state(&store, &grant),
+        (
+            "admitted".to_owned(),
+            "admitted".to_owned(),
+            i64::try_from(grant.revision.as_u64()).unwrap() + 2,
+            1,
+        )
+    );
+    let started: i64 = store
+        .read_snapshot(|conn, _| {
+            Ok(conn.query_row(
+                "SELECT count(*) FROM events WHERE event_type='InvocationStarted'",
+                [],
+                |row| row.get(0),
+            )?)
+        })
+        .unwrap();
+    assert_eq!(started, 0);
+    assert_eq!(
+        store.execution_pool_state(POOL).unwrap().current_occupation,
+        1
+    );
+    Arc::try_unwrap(store).ok().unwrap().shutdown().unwrap();
+}
+
+#[test]
+#[ignore = "requires the matching packaged Rust worker via UNLEASH_TEST_AGENT_WORKER_BIN"]
+fn t_f003_006_worker_start_event_failure_rolls_back_both_states() {
+    let executable = worker_test_executable();
+    let data = local_test_dir("f003-worker-start-rollback").unwrap();
+    let store = worker_test_store(data.path());
+    let runtime = worker_test_runtime();
+    let (grant, _) = admit_worker_fixture(&store);
+    let pending = runtime
+        .block_on(prepare_invocation_worker(
+            Arc::clone(&store),
+            grant.clone(),
+            &executable,
+        ))
+        .unwrap();
+    let before = worker_preparation_state(&store, &grant);
+    store
+        .execute_in_writer_tx(WriteCriticality::Critical, |tx, _| {
+            tx.execute_batch(
+                "CREATE TRIGGER fixture_refuse_worker_start BEFORE INSERT ON events
+             WHEN NEW.event_type='InvocationStarted'
+             BEGIN SELECT RAISE(ABORT, 'fixture_worker_start_aborted'); END;",
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    let rejected = runtime.block_on(pending.activate(Arc::clone(&store)));
+    assert!(matches!(
+        rejected,
+        Err(WorkerLaunchError::Admission(error)) if error.to_string().contains("fixture_worker_start_aborted")
+    ));
+    assert_eq!(worker_preparation_state(&store, &grant), before);
+    assert_eq!(
+        store.execution_pool_state(POOL).unwrap().current_occupation,
+        1
+    );
+    Arc::try_unwrap(store).ok().unwrap().shutdown().unwrap();
+}
+
+#[test]
+#[ignore = "requires the matching packaged Rust worker via UNLEASH_TEST_AGENT_WORKER_BIN"]
+fn t_f003_006_worker_start_rejects_out_of_range_event_sequence() {
+    let executable = worker_test_executable();
+    let data = local_test_dir("f003-worker-sequence-range").unwrap();
+    let store = worker_test_store(data.path());
+    let runtime = worker_test_runtime();
+    let (grant, _) = admit_worker_fixture(&store);
+    let pending = runtime
+        .block_on(prepare_invocation_worker(
+            Arc::clone(&store),
+            grant.clone(),
+            &executable,
+        ))
+        .unwrap();
+    let before = worker_preparation_state(&store, &grant);
+    store
+        .execute_in_writer_tx(WriteCriticality::Critical, |tx, _| {
+            assert_eq!(
+                tx.execute(
+                    "UPDATE sqlite_sequence SET seq=9007199254740991 WHERE name='events'",
+                    [],
+                )?,
+                1
+            );
+            Ok(())
+        })
+        .unwrap();
+    match runtime.block_on(pending.activate(Arc::clone(&store))) {
+        Err(WorkerLaunchError::Admission(StoreError::InvariantViolation(message))) => {
+            assert_eq!(message, "séquence de lancement hors plage");
+        }
+        Err(error) => panic!("unexpected worker start error: {error:?}"),
+        Ok(_) => panic!("worker started despite the out-of-range event sequence"),
+    }
+    assert_eq!(worker_preparation_state(&store, &grant), before);
+    assert_eq!(
+        store.execution_pool_state(POOL).unwrap().current_occupation,
+        1
+    );
+    Arc::try_unwrap(store).ok().unwrap().shutdown().unwrap();
+}

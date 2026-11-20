@@ -8,11 +8,16 @@ use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::{Child, Command};
 use unleash_agent_worker::{
-    WorkerBinding, WorkerBootstrap, WorkerReply, WorkerReplyKind, WorkerWireVersion,
+    WorkerBinding, WorkerBootstrap, WorkerPermit, WorkerReply, WorkerReplyKind, WorkerWireVersion,
 };
-use unleash_platform::{OsProcessIdentity, effective_uid, inspect_process_identity};
-use unleash_protocol::{MAX_FRAME_BYTES, write_frame};
-use unleash_store::{AdmissionCommit, StoreError, UnleashStore, WorkerLaunchPreparation};
+use unleash_platform::{
+    OsProcessIdentity, ProcessVerification, effective_uid, inspect_process_identity,
+    verify_process_identity,
+};
+use unleash_protocol::{EventCursor, MAX_FRAME_BYTES, write_frame};
+use unleash_store::{
+    AdmissionCommit, StoreError, UnleashStore, WorkerLaunchPreparation, WorkerProcessObservation,
+};
 
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -37,6 +42,12 @@ pub enum WorkerLaunchError {
     /// Startup or closure did not finish inside the controller's deadline.
     #[error("worker deadline exceeded")]
     Deadline,
+    /// Start was committed, but permit consumption was not established.
+    #[error("worker start committed with unconfirmed continuation")]
+    ContinuationUnknown {
+        /// Exact durable start event to reconcile.
+        start_cursor: EventCursor,
+    },
 }
 
 /// A child waiting for the separate running transition.
@@ -63,6 +74,64 @@ impl PendingInvocationWorker {
         &self.preparation
     }
 
+    /// Engage the running transition and send the permit to this owned child.
+    ///
+    /// # Errors
+    /// Returns an error if the transition or permit cannot be established.
+    pub async fn activate(
+        mut self,
+        store: Arc<UnleashStore>,
+    ) -> Result<RunningInvocationWorker, WorkerLaunchError> {
+        let permit = encode_frame(&WorkerPermit {
+            wire_version: WorkerWireVersion::V1,
+            binding: self.ready.binding.clone(),
+        })
+        .map_err(|_| WorkerLaunchError::Readiness)?;
+        let identity = self.identity.clone();
+        let preparation = self.preparation.clone();
+        let start_cursor = tokio::task::spawn_blocking(move || {
+            if !matches!(
+                verify_process_identity(&identity),
+                Ok(ProcessVerification::Match)
+            ) {
+                return Err(WorkerLaunchError::Identity);
+            }
+            Ok(store.commit_invocation_worker_running(
+                preparation,
+                WorkerProcessObservation {
+                    pid: identity.pid,
+                    owner_uid: identity.owner_uid,
+                    boot_identity: identity.boot_identity.as_str().to_owned(),
+                    start_identity: identity.start_identity.as_str().to_owned(),
+                },
+            )?)
+        })
+        .await
+        .map_err(|_| WorkerLaunchError::NativeProcess)??;
+
+        let unconfirmed = WorkerLaunchError::ContinuationUnknown { start_cursor };
+        if !matches!(self.child.try_wait(), Ok(None)) {
+            return Err(unconfirmed);
+        }
+        let Ok(Ok(acknowledgement)) =
+            tokio::time::timeout(STARTUP_TIMEOUT, exchange_worker(&mut self.child, &permit)).await
+        else {
+            return Err(unconfirmed);
+        };
+        if acknowledgement.kind != WorkerReplyKind::Activated
+            || acknowledgement.wire_version != self.ready.wire_version
+            || acknowledgement.pid != self.ready.pid
+            || acknowledgement.binding != self.ready.binding
+        {
+            return Err(unconfirmed);
+        }
+        Ok(RunningInvocationWorker {
+            pending: self,
+            acknowledgement,
+            start_cursor,
+        })
+    }
+
     /// Close the controller and reap the still-gated worker.
     ///
     /// # Errors
@@ -78,6 +147,33 @@ impl PendingInvocationWorker {
         } else {
             Err(WorkerLaunchError::NativeProcess)
         }
+    }
+}
+
+/// The owned child has acknowledged its permit after a durable start.
+pub struct RunningInvocationWorker {
+    pending: PendingInvocationWorker,
+    acknowledgement: WorkerReply,
+    start_cursor: EventCursor,
+}
+
+impl RunningInvocationWorker {
+    /// Reply from the exact child on the private channel.
+    pub const fn acknowledgement(&self) -> &WorkerReply {
+        &self.acknowledgement
+    }
+
+    /// Durable start event, before the permit was sent.
+    pub const fn start_cursor(&self) -> EventCursor {
+        self.start_cursor
+    }
+
+    /// Close and reap the child, leaving disposition to the writer.
+    ///
+    /// # Errors
+    /// Returns an error if a normal exit cannot be established.
+    pub async fn close(self) -> Result<(), WorkerLaunchError> {
+        self.pending.close().await
     }
 }
 
@@ -113,7 +209,7 @@ pub async fn prepare_invocation_worker(
         .spawn()
         .map_err(|_| WorkerLaunchError::NativeProcess)?;
     let pid = child.id().ok_or(WorkerLaunchError::NativeProcess)?;
-    let ready = tokio::time::timeout(STARTUP_TIMEOUT, exchange_ready(&mut child, &frame))
+    let ready = tokio::time::timeout(STARTUP_TIMEOUT, exchange_worker(&mut child, &frame))
         .await
         .map_err(|_| WorkerLaunchError::Deadline)??;
     if ready.wire_version != WorkerWireVersion::V1
@@ -173,13 +269,21 @@ fn prepare_frame(
     bootstrap
         .verify()
         .map_err(|_| WorkerLaunchError::Manifest)?;
-    let payload = serde_json::to_vec(&bootstrap).map_err(|_| WorkerLaunchError::Manifest)?;
-    let mut frame = Vec::new();
-    write_frame(&mut frame, &payload).map_err(|_| WorkerLaunchError::Manifest)?;
+    let frame = encode_frame(&bootstrap).map_err(|_| WorkerLaunchError::Manifest)?;
     Ok((preparation, binding, frame))
 }
 
-async fn exchange_ready(child: &mut Child, frame: &[u8]) -> Result<WorkerReply, WorkerLaunchError> {
+fn encode_frame(message: &impl serde::Serialize) -> Result<Vec<u8>, WorkerLaunchError> {
+    let payload = serde_json::to_vec(message).map_err(|_| WorkerLaunchError::Readiness)?;
+    let mut frame = Vec::new();
+    write_frame(&mut frame, &payload).map_err(|_| WorkerLaunchError::Readiness)?;
+    Ok(frame)
+}
+
+async fn exchange_worker(
+    child: &mut Child,
+    frame: &[u8],
+) -> Result<WorkerReply, WorkerLaunchError> {
     let stdin = child.stdin.as_mut().ok_or(WorkerLaunchError::Readiness)?;
     stdin
         .write_all(frame)

@@ -25,6 +25,51 @@
   ],
   "allOf": [
     {
+      "if": { "properties": { "event_type": { "const": "InvocationStarted" } } },
+      "then": {
+        "properties": {
+          "payload": {
+            "oneOf": [
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "attempt_id", "reservation_id", "lease_id", "authority_generation", "daemon_epoch",
+                  "fence", "prepared_sequence", "context_manifest_id", "context_manifest_digest",
+                  "scope_id", "scope_revision", "process_identity"
+                ],
+                "properties": {
+                  "attempt_id": { "type": "string", "format": "uuid" },
+                  "reservation_id": { "type": "string", "format": "uuid" },
+                  "lease_id": { "type": "string", "format": "uuid" },
+                  "authority_generation": { "type": "string", "format": "uuid" },
+                  "daemon_epoch": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
+                  "fence": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
+                  "prepared_sequence": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
+                  "context_manifest_id": { "type": "string", "format": "uuid" },
+                  "context_manifest_digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+                  "scope_id": { "type": "string", "minLength": 1 },
+                  "scope_revision": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
+                  "process_identity": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["pid", "owner_uid", "boot_identity", "start_identity"],
+                    "properties": {
+                      "pid": { "type": "integer", "minimum": 1, "maximum": 4294967295 },
+                      "owner_uid": { "type": "integer", "minimum": 0, "maximum": 4294967295 },
+                      "boot_identity": { "type": "string", "minLength": 1 },
+                      "start_identity": { "type": "string", "minLength": 1 }
+                    }
+                  }
+                }
+              },
+              { "const": { "tombstoned": true } }
+            ]
+          }
+        }
+      }
+    },
+    {
       "if": { "properties": { "event_type": { "const": "InvocationWorkerLaunchPrepared" } } },
       "then": {
         "properties": {
