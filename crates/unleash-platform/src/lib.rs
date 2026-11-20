@@ -13,13 +13,16 @@
 //! - Extraction de l'identité noyau du pair Unix (`LOCAL_PEERCRED` macOS / `SO_PEERCRED` Linux).
 //! - Observation d'identité OS de boot (`boot_identity`) et de processus (`start_identity`)
 //!   via `proc_pidinfo` (macOS) et `/proc` (Linux).
+//! - Observation du listener TCP loopback détenu par un processus macOS attendu,
+//!   avec identité complète et génération socket revérifiées ; sans preuve de pair ou de confinement.
 //! - Abstraction du coffre de secrets OS ([`KeyringPort`]) et adaptateur local sécurisé de test
 //!   utilisant `secrecy` et `zeroize`.
 //!
 //! ## Politique `unsafe`
 //! Le workspace impose `unsafe_code = "deny"`. Seuls les appels FFI OS strictement ciblés
 //! (`confstr`, `getsockopt(LOCAL_PEERCRED/LOCAL_PEERPID)`, `sysctl(KERN_BOOTTIME)`,
-//! `proc_pidinfo(PROC_PIDTBSDINFO)`) utilisent `#[allow(unsafe_code)]` local avec justification
+//! `proc_pidinfo(PROC_PIDTBSDINFO/PROC_PIDLISTFDS)` et `proc_pidfdinfo(PROC_PIDFDSOCKETINFO)`)
+//! utilisent `#[allow(unsafe_code)]` local avec justification
 //! `// SAFETY:`.
 
 #![warn(missing_docs)]
@@ -31,6 +34,7 @@ pub mod paths;
 pub mod peer_cred;
 pub mod process_identity;
 pub mod rendezvous;
+pub mod tcp_listener;
 
 pub use authority::{
     AUTHORITY_LOCK_FILENAME, AuthorityLock, AuthorityLockMetadata, SOCKET_FILENAME,
@@ -57,4 +61,7 @@ pub use rendezvous::{
     ensure_private_rendezvous_dir, read_admin_credential, read_private_file_to_string,
     validate_rendezvous_dir, validate_socket_file, validate_unix_socket_path_len,
     write_private_file_atomic,
+};
+pub use tcp_listener::{
+    TcpListenerError, TcpListenerObservation, observe_owned_tcp_listener, verify_owned_tcp_listener,
 };
