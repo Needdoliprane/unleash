@@ -69,6 +69,52 @@
         }
       }
     },
+    "invocation_attempt_projection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["attempt_id", "ordinal", "state", "authority_generation", "daemon_epoch", "fence"],
+      "properties": {
+        "attempt_id": { "$ref": "#/$defs/uuid" },
+        "ordinal": { "$ref": "#/$defs/wire_uint", "minimum": 1 },
+        "state": { "enum": ["admitted", "running", "checkpointing", "reconciling", "ended", "failed", "fenced"] },
+        "authority_generation": { "$ref": "#/$defs/uuid" },
+        "daemon_epoch": { "$ref": "#/$defs/wire_uint" },
+        "fence": { "$ref": "#/$defs/wire_uint" }
+      }
+    },
+    "invocation_projection_response": {
+      "$ref": "#",
+      "required": ["watermark"],
+      "properties": {
+        "watermark": { "type": "object" },
+        "result": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "invocation_id", "agent_id", "session_id", "project_id", "state", "wait_reason",
+            "revision", "effective_bundle_hash", "context_manifest_id", "attempts",
+            "next_after_attempt_ordinal"
+          ],
+          "properties": {
+            "invocation_id": { "$ref": "#/$defs/uuid" },
+            "agent_id": { "$ref": "#/$defs/uuid" },
+            "session_id": { "$ref": "#/$defs/uuid" },
+            "project_id": { "$ref": "#/$defs/optional_uuid" },
+            "state": { "enum": ["queued", "admitted", "running", "checkpointing", "waiting_durable", "reconciling", "completed", "failed", "cancelled"] },
+            "wait_reason": { "enum": [null, "waiting_owner", "waiting_children", "authentication", "document_event", "budget", "timer"] },
+            "revision": { "$ref": "#/$defs/wire_uint" },
+            "effective_bundle_hash": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" },
+            "context_manifest_id": { "$ref": "#/$defs/uuid" },
+            "attempts": {
+              "type": "array",
+              "maxItems": 100,
+              "items": { "$ref": "#/$defs/invocation_attempt_projection" }
+            },
+            "next_after_attempt_ordinal": { "type": ["integer", "null"], "minimum": 1, "maximum": 9007199254740991 }
+          }
+        }
+      }
+    },
     "terminal_acquisition_response": {
       "$ref": "#",
       "required": ["watermark"],

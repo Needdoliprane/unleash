@@ -19,6 +19,7 @@ pub mod config;
 pub mod error;
 pub mod events;
 pub mod fs_sync;
+mod invocation_projection;
 pub mod leases;
 pub mod migrations;
 pub mod objects;
@@ -78,6 +79,7 @@ pub use events::{
     MAX_OUTBOX_NON_TRANSIENT_ATTEMPTS, OutboxDispatchItem, OutboxState, PurgeStats,
     ReadEventsOutcome, RetentionPurgeReport, RetentionPurgeRequest, RetentionPurgeStatusRecord,
 };
+pub use invocation_projection::{InvocationAttemptProjection, InvocationProjection};
 pub use leases::{AcquireLeaseRequest, FenceAssertion, LeaseState, ResourceLeaseRecord};
 pub use migrations::{CURRENT_SCHEMA_VERSION, MigrationRecord, MigrationReport, MigrationState};
 pub use objects::{

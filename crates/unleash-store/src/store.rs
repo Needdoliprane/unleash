@@ -2198,6 +2198,30 @@ impl UnleashStore {
         })
     }
 
+    /// Lit une invocation, une fenêtre de ses tentatives et leur watermark transactionnel.
+    ///
+    /// # Errors
+    /// Refuse une identité invisible, une fenêtre invalide ou une lecture indisponible.
+    pub fn get_invocation_snapshot(
+        &self,
+        invocation_id: unleash_domain::InvocationId,
+        project_id: Option<ProjectId>,
+        allowed_projects: Option<&HashSet<ProjectId>>,
+        after_attempt_ordinal: i64,
+        limit: u16,
+    ) -> Result<SnapshotProjection<crate::InvocationProjection>, StoreError> {
+        self.project_snapshot(|conn| {
+            crate::invocation_projection::get_invocation_conn(
+                conn,
+                invocation_id,
+                project_id,
+                allowed_projects,
+                after_attempt_ordinal,
+                limit,
+            )
+        })
+    }
+
     /// Lit réglages et watermark dans une seule transaction lectrice.
     ///
     /// # Errors

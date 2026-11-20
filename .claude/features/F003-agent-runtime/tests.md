@@ -19,4 +19,6 @@ La campagne distingue requested_limit pending et effective_limit pendant la cond
 
 Le sous-cas lecture de T-F003-001 vérifie l’identité et la session durable via `GetAgent` sur le socket du daemon. Il contrôle le watermark, le refus sans preuve administrative, la portée exacte, le masquage d’un parent ou créateur hors scope et le rejet d’un payload non fermé. La création authentifiée, l’assignation et le crash du worker ont leurs propres preuves.
 
+Le sous-cas `GetInvocation` part d’un historique de fixture persisté. Il lit une ancienne tentative clôturée par fence puis une tentative terminée, avec les mêmes identités agent, session et invocation. La suite vérifie l’ordre des pages, la fin de pagination, les bornes, la portée et le watermark transactionnel.
+
 Les tests end-to-end doivent comparer le contexte envoyé et les actions observées, avec données synthétiques et prix fixes de fixture. Les intégrations réelles fournisseur sont séparées, facultatives par credentials de test mais obligatoires pour revendiquer cette compatibilité. Voir [concurrency-tests.md](../../testing/concurrency-tests.md).

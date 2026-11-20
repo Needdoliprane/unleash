@@ -494,6 +494,7 @@ async fn dispatch_query(
         "GetStateSnapshot" => query_state_snapshot(state, session, query).await,
         "GetCommandReceipt" => query_command_receipt(state, session, query).await,
         "GetAgent" => query_agent(state, session, query).await,
+        "GetInvocation" => query_invocation(state, session, query).await,
         "GetBackupManifest" => query_backup_manifest(state, session, query).await,
         "ReadTerminalLog" => crate::terminal_service::read_log(state, session, query).await,
         "GetProviderProfile" => {
@@ -536,6 +537,50 @@ async fn query_agent(
     })
     .await
     .map_err(|_| internal_ipc_error("Lecture de l’agent interrompue", None))?
+    .map_err(|error| store_error_to_ipc_error(&error, None))?;
+    let (result, cursor) = projection_response(projection)?;
+    Ok(QueryResponse {
+        request_id: query.request_id,
+        watermark: Some(cursor),
+        result,
+    })
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct InvocationQuery {
+    invocation_id: unleash_domain::InvocationId,
+    #[serde(default)]
+    after_attempt_ordinal: i64,
+    #[serde(default = "default_invocation_attempt_limit")]
+    limit: u16,
+}
+
+const fn default_invocation_attempt_limit() -> u16 {
+    50
+}
+
+async fn query_invocation(
+    state: &Arc<DaemonRuntimeState>,
+    session: &AuthenticatedSession,
+    query: QueryEnvelope,
+) -> Result<QueryResponse, IpcError> {
+    let args: InvocationQuery =
+        serde_json::from_value(Value::Object(query.payload)).map_err(|_| invalid_projection())?;
+    let store = Arc::clone(&state.store);
+    let project_id = query.project_id;
+    let allowed = session.allowed_projects.clone();
+    let projection = tokio::task::spawn_blocking(move || {
+        store.get_invocation_snapshot(
+            args.invocation_id,
+            project_id,
+            allowed.as_ref(),
+            args.after_attempt_ordinal,
+            args.limit,
+        )
+    })
+    .await
+    .map_err(|_| internal_ipc_error("Lecture de l’invocation interrompue", None))?
     .map_err(|error| store_error_to_ipc_error(&error, None))?;
     let (result, cursor) = projection_response(projection)?;
     Ok(QueryResponse {
