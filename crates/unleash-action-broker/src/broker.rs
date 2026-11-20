@@ -619,6 +619,26 @@ pub enum BrokerAuditEvent {
     },
 }
 
+/// Effective policy loaded by a trusted durable service for one exact scope.
+/// This is internal initialization data, never a client codec or an authority grant.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InitialEffectivePolicy {
+    /// Exact project scope, or the global user scope.
+    pub project_id: Option<ProjectId>,
+    /// Effective max of applicable policy revisions, without fabricating an update.
+    pub policy_revision: Revision,
+    /// Actual scope revision retained by the original producer.
+    pub scope_revision: Revision,
+    /// Digest of the complete global/project/Guard snapshot; revalidated by the journal writer.
+    pub policy_digest: Sha256Digest,
+    /// Strict if any applicable policy requires it.
+    pub isolation_mode: IsolationMode,
+    /// Actual configured mode; unsupported Guard integration must remain closed.
+    pub guard_mode: GuardMode,
+    /// Exact authority incarnation of the durable snapshot.
+    pub lineage_fence: LineageFence,
+}
+
 /// Configuration d'initialisation de [`ActionBroker`].
 #[derive(Clone)]
 pub struct BrokerConfig {
@@ -732,6 +752,7 @@ struct EvaluationAttempt {
 
 struct BrokerState {
     current_fence: LineageFence,
+    initial_policy: Option<InitialEffectivePolicy>,
     global_policy: PolicyEntry,
     project_policies: BTreeMap<ProjectId, PolicyEntry>,
     scope_revisions: BTreeMap<Option<ProjectId>, Revision>,
@@ -863,6 +884,7 @@ impl ActionBroker {
             journal,
             state: Mutex::new(BrokerState {
                 current_fence: config.current_fence,
+                initial_policy: None,
                 global_policy: PolicyEntry::default(),
                 project_policies: BTreeMap::new(),
                 scope_revisions: BTreeMap::new(),
@@ -885,8 +907,76 @@ impl ActionBroker {
         }
     }
 
+    /// Constructs a new broker bound to one durable effective policy snapshot.
+    /// No admin mutation or revision increment is synthesized.
+    /// # Errors
+    /// Rejects an unqualified snapshot; no broker or journal acknowledgement is returned.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "Explicit constructor injection of existing ports plus the durable policy snapshot"
+    )]
+    pub fn new_with_policy_snapshot(
+        clock: Arc<dyn ClockPort>,
+        monotonic_clock: Arc<dyn MonotonicClockPort>,
+        sleep_port: Arc<dyn SleepPort>,
+        ids: Arc<dyn IdGeneratorPort>,
+        isolation_probe: Arc<dyn IsolationProbePort>,
+        obligation_checker: Arc<dyn ObligationCapabilityPort>,
+        fallback_policy: Arc<dyn FallbackPolicyPort>,
+        config: BrokerConfig,
+        journal: Arc<dyn BrokerJournalPort>,
+        snapshot: InitialEffectivePolicy,
+    ) -> Result<Self, ActionBrokerError> {
+        if config.current_fence != snapshot.lineage_fence {
+            return Err(ActionBrokerError::StaleFence {
+                reason: "Initial policy belongs to a different authority incarnation".into(),
+                lineage_mismatch: config.current_fence.authority_generation
+                    != snapshot.lineage_fence.authority_generation,
+            });
+        }
+        // This constructor has no qualified GuardPort. Never silently replace
+        // Required/Optional by BrokerOnly, nor authorize their fallback here.
+        if !matches!(&snapshot.guard_mode, GuardMode::BrokerOnly) {
+            return Err(ActionBrokerError::GuardUnavailable {
+                reason: "Initial Guard policy requires a qualified port".into(),
+            });
+        }
+        let broker = Self::new(
+            clock,
+            monotonic_clock,
+            sleep_port,
+            ids,
+            isolation_probe,
+            obligation_checker,
+            fallback_policy,
+            config,
+            journal,
+        );
+        {
+            // The new instance has not escaped this constructor: no caller,
+            // evaluation, cache entry or live action can be overwritten.
+            let mut state = broker.lock_state();
+            let effective = PolicyEntry {
+                revision: snapshot.policy_revision,
+                isolation_mode: snapshot.isolation_mode,
+                ..PolicyEntry::default()
+            };
+            if let Some(project) = snapshot.project_id {
+                state.project_policies.insert(project, effective);
+            } else {
+                state.global_policy = effective;
+            }
+            state
+                .scope_revisions
+                .insert(snapshot.project_id, snapshot.scope_revision);
+            state.guard_mode = snapshot.guard_mode.clone();
+            state.initial_policy = Some(snapshot);
+        }
+        Ok(broker)
+    }
+
     /// Creates an explicitly non-durable broker for local tests and examples only.
-    /// A daemon must use [`Self::new`] with its durable store adapter.
+    /// A daemon must use a durable constructor with its real store journal.
     #[must_use]
     #[expect(
         clippy::too_many_arguments,
@@ -1881,6 +1971,9 @@ impl ActionBroker {
         let action_id = intent.action_id;
         let evaluation = {
             let mut st = self.lock_state();
+            if let Some(snapshot) = &st.initial_policy {
+                validate_initial_policy_intent(snapshot, &intent)?;
+            }
             if st.authorizations_in_progress.contains(&action_id) {
                 return Err(ActionBrokerError::ContractViolation {
                     reason: "Action authorization already in progress".into(),
@@ -3486,6 +3579,33 @@ fn validate_guard_endpoint(ep: &str) -> Result<(), ActionBrokerError> {
             reason: format!(
                 "Transport AI-Guard non autorisé pour '{trimmed}' (seuls unix:// et https:// sont admis)"
             ),
+        });
+    }
+    Ok(())
+}
+
+fn validate_initial_policy_intent(
+    snapshot: &InitialEffectivePolicy,
+    intent: &ActionIntent,
+) -> Result<(), ActionBrokerError> {
+    if intent.lineage_fence != snapshot.lineage_fence {
+        return Err(ActionBrokerError::StaleFence {
+            reason: "Action differs from the initial policy incarnation".into(),
+            lineage_mismatch: intent.lineage_fence.authority_generation
+                != snapshot.lineage_fence.authority_generation,
+        });
+    }
+    if intent.project_id != snapshot.project_id {
+        return Err(ActionBrokerError::ScopeDenied {
+            reason: "Action differs from the initial policy scope".into(),
+        });
+    }
+    if intent.policy_revision != snapshot.policy_revision
+        || intent.scope_revision != snapshot.scope_revision
+    {
+        return Err(ActionBrokerError::PolicyDenied {
+            reason: "Action differs from the loaded effective policy or scope revision".into(),
+            limiting_authorities: vec!["initial_effective_policy".into()],
         });
     }
     Ok(())
