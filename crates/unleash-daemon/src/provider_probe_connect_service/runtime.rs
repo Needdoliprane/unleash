@@ -1,5 +1,6 @@
 //! One original claim, one broker and one native execution; never restart I/O.
 
+use super::owner::TransportOwner;
 use crate::broker_activity::BrokerActivityGuard;
 use crate::ipc::DaemonRuntimeState;
 use std::collections::BTreeSet;
@@ -15,13 +16,11 @@ use unleash_action_broker::{
 use unleash_domain::{Fence, LineageFence, ModelPolicy, ReceiptId, ReconcileStrategy};
 use unleash_model_router::{
     connect_transport::{self, FrozenConnectRequest},
+    inventory_transport::{self, FrozenOllamaInventoryRequest},
     transport::{BrokerDispatch, ProfileRef},
 };
 use unleash_protocol::CommandEnvelope;
-use unleash_store::{
-    CallerAuthority, ClaimProviderProbeConnectRequest, ProviderProbeConnectClaim,
-    ProviderProbeConnectClaimOutcome,
-};
+use unleash_store::CallerAuthority;
 
 pub(super) fn start(
     state: &Arc<DaemonRuntimeState>,
@@ -39,44 +38,28 @@ pub(super) fn start(
         let worker = Arc::clone(&activity);
         let claimed = tokio::task::spawn_blocking(move || {
             let _activity = worker;
-            let probe = unleash_domain::ProviderProbeId::from_uuid(command.aggregate_id);
-            let record = store
-                .inspect_provider_probe_connect_snapshot(probe)?
-                .value
-                .ok_or_else(|| unleash_store::StoreError::NotFound("probe connect".into()))?;
-            let control_fence = LineageFence::new(
-                record.context.authority_generation,
-                record.context.daemon_epoch,
-                Fence::ZERO,
-            );
-            store.claim_provider_probe_connect(ClaimProviderProbeConnectRequest {
-                envelope: command,
-                caller,
-                receipt_id,
-                context_digest: record.context_digest,
-                control_fence,
-            })
+            TransportOwner::claim(&store, command, caller, receipt_id)
         })
         .await;
-        let Ok(Ok(ProviderProbeConnectClaimOutcome::FreshClaim(claim))) = claimed else {
+        let Ok(Ok(Some(claim))) = claimed else {
             return;
         };
         if run(&state, Arc::new(claim), activity).await.is_err() {
-            tracing::warn!("Connexion fournisseur non terminée ; consulter son état durable");
+            tracing::warn!("Transport fournisseur non terminé ; consulter son état durable");
         }
     });
 }
 
 async fn run(
     state: &Arc<DaemonRuntimeState>,
-    claim: Arc<ProviderProbeConnectClaim>,
+    claim: Arc<TransportOwner>,
     activity: Arc<BrokerActivityGuard>,
 ) -> Result<(), ()> {
     let c = claim.context();
     let frozen = freeze_request(&claim)?;
     let store = Arc::clone(&state.store);
     let policy_claim = Arc::clone(&claim);
-    let policy = tokio::task::spawn_blocking(move || store.provider_probe_connect_policy_snapshot(&policy_claim))
+    let policy = tokio::task::spawn_blocking(move || policy_claim.policy(&store))
         .await
         .map_err(|_| failed("policy_reader_task"))?
         .map_err(|error| {tracing::warn!(stage="policy_reader",code=%error.error_code(),reason=?error.reason_code(),"Connect preparation refused");})?;
@@ -131,22 +114,23 @@ async fn run(
     let secrets = PlatformKeyringSecretStore::new(Arc::new(
         unleash_platform::UnavailableOsKeyring::new("Secrets interdits pour connect"),
     ));
-    let result = connect_transport::execute(
-        frozen,
-        BrokerDispatch {
-            broker: &broker,
-            action: c.action_id,
-            decision: &decision.decision_ref,
-            fence: control_fence,
-            authority: &authority,
-            clock: state.store.config().clock.clone(),
-            secrets: &secrets,
-        },
-        observation,
-    )
-    .await
-    .map_err(|_| ())?;
-    result.receipt.map_err(|_| ())?;
+    let dispatch = BrokerDispatch {
+        broker: &broker,
+        action: c.action_id,
+        decision: &decision.decision_ref,
+        fence: control_fence,
+        authority: &authority,
+        clock: state.store.config().clock.clone(),
+        secrets: &secrets,
+    };
+    let receipt = match frozen {
+        FrozenTransport::Connect(frozen) => connect_transport::execute(frozen, dispatch, observation)
+            .await.map_err(|_| ())?.receipt,
+        FrozenTransport::Inventory(frozen) => inventory_transport::execute_ollama_inventory_with_observation(
+            frozen, dispatch, observation,
+        ).await.map_err(|_| ())?.receipt,
+    };
+    receipt.map_err(|_| ())?;
         Ok(())
     }.await;
     if outcome.is_err() {
@@ -155,43 +139,72 @@ async fn run(
     outcome
 }
 
-fn freeze_request(claim: &ProviderProbeConnectClaim) -> Result<FrozenConnectRequest, ()> {
+enum FrozenTransport {
+    Connect(FrozenConnectRequest),
+    Inventory(FrozenOllamaInventoryRequest),
+}
+
+fn freeze_request(claim: &TransportOwner) -> Result<FrozenTransport, ()> {
     let context = claim.context();
-    let frozen = FrozenConnectRequest::new_loopback(
-        &context.destination,
-        ProfileRef::new(
-            &context.profile_id.to_string(),
-            context.profile_version,
-            context.configuration_digest,
-        )
-        .map_err(|_| failed("profile_reference"))?,
-        context.limits.timeout_ms(),
+    let profile = ProfileRef::new(
+        &context.profile_id.to_string(),
+        context.profile_version,
+        context.configuration_digest,
     )
-    .map_err(|error| {
-        tracing::warn!(stage="frozen_request",code=?error,"Connect preparation refused");
-    })?;
-    if frozen
-        .payload_digest()
-        .map_err(|_| failed("frozen_digest"))?
-        != context.request_digest
-    {
+    .map_err(|_| failed("profile_reference"))?;
+    let (frozen, digest) = match claim {
+        TransportOwner::Connect(_) => {
+            let request = FrozenConnectRequest::new_loopback(
+                &context.destination,
+                profile,
+                context.limits.timeout_ms(),
+            )
+            .map_err(|_| failed("frozen_connect_request"))?;
+            let digest = request
+                .payload_digest()
+                .map_err(|_| failed("frozen_digest"))?;
+            (FrozenTransport::Connect(request), digest)
+        }
+        TransportOwner::Inventory(_) => {
+            let limits = context
+                .inventory_limits
+                .as_ref()
+                .ok_or_else(|| failed("inventory_bounds"))?;
+            let request = FrozenOllamaInventoryRequest::new_loopback_with_limits(
+                &format!("{}api/tags", context.destination),
+                profile,
+                limits.connect_timeout_ms,
+                limits.timeout_ms,
+                usize::try_from(limits.max_response_bytes)
+                    .map_err(|_| failed("inventory_body_bound"))?,
+            )
+            .map_err(|_| failed("frozen_inventory_request"))?;
+            let digest = request.payload_digest();
+            (FrozenTransport::Inventory(request), digest)
+        }
+    };
+    if digest != context.request_digest {
         failed("request_digest_binding");
         return Err(());
     }
     Ok(frozen)
 }
 
-fn claim_authority(claim: &ProviderProbeConnectClaim) -> EffectiveAuthority {
+fn claim_authority(claim: &TransportOwner) -> EffectiveAuthority {
     let context = claim.context();
     compute_effective_authority(
         context.project_id,
         context.policy_revision,
         context.scope_revision,
         &[AuthorityLayer {
-            layer_name: "provider_probe_connect_mandate".into(),
+            layer_name: match claim {
+                TransportOwner::Connect(_) => "provider_probe_connect_mandate",
+                TransportOwner::Inventory(_) => "provider_probe_inventory_mandate",
+            }
+            .into(),
             allowed_effects: Some(BTreeSet::from([EffectsClass::NetworkEgress])),
             denied_effects: BTreeSet::new(),
-            allowed_verbs: Some(BTreeSet::from([connect_transport::CONNECT_VERB.into()])),
+            allowed_verbs: Some(BTreeSet::from([claim.verb().into()])),
             denied_verbs: BTreeSet::new(),
             allowed_roots: Some(vec![]),
             allowed_network_hosts: Some(BTreeSet::from([claim.destination().host().to_owned()])),
@@ -212,7 +225,7 @@ fn claim_authority(claim: &ProviderProbeConnectClaim) -> EffectiveAuthority {
 }
 
 fn claim_intent(
-    claim: &ProviderProbeConnectClaim,
+    claim: &TransportOwner,
     authority: &EffectiveAuthority,
     control_fence: LineageFence,
 ) -> Result<ActionIntent, ()> {
@@ -226,7 +239,7 @@ fn claim_intent(
         )
         .map_err(|_| failed("subject"))?,
         project_id: context.project_id,
-        verb: connect_transport::CONNECT_VERB.into(),
+        verb: claim.verb().into(),
         resource_refs: vec![NormalizedResourceRef::NetworkEndpoint {
             host: endpoint.host().into(),
             port: Some(endpoint.port()),

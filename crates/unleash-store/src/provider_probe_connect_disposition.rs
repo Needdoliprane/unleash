@@ -2,7 +2,7 @@
 //! This path never handles an uncertain dispatch or a native observation.
 
 use crate::provider_probe_connect::{
-    ConnectPhasePermission, ProviderProbeConnectClaim, fact_context,
+    ConnectPhasePermission, ProviderProbeConnectClaim, TransportPhase, fact_transport_context,
 };
 use crate::{BrokerPhase, ExecutionContinuation, StoreError, UnleashStore, WriteCriticality};
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
@@ -66,8 +66,9 @@ fn read_input(
     daemon: &crate::DaemonStateRow,
     permission: &ConnectPhasePermission,
     continuation: &ExecutionContinuation,
+    phase: TransportPhase,
 ) -> Result<RefusalInput, StoreError> {
-    let record = fact_context(tx, daemon, permission)?;
+    let record = fact_transport_context(tx, daemon, permission, phase)?;
     let context = &record.context;
     let action = crate::broker_writer::inspect_action_conn(tx, context.action_id)?
         .ok_or_else(|| invalid("action de disposition absente"))?;
@@ -282,12 +283,24 @@ impl UnleashStore {
         claim: &ProviderProbeConnectClaim,
         continuation: &ExecutionContinuation,
     ) -> Result<ProviderConnectDispositionCommit, StoreError> {
-        let permission = claim.permission();
+        self.dispose_provider_probe_transport_without_dispatch(
+            claim.permission(),
+            continuation,
+            TransportPhase::Connect,
+        )
+    }
+
+    pub(crate) fn dispose_provider_probe_transport_without_dispatch(
+        &self,
+        permission: ConnectPhasePermission,
+        continuation: &ExecutionContinuation,
+        phase: TransportPhase,
+    ) -> Result<ProviderConnectDispositionCommit, StoreError> {
         let continuation = continuation.clone();
         let config = self.config().clone();
         self.execute_in_writer_tx(WriteCriticality::Normal, move |tx, now| {
             let daemon = crate::commands::read_daemon_state_conn(tx)?;
-            let input = read_input(tx, &daemon, &permission, &continuation)?;
+            let input = read_input(tx, &daemon, &permission, &continuation, phase)?;
             if let Some(prior) = replay(tx, &daemon, &input, &continuation)? {
                 return Ok(prior);
             }

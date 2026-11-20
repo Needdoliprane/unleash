@@ -425,11 +425,12 @@ impl UnleashDaemon {
             opened.register_principal(&local_principal, "user", &local_principal)?;
             // Internal native observer. Facts bind this producer to the actual
             // authority/epoch, fresh claim and resource lease in the writer.
-            opened.register_principal(
+            for observer in [
                 unleash_store::CONNECT_OBSERVER_PRINCIPAL,
-                "system",
-                unleash_store::CONNECT_OBSERVER_PRINCIPAL,
-            )?;
+                unleash_store::INVENTORY_OBSERVER_PRINCIPAL,
+            ] {
+                opened.register_principal(observer, "system", observer)?;
+            }
             let new_inst = DaemonInstanceId::from_uuid(opened.config().id_generator.new_uuid());
             let (row, prev_mode, started_ev) =
                 enter_recovering_and_emit_event(&opened, &boot_id, new_inst)?;

@@ -831,6 +831,7 @@ pub(crate) fn finish_projection(
             result_ref: format!("provider-probe:{}", proof.probe),
             observed_at_ms: proof.observed_at,
             status: crate::provider_profile_validation::LocalValidationStatus::Connected,
+            inventory: None,
         },
     )
 }

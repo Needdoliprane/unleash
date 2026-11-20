@@ -295,6 +295,69 @@ pub enum ProviderProbeInventoryClaimOutcome {
 }
 
 impl UnleashStore {
+    /// Revalidate the original claim before selecting the effective broker policy.
+    ///
+    /// # Errors
+    ///
+    /// Rejects an unavailable policy or a stale inventory claim.
+    pub fn provider_probe_inventory_policy_snapshot(
+        &self,
+        claim: &ProviderProbeInventoryClaim,
+    ) -> Result<crate::ProviderConnectPolicySnapshot, StoreError> {
+        self.provider_probe_transport_policy_snapshot(
+            claim.inner.permission(),
+            TransportPhase::Inventory,
+        )
+    }
+
+    /// Revalidates the exact admission before any inventory dispatch.
+    ///
+    /// # Errors
+    ///
+    /// Rejects stale authority, ownership or continuation.
+    pub fn validate_provider_probe_inventory_continuation(
+        &self,
+        claim: &ProviderProbeInventoryClaim,
+        continuation: crate::ExecutionContinuation,
+    ) -> Result<(), StoreError> {
+        let permission = claim.permission();
+        self.execute_in_writer_tx(WriteCriticality::Normal, move |tx, now| {
+            let daemon = crate::commands::read_daemon_state_conn(tx)?;
+            let record = transport::validate_live_transport_permission(
+                tx,
+                &daemon,
+                now,
+                permission.inner(),
+                TransportPhase::Inventory,
+            )?;
+            crate::provider_probe_connect_observation::validate_continuation(
+                tx,
+                &daemon,
+                now,
+                &record,
+                &continuation,
+                true,
+            )
+        })
+    }
+
+    /// Disposes an exact admission after a qualified pre-dispatch refusal.
+    ///
+    /// # Errors
+    ///
+    /// Rejects stale ownership or any durable dispatch or observation marker.
+    pub fn dispose_provider_probe_inventory_without_dispatch(
+        &self,
+        claim: &ProviderProbeInventoryClaim,
+        continuation: &crate::ExecutionContinuation,
+    ) -> Result<crate::ProviderConnectDispositionCommit, StoreError> {
+        self.dispose_provider_probe_transport_without_dispatch(
+            claim.inner.permission(),
+            continuation,
+            TransportPhase::Inventory,
+        )
+    }
+
     /// Append only for the orchestrator retaining its original inventory claim.
     /// The generic journal never grants this access, including on exact replay.
     ///

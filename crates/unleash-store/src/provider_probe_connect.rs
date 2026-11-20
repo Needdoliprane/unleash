@@ -1417,9 +1417,17 @@ impl UnleashStore {
         claim: &ProviderProbeConnectClaim,
     ) -> Result<ProviderConnectPolicySnapshot, StoreError> {
         let permission = claim.permission();
+        self.provider_probe_transport_policy_snapshot(permission, TransportPhase::Connect)
+    }
+
+    pub(crate) fn provider_probe_transport_policy_snapshot(
+        &self,
+        permission: ConnectPhasePermission,
+        phase: TransportPhase,
+    ) -> Result<ProviderConnectPolicySnapshot, StoreError> {
         self.execute_in_writer_tx(WriteCriticality::Normal, move |tx, now| {
             let daemon = read_daemon_state_conn(tx)?;
-            let record = validate_live_permission(tx, &daemon, now, &permission)?;
+            let record = validate_live_transport_permission(tx, &daemon, now, &permission, phase)?;
             let context = &record.context;
             let summary = read_policy_summary_conn(tx, context.project_id)?;
             Ok(ProviderConnectPolicySnapshot {

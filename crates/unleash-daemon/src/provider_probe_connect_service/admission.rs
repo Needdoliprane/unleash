@@ -1,5 +1,6 @@
 //! The original claim gates durable broker phases and the existing V008 scheduler.
 
+use super::owner::{AdoptedFact, TransportOwner};
 use crate::broker_activity::BrokerActivityGuard;
 use crate::execution_scheduler::{ExecutionSchedulingInputs, schedule_execution};
 use crate::ipc::{DaemonRuntimeState, publish_committed_events_ordered};
@@ -10,16 +11,15 @@ use unleash_action_broker::{
 };
 use unleash_domain::{ActionState, Revision};
 use unleash_store::{
-    AdmissionOutcome, AdmissionUnit, AdoptedProviderConnectObservation, BrokerPhaseRequest,
-    CommitProviderConnectObservation, ExecutionContinuation, ProviderProbeConnectClaim, StoreError,
+    AdmissionOutcome, AdmissionUnit, BrokerPhaseRequest, ExecutionContinuation, StoreError,
     UnleashStore,
 };
 
-pub(super) type FactSlot = Mutex<Option<AdoptedProviderConnectObservation>>;
+pub(super) type FactSlot = Mutex<Option<AdoptedFact>>;
 
 pub(super) struct ConnectJournal {
     runtime: Weak<DaemonRuntimeState>,
-    pub(super) claim: Arc<ProviderProbeConnectClaim>,
+    pub(super) claim: Arc<TransportOwner>,
     pub(super) continuation: Arc<Mutex<Option<ExecutionContinuation>>>,
     pub(super) fact: Arc<FactSlot>,
     pub(super) activity: Arc<BrokerActivityGuard>,
@@ -28,7 +28,7 @@ pub(super) struct ConnectJournal {
 impl ConnectJournal {
     pub(super) fn new(
         runtime: &Arc<DaemonRuntimeState>,
-        claim: Arc<ProviderProbeConnectClaim>,
+        claim: Arc<TransportOwner>,
         activity: Arc<BrokerActivityGuard>,
     ) -> Self {
         Self {
@@ -52,7 +52,7 @@ impl ConnectJournal {
         let activity = Arc::clone(&self.activity);
         let result = tokio::task::spawn_blocking(move || {
             let _activity = activity;
-            store.dispose_provider_probe_connect_without_dispatch(&claim, &continuation)
+            claim.dispose_without_dispatch(&store, &continuation)
         })
         .await;
         match result {
@@ -107,7 +107,7 @@ impl ConnectJournal {
                 let result = tokio::task::spawn_blocking(move || {
                     let _activity = activity;
                     if let Some(current) = slot.lock().map_err(|_| unavailable())?.clone() {
-                        store.validate_provider_probe_connect_continuation(&claim, current)?;
+                        claim.validate_continuation(&store, current)?;
                         return Ok(None);
                     }
                     observe_eligibility(&store, &claim)?;
@@ -148,10 +148,7 @@ impl ConnectJournal {
                                 fence: commit.lease.fence,
                                 boot_identity: commit.lease.boot_identity.clone(),
                             };
-                            store.validate_provider_probe_connect_continuation(
-                                &claim,
-                                continuation.clone(),
-                            )?;
+                            claim.validate_continuation(&store, continuation.clone())?;
                             *slot.lock().map_err(|_| unavailable())? = Some(continuation);
                         }
                         return Ok(Some(commit.event_cursor));
@@ -217,25 +214,31 @@ fn unavailable() -> StoreError {
     StoreError::EvidenceUnavailable("orchestrateur connect indisponible".into())
 }
 
-fn observe_eligibility(
-    store: &UnleashStore,
-    claim: &ProviderProbeConnectClaim,
-) -> Result<(), StoreError> {
+fn observe_eligibility(store: &UnleashStore, claim: &TransportOwner) -> Result<(), StoreError> {
     let c = claim.context();
     let bytes = store.read_verified_object_bytes(c.configuration_digest)?;
     if unleash_domain::Sha256Digest::from_bytes(&bytes) != c.configuration_digest {
         return Err(unavailable());
     }
-    let value = serde_json::json!({"schema_version":1,"producer":"daemon_provider_connect_preflight","probe_id":c.probe_id,
+    let (producer, kind, transport, observer) = match claim {
+        TransportOwner::Connect(_) => (
+            "daemon_provider_connect_preflight",
+            "provider_probe_connect_eligibility",
+            "loopback_only_tcp_tls_no_http_no_secret_no_model",
+            unleash_store::CONNECT_OBSERVER_PRINCIPAL,
+        ),
+        TransportOwner::Inventory(_) => (
+            "daemon_provider_inventory_preflight",
+            "provider_probe_inventory_eligibility",
+            "loopback_only_ollama_tags_no_secret_no_model",
+            unleash_store::INVENTORY_OBSERVER_PRINCIPAL,
+        ),
+    };
+    let value = serde_json::json!({"schema_version":1,"producer":producer,"probe_id":c.probe_id,
         "receipt_id":c.receipt_id,"action_id":c.action_id,"claim_id":claim.claim_id(),"context_digest":claim.context_digest(),
         "configuration_digest":c.configuration_digest,"mandate_digest":c.mandate_digest,"policy_digest":c.policy_digest,
-        "transport":"loopback_only_tcp_tls_no_http_no_secret_no_model","authority_generation":c.authority_generation,"daemon_epoch":c.daemon_epoch});
-    let hash = super::observation::publish_document(
-        store,
-        &value,
-        "provider_probe_connect_eligibility",
-        "eligibility",
-    )?;
+        "transport":transport,"authority_generation":c.authority_generation,"daemon_epoch":c.daemon_epoch});
+    let hash = super::observation::publish_document(store, &value, kind, "eligibility")?;
     let snapshot = store.execution_admission_snapshot(store.global_execution_pool_id()?)?;
     let candidate = snapshot
         .queued
@@ -244,7 +247,7 @@ fn observe_eligibility(
         .ok_or_else(unavailable)?;
     store.record_admission_eligibility(unleash_store::AdmissionEligibilityObservation {
         evidence_id: store.config().id_generator.new_uuid(),
-        observer_principal_id: unleash_store::CONNECT_OBSERVER_PRINCIPAL.into(),
+        observer_principal_id: observer.into(),
         object_hash: hash,
         unit: candidate.unit,
         unit_revision: candidate.revision,
@@ -258,6 +261,7 @@ fn observe_eligibility(
 
 fn project(
     entry: &BrokerJournalEntry,
+    verb: &str,
 ) -> Result<
     (
         unleash_store::BrokerEvaluation,
@@ -272,7 +276,7 @@ fn project(
         cause: ObservationCause::Execution,
         ..
     } = entry
-        && intent.verb == unleash_model_router::connect_transport::CONNECT_VERB
+        && intent.verb == verb
         && receipt.state == ActionState::OutcomeUnknown
         && receipt.output_digest.is_none()
         && receipt.remote_audit_ref.is_none()
@@ -293,16 +297,23 @@ impl BrokerJournalPort for ConnectJournal {
     ) -> BoxFuture<'a, Result<(), BrokerJournalError>> {
         Box::pin(async move {
             let state = self.runtime.upgrade().ok_or(BrokerJournalError)?;
-            let (evaluation, intent, phase) = project(entry).inspect_err(|_| {
-                tracing::warn!(stage = "broker_projection", "Connect journal refused");
-            })?;
+            let (evaluation, intent, phase) =
+                project(entry, self.claim.verb()).inspect_err(|_| {
+                    tracing::warn!(stage = "broker_projection", "Connect journal refused");
+                })?;
             let phase_name = match &phase {
                 unleash_store::BrokerPhase::Authorizing { .. } => "authorizing",
                 unleash_store::BrokerPhase::Authorization { .. } => "authorization",
                 unleash_store::BrokerPhase::Dispatch { .. } => "dispatch",
                 unleash_store::BrokerPhase::Observation { .. } => "observation",
             };
-            if intent.action_id != self.claim.context().action_id {
+            if intent.action_id != self.claim.context().action_id
+                || intent
+                    .manifest
+                    .get("verb")
+                    .and_then(serde_json::Value::as_str)
+                    != Some(self.claim.verb())
+            {
                 return Err(BrokerJournalError);
             }
             let authorizing = matches!(&phase, unleash_store::BrokerPhase::Authorizing { .. });
@@ -331,16 +342,9 @@ impl BrokerJournalPort for ConnectJournal {
                         .clone()
                         .ok_or_else(unavailable)?;
                     let fact = fact.lock().map_err(|_| unavailable())?.clone();
-                    store.commit_provider_probe_connect_observation(
-                        &claim,
-                        CommitProviderConnectObservation {
-                            continuation,
-                            fact,
-                            request,
-                        },
-                    )
+                    claim.commit_observation(&store, request, continuation, fact)
                 } else {
-                    store.commit_provider_probe_connect_phase(&claim, request)
+                    claim.commit_phase(&store, request)
                 }
             })
             .await;

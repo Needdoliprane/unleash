@@ -1,9 +1,10 @@
-//! Authenticated entry preparation for the active `connect` phase.
+//! Authenticated entry preparation for the two passive transport phases.
 //!
 //! Only the original, acknowledged claim can start this one-attempt transport.
 
 mod admission;
 mod observation;
+mod owner;
 mod runtime;
 
 use std::fmt;
@@ -88,7 +89,7 @@ fn decode(command: &CommandEnvelope) -> Result<TestProviderProfilePayload, IpcEr
         IpcError::new(
             ErrorCode::InvalidArgument,
             None,
-            "Payload de connexion fournisseur invalide",
+            "Payload de transport fournisseur invalide",
             RetryClass::Never,
         )
         .with_command_id(command.command_id)
@@ -96,7 +97,10 @@ fn decode(command: &CommandEnvelope) -> Result<TestProviderProfilePayload, IpcEr
     let request: TestProviderProfilePayload =
         serde_json::from_value(serde_json::Value::Object(command.payload.clone()))
             .map_err(|_| invalid())?;
-    if request.phase() != ProviderTestPhase::Connect {
+    if !matches!(
+        request.phase(),
+        ProviderTestPhase::Connect | ProviderTestPhase::Inventory
+    ) {
         return Err(invalid());
     }
     Ok(request)
@@ -178,12 +182,35 @@ pub(crate) async fn commit(
             let store = Arc::clone(&state.store);
             let prepared = request.command.clone();
             let authority = request.caller.clone();
+            let phase = request.request.phase();
             // begin's parsed phase and canonical mandate are part of the same wire.
             if request.request.mandate_ref() != request.mandate_ref.to_string() {
                 return Err(unavailable(command_id));
             }
             let result = tokio::task::spawn_blocking(move || {
-                let preparation = store.prepare_provider_probe_connect(&prepared, &authority)?;
+                let mutation = match phase {
+                    ProviderTestPhase::Connect => {
+                        let preparation =
+                            store.prepare_provider_probe_connect(&prepared, &authority)?;
+                        unleash_store::CommandMutation::PrepareProviderProbeConnect {
+                            caller: authority.clone(),
+                            preparation: Box::new(preparation),
+                        }
+                    }
+                    ProviderTestPhase::Inventory => {
+                        let preparation =
+                            store.prepare_provider_probe_inventory(&prepared, &authority)?;
+                        unleash_store::CommandMutation::PrepareProviderProbeInventory {
+                            caller: authority.clone(),
+                            preparation: Box::new(preparation),
+                        }
+                    }
+                    _ => {
+                        return Err(StoreError::EvidenceUnavailable(
+                            "phase de transport absente".into(),
+                        ));
+                    }
+                };
                 store.commit_command(unleash_store::CommitCommandRequest {
                     actor_id: authority.actor_id.clone(),
                     envelope: prepared.clone(),
@@ -193,10 +220,7 @@ pub(crate) async fn commit(
                     result_ref: Some(format!("provider-probe:{}", prepared.aggregate_id)),
                     retention_days_override: None,
                     fence_assertion: None,
-                    mutation: unleash_store::CommandMutation::PrepareProviderProbeConnect {
-                        caller: authority,
-                        preparation: Box::new(preparation),
-                    },
+                    mutation,
                     events: vec![],
                     capacity_reservations: vec![],
                     budget_reservations: vec![],

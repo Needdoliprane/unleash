@@ -71,6 +71,8 @@ pub enum LocalValidationStatus {
     Validated,
     /// The bounded native TCP/TLS connect completed; no model capability is qualified.
     Connected,
+    /// The complete native inventory was retained and the probe disposed.
+    InventoryObserved,
 }
 
 /// Objet local publié avant la mutation, sans reçu préalloué.
@@ -95,6 +97,29 @@ pub struct ProviderValidationSummary {
     pub observed_at_ms: TimestampMs,
     /// Résultat limité à cette phase.
     pub status: LocalValidationStatus,
+    /// Exact retained inventory, present only for an observed inventory.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub inventory: Option<ProviderInventoryView>,
+}
+
+/// Read-only projection of the verified native pair.
+#[derive(Debug, Clone, Serialize)]
+pub struct ProviderInventoryView {
+    /// Writer identity and digest of the retained fact.
+    pub fact_ref: ProviderInventoryFactRef,
+    /// Digest of the canonical list bound by the fact.
+    pub inventory_digest: Sha256Digest,
+    /// Complete bounded native declarations.
+    pub models: Vec<unleash_protocol::provider_inventory::OllamaListedModel>,
+}
+
+/// Closed reference to the observed inventory fact.
+#[derive(Debug, Clone, Serialize)]
+pub struct ProviderInventoryFactRef {
+    /// Evidence row identity.
+    pub evidence_id: Uuid,
+    /// Verified canonical object digest.
+    pub object_hash: Sha256Digest,
 }
 
 /// Projection autorisable d'une version exacte ; aucun détail privé de liaison.
@@ -112,7 +137,7 @@ pub struct ProviderProfileView {
     pub configuration_receipt_id: ReceiptId,
     /// La validation locale ne qualifie pas un fournisseur.
     pub qualification: crate::ProviderProfileQualification,
-    /// Dernière observation conservée par phase ; seule `validate_config` est produite ici.
+    /// Dernière observation conservée pour chaque phase qualifiée.
     pub observations: Vec<ProviderValidationSummary>,
 }
 
@@ -414,6 +439,7 @@ pub(crate) struct ProfileProjection {
     profile: ConfiguredProviderProfile,
     latest: Option<LatestValidation>,
     connect: Option<crate::provider_probe_connect_observation::ConnectProjection>,
+    inventory: Option<crate::provider_probe_inventory_observation::InventoryProjection>,
 }
 
 struct LatestValidation {
@@ -450,18 +476,26 @@ pub(crate) fn read_projection(
             committed_at_ms: row.get(6)?, command_type: row.get(7)?,
         }),
     ).optional()?;
-    let connect = if crate::commands::read_daemon_state_conn(conn)?.schema_version >= 15 {
-        crate::provider_probe_connect_observation::read_projection(
-            conn,
-            &profile.profile_version_ref,
-        )?
-    } else {
-        None
-    };
+    let (connect, inventory) =
+        if crate::commands::read_daemon_state_conn(conn)?.schema_version >= 15 {
+            (
+                crate::provider_probe_connect_observation::read_projection(
+                    conn,
+                    &profile.profile_version_ref,
+                )?,
+                crate::provider_probe_inventory_observation::read_projection(
+                    conn,
+                    &profile.profile_version_ref,
+                )?,
+            )
+        } else {
+            (None, None)
+        };
     Ok(Some(ProfileProjection {
         profile,
         latest,
         connect,
+        inventory,
     }))
 }
 
@@ -510,6 +544,7 @@ pub(crate) fn finish_view(
         profile,
         latest,
         connect,
+        inventory,
     } = projection;
     let mut observations = Vec::new();
     if let Some(latest) = latest {
@@ -521,11 +556,17 @@ pub(crate) fn finish_view(
             result_ref: format!("provider-probe:{}", observed.probe_id),
             observed_at_ms: observed.observed_at_ms,
             status: observed.status,
+            inventory: None,
         });
     }
     if let Some(connect) = connect {
         observations
             .push(crate::provider_probe_connect_observation::finish_projection(store, &connect)?);
+    }
+    if let Some(inventory) = inventory {
+        observations.push(
+            crate::provider_probe_inventory_observation::finish_projection(store, &inventory)?,
+        );
     }
     Ok(ProviderProfileView {
         profile_id: profile.configuration.profile_id,

@@ -1,6 +1,6 @@
 //! Attribution of the two native inventory objects to one durable dispatch.
 
-use rusqlite::{Transaction, params};
+use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use unleash_domain::{
     ActionId, ActionState, AuthorityGeneration, DispatchId, Sha256Digest, TimestampMs,
@@ -134,6 +134,18 @@ fn read_native_fact(
     fact_hash: Sha256Digest,
     list_hash: Sha256Digest,
 ) -> Result<NativeFact, StoreError> {
+    read_native_pair(store, action_id, fact_hash, list_hash, |_, fact, _| {
+        Ok(fact)
+    })
+}
+
+fn read_native_pair<T>(
+    store: &UnleashStore,
+    action_id: ActionId,
+    fact_hash: Sha256Digest,
+    list_hash: Sha256Digest,
+    project: impl FnOnce(&Connection, NativeFact, OllamaInventory) -> Result<T, StoreError>,
+) -> Result<T, StoreError> {
     let owner = action_id.to_string();
     let fact_pin = store.acquire_read_pin(fact_hash, "provider_inventory_fact_reader", &owner)?;
     let list_pin = match store.acquire_read_pin(list_hash, "provider_inventory_list_reader", &owner)
@@ -162,8 +174,11 @@ fn read_native_fact(
             list_hash,
             MAX_INVENTORY_LIST_BYTES,
         )?;
-        canonical_document::<OllamaInventory>(&list_bytes)?;
-        Ok(fact)
+        project(
+            conn,
+            fact,
+            canonical_document::<OllamaInventory>(&list_bytes)?,
+        )
     });
     let released_fact = store.release_pin(&fact_pin);
     let released_list = store.release_pin(&list_pin);
@@ -171,6 +186,143 @@ fn read_native_fact(
     released_fact?;
     released_list?;
     Ok(fact)
+}
+
+#[derive(PartialEq, Eq)]
+pub(crate) struct InventoryProjection {
+    probe: unleash_domain::ProviderProbeId,
+    action: ActionId,
+    dispatch: DispatchId,
+    request_digest: Sha256Digest,
+    evidence_id: uuid::Uuid,
+    fact: Sha256Digest,
+    list: Sha256Digest,
+    observed_at: TimestampMs,
+    profile_ref: String,
+}
+
+pub(crate) fn read_projection(
+    conn: &Connection,
+    profile_ref: &str,
+) -> Result<Option<InventoryProjection>, StoreError> {
+    let latest: Option<(String, String)> = conn
+        .query_row(
+            "SELECT p.probe_id,p.state FROM provider_probes p
+         JOIN command_receipts c ON c.receipt_id=p.command_receipt_id
+         WHERE p.phase='inventory' AND p.profile_version_ref=?1
+         ORDER BY c.last_event_seq DESC,p.probe_id DESC LIMIT 1",
+            [profile_ref],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?;
+    let Some((probe, state)) = latest else {
+        return Ok(None);
+    };
+    let probe = probe.parse()?;
+    if state != "ended"
+        || crate::provider_probe_connect_disposition::has_closed_refusal(conn, probe)?
+    {
+        return Ok(None);
+    }
+    let mut statement = conn.prepare(
+        "SELECT c.action_id,d.dispatch_id,json_extract(c.context_json,'$.request_digest'),
+                f.evidence_id,f.object_hash,l.object_hash,f.observed_at_ms
+         FROM provider_probe_transport_contexts c
+         JOIN actions a ON a.action_id=c.action_id AND a.state='observed_success'
+         JOIN action_dispatches d ON d.action_id=a.action_id AND d.transport_state='observed_success'
+         JOIN broker_phase_records b ON b.action_id=a.action_id AND b.phase_key='observation:1'
+         JOIN events e ON e.event_id=b.event_id AND e.event_type='ActionObserved'
+             AND e.aggregate_id=a.action_id AND json_extract(e.payload_json,'$.dispatch_id')=d.dispatch_id
+             AND json_extract(e.payload_json,'$.state')='observed_success'
+         JOIN evidence f ON f.action_id=a.action_id AND f.kind='observation'
+             AND f.producer_id=?2 AND f.schema_version=1 AND f.availability='available'
+             AND f.snapshot_ref LIKE 'provider-inventory-fact:v1:%'
+             AND f.object_hash=json_extract(e.payload_json,'$.output_digest')
+         JOIN evidence z ON z.action_id=a.action_id AND z.kind='observation'
+             AND z.producer_id=?2 AND z.schema_version=1 AND z.availability='available'
+             AND z.snapshot_ref LIKE 'provider-inventory-disposition:v1:%:'||e.event_id
+             AND z.object_hash=f.object_hash
+         JOIN object_references r ON r.owner_kind='provider_probe' AND r.owner_id=c.probe_id
+             AND r.source_field='inventory_observation' AND r.state='live' AND r.object_hash=f.object_hash
+         JOIN object_references l ON l.owner_kind='provider_probe' AND l.owner_id=c.probe_id
+             AND l.source_field='inventory_models' AND l.state='live'
+         WHERE c.probe_id=?1 AND c.phase='inventory' AND c.profile_version_ref=?3",
+    )?;
+    let mut rows = statement.query(params![
+        probe.to_string(),
+        INVENTORY_OBSERVER_PRINCIPAL,
+        profile_ref
+    ])?;
+    let row = rows
+        .next()?
+        .ok_or_else(|| unavailable("preuve du dernier inventaire indisponible"))?;
+    let string = |index| -> Result<String, StoreError> { Ok(row.get(index)?) };
+    let projection = InventoryProjection {
+        probe,
+        action: string(0)?.parse()?,
+        dispatch: string(1)?.parse()?,
+        request_digest: string(2)?.parse()?,
+        evidence_id: string(3)?
+            .parse()
+            .map_err(|_| unavailable("identité de preuve inventory illisible"))?,
+        fact: string(4)?.parse()?,
+        list: string(5)?.parse()?,
+        observed_at: TimestampMs::new(row.get(6)?),
+        profile_ref: profile_ref.to_owned(),
+    };
+    if rows.next()?.is_some() {
+        return Err(unavailable("preuve du dernier inventaire ambiguë"));
+    }
+    Ok(Some(projection))
+}
+
+pub(crate) fn finish_projection(
+    store: &UnleashStore,
+    proof: &InventoryProjection,
+) -> Result<crate::provider_profile_validation::ProviderValidationSummary, StoreError> {
+    use crate::provider_profile_validation::{
+        LocalValidationStatus, ProviderInventoryFactRef, ProviderInventoryView,
+        ProviderValidationSummary,
+    };
+    read_native_pair(
+        store,
+        proof.action,
+        proof.fact,
+        proof.list,
+        |conn, fact, list| {
+            if read_projection(conn, &proof.profile_ref)?.as_ref() != Some(proof)
+                || fact.schema_version != 1
+                || fact.action_id != proof.action
+                || fact.dispatch_id != proof.dispatch
+                || fact.request_digest != proof.request_digest
+                || fact.observed_at_ms != proof.observed_at
+                || fact.status_code != 200
+                || fact.revocation_checked
+                || !fact.peer.ip().is_loopback()
+            {
+                return Err(unavailable("preuve d'inventaire projetée divergente"));
+            }
+            Ok(ProviderValidationSummary {
+                phase: unleash_protocol::ProviderTestPhase::Inventory,
+                probe_id: proof.probe,
+                result_ref: format!("provider-probe:{}", proof.probe),
+                observed_at_ms: proof.observed_at,
+                status: LocalValidationStatus::InventoryObserved,
+                inventory: Some(ProviderInventoryView {
+                    fact_ref: ProviderInventoryFactRef {
+                        evidence_id: proof.evidence_id,
+                        object_hash: proof.fact,
+                    },
+                    inventory_digest: proof.list,
+                    models: list.models,
+                }),
+            })
+        },
+    )
+    .map_err(|error| match error {
+        StoreError::NotFound(_) => unavailable("objet du dernier inventaire indisponible"),
+        other => other,
+    })
 }
 
 fn fact_snapshot_ref(

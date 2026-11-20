@@ -1181,9 +1181,10 @@ async fn handle_command_frame(
                     cmd.clone(),
                 )
                 .await
-            } else if cmd.payload.get("phase").and_then(serde_json::Value::as_str)
-                == Some("connect")
-            {
+            } else if matches!(
+                cmd.payload.get("phase").and_then(serde_json::Value::as_str),
+                Some("connect" | "inventory")
+            ) {
                 crate::provider_probe_connect_service::commit(state, session.clone(), cmd.clone())
                     .await
             } else {
