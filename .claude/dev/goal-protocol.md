@@ -87,7 +87,10 @@ reste ambigu, suspendre cette exécution jusqu’à clarification du périmètre
   de données, de cible ou d’effet, actualiser le mandat et réexaminer le
   périmètre.
 - **Critère et remise** — oracle de réussite ou de refus, preuve à retenir,
-  résultat réellement obtenu et limites de la vérification.
+  résultat réellement obtenu et limites de la vérification. Pour une lecture,
+  fixer la forme de la réponse dans le mandat. Demander un verdict confirmé,
+  infirmé ou non vérifié, avec les références qui l’établissent. La remise se
+  limite à la propriété demandée.
 
 Les mandats couvrent la revue de code, les corrections défensives et leurs
 tests de contrat. Ils excluent le développement d’exploits, la reproduction
