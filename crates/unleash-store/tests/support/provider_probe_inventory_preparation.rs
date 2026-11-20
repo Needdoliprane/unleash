@@ -144,7 +144,7 @@ fn issue(store: &UnleashStore, phase: ProviderTestPhase) -> TestResult<ReceiptId
     let wire = envelope(
         store,
         0xf012_2002,
-        Uuid::from_u128(0xf012_2002),
+        store.active_authority_generation()?.as_uuid(),
         "SetPolicy",
         json!({
             "scope_kind":"global","scope_id":"global","isolation_mode":"standard",
