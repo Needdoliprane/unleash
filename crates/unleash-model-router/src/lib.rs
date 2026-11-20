@@ -18,6 +18,8 @@ pub mod anthropic;
 pub mod anthropic_transport;
 /// One-attempt loopback TCP/TLS component; no HTTP or provider qualification.
 pub mod connect_transport;
+/// Internal, one-attempt passive Ollama inventory component; no product route.
+pub mod inventory_transport;
 /// Bounded, explicitly restricted OpenAI Responses SSE dialect.
 pub mod openai;
 /// One-attempt Responses executor for the action-broker port.
@@ -31,6 +33,8 @@ mod anthropic_transport_tests;
 mod connect_transport_tests;
 #[cfg(test)]
 mod http_fixture_tests;
+#[cfg(test)]
+mod inventory_transport_tests;
 #[cfg(test)]
 mod openai_tests;
 #[cfg(test)]
