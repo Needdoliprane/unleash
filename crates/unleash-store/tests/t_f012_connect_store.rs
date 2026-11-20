@@ -31,6 +31,9 @@ mod claim_scenarios;
 #[path = "support/provider_probe_connect_admission_scenarios.rs"]
 mod admission_scenarios;
 
+#[path = "support/provider_service_launch_scenarios.rs"]
+mod service_launch_scenarios;
+
 #[path = "common/admission_fixture.rs"]
 mod mixed_admission_fixture;
 
@@ -111,6 +114,15 @@ fn configure_profile(store: &UnleashStore, profile: Uuid, command_id: u128) {
         payload:serde_json::from_value(json!({"provider_kind":"lmstudio","dialect":{"kind":"openai_chat_completions","version":1},"endpoint":"http://127.0.0.1:1234/v1","model":"synthetic-connect-store","locality":"local_only","server_management":"user_managed","auth":{"kind":"none"},"limits":{"max_inflight":1,"connect_timeout_ms":2000,"queue_timeout_ms":1000,"load_timeout_ms":180_000,"first_token_timeout_ms":60000,"generation_timeout_ms":60000},"declared_capabilities":["text"],"pricing":{"kind":"none_local"}})).unwrap(),
         secret_binding:None, catalog_binding:None,
     };
+    publish_profile(store, configuration, command_id);
+}
+
+fn publish_profile(
+    store: &UnleashStore,
+    configuration: ProviderProfileConfiguration,
+    command_id: u128,
+) {
+    let profile = configuration.profile_id;
     let bytes = canonicalize_to_vec(&configuration).unwrap();
     let hash = Sha256Digest::from_bytes(&bytes);
     let prepared = store
@@ -223,6 +235,27 @@ fn fixture() -> (
         .receipt()
         .receipt_id;
     (store, directory, receipt, failure)
+}
+
+#[test]
+fn service_launch_receipt_cannot_be_minted_with_an_unrelated_mutation() {
+    let (store, _directory, _mandate, _failure) = fixture();
+    let mut wire = envelope(
+        &store,
+        0xc502,
+        Uuid::from_u128(0xc503),
+        "PrepareProviderServiceLaunch",
+        json!({}),
+    );
+    wire.expected_revision = store.daemon_state().unwrap().revision;
+    assert!(matches!(
+        store.commit_command(command(
+            wire,
+            AggregateKind::Daemon,
+            CommandMutation::NoopDaemonBump,
+        )),
+        Err(StoreError::InvalidArgument { .. })
+    ));
 }
 
 fn connect(store: &UnleashStore, id: u128, mandate: ReceiptId) -> CommandEnvelope {

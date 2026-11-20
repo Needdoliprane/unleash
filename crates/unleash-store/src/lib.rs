@@ -35,6 +35,7 @@ mod provider_probe_mandates;
 pub mod provider_probes;
 mod provider_profile_validation;
 pub mod provider_profiles;
+mod provider_service_launch;
 pub mod qualification;
 pub mod recovery_ops;
 pub mod restore;
@@ -139,6 +140,9 @@ pub use provider_profiles::{
     ConfiguredProviderProfile, ProviderCatalogBinding, ProviderCatalogSource,
     ProviderProfileConfiguration, ProviderProfilePreparation, ProviderProfileQualification,
     ProviderSecretBinding,
+};
+pub use provider_service_launch::{
+    ProviderServiceBackend, ProviderServiceLaunchContext, ProviderServiceLaunchPlan,
 };
 pub use qualification::{
     APPROVED_BACKPORT_VERSIONS, EffectivePragmaProfile, MIN_QUALIFIED_SQLITE_VERSION,

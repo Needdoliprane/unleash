@@ -42,6 +42,14 @@ Les credentials ne transitent que du coffre au transport autorisé. Les document
 
 ## Ordre interne de construction
 
+La préparation interne d’un serveur Ollama géré est enregistrée séparément
+des sondes et de la configuration, dans [le schéma V019](../../architecture/sqlite-design.md#préparation-dun-serveur-géré-v019).
+Le writer fige le profil local exact, le binaire, les digests de commande,
+d’environnement et de confinement et la date limite. Ce document conserve
+le plan à vérifier par le producteur natif. Le dispatch et le permis de
+démarrage restent fermés jusqu’à la qualification du chemin Strict et à
+son engagement durable dans le broker.
+
 Figer les DTO puis créer les doubles déterministes ; implémenter la voie nominale ; ajouter persistance et idempotence ; injecter les pannes aux frontières ; qualifier les adaptateurs réels ; raccorder clients et rapports. Les interfaces de feature sont proposées, et les APIs de bibliothèques doivent correspondre aux versions verrouillées au jalon de build.
 
 Ne pas ajouter de service séparé sans besoin démontré. Le daemon possède la coordination ; les adaptateurs ne créent ni workflow parallèle ni gestionnaire de budget caché.

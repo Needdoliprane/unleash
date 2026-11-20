@@ -303,6 +303,19 @@ Les versions établies par `SetProviderProfile` portent la paire unique `(profil
 
 La migration additive V011 garde les références et relations des anciennes lignes. Leurs nouvelles colonnes d’identité restent nulles. Une nouvelle ligne configurée lie l’objet canonique et son digest, le digest de préparation, l’acteur et le principal, la portée et le reçu. Le writer conserve ces versions en lecture seule. Pour un tarif de catalogue, il réutilise le snapshot de même identité, contenu et provenance. Un catalogue de même version avec une autre empreinte ou métadonnée est refusé. La vérification d’un catalogue livré par OVPT relève du producteur serveur, qui contrôle sa signature avant de choisir cette provenance.
 
+### Préparation d’un serveur géré V019
+
+La migration additive V019 crée `provider_service_launches`. La commande interne
+`PrepareProviderServiceLaunch` engage dans la transaction du reçu un document
+haché, un événement et son outbox. Le document lie la version configurée d’un
+profil Ollama géré par Unleash, sa destination locale, l’autorité courante,
+le plan natif explicite et les identités réservées. Le lien au reçu est une clé
+étrangère différable. Un rejeu exact retrouve le même reçu et les mêmes
+identités. La préparation ne crée ni action broker, ni ligne de processus,
+ni réservation d’admission. Le broker refuse le verbe de lancement et
+l’utilisation du reçu, de l’événement de préparation ou de l’identité
+d’action pour un autre effet.
+
 | Table | Colonnes minimales | Contraintes |
 |---|---|---|
 | `model_catalog_snapshots` | `catalog_id`, `catalog_version`, `digest`, `source_kind`, `published_at_ms`, `valid_until_ms`, `imported_at_ms`, `content_ref` | UNIQUE `(catalog_id,catalog_version)` ; source_kind ovpt_release/user_import/user_declared ; contenu immuable référencé par objet ; import ou saisie seulement par SetProviderProfile, jamais par récupération réseau automatique (Q-14, [F012](../features/F012-model-api-router/technical-design.md)). |

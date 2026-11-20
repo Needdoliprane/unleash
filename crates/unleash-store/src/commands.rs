@@ -78,6 +78,8 @@ pub enum AggregateKind {
     ProviderProbe,
     /// Version immuable d'un profil fournisseur configuré.
     ProviderProfile,
+    /// Contexte de préparation explicite d'un service fournisseur.
+    ProviderServiceLaunch,
     /// Préparation d'allocation terminal humaine.
     TerminalAllocation,
     /// Contrôle courant d'un terminal enregistré, distinct de son lancement.
@@ -112,6 +114,7 @@ impl AggregateKind {
             Self::BackupJob => "backup_job",
             Self::ProviderProbe => "provider_probe",
             Self::ProviderProfile => "provider_profile",
+            Self::ProviderServiceLaunch => "provider_service_launch",
             Self::TerminalAllocation => "terminal_allocation",
             Self::TerminalControl => "terminal_control",
             Self::TerminalControlIntent => "terminal_control_intent",
@@ -185,6 +188,11 @@ pub enum CommandMutation {
         caller: CallerAuthority,
         /// Résolution exacte de la phase inventory, relue par le writer.
         preparation: Box<crate::ProviderProbeInventoryPreparation>,
+    },
+    /// Prepare the effect context for an explicit managed service launch.
+    PrepareProviderServiceLaunch {
+        /// Human security authority resolved by the daemon.
+        caller: CallerAuthority,
     },
     /// Prépare un terminal sans action OS ni action broker préinsérée.
     PrepareTerminalAllocation {
@@ -956,6 +964,7 @@ pub(crate) fn tx_commit_command(
         crate::provider_probes::validate_command(tx, req)?;
     }
     crate::provider_profiles::validate_identity(req)?;
+    crate::provider_service_launch::validate_command(req)?;
     crate::terminal_allocations::validate_command(tx, req)?;
 
     // Étape 2 : Rechercher `(actor_id, command_id)` dans `command_receipts`
@@ -1255,6 +1264,11 @@ pub(crate) fn tx_commit_command(
     } else {
         None
     };
+    let service_launch_result = matches!(
+        req.mutation,
+        CommandMutation::PrepareProviderServiceLaunch { .. }
+    )
+    .then(|| format!("provider-service-launch:{}", req.envelope.aggregate_id));
     let receipt = CommandReceipt {
         receipt_id,
         command_id: req.envelope.command_id,
@@ -1271,6 +1285,7 @@ pub(crate) fn tx_commit_command(
             .map(|id| format!("retention-purge:{id}"))
             .or_else(|| reserved_backup.map(|id| format!("backup:{id}")))
             .or_else(|| prepared_probe.map(|id| format!("provider-probe:{id}")))
+            .or(service_launch_result)
             .or(release_result)
             .or_else(|| {
                 if matches!(req.mutation, CommandMutation::SetProviderProfile { .. }) {
@@ -1581,6 +1596,18 @@ fn apply_command_mutation(
             receipt_id,
             generated_events,
         ),
+        CommandMutation::PrepareProviderServiceLaunch { caller } => {
+            crate::provider_service_launch::commit_tx(
+                tx,
+                config,
+                daemon,
+                now_ms,
+                envelope,
+                caller,
+                receipt_id,
+                generated_events,
+            )
+        }
         CommandMutation::PrepareTerminalAllocation {
             terminal_id,
             preparation,

@@ -63,7 +63,7 @@ c8f45af2ab1a811389c98a36c0d2005d76731e9a86b2dcd20bf650cc3aa3f212  .claude/archit
 e946587cb98515bb8faaab4a2c8eea2267e51ab2d94cb724e5d5da69e40eda57  .claude/architecture/security-boundaries.md
 a061a5e2c342f501f5206af75b6bb370fd1663c89a7ed9b0aa93fb16aa0b8ef7  .claude/architecture/session-model.md
 18d6c5daddbe78f08315034057f439666548b2d480a9192dabed0917f8037d05  .claude/architecture/skills-contract-model.md
-f164d735a2a3fd8f65b174fca4a3f0676bfd93362138208d55a1ed7588f4768b  .claude/architecture/sqlite-design.md
+05574ca2d87cc6b3ab9b05b3a5ff532eff36bd47c6d579b3ecab877208d7a35d  .claude/architecture/sqlite-design.md
 45676028a5669b3021240c649576ecb1d81d7a03196b1ad07389c36faf76d854  .claude/architecture/state-machines.md
 11a2150eb7c0e28e5462bda08022e676480aa8a2c4f0b7f7d1cd5e81eb1abd2e  .claude/architecture/storage-model.md
 86e3b61e1bce0b42ec71dcd2b9b9829bf840e0a90ae37c227dbbab84d50466bf  .claude/architecture/system-overview.md
@@ -121,7 +121,7 @@ fd66815a76ace8b136778face8afcfd940d6b6d02d1f2dbe1c2a162d5ef3e666  .claude/brief/
 08e0a0152f290d07fa66453243218c404530afc1dcb92e9fc5d8e24aa366b6eb  .claude/catalog/README.md
 a87fbd5d995747bc222abdef47db8fb9c561b93c0ba0846c08ead13d1a1c6529  .claude/catalog/design-catalog.json
 bcdc9be2f4559a4d743d08307d710c818606896b4c59f55cb831b01539ddd3d7  .claude/catalog/operations.json
-f0e9fed6cefc5c82ac983a83a1972eb9a925883f181ebf93175d5c672b55958a  .claude/catalog/package-manifest.json
+223da2d088bf6c5d4687bb7bd2204056ac62898ce7c73cdf829e9f4b5dd90577  .claude/catalog/package-manifest.json
 dc670318f9a2834c72d589fa921567ab3c2da5a6777d6d348697fd54b643f60b  .claude/design/activity-timeline.md
 7e66e407555c2cd16175e2f26c9515ede0d802d8e2bc53b2675d3883dfbfa2a8  .claude/design/agent-tree-and-status.md
 1558c901b73b4ce6ca5963a1b2a1c06864afc92f61b4f9ed1950ff841669c6ed  .claude/design/cli-tui-design.md
@@ -141,7 +141,7 @@ a501eb8a7d1e8598dd31bd1f8aa956c6521d691d806ef9000b6aaf852c337251  .claude/design
 26b7432507d33404b2cae4b72eb435d0a7170cea5a9597d9d14eedadbe7e9047  .claude/design/workflow-editor.md
 92248a63204ee3f570baada0b1a93a4ee67b82e3855c7c20af572815ce62b103  .claude/dev/definition-of-done.md
 b08b6572aa0f56f5ea0d84ed678edbe3f091362c17fbd29a8c81a8196de679bb  .claude/dev/goal-journal-template.md
-1e66ca39496cd0b27b2dfe1aa06d0d683a121941a2ca3cc722aca06f8184cfb9  .claude/dev/goal-protocol.md
+b78903768f94b5efdd6bcaf1d613119062c87c4ad90653aef76888301b57b4b5  .claude/dev/goal-protocol.md
 ce490d1c15cb22da7bce96e13ad73e5fa1477942fa155623d400bce663e20070  .claude/dev/m0-kickoff.md
 7f03b381c3c22be0f40064b324d55d5d8cdc2f4fcefcce2fc9764649a6845d38  .claude/dev/model-routing.md
 b88ba98be92f1b27128b24873df746edff88d95558899758022573b2c2257631  .claude/dev/worktrees.md
@@ -257,7 +257,7 @@ b9f21c2478166b16d4bbe1b4822fe5acab37e13eda7fc6964accfaac72d54ce8  .claude/featur
 17eabd25f5c6da4c3ccedde0df06f286383ff140d82bd7f5b8f75b4f5e8582d6  .claude/features/F012-model-api-router/dependencies.md
 9b4d929e3cc2e9a503f345cbeee95efec32adc9093b996723fa969cbfe6db78a  .claude/features/F012-model-api-router/interfaces.md
 8018d1411c5558cd5d31bef6b3e316fa8b17ff85fe82d0204b6ce2cd56bea4e2  .claude/features/F012-model-api-router/requirements.md
-20c32be593c9b19ae8291578022a6a0c04d4aa763149fbee75070f6b2270ac4b  .claude/features/F012-model-api-router/technical-design.md
+3954281050233639413d62f93a294d3755c9c2964242b796520255060584c9eb  .claude/features/F012-model-api-router/technical-design.md
 f8ec73d8535951e4e7c821fcb3f07412927d6174d7c1f53e789479728b168993  .claude/features/F012-model-api-router/tests.md
 a5642f550fb3a07078255816a1e476814454ece09d1090b440e2c6443edd9540  .claude/features/F013-document-connectors/README.md
 726ccd8e5248483e067ee4739ed9742696a4492298c789fee54d49f3a7f652a1  .claude/features/F013-document-connectors/acceptance.md

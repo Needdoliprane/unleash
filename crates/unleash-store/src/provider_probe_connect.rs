@@ -726,7 +726,7 @@ fn integer(value: u64) -> Result<i64, StoreError> {
     i64::try_from(value).map_err(|_| invalid("borne connect hors plage SQLite"))
 }
 
-fn scope_revision(
+pub(crate) fn scope_revision(
     tx: &Transaction<'_>,
     project: Option<ProjectId>,
 ) -> Result<Revision, StoreError> {

@@ -232,6 +232,7 @@ fn validate_live_intent_with_connect(
     intent: &BrokerIntent,
     connect_authorized: bool,
 ) -> Result<(), StoreError> {
+    crate::provider_service_launch::reject_unqualified_intent(tx, daemon, intent)?;
     crate::backup_requests::validate_backup_intent_tx(tx, daemon, intent)?;
     if !connect_authorized && !crate::provider_probe_connect::validate_intent(tx, daemon, intent)? {
         crate::provider_probes::validate_intent(tx, daemon, intent)?;
@@ -595,6 +596,9 @@ fn commit_phase_tx_inner(
     let exact = json!({"schema_version":BROKER_PHASE_SCHEMA_VERSION,"evaluation":request.evaluation,"phase":request.phase});
     let digest = canonical_sha256(&exact)?;
     if let Some(replayed) = lookup_phase_record(tx, &daemon, request)? {
+        if let BrokerPhase::Authorizing { intent } = &request.phase {
+            crate::provider_service_launch::reject_unqualified_intent(tx, &daemon, intent)?;
+        }
         return Ok(replayed);
     }
     crate::terminal_allocations::guard_observation(tx, &request.phase, terminal_proof)?;
