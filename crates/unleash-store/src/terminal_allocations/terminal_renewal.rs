@@ -39,11 +39,17 @@ pub(crate) fn prepare_registered_tx(
     command: &RegisteredCommand<'_>,
     events: &mut Vec<EventAppendSpec>,
 ) -> Result<Revision, StoreError> {
+    super::terminal_release::guard_pending(tx, d, command.request.terminal_id)?;
     let same_incarnation: bool = tx.query_row(
         "SELECT EXISTS(SELECT 1 FROM terminal_sessions s JOIN resource_leases l ON l.lease_id=s.lease_id WHERE s.terminal_id=?1 AND l.daemon_epoch=?2)",
         params![command.request.terminal_id.to_string(),integer(d.daemon_epoch.as_u64())?],|row|row.get(0),
     )?;
-    if d.schema_version >= 16 && same_incarnation {
+    let released = if d.schema_version >= 18 {
+        tx.query_row("SELECT EXISTS(SELECT 1 FROM terminal_sessions s JOIN resource_leases l ON l.lease_id=s.lease_id WHERE s.terminal_id=?1 AND l.state='released')",[command.request.terminal_id.to_string()],|row|row.get::<_,bool>(0))?
+    } else {
+        false
+    };
+    if d.schema_version >= 16 && same_incarnation && !released {
         guard_pending(tx, d, command.request.terminal_id)?;
         prepare_tx(tx, config, d, now, command, events)
     } else {

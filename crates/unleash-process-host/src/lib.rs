@@ -38,6 +38,7 @@
 #![warn(missing_docs)]
 
 pub mod anchor;
+mod control_release;
 mod control_transfer;
 pub mod error;
 pub mod fencing;
@@ -52,6 +53,11 @@ pub use anchor::{
     AnchorVerificationReport, ChildExitStatus, HostSignal, OsProcessInspector, OwnedChildAnchor,
     OwnedChildHandle, ProcessInspector, SigchldQualification, StopObservation,
     configure_setsid_pre_exec, ensure_sigchld_qualified, inspect_sigchld_disposition,
+};
+pub use control_release::{
+    ControlReacquisitionAck, ControlReacquisitionRequest, ControlReacquisitionResponse,
+    ControlReleaseAck, ControlReleaseKey, ControlReleaseRequest, ControlReleaseResponse,
+    HostControlState,
 };
 pub use control_transfer::{ControlTransferAck, ControlTransferRequest, ControlTransferResponse};
 pub use error::ProcessHostError;

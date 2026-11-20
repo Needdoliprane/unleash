@@ -123,6 +123,13 @@ impl AggregateKind {
 /// Mutation pure décidée par le domaine et exécutée atomiquement par [`CommitCommandRequest`].
 #[derive(Debug, Clone)]
 pub enum CommandMutation {
+    /// Prepare explicit native control retirement without stopping the resource.
+    PrepareTerminalRelease {
+        /// Transport-authenticated human authority.
+        caller: CallerAuthority,
+        /// Exact registered controller target, with no client-supplied evidence.
+        request: crate::terminal_allocations::terminal_release_types::TerminalReleaseRequest,
+    },
     /// Accept an exact input intention without retaining its raw bytes or performing I/O.
     PrepareTerminalInput {
         /// Identity and role resolved by the authenticated daemon connection.
@@ -1159,6 +1166,7 @@ pub(crate) fn tx_commit_command(
             CommandMutation::PrepareTerminalAllocation { .. }
                 | CommandMutation::PrepareTerminalControl { .. }
                 | CommandMutation::PrepareTerminalInput { .. }
+                | CommandMutation::PrepareTerminalRelease { .. }
         ) {
         ReceiptState::Accepted
     } else {
@@ -1197,6 +1205,15 @@ pub(crate) fn tx_commit_command(
     } else {
         None
     };
+    let release_result = if matches!(req.mutation, CommandMutation::PrepareTerminalRelease { .. }) {
+        let action: String = tx.query_row(
+            "SELECT action_id FROM terminal_release_intents WHERE receipt_id=?1 AND actor_id=?2 AND command_id=?3",
+            rusqlite::params![receipt_id.to_string(), actor_str, cmd_str], |row| row.get(0),
+        )?;
+        Some(format!("terminal-release:{action}"))
+    } else {
+        None
+    };
     let receipt = CommandReceipt {
         receipt_id,
         command_id: req.envelope.command_id,
@@ -1213,6 +1230,7 @@ pub(crate) fn tx_commit_command(
             .map(|id| format!("retention-purge:{id}"))
             .or_else(|| reserved_backup.map(|id| format!("backup:{id}")))
             .or_else(|| prepared_probe.map(|id| format!("provider-probe:{id}")))
+            .or(release_result)
             .or_else(|| {
                 if matches!(req.mutation, CommandMutation::SetProviderProfile { .. }) {
                     Some(format!(
@@ -1377,6 +1395,21 @@ fn apply_command_mutation(
 ) -> Result<Revision, StoreError> {
     let exp_i64 = i64::try_from(expected_rev.as_u64()).unwrap_or(0);
     match mutation {
+        CommandMutation::PrepareTerminalRelease { request, .. } => {
+            crate::terminal_allocations::terminal_release::prepare_tx(
+                tx,
+                config,
+                daemon,
+                now_ms,
+                &crate::terminal_allocations::terminal_release::ReleaseCommand {
+                    actor: actor_id,
+                    envelope,
+                    request,
+                    receipt: receipt_id,
+                },
+                generated_events,
+            )
+        }
         CommandMutation::PrepareTerminalInput { request, .. } => {
             crate::terminal_allocations::terminal_input_writer::prepare_tx(
                 tx,

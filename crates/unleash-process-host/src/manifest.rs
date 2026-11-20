@@ -184,6 +184,10 @@ pub struct HostManifest {
     /// Allocation supplied by the authenticated launcher, separate from the applied environment.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub allocation_context_digest: Option<Sha256Digest>,
+    /// Qualified terminal control state. Missing in legacy manifests; absence
+    /// never proves support for retirement or a retired native capability.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub control_state: Option<crate::HostControlState>,
     /// UID effectif propriétaire.
     pub owner_uid: u32,
     /// PID observé du processus enfant direct.
@@ -561,6 +565,7 @@ mod tests {
         let manifest = HostManifest {
             effective_environment_digest: None,
             allocation_context_digest: None,
+            control_state: None,
             schema_version: 1,
             host_id: HostId::from_u128(1),
             process_id: ProcessId::from_u128(2),

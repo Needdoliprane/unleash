@@ -8,6 +8,9 @@ mod terminal_input_execution;
 mod terminal_input_observation;
 pub mod terminal_input_types;
 pub(crate) mod terminal_input_writer;
+pub(crate) mod terminal_release;
+pub(crate) mod terminal_release_observation;
+pub mod terminal_release_types;
 pub(crate) mod terminal_renewal;
 mod terminal_renewal_observation;
 mod terminal_renewal_recovery;
@@ -152,6 +155,10 @@ pub struct TerminalControlContext {
     pub expires_at_ms: TimestampMs,
     /// Actual identity previously recorded for this exact child, not a requested PID.
     pub expected_os_identity: TerminalProcessIdentity,
+    /// Qualified native retirement consumed by this explicit reactivation.
+    /// Absent on historical transfers, preserving their canonical encoding.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub release_source: Option<terminal_release_types::TerminalReleasedControlSource>,
 }
 
 /// State of a transfer intent. Pending/unknown states never grant a capability.
@@ -422,6 +429,7 @@ impl crate::UnleashStore {
             }
             let evidence:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM object_references f JOIN object_records o ON o.object_hash=f.object_hash WHERE f.owner_kind='terminal_control_observation' AND f.owner_id=?1 AND f.source_field=?2 AND f.object_hash=?3 AND f.state='live' AND o.state='live')",params![c.action_id.to_string(),observation.dispatch_id.to_string(),digest.to_string()],|row|row.get(0))?;
             if !evidence {return Err(invalid("terminal control observation object is not published"));}
+            terminal_release::validate_reactivation_ack(tx,&config,&record,&observation)?;
             if tx.execute("UPDATE resource_leases SET state='held' WHERE lease_id=?1 AND state='reconciling' AND authority_generation=?2 AND daemon_epoch=?3 AND fence=?4 AND boot_identity=?5 AND owner_type='principal' AND owner_id=?6 AND expires_at_ms=?7",params![c.next_lease_id.to_string(),c.authority_generation.to_string(),integer(c.daemon_epoch.as_u64())?,integer(c.next_fence.as_u64())?,c.daemon_boot_identity,c.principal_id.as_str(),c.expires_at_ms.as_i64()])?!=1 {return Err(stale("terminal successor lease differs"));}
             if tx.execute("UPDATE terminal_sessions SET lease_id=?2,control_revision=control_revision+1,durable_log_seq=MAX(durable_log_seq,?3),state='ready' WHERE terminal_id=?1 AND process_id=?4 AND lease_id=?5 AND control_revision=?6",params![c.terminal_id.to_string(),c.next_lease_id.to_string(),integer(observation.durable_log_seq)?,c.process_id.to_string(),c.previous_lease_id.to_string(),integer(c.previous_control_revision.as_u64())?])?!=1 {return Err(invalid("terminal activation CAS lost"));}
             tx.execute("UPDATE processes SET state='live',last_observed_at_ms=?2 WHERE process_id=?1 AND process_run_uuid=?3",params![c.process_id.to_string(),observation.observed_at_ms.as_i64(),c.process_run_uuid.to_string()])?;
@@ -449,6 +457,7 @@ fn validate_control_live(
     record: &TerminalControlRecord,
 ) -> Result<TerminalAllocationRecord, StoreError> {
     let c = &record.context;
+    terminal_release::validate_reactivation_source(tx, c)?;
     validate_incarnation(tx, d, c.action_id)?;
     if d.mode != unleash_domain::DaemonMode::Ready
         || c.expires_at_ms <= now
@@ -610,6 +619,7 @@ struct ValidatedControlTarget {
 
 fn validate_control_target(
     tx: &Transaction<'_>,
+    config: &StoreConfig,
     d: &DaemonStateRow,
     now: TimestampMs,
     request: &RegisteredTerminalControl,
@@ -636,7 +646,9 @@ fn validate_control_target(
     control_holds(tx, d, allocation)?;
     let identity = control_identity(tx, d, allocation)?;
     let previous = control_lease(tx, lease_id.parse()?)?;
-    if previous.daemon_epoch == d.daemon_epoch {
+    let release_source =
+        terminal_release::qualified_source(tx, config, d, allocation, previous.lease_id)?;
+    if previous.daemon_epoch == d.daemon_epoch && release_source.is_none() {
         return Err(stale(
             "registered terminal transfer requires a successor daemon epoch",
         ));
@@ -698,6 +710,7 @@ pub(crate) fn prepare_control_tx(
     expected: Revision,
     events: &mut Vec<EventAppendSpec>,
 ) -> Result<Revision, StoreError> {
+    terminal_release::guard_pending(tx, d, request.terminal_id)?;
     if d.schema_version < 12
         || d.mode != unleash_domain::DaemonMode::Ready
         || config
@@ -750,7 +763,7 @@ pub(crate) fn prepare_control_tx(
         identity,
         previous,
         next_fence,
-    } = validate_control_target(tx, d, now, request, &allocation, &lease_id)?;
+    } = validate_control_target(tx, config, d, now, request, &allocation, &lease_id)?;
     let (policy_revision, security_policy_digest) = policy(tx, project_id)?;
     let context = TerminalControlContext {
         schema_version: 1,
@@ -787,6 +800,13 @@ pub(crate) fn prepare_control_tx(
                 .ok_or_else(|| invalid("terminal control deadline overflow"))?,
         ),
         expected_os_identity: identity,
+        release_source: terminal_release::qualified_source(
+            tx,
+            config,
+            d,
+            &allocation,
+            previous.lease_id,
+        )?,
     };
     let digest = canonical_sha256(&context)?;
     terminal_renewal_recovery::link_transfer_tx(tx, d, now, &context, caller, events)?;
@@ -1313,6 +1333,12 @@ pub(crate) fn validate_command(
     tx: &Transaction<'_>,
     req: &CommitCommandRequest,
 ) -> Result<(), StoreError> {
+    if let CommandMutation::PrepareTerminalRelease { caller, request } = &req.mutation {
+        return terminal_release::validate_command(req, caller, request);
+    }
+    if req.envelope.command_type == "ReleaseTerminal" {
+        return Err(invalid("terminal release mutation missing"));
+    }
     if let CommandMutation::PrepareTerminalInput { caller, request } = &req.mutation {
         return terminal_input_writer::validate_command(req, caller, request);
     }
@@ -1920,6 +1946,9 @@ pub(crate) fn validate_intent(
     now: TimestampMs,
     intent: &BrokerIntent,
 ) -> Result<(), StoreError> {
+    if terminal_release::validate_intent(tx, d, now, intent)? {
+        return Ok(());
+    }
     if terminal_renewal::validate_intent(tx, d, now, intent)? {
         return Ok(());
     }
@@ -2006,6 +2035,7 @@ pub(crate) fn guard_observation(
     phase: &crate::BrokerPhase,
     proof: Option<&TerminalObservationProof>,
 ) -> Result<(), StoreError> {
+    terminal_release_observation::guard_observation(tx, phase, proof)?;
     terminal_renewal_observation::guard_observation(tx, phase, proof)?;
     terminal_input_writer::guard_observation(tx, phase, proof)?;
     if let crate::BrokerPhase::Observation {
@@ -2298,7 +2328,8 @@ mod metadata_projection {
         project_filter: Option<ProjectId>,
         allowed_projects: Option<&HashSet<ProjectId, S>>,
     ) -> Result<TerminalMetadataPage, StoreError> {
-        if super::read_daemon_state_conn(conn)?.schema_version < 12 {
+        let schema = super::read_daemon_state_conn(conn)?.schema_version;
+        if schema < 12 {
             return Ok(TerminalMetadataPage {
                 items: vec![],
                 truncated: false,
@@ -2312,7 +2343,14 @@ mod metadata_projection {
         let project = project_filter.map(|project| project.to_string());
         // Filtering precedes LIMIT so neither rows nor the truncation bit disclose
         // another actor/project. All values are bound parameters, never SQL text.
-        let mut statement=conn.prepare("SELECT s.terminal_id,p.process_run_uuid,a.project_id,s.control_revision,s.state,p.state,l.state,control.action_id
+        // These clauses are closed implementation literals. V012 databases
+        // never reference the not-yet-existing V018 table.
+        let released = if schema >= 18 {
+            " OR (l.state='released' AND s.state='detached' AND EXISTS(SELECT 1 FROM terminal_release_intents r JOIN actions effect ON effect.action_id=r.action_id JOIN object_records o ON o.object_hash=r.observation_object_hash JOIN object_references f ON f.object_hash=o.object_hash WHERE r.terminal_id=s.terminal_id AND r.lease_id=l.lease_id AND r.state='observed' AND r.control_revision+1=s.control_revision AND r.actor_id=owner.actor_id AND r.principal_id=a.principal_id AND r.authority_generation=d.authority_generation AND json_extract(r.context_json,'$.daemon_boot_identity')=d.boot_identity AND json_extract(r.context_json,'$.initial_action_id')=a.action_id AND json_extract(r.context_json,'$.initial_context_digest')=a.context_digest AND json_extract(r.context_json,'$.process_run_uuid')=p.process_run_uuid AND effect.state='observed_success' AND effect.action_type='terminal.release' AND effect.payload_hash=r.context_digest AND o.state='live' AND f.owner_kind='terminal_release_observation' AND f.owner_id=r.action_id AND f.source_field=r.dispatch_id AND f.state='live'))"
+        } else {
+            ""
+        };
+        let mut statement=conn.prepare(&format!("SELECT s.terminal_id,p.process_run_uuid,a.project_id,s.control_revision,s.state,p.state,l.state,control.action_id
         FROM terminal_sessions s
         JOIN processes p ON p.process_id=s.process_id
         JOIN terminal_allocations a ON a.terminal_id=s.terminal_id AND a.process_id=p.process_id AND a.process_run_uuid=p.process_run_uuid AND a.action_id=p.action_id
@@ -2329,12 +2367,12 @@ mod metadata_projection {
         WHERE p.authority_generation=d.authority_generation AND p.boot_identity=d.boot_identity AND p.owner_uid=d.owner_uid
         AND p.pid>0 AND p.pgid>0 AND length(trim(p.start_identity))>0 AND p.identity_backend IN ('macos_proc_pidinfo','linux_procfs')
         AND l.authority_generation=d.authority_generation AND l.boot_identity=d.boot_identity AND l.resource_kind='terminal' AND l.resource_key=initial_lease.resource_key
-        AND l.owner_type='principal' AND l.owner_id=a.principal_id AND (l.state IN ('held','suspect','reconciling') OR (l.state='revoked' AND control.state IN ('handshake_resolved','outcome_unknown') AND transfer.dispatch_id IS NOT NULL AND pending_lease.lease_id IS NOT NULL))
+        AND l.owner_type='principal' AND l.owner_id=a.principal_id AND (l.state IN ('held','suspect','reconciling') OR (l.state='revoked' AND control.state IN ('handshake_resolved','outcome_unknown') AND transfer.dispatch_id IS NOT NULL AND pending_lease.lease_id IS NOT NULL){released})
         AND p.state IN ('live','suspect') AND s.state IN ('ready','busy','detached','suspect')
         AND cap.authority_generation=d.authority_generation AND cap.state IN ('held','reconciling')
         AND owner.actor_id=?1 AND owner.principal_kind='user' AND owner.state='active' AND json_extract(a.context_json,'$.actor_id')=?1
         AND (?2 IS NULL OR a.project_id=?2) AND (?3 IS NULL OR a.project_id IN (SELECT value FROM json_each(?3)))
-        ORDER BY s.terminal_id LIMIT 257")?;
+        ORDER BY s.terminal_id LIMIT 257"))?;
         let rows = statement.query_map(
             rusqlite::params![
                 actor.as_str(),

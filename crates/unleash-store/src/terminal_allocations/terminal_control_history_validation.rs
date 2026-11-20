@@ -201,7 +201,7 @@ struct SealedLaunchPhase {
     phase: BrokerPhase,
 }
 
-fn observed_environment(
+pub(super) fn observed_environment(
     conn: &Connection,
     config: &StoreConfig,
     record: &TerminalControlRecord,

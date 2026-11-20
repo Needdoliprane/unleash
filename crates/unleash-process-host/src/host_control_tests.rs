@@ -7,6 +7,8 @@ use unleash_domain::{
 };
 use unleash_testkit::local_test_dir;
 
+#[path = "host_release_tests.rs"]
+mod release_tests;
 #[path = "host_transfer_ack_tests.rs"]
 mod transfer_ack_tests;
 

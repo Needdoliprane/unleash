@@ -176,6 +176,7 @@ pub(super) fn read_result(
     // consulting this projection cannot dispose or retry that uncertain write.
     super::terminal_input_writer::guard_causal_assertions(conn, &binding.allocation)?;
     super::terminal_renewal::guard_causal_assertions(conn, &binding.allocation)?;
+    super::terminal_release::guard_causal_assertions(conn, &binding.allocation)?;
     let (mut proof, cursor) = observation(conn, config, &binding, &daemon)?;
     if !proof.unknown_input_seqs.is_empty() {
         return Err(stale("terminal native input state requires reconciliation"));
@@ -699,7 +700,7 @@ fn native_proof(
     let bytes =
         crate::objects::read_verified_evidence_bytes_bounded(conn, config, hash, 2 * 1024 * 1024)?;
     if let Some(control) = &binding.control {
-        control_input_state(conn, binding, control, hash, &bytes)
+        control_input_state(conn, config, binding, control, hash, &bytes)
     } else {
         launch_input_state(conn, binding, hash, &bytes)
     }
@@ -707,6 +708,7 @@ fn native_proof(
 
 fn control_input_state(
     conn: &Connection,
+    config: &StoreConfig,
     binding: &AcquisitionBinding,
     control: &TerminalControlRecord,
     hash: Sha256Digest,
@@ -714,6 +716,7 @@ fn control_input_state(
 ) -> Result<TerminalObservedInputState, StoreError> {
     let base = &binding.allocation.context;
     let proof: terminal_allocations::TerminalControlObservation = serde_json::from_slice(bytes)?;
+    super::terminal_release::validate_reactivation_ack(conn, config, control, &proof)?;
     // The phase seals the native effective environment observation. The public
     // profile object's digest has a different domain (the host adds TMPDIR),
     // and cannot serve as an expected native digest in this passive read.
