@@ -260,7 +260,7 @@ impl Fixture {
         response: Response,
         dispatches: Arc<AtomicUsize>,
         allow_response_reset: bool,
-        closed: Option<Arc<tokio::sync::Notify>>,
+        close_signal: Option<Arc<tokio::sync::Notify>>,
     ) -> io::Result<Self> {
         let listener = TcpListener::bind("127.0.0.1:0").await?;
         let port = listener.local_addr()?.port();
@@ -307,8 +307,8 @@ impl Fixture {
                 return Err(error);
             }
             request.extend(remaining);
-            if let Some(closed) = closed {
-                closed.notify_one();
+            if let Some(signal) = close_signal {
+                signal.notify_one();
             }
             let extra_connection =
                 tokio::time::timeout(Duration::from_millis(30), listener.accept())
