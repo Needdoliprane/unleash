@@ -236,7 +236,7 @@ pub struct InventoryExecution {
     /// Actual result of the caller's broker.
     pub receipt: Result<ActionReceipt, ActionBrokerError>,
     /// Current state read on that same action after the broker returned. In
-    /// particular, Dispatching is not a committed OutcomeUnknown observation.
+    /// particular, `Dispatching` is not a committed `OutcomeUnknown` observation.
     pub state: ActionState,
     /// Correlated native list or closed local failure.
     pub outcome: InventoryOutcome,
@@ -509,7 +509,7 @@ pub async fn execute_ollama_inventory(
             dispatch.secrets,
         )
         .await;
-    let state = dispatch
+    let broker_state = dispatch
         .broker
         .action_state(dispatch.action)
         .ok_or(InventoryError::Unavailable)?;
@@ -519,7 +519,7 @@ pub async fn execute_ollama_inventory(
         .take();
     match result {
         Some(Ok(observed))
-            if state == ActionState::ObservedSuccess
+            if broker_state == ActionState::ObservedSuccess
                 && receipt.as_ref().is_ok_and(|receipt| {
                     receipt.state == ActionState::ObservedSuccess
                         && receipt.action_id == observed.observation.action_id
@@ -529,7 +529,7 @@ pub async fn execute_ollama_inventory(
         {
             Ok(InventoryExecution {
                 receipt,
-                state,
+                state: broker_state,
                 outcome: InventoryOutcome::Listed(observed.inventory),
                 observation: Some(observed.observation),
             })
@@ -541,7 +541,7 @@ pub async fn execute_ollama_inventory(
             };
             Ok(InventoryExecution {
                 receipt,
-                state,
+                state: broker_state,
                 outcome: InventoryOutcome::Failed(error),
                 observation: None,
             })

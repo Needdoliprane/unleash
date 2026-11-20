@@ -1,5 +1,5 @@
 //! T-F012-013 / REQ-MODEL-013: native inventory against synthetic loopback peers.
-//! Memory authority/journal only: no SQLite admission, mandate or real provider.
+//! Memory authority/journal only: no `SQLite` admission, mandate or real provider.
 
 use std::collections::BTreeSet;
 use std::error::Error;
