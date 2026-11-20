@@ -363,7 +363,7 @@ const fn current_strict_backend_name() -> &'static str {
     }
 }
 
-fn prepare_strict_launch_command(
+pub(crate) fn prepare_strict_launch_command(
     program: &str,
     args: &[String],
     clean_env: BTreeMap<String, String>,

@@ -315,6 +315,8 @@ pub fn load_control_secret(path: &Path) -> Result<HostControlSecret, ProcessHost
 pub enum EnvironmentMode {
     /// Only configured finite locale values and the private managed TMPDIR.
     ExplicitV1,
+    /// Exact private environment for a strictly confined, egress-denied macOS service.
+    StrictServiceV1,
 }
 
 /// Build the exact explicit environment without consulting the parent environment.

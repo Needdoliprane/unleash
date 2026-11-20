@@ -54,6 +54,31 @@ L’admission locale applique `max_inflight=1` par serveur, défaut V1 R7 ([ADR-
 
 Un endpoint déjà géré par l’utilisateur est la voie initiale. F011 intervient seulement si le lancement d’un processus de serveur est explicitement géré. Le router ne télécharge pas de poids, ne change pas le routage cloud et n’arrête pas un serveur partagé pour résoudre une simple erreur de génération. Un OOM ne déclenche pas un fallback hors politique.
 
+### Lancement explicite d’un service confiné sur macOS
+
+Le bootstrap privé `strict_service_v1` de `unleash-process-host` exige une
+ressource Service, le mode Strict et un contexte d’allocation. Il applique le
+profil de commande Seatbelt avec toutes les exceptions de sortie désactivées.
+Le programme règle son adresse d’écoute. Les chemins privés du host,
+notamment le token de contrôle, les canaris et le profil, sont protégés
+contre la lecture et l’écriture de l’enfant. Le répertoire de travail privé
+et son `child-tmp` se trouvent dans une racine d’écriture assignée, séparée
+du runtime du host.
+
+L’environnement fourni au lancement est une carte fermée de valeurs non
+secrètes, avec un `TMPDIR` géré. Le host calcule son empreinte canonique à
+partir des clés et valeurs, contrôle l’empreinte attendue avant spawn, puis
+la restitue dans le manifeste et l’accusé de handshake. Cette empreinte
+couvre l’environnement fourni par le host. Le processus et les bibliothèques
+chargées peuvent ensuite modifier leur environnement.
+
+Le banc natif couple ce lancement à une fixture TCP loopback. Il vérifie
+l’identité OS issue de l’enfant détenu, l’écoute, le socket accepté et le
+descripteur client exact avant d’envoyer des octets synthétiques. Un second
+listener de fixture permet de contrôler le refus d’une connexion sortante.
+L’admission Q-19 exige en plus le serveur et le modèle réels, leur build,
+l’autorité de placement et la vérification du FD utilisé par le transport.
+
 ## Localité, transport et erreurs
 
 `data_locality=local_only` exige un placement qualifié sur la machine du daemon ; `approved_remote` permet seulement les destinations déjà autorisées. Les profils conservent une preuve de placement et sa fraîcheur. Les fonctions de relais telles que celles relevées dans les [sources](../../research/local-model-sources.md) rendent insuffisante une vérification de l’URL seule. Un proxy ou placement inconnu est bloqué dans le mode strict.

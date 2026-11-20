@@ -57,6 +57,9 @@ mod control_tests;
 #[path = "host_release.rs"]
 mod release;
 
+#[path = "host_strict_service.rs"]
+mod strict_service;
+
 const IO_CHUNK_BYTES: usize = 8192;
 const SOCKET_IO_TIMEOUT: Duration = Duration::from_secs(15);
 const MAX_CONCURRENT_CONNECTIONS: usize = 16;
@@ -213,6 +216,11 @@ impl ProcessHostServer {
                     },
                     Some(digest),
                 )
+            }
+            Some(crate::manifest::EnvironmentMode::StrictServiceV1) => {
+                let (prepared, digest) =
+                    strict_service::prepare(spec, &canon_cwd, isolation_probe)?;
+                (prepared, Some(digest))
             }
         };
 

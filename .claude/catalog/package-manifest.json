@@ -14,7 +14,7 @@
     "cache/"
   ],
   "hash_algorithm": "sha256",
-  "source_tree_digest": "28c2bca27141c55f6cbb432d051d349a354bab46f97c45e8b370484b812b42c9",
+  "source_tree_digest": "51b67a9af8d1d962b62de20b7dc1ce0774f9231c9cd213a38688232dacd58b4b",
   "files": [
     {
       "path": "INDEX.md",
@@ -1554,8 +1554,8 @@
     },
     {
       "path": "features/F012-model-api-router/technical-design.md",
-      "sha256": "692f2d73b105bce8276579addf304f317ce8125d7f9b2300675df92bfac04174",
-      "bytes": 15521,
+      "sha256": "8c422929b52da552fb2833a752cd5cf2ce6f980cec8845c47b6c365af0441343",
+      "bytes": 17071,
       "media_type": "text/markdown"
     },
     {

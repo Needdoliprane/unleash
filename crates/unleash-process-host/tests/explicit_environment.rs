@@ -117,6 +117,10 @@ fn spec(runtime: &Path) -> HostBootstrapSpec {
         max_volatile_bytes: 4096,
     }
 }
+#[cfg(target_os = "macos")]
+#[path = "explicit_environment/strict_service.rs"]
+mod strict_service;
+
 fn spawn(spec: &HostBootstrapSpec) -> OwnedHost {
     store_control_secret(
         &spec.control_secret_path,
@@ -134,9 +138,10 @@ fn spawn(spec: &HostBootstrapSpec) -> OwnedHost {
             .env("LANG", "parent-locale-must-not-reach-child")
             .env("LC_ALL", "parent-locale-must-not-reach-child")
             .env("TERM", "parent-terminal-must-not-reach-child")
+            .env("__CF_USER_TEXT_ENCODING", "synthetic-parent-text-encoding")
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
+            .stderr(Stdio::piped())
             .spawn()
             .unwrap(),
         spec.clone(),
