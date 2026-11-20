@@ -24,6 +24,9 @@ const STARTUP_TIMEOUT: Duration = Duration::from_secs(5);
 /// Preparation could not establish an owned, waiting worker.
 #[derive(Debug, thiserror::Error)]
 pub enum WorkerLaunchError {
+    /// The daemon has closed worker admission for shutdown.
+    #[error("daemon is draining invocation workers")]
+    Draining,
     /// The exact durable admission could not be claimed.
     #[error("worker admission unavailable")]
     Admission(#[from] StoreError),
@@ -42,6 +45,9 @@ pub enum WorkerLaunchError {
     /// Startup or closure did not finish inside the controller's deadline.
     #[error("worker deadline exceeded")]
     Deadline,
+    /// The owned child's exit could not be confirmed.
+    #[error("owned worker exit unconfirmed")]
+    ProcessExitUnconfirmed,
     /// Start was committed, but permit consumption was not established.
     #[error("worker start committed with unconfirmed continuation")]
     ContinuationUnknown {
@@ -103,11 +109,13 @@ impl PendingInvocationWorker {
         store: Arc<UnleashStore>,
         shutdown: impl Future<Output = ()>,
     ) -> Result<RunningInvocationWorker, WorkerLaunchError> {
-        let permit = encode_frame(&WorkerPermit {
+        let permit = match encode_frame(&WorkerPermit {
             wire_version: WorkerWireVersion::V1,
             binding: self.ready.binding.clone(),
-        })
-        .map_err(|_| WorkerLaunchError::Readiness)?;
+        }) {
+            Ok(permit) => permit,
+            Err(error) => return Err(self.close_and_report_failure(error).await),
+        };
         let identity = self.identity.clone();
         let preparation = self.preparation.clone();
         let observation = self.process_observation();
@@ -126,10 +134,7 @@ impl PendingInvocationWorker {
         .unwrap_or(Err(WorkerLaunchError::NativeProcess));
         let start_cursor = match start {
             Ok(cursor) => cursor,
-            Err(error) => {
-                self.close_after_failed_activation().await;
-                return Err(error);
-            }
+            Err(error) => return Err(self.close_and_report_failure(error).await),
         };
 
         let reply = if matches!(self.child.try_wait(), Ok(None)) {
@@ -162,6 +167,9 @@ impl PendingInvocationWorker {
             }).await;
             if !matches!(written, Ok(Ok(_))) {
                 return Err(WorkerLaunchError::ContinuationNotRecorded { start_cursor });
+            }
+            if !process_exit_observed {
+                return Err(WorkerLaunchError::ProcessExitUnconfirmed);
             }
             return Err(WorkerLaunchError::ContinuationUnknown { start_cursor });
         };
@@ -197,6 +205,14 @@ impl PendingInvocationWorker {
         }
     }
 
+    async fn close_and_report_failure(self, error: WorkerLaunchError) -> WorkerLaunchError {
+        if self.close_after_failed_activation().await {
+            error
+        } else {
+            WorkerLaunchError::ProcessExitUnconfirmed
+        }
+    }
+
     /// Close the controller and reap the still-gated worker.
     ///
     /// # Errors
@@ -210,11 +226,7 @@ impl PendingInvocationWorker {
     }
 
     async fn reap(&mut self) -> Result<std::process::ExitStatus, WorkerLaunchError> {
-        drop(self.child.stdin.take());
-        tokio::time::timeout(STARTUP_TIMEOUT, self.child.wait())
-            .await
-            .map_err(|_| WorkerLaunchError::Deadline)?
-            .map_err(|_| WorkerLaunchError::NativeProcess)
+        reap_child(&mut self.child).await
     }
 }
 
@@ -313,14 +325,40 @@ pub async fn prepare_invocation_worker(
         .kill_on_drop(true)
         .spawn()
         .map_err(|_| WorkerLaunchError::NativeProcess)?;
+    let (identity, ready) = match observe_ready(&mut child, &frame, &binding, &boot).await {
+        Ok(observation) => observation,
+        Err(error) => {
+            // This is the child we own; close it before releasing the preparation task.
+            let _ = child.start_kill();
+            return Err(if reap_child(&mut child).await.is_ok() {
+                error
+            } else {
+                WorkerLaunchError::ProcessExitUnconfirmed
+            });
+        }
+    };
+    Ok(PendingInvocationWorker {
+        child,
+        identity,
+        ready,
+        preparation,
+    })
+}
+
+async fn observe_ready(
+    child: &mut Child,
+    frame: &[u8],
+    binding: &WorkerBinding,
+    boot: &str,
+) -> Result<(OsProcessIdentity, WorkerReply), WorkerLaunchError> {
     let pid = child.id().ok_or(WorkerLaunchError::NativeProcess)?;
-    let ready = tokio::time::timeout(STARTUP_TIMEOUT, exchange_worker(&mut child, &frame))
+    let ready = tokio::time::timeout(STARTUP_TIMEOUT, exchange_worker(child, frame))
         .await
         .map_err(|_| WorkerLaunchError::Deadline)??;
     if ready.wire_version != WorkerWireVersion::V1
         || ready.kind != WorkerReplyKind::Ready
         || ready.pid != pid
-        || ready.binding != binding
+        || &ready.binding != binding
     {
         return Err(WorkerLaunchError::Readiness);
     }
@@ -334,12 +372,15 @@ pub async fn prepare_invocation_worker(
     {
         return Err(WorkerLaunchError::Identity);
     }
-    Ok(PendingInvocationWorker {
-        child,
-        identity,
-        ready,
-        preparation,
-    })
+    Ok((identity, ready))
+}
+
+async fn reap_child(child: &mut Child) -> Result<std::process::ExitStatus, WorkerLaunchError> {
+    drop(child.stdin.take());
+    tokio::time::timeout(STARTUP_TIMEOUT, child.wait())
+        .await
+        .map_err(|_| WorkerLaunchError::Deadline)?
+        .map_err(|_| WorkerLaunchError::NativeProcess)
 }
 
 fn prepare_frame(

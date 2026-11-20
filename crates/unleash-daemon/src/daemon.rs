@@ -121,8 +121,7 @@ pub enum DaemonStartOutcome {
 /// Handle de contrôle sur une instance [`UnleashDaemon`] active.
 #[derive(Debug)]
 pub struct DaemonHandle {
-    #[cfg(test)]
-    test_state: std::sync::Weak<DaemonRuntimeState>,
+    runtime: std::sync::Weak<DaemonRuntimeState>,
     socket_path: PathBuf,
     data_root: PathBuf,
     rendezvous_dir: PathBuf,
@@ -139,7 +138,7 @@ pub struct DaemonHandle {
 impl DaemonHandle {
     #[cfg(test)]
     pub(crate) fn test_runtime_state(&self) -> Arc<DaemonRuntimeState> {
-        self.test_state.upgrade().expect("daemon test runtime")
+        self.runtime.upgrade().expect("daemon test runtime")
     }
     /// Chemin du socket Unix servi par le daemon.
     #[must_use]
@@ -205,6 +204,40 @@ impl DaemonHandle {
                 )));
             }
         }
+    }
+
+    /// Start an admitted invocation under the daemon's lifetime.
+    ///
+    /// This in-process port takes a committed admission and the packaged worker
+    /// selected by the embedding runtime. It returns the durable start cursor
+    /// and the native identity. The daemon keeps the child's controller.
+    ///
+    /// # Errors
+    /// Returns an error if shutdown has begun or the exact admission cannot start.
+    pub async fn start_invocation_worker(
+        &self,
+        admission: unleash_store::AdmissionCommit,
+        packaged_worker: &Path,
+    ) -> Result<
+        (
+            unleash_protocol::EventCursor,
+            unleash_platform::OsProcessIdentity,
+        ),
+        crate::worker_launch::WorkerLaunchError,
+    > {
+        let runtime = self
+            .runtime
+            .upgrade()
+            .ok_or(crate::worker_launch::WorkerLaunchError::Draining)?;
+        runtime
+            .invocation_workers
+            .start(
+                Arc::clone(&runtime.store),
+                admission,
+                packaged_worker,
+                runtime.subscribe_drain_started(),
+            )
+            .await
     }
 
     /// Déclenche un arrêt contrôlé et attend le rapport final de drainage.
@@ -527,6 +560,7 @@ impl UnleashDaemon {
             terminal_children: Mutex::new(Vec::new()),
             terminal_host_launcher: Arc::clone(&config.terminal_host_launcher),
             broker_activity: crate::broker_activity::BrokerActivity::new(),
+            invocation_workers: crate::managed_workers::ManagedWorkers::default(),
             store: Arc::clone(&store),
             authority_generation: recovery_row.authority_generation,
             daemon_epoch: recovery_row.daemon_epoch,
@@ -600,8 +634,7 @@ impl UnleashDaemon {
         });
 
         let handle = DaemonHandle {
-            #[cfg(test)]
-            test_state: Arc::downgrade(&state),
+            runtime: Arc::downgrade(&state),
             socket_path,
             data_root,
             rendezvous_dir: rdv_dir,
@@ -971,6 +1004,7 @@ fn spawn_drain_coordinator(params: DrainCoordinatorParams) {
                 }
                 let effective_drain_timeout =
                     req.drain_timeout_override.unwrap_or(params.drain_timeout);
+                let drain_started_at = tokio::time::Instant::now();
                 if tokio::time::timeout(
                     effective_drain_timeout,
                     state.broker_activity.close_and_wait(),
@@ -987,6 +1021,30 @@ fn spawn_drain_coordinator(params: DrainCoordinatorParams) {
                     // Sans demandeur vivant, poursuivre l'arrêt dès que le travail
                     // se termine tout en conservant le verrou entre-temps.
                     state.broker_activity.close_and_wait().await;
+                }
+                let remaining = effective_drain_timeout.saturating_sub(drain_started_at.elapsed());
+                let workers_closed = if let Ok(closed) =
+                    tokio::time::timeout(remaining, state.invocation_workers.close_and_wait()).await
+                {
+                    closed
+                } else {
+                    if let Some(ack) = req.ack.take() {
+                        let _ = ack.send(Err(DaemonError::InvalidConfiguration(String::from(
+                            "Workers d'invocation encore actifs ; verrou d'autorité conservé",
+                        ))));
+                        continue;
+                    }
+                    state.invocation_workers.close_and_wait().await
+                };
+                if !workers_closed {
+                    let message = String::from(
+                        "Fermeture des workers d'invocation incertaine ; verrou d'autorité conservé",
+                    );
+                    if let Some(ack) = req.ack.take() {
+                        let _ = ack.send(Err(DaemonError::InvalidConfiguration(message.clone())));
+                    }
+                    cleanup_failure = Some(message);
+                    continue;
                 }
                 let result = execute_drain_and_stop(
                     &state,
@@ -1060,7 +1118,11 @@ fn spawn_drain_coordinator(params: DrainCoordinatorParams) {
             recovery_handle.abort();
         }
         if let Some(state) = &resources.state {
+            state.mark_draining();
             state.broker_activity.close_and_wait().await;
+            if !state.invocation_workers.close_and_wait().await {
+                std::future::pending::<()>().await;
+            }
         }
     });
 }
@@ -1554,7 +1616,7 @@ mod shutdown_ownership_tests {
         else {
             panic!("a new fixture authority is required");
         };
-        let retained_store = Arc::clone(&handle.test_state.upgrade().unwrap().store);
+        let retained_store = Arc::clone(&handle.test_runtime_state().store);
         let error = tokio::time::timeout(Duration::from_secs(5), async {
             loop {
                 match handle.shutdown_graceful("retained Store owner").await {

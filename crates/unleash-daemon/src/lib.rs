@@ -31,6 +31,7 @@ pub mod error;
 pub mod execution_scheduler;
 pub mod executors;
 pub mod ipc;
+mod managed_workers;
 mod provider_probe_connect_service;
 mod provider_probe_generation_service;
 mod provider_profile_service;
@@ -40,6 +41,8 @@ pub mod subscriptions;
 pub mod terminal_host_launcher;
 mod terminal_service;
 pub mod worker_launch;
+#[cfg(test)]
+mod worker_shutdown_tests;
 
 pub use auth::{AuthVerifierPort, AuthenticatedSession, Capability, PeerUidAuthVerifier};
 pub use config::{DaemonConfig, PostCommitAction, PostCommitHook, StoreOverrides};

@@ -63,6 +63,7 @@ pub(crate) struct DaemonRuntimeState {
     pub(crate) terminal_children: Mutex<Vec<std::process::Child>>,
     pub(crate) terminal_host_launcher: Arc<dyn crate::terminal_host_launcher::TerminalHostLauncher>,
     pub(crate) broker_activity: Arc<crate::broker_activity::BrokerActivity>,
+    pub(crate) invocation_workers: crate::managed_workers::ManagedWorkers,
     pub(crate) store: Arc<UnleashStore>,
     pub(crate) authority_generation: AuthorityGeneration,
     pub(crate) daemon_epoch: DaemonEpoch,
