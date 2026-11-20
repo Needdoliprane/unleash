@@ -218,7 +218,7 @@ pub(super) async fn wait_for_inventory_view(
 
 pub(super) struct CommittedProof {
     pub(super) stream_id: String,
-    pub(super) event_sequence: u64,
+    pub(super) event_sequence: i64,
     action_id: String,
     dispatch_id: String,
     request_digest: String,

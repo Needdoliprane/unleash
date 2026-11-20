@@ -86,7 +86,7 @@ async fn nominal_inventory(fixture: &InventoryFixture, admin: &mut UnleashClient
         .ok_or("inventory view must carry a durable watermark")?;
     require(
         cursor.stream_id.to_string() == proof.stream_id
-            && cursor.sequence.as_u64() >= proof.event_sequence,
+            && cursor.sequence.as_u64() >= u64::try_from(proof.event_sequence)?,
         "view watermark must cover the inventory commit",
     )?;
     let before = fixture.probe_counts(request.aggregate_id)?;
