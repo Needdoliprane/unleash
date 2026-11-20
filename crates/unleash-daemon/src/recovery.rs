@@ -18,6 +18,8 @@ use uuid::Uuid;
 
 use crate::error::DaemonError;
 
+mod invocations;
+
 /// Barrière déterministe injectable permettant aux tests d'observer le daemon en mode `recovering`
 /// sans aucun `sleep` de synchronisation (`T-F001-006`).
 #[derive(Debug, Default)]
@@ -251,12 +253,10 @@ pub fn classify_and_finish_recovery(
                 }
             }
 
-            // 3. Invocations actives -> reconciling (sans nouvelle admission)
-            tx.execute(
-                "UPDATE invocations SET state = 'reconciling', revision = revision + 1
-                 WHERE state IN ('admitted', 'running', 'checkpointing')",
-                [],
-            )?;
+            // 3. Classifier les tentatives historiques sans disposer leurs ressources.
+            emitted_events.extend(invocations::reconcile_invocations(
+                tx, &config, &row, started_event_id, now_ms,
+            )?);
 
             // 4. Mettre à jour l'état des processus observés
             for (proc_id, new_state) in &process_verdicts {

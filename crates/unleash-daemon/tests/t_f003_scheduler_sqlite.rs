@@ -9,8 +9,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use unleash_daemon::execution_scheduler::{ExecutionSchedulingInputs, schedule_execution};
+use unleash_daemon::recovery::{classify_and_finish_recovery, enter_recovering_and_emit_event};
 use unleash_daemon::worker_launch::{WorkerLaunchError, prepare_invocation_worker};
-use unleash_domain::{InvocationId, ReservationId, Sha256Digest};
+use unleash_domain::{DaemonInstanceId, DaemonMode, InvocationId, ReservationId, Sha256Digest};
 use unleash_platform::{ProcessVerification, verify_process_identity};
 use unleash_scheduler::{CapacityWait, CheckpointEligibility, CheckpointRequest, Decision};
 use unleash_store::{
@@ -1001,6 +1002,230 @@ fn t_f003_006_reconciliation_outbox_rollback_then_exact_replay_during_drain() {
     assert_eq!(
         store.execution_pool_state(POOL).unwrap().current_occupation,
         1
+    );
+    Arc::try_unwrap(store).ok().unwrap().shutdown().unwrap();
+}
+
+fn enter_worker_recovery(store: &UnleashStore) -> (DaemonMode, Uuid) {
+    let boot = unleash_platform::current_boot_identity().unwrap();
+    let instance = DaemonInstanceId::from_uuid(store.config().id_generator.new_uuid());
+    let (_, previous, started) =
+        enter_recovering_and_emit_event(store, boot.as_str(), instance).unwrap();
+    (previous, started.event_id)
+}
+
+#[test]
+#[ignore = "requires the packaged Rust worker via UNLEASH_TEST_AGENT_WORKER_BIN"]
+fn t_f003_006_restart_reconciles_a_live_worker_without_freeing_its_capacity() {
+    let data = local_test_dir("f003-worker-after-restart").unwrap();
+    let store = worker_test_store(data.path());
+    let (previous, started) = enter_worker_recovery(&store);
+    classify_and_finish_recovery(&store, previous, started).unwrap();
+    let (grant, _) = admit_worker_fixture(&store);
+    let runtime = worker_test_runtime();
+    let pending = runtime
+        .block_on(prepare_invocation_worker(
+            Arc::clone(&store),
+            grant.clone(),
+            &worker_test_executable(),
+        ))
+        .unwrap();
+    let identity = pending.identity().clone();
+    let old_preparation = pending.preparation().clone();
+    let running = runtime
+        .block_on(pending.activate(Arc::clone(&store)))
+        .unwrap();
+    let start_cursor = running.start_cursor();
+    let revision = worker_preparation_state(&store, &grant).2;
+    let mut resources = invocation_worker_resources(&store, &grant);
+    assert_eq!(resources.0, "held");
+    assert_eq!(resources.4, "held");
+    resources.0 = "suspect".to_owned();
+    Arc::try_unwrap(store).ok().unwrap().shutdown().unwrap();
+
+    let recovered = UnleashStore::open(StoreConfig::new(data.path())).unwrap();
+    let (previous, trigger) = enter_worker_recovery(&recovered);
+    assert_worker_recovery_rolls_back_on_outbox_error(&recovered, &grant, previous, trigger);
+    let (daemon, events) = classify_and_finish_recovery(&recovered, previous, trigger).unwrap();
+    assert_eq!(daemon.mode, DaemonMode::Ready);
+    assert!(daemon.daemon_epoch > grant.lease.daemon_epoch);
+    assert_eq!(
+        worker_preparation_state(&recovered, &grant),
+        (
+            "reconciling".to_owned(),
+            "reconciling".to_owned(),
+            revision + 1,
+            1
+        )
+    );
+    assert_eq!(invocation_worker_resources(&recovered, &grant), resources);
+    assert_eq!(
+        verify_process_identity(&identity).unwrap(),
+        ProcessVerification::Match
+    );
+    assert_historical_worker_event(&recovered, &grant, start_cursor, trigger, &events);
+    let old_observation = WorkerProcessObservation {
+        pid: identity.pid,
+        owner_uid: identity.owner_uid,
+        boot_identity: identity.boot_identity.as_str().to_owned(),
+        start_identity: identity.start_identity.as_str().to_owned(),
+    };
+    assert!(matches!(
+        recovered.record_invocation_worker_continuation_lost(
+            old_preparation,
+            start_cursor,
+            old_observation,
+            false,
+        ),
+        Err(StoreError::StaleFence { .. })
+    ));
+
+    let (previous, next_trigger) = enter_worker_recovery(&recovered);
+    let (_, replay) = classify_and_finish_recovery(&recovered, previous, next_trigger).unwrap();
+    assert!(
+        !replay
+            .iter()
+            .any(|event| event.event_type == "InvocationReconciling")
+    );
+    assert_eq!(worker_preparation_state(&recovered, &grant).2, revision + 1);
+    assert_eq!(invocation_worker_resources(&recovered, &grant), resources);
+    assert_eq!(
+        recovered
+            .execution_pool_state(POOL)
+            .unwrap()
+            .current_occupation,
+        1
+    );
+    runtime.block_on(running.close()).unwrap();
+    recovered.shutdown().unwrap();
+}
+
+fn assert_worker_recovery_rolls_back_on_outbox_error(
+    store: &UnleashStore,
+    grant: &AdmissionCommit,
+    previous: DaemonMode,
+    trigger: Uuid,
+) {
+    let attempts_before = worker_preparation_state(store, grant);
+    let resources_before = invocation_worker_resources(store, grant);
+    let outbox_before = reconciliation_outbox_count(store);
+    reject_reconciliation_delivery(store);
+    let error = classify_and_finish_recovery(store, previous, trigger).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("fixture_reconciliation_delivery_aborted")
+    );
+    assert_eq!(store.daemon_state().unwrap().mode, DaemonMode::Recovering);
+    assert_eq!(worker_preparation_state(store, grant), attempts_before);
+    assert_eq!(invocation_worker_resources(store, grant), resources_before);
+    assert_eq!(reconciliation_outbox_count(store), outbox_before);
+    store
+        .execute_in_writer_tx(WriteCriticality::Critical, |tx, _| {
+            tx.execute_batch("DROP TRIGGER fixture_refuse_reconciliation_delivery")?;
+            Ok(())
+        })
+        .unwrap();
+}
+
+fn assert_historical_worker_event(
+    store: &UnleashStore,
+    grant: &AdmissionCommit,
+    start: unleash_protocol::EventCursor,
+    trigger: Uuid,
+    events: &[unleash_protocol::EventEnvelope],
+) {
+    let mut reconciliation = events
+        .iter()
+        .filter(|event| event.event_type == "InvocationReconciling");
+    let event = reconciliation.next().unwrap();
+    assert!(reconciliation.next().is_none());
+    assert_eq!(event.aggregate_id, grant.unit.id());
+    assert_eq!(event.causation.id, trigger.to_string());
+    assert_eq!(
+        event.payload.get("start_sequence"),
+        Some(&serde_json::json!(start.sequence))
+    );
+    assert_eq!(
+        event.payload.get("attempt_id"),
+        Some(&serde_json::json!(grant.attempt_id.unwrap()))
+    );
+    assert_eq!(
+        event.payload.get("reservation_id"),
+        Some(&serde_json::json!(grant.reservation_id))
+    );
+    assert!(!event.payload.contains_key("process_exit_observed"));
+    let destinations = store
+        .read_snapshot(|conn, _| {
+            let mut statement = conn
+                .prepare("SELECT destination FROM outbox WHERE event_id=?1 ORDER BY destination")?;
+            let rows =
+                statement.query_map([event.event_id.to_string()], |row| row.get::<_, String>(0))?;
+            Ok(rows.collect::<Result<Vec<_>, _>>()?)
+        })
+        .unwrap();
+    assert_eq!(destinations, ["clients", "harness"]);
+}
+
+#[test]
+fn t_f003_006_restart_quarantines_unattributed_invocations() {
+    let data = local_test_dir("f003-legacy-invocation-recovery").unwrap();
+    let store = worker_test_store(data.path());
+    seed(&store, false);
+    let id = unit(1).id().to_string();
+    let foreign = unit(2).id().to_string();
+    store.execute_in_writer_tx(WriteCriticality::Critical, {
+        let id = id.clone();
+        let foreign = foreign.clone();
+        move |tx, _| {
+            assert_eq!(tx.execute(
+                "UPDATE invocations SET state='running' WHERE invocation_id IN (?1,?2)",
+                rusqlite::params![id, foreign],
+            )?, 2);
+            tx.execute(
+                "INSERT INTO invocation_attempts(attempt_id,invocation_id,ordinal,authority_generation,
+                    daemon_epoch,fence,state,started_at_ms) VALUES(?1,?2,1,?3,1,1,'running',0)",
+                rusqlite::params![Uuid::from_u128(990_001).to_string(), foreign, Uuid::from_u128(990_002).to_string()],
+            )?;
+            Ok(())
+        }
+    }).unwrap();
+    let (previous, trigger) = enter_worker_recovery(&store);
+    let (_, events) = classify_and_finish_recovery(&store, previous, trigger).unwrap();
+    assert!(
+        !events
+            .iter()
+            .any(|event| event.event_type == "InvocationReconciling")
+    );
+    let (state, count): (String, i64) = store
+        .read_snapshot(|conn, _| {
+            Ok(conn.query_row(
+                "SELECT state,(SELECT COUNT(*) FROM invocation_attempts WHERE invocation_id=?1)
+         FROM invocations WHERE invocation_id=?1",
+                [id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )?)
+        })
+        .unwrap();
+    assert_eq!(state, "reconciling");
+    assert_eq!(count, 0);
+    let foreign_states: (String, String) = store
+        .read_snapshot(|conn, _| {
+            Ok(conn.query_row(
+        "SELECT i.state,t.state FROM invocations i JOIN invocation_attempts t USING(invocation_id)
+         WHERE i.invocation_id=?1",
+        [foreign],
+        |row| Ok((row.get(0)?,row.get(1)?)),
+    )?)
+        })
+        .unwrap();
+    assert_eq!(
+        foreign_states,
+        ("reconciling".to_owned(), "running".to_owned())
+    );
+    assert_eq!(
+        store.execution_pool_state(POOL).unwrap().current_occupation,
+        0
     );
     Arc::try_unwrap(store).ok().unwrap().shutdown().unwrap();
 }
