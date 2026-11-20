@@ -1336,6 +1336,33 @@ impl UnleashStore {
         })
     }
 
+    /// Claims the native startup of one admitted invocation attempt.
+    ///
+    /// The invocation stays admitted and the held reservations are preserved.
+    /// The returned manifest was read from the private object store after commit.
+    /// Unavailable bytes preserve the claim for reconciliation.
+    ///
+    /// # Errors
+    /// Refuses a stale admission, non-live context, revoked scope or unavailable writer.
+    pub fn claim_invocation_worker(
+        &self,
+        admission: crate::AdmissionCommit,
+    ) -> Result<(crate::WorkerLaunchPreparation, Vec<u8>), StoreError> {
+        let config = self.config.clone();
+        let claim = self.execute_in_writer_tx(WriteCriticality::Critical, move |tx, now| {
+            crate::admission::claim_worker_launch(tx, &config, now, &admission)
+        })?;
+        let manifest = self.read_snapshot(|conn, _ctx| {
+            crate::objects::read_verified_evidence_bytes_bounded(
+                conn,
+                &self.config,
+                claim.context_manifest_digest,
+                unleash_protocol::MAX_FRAME_BYTES,
+            )
+        })?;
+        Ok((claim, manifest))
+    }
+
     /// Journalise une demande coopérative ; ne rend aucune capacité.
     /// # Errors
     /// Refuse contrôle, cible ou faisceau obsolète et demande déjà présente.

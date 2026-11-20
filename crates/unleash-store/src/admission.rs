@@ -32,6 +32,11 @@ use crate::leases::{
 };
 use crate::{StoreConfig, StoreError};
 
+mod worker;
+
+pub use worker::WorkerLaunchPreparation;
+pub(crate) use worker::claim_worker_launch;
+
 /// Unité réelle projetée de sa table d'origine, sans agent fictif pour un probe.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
@@ -802,7 +807,7 @@ where
     {
         crate::provider_probes::validate_admission_budgets(tx, probe, &budgets)?;
     }
-    validate_scope_and_subjects(tx, candidate)?;
+    validate_scope_and_subjects(tx, candidate.unit, candidate.project_id)?;
     validate_deltas(&snapshot, candidate, &deficit_deltas, consecutive_controls)?;
     let lease = tx_acquire_lease(
         tx,
@@ -963,13 +968,14 @@ fn validate_candidate(
 
 fn validate_scope_and_subjects(
     tx: &Transaction<'_>,
-    candidate: &AdmissionCandidate,
+    unit: AdmissionUnit,
+    project_id: Option<ProjectId>,
 ) -> Result<(), StoreError> {
     use crate::policies_secrets::{SubjectKind, ensure_subject_not_blocked_tx};
-    let (run, scope): (Option<String>, Option<String>) = match candidate.unit {
+    let (run, scope): (Option<String>, Option<String>) = match unit {
         AdmissionUnit::Invocation(id) => {
             let (agent,run,scope):(String,Option<String>,String)=tx.query_row("SELECT i.agent_id,i.run_id,b.scope_id FROM invocations i JOIN effective_bundles b ON b.bundle_hash=i.effective_bundle_hash WHERE i.invocation_id=?1",[id.to_string()],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?)))?;
-            ensure_subject_not_blocked_tx(tx, SubjectKind::Agent, &agent, candidate.project_id)?;
+            ensure_subject_not_blocked_tx(tx, SubjectKind::Agent, &agent, project_id)?;
             (run, Some(scope))
         }
         AdmissionUnit::Replay(id) => (
@@ -982,17 +988,17 @@ fn validate_scope_and_subjects(
         ),
         AdmissionUnit::Probe(id) => {
             let (actor,run):(String,Option<String>)=tx.query_row("SELECT s.actor_id,p.source_run_id FROM provider_probes p JOIN principals s ON s.principal_id=p.principal_id WHERE p.probe_id=?1",[id.to_string()],|row|Ok((row.get(0)?,row.get(1)?)))?;
-            ensure_subject_not_blocked_tx(tx, SubjectKind::Actor, &actor, candidate.project_id)?;
+            ensure_subject_not_blocked_tx(tx, SubjectKind::Actor, &actor, project_id)?;
             (run, None)
         }
     };
     if let Some(run) = run.as_deref() {
-        ensure_subject_not_blocked_tx(tx, SubjectKind::Workflow, run, candidate.project_id)?;
+        ensure_subject_not_blocked_tx(tx, SubjectKind::Workflow, run, project_id)?;
     }
     let run = run
         .map(|raw| uuid(&raw).map(unleash_domain::RunId::from_uuid))
         .transpose()?;
-    ensure_scope_not_frozen_tx(tx, candidate.project_id, scope.as_deref(), run)
+    ensure_scope_not_frozen_tx(tx, project_id, scope.as_deref(), run)
 }
 
 fn validate_budget_owner(

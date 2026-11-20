@@ -5874,6 +5874,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "unleash-agent-worker"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+ "tokio",
+ "unleash-domain",
+ "unleash-protocol",
+ "uuid",
+]
+
+[[package]]
 name = "unleash-browser"
 version = "0.1.0"
 dependencies = [
@@ -5952,6 +5965,7 @@ dependencies = [
  "tokio",
  "tracing",
  "unleash-action-broker",
+ "unleash-agent-worker",
  "unleash-browser",
  "unleash-cli",
  "unleash-client",

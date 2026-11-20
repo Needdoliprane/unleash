@@ -38,6 +38,7 @@ pub mod recovery;
 pub mod subscriptions;
 pub mod terminal_host_launcher;
 mod terminal_service;
+pub mod worker_launch;
 
 pub use auth::{AuthVerifierPort, AuthenticatedSession, Capability, PeerUidAuthVerifier};
 pub use config::{DaemonConfig, PostCommitAction, PostCommitHook, StoreOverrides};

@@ -5,11 +5,17 @@
     reason = "Synthetic test fixtures and direct policy assertions"
 )]
 
+use std::path::PathBuf;
+use std::sync::Arc;
+
 use unleash_daemon::execution_scheduler::{ExecutionSchedulingInputs, schedule_execution};
-use unleash_domain::{InvocationId, ReservationId};
+use unleash_daemon::worker_launch::{WorkerLaunchError, prepare_invocation_worker};
+use unleash_domain::{InvocationId, ReservationId, Sha256Digest};
+use unleash_platform::{ProcessVerification, verify_process_identity};
 use unleash_scheduler::{CapacityWait, CheckpointEligibility, CheckpointRequest, Decision};
 use unleash_store::{
-    AdmissionOutcome, AdmissionUnit, StoreConfig, StoreError, UnleashStore, WriteCriticality,
+    AdmissionCommit, AdmissionOutcome, AdmissionUnit, PrepareObjectRequest,
+    PublishObjectReferenceRequest, StoreConfig, StoreError, UnleashStore, WriteCriticality,
 };
 use unleash_testkit::local_test_dir;
 use uuid::Uuid;
@@ -225,4 +231,254 @@ fn t_f003_003_q15_and_writer_enforce_one_pool_with_twenty_logical_leaders() {
     ));
     assert_eq!(durable_counts(&store), (5, 5, 5));
     assert_checkpoint_proposal(&store, object, first_reservation.unwrap());
+}
+
+fn admit_worker_fixture(store: &UnleashStore) -> (AdmissionCommit, Sha256Digest) {
+    let eligibility = seed(store, false);
+    set_fixture_order(store);
+    let bytes = br#"{"schema_version":1,"entries":[],"fixture":"owned-worker"}"#;
+    let digest = Sha256Digest::from_bytes(bytes);
+    let object = store
+        .prepare_object(PrepareObjectRequest {
+            object_hash: digest,
+            byte_length: bytes.len() as u64,
+            media_type: "application/json".to_owned(),
+            owner_kind: "evidence".to_owned(),
+            owner_id: "fixture:worker-manifest".to_owned(),
+        })
+        .unwrap();
+    store.write_prepared_object_bytes(&object, bytes).unwrap();
+    store
+        .publish_object_reference(PublishObjectReferenceRequest {
+            object_hash: digest,
+            pin_id: object.pin_id,
+            object_generation: object.object_generation,
+            owner_kind: "evidence".to_owned(),
+            owner_id: "fixture:worker-manifest".to_owned(),
+            source_field: "manifest".to_owned(),
+        })
+        .unwrap();
+    store
+        .execute_in_writer_tx(WriteCriticality::Critical, move |tx, _| {
+            assert_eq!(
+                tx.execute(
+                    "UPDATE context_manifests SET content_hash=?1 WHERE manifest_id=
+                     (SELECT context_manifest_id FROM invocations WHERE invocation_id=?2)",
+                    rusqlite::params![digest.to_string(), unit(1).id().to_string()],
+                )?,
+                1
+            );
+            Ok(())
+        })
+        .unwrap();
+    observe(store, eligibility);
+    let snapshot = store.execution_admission_snapshot(POOL).unwrap();
+    let mut plan = ExecutionSchedulingInputs::default();
+    plan.budgets.extend(
+        snapshot
+            .queued
+            .iter()
+            .map(|candidate| (candidate.unit, vec![])),
+    );
+    let (outcome, _) = schedule_execution(store, POOL, snapshot.token, plan).unwrap();
+    let AdmissionOutcome::Admitted(grant) = outcome else {
+        panic!("expected a committed invocation admission");
+    };
+    assert_eq!(grant.unit, unit(1));
+    (*grant, digest)
+}
+
+fn worker_preparation_state(
+    store: &UnleashStore,
+    grant: &AdmissionCommit,
+) -> (String, String, i64, i64) {
+    store
+        .read_snapshot(|conn, _| {
+            Ok(conn.query_row(
+                "SELECT i.state,t.state,i.revision,(SELECT count(*) FROM events e
+                  WHERE e.aggregate_id=i.invocation_id AND e.event_type='InvocationWorkerLaunchPrepared')
+                 FROM invocations i JOIN invocation_attempts t ON t.invocation_id=i.invocation_id
+                 WHERE i.invocation_id=?1 AND t.attempt_id=?2",
+                rusqlite::params![grant.unit.id().to_string(), grant.attempt_id.unwrap().to_string()],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )?)
+        })
+        .unwrap()
+}
+
+fn worker_test_executable() -> PathBuf {
+    let executable = PathBuf::from(std::env::var_os("UNLEASH_TEST_AGENT_WORKER_BIN").unwrap());
+    assert!(executable.is_absolute() && executable.is_file());
+    executable
+}
+
+fn worker_test_store(root: &std::path::Path) -> Arc<UnleashStore> {
+    let observed_boot = unleash_platform::current_boot_identity()
+        .unwrap()
+        .to_string();
+    let store = UnleashStore::open(StoreConfig::new(root)).unwrap();
+    // The standalone Store fixture needs the boot observation normally installed by daemon recovery.
+    store
+        .execute_in_writer_tx(WriteCriticality::Critical, move |tx, _| {
+            assert_eq!(
+                tx.execute(
+                    "UPDATE daemon_state SET boot_identity=?1 WHERE singleton=1",
+                    [&observed_boot],
+                )?,
+                1
+            );
+            Ok(())
+        })
+        .unwrap();
+    Arc::new(store)
+}
+
+fn worker_test_runtime() -> tokio::runtime::Runtime {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+}
+
+#[test]
+#[ignore = "requires the matching packaged Rust worker via UNLEASH_TEST_AGENT_WORKER_BIN"]
+fn t_f003_001_admission_prepares_one_owned_worker_without_granting_execution() {
+    let executable = worker_test_executable();
+    let data = local_test_dir("f003-native-worker").unwrap();
+    let store = worker_test_store(data.path());
+    let runtime = worker_test_runtime();
+    let (grant, manifest_digest) = admit_worker_fixture(&store);
+    let original_revision = i64::try_from(grant.revision.as_u64()).unwrap();
+    assert_eq!(
+        worker_preparation_state(&store, &grant),
+        (
+            "admitted".to_owned(),
+            "admitted".to_owned(),
+            original_revision,
+            0
+        )
+    );
+    let mut stale = grant.clone();
+    stale.lease.fence = stale.lease.fence.next();
+    assert!(matches!(
+        runtime.block_on(prepare_invocation_worker(
+            Arc::clone(&store),
+            stale,
+            &executable
+        )),
+        Err(WorkerLaunchError::Admission(StoreError::StaleFence { .. }))
+    ));
+    assert_eq!(worker_preparation_state(&store, &grant).3, 0);
+    let (first, second) = runtime.block_on(async {
+        tokio::join!(
+            prepare_invocation_worker(Arc::clone(&store), grant.clone(), &executable),
+            prepare_invocation_worker(Arc::clone(&store), grant.clone(), &executable),
+        )
+    });
+    let pending = match (first, second) {
+        (Ok(worker), Err(WorkerLaunchError::Admission(StoreError::RevisionConflict { .. })))
+        | (Err(WorkerLaunchError::Admission(StoreError::RevisionConflict { .. })), Ok(worker)) => {
+            worker
+        }
+        (Err(first), Err(second)) => {
+            panic!("expected one prepared worker: {first:?}, {second:?}");
+        }
+        _ => panic!("one admission must never prepare two children"),
+    };
+    let ready = pending.ready();
+    assert_eq!(ready.kind, unleash_agent_worker::WorkerReplyKind::Ready);
+    assert_eq!(ready.binding.attempt_id, grant.attempt_id.unwrap());
+    assert_eq!(ready.binding.reservation_id, grant.reservation_id);
+    assert_eq!(ready.binding.fence, grant.lease.fence);
+    assert_eq!(ready.binding.context_manifest_digest, manifest_digest);
+    assert_eq!(ready.pid, pending.identity().pid);
+    assert_eq!(
+        pending.preparation().prepared_revision,
+        grant.revision.next()
+    );
+    assert_eq!(
+        pending.preparation().event_cursor.stream_id,
+        grant.event_cursor.stream_id
+    );
+    assert!(pending.preparation().event_cursor.sequence > grant.event_cursor.sequence);
+    assert_eq!(
+        verify_process_identity(pending.identity()).unwrap(),
+        ProcessVerification::Match
+    );
+    assert_eq!(
+        worker_preparation_state(&store, &grant),
+        (
+            "admitted".to_owned(),
+            "admitted".to_owned(),
+            original_revision + 1,
+            1
+        )
+    );
+    let identity = pending.identity().clone();
+    runtime.block_on(pending.close()).unwrap();
+    assert_eq!(
+        verify_process_identity(&identity).unwrap(),
+        ProcessVerification::Exited
+    );
+    assert_eq!(
+        store.execution_pool_state(POOL).unwrap().current_occupation,
+        1
+    );
+    assert_eq!(worker_preparation_state(&store, &grant).3, 1);
+    Arc::try_unwrap(store).ok().unwrap().shutdown().unwrap();
+}
+
+#[test]
+#[ignore = "requires the matching packaged Rust worker via UNLEASH_TEST_AGENT_WORKER_BIN"]
+fn t_f003_006_worker_manifest_loss_keeps_claim_and_slot() {
+    let executable = worker_test_executable();
+    let data = local_test_dir("f003-worker-manifest-loss").unwrap();
+    let store = worker_test_store(data.path());
+    let runtime = worker_test_runtime();
+    let (grant, digest) = admit_worker_fixture(&store);
+    let object = store.object_record(digest).unwrap();
+    let artifact = data.path().join("artifacts").join(object.relative_path);
+    assert!(artifact.is_file() && !artifact.is_symlink());
+    std::fs::write(artifact, br#"{"fixture":"corrupted"}"#).unwrap();
+    let first = runtime.block_on(prepare_invocation_worker(
+        Arc::clone(&store),
+        grant.clone(),
+        &executable,
+    ));
+    if !matches!(
+        first,
+        Err(WorkerLaunchError::Admission(
+            StoreError::EvidenceUnavailable(_)
+        ))
+    ) {
+        if let Err(error) = first {
+            panic!("expected unverified bytes after claim, got {error:?}");
+        }
+        panic!("a published record with incorrect bytes must fail before native startup");
+    }
+    assert_eq!(
+        worker_preparation_state(&store, &grant),
+        (
+            "admitted".to_owned(),
+            "admitted".to_owned(),
+            i64::try_from(grant.revision.as_u64()).unwrap() + 1,
+            1
+        )
+    );
+    assert!(matches!(
+        runtime.block_on(prepare_invocation_worker(
+            Arc::clone(&store),
+            grant.clone(),
+            &executable
+        )),
+        Err(WorkerLaunchError::Admission(
+            StoreError::RevisionConflict { .. }
+        ))
+    ));
+    assert_eq!(worker_preparation_state(&store, &grant).3, 1);
+    assert_eq!(
+        store.execution_pool_state(POOL).unwrap().current_occupation,
+        1
+    );
+    Arc::try_unwrap(store).ok().unwrap().shutdown().unwrap();
 }

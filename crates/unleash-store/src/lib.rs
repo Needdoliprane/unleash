@@ -43,7 +43,7 @@ pub use admission::{
     ActiveAdmission, AdmissionCandidate, AdmissionCommit, AdmissionDecision,
     AdmissionEligibilityObservation, AdmissionOutcome, AdmissionSnapshotToken, AdmissionUnit,
     AdmissionUrgency, ExecutionAdmissionSnapshot, ExecutionCheckpointObservation,
-    ExecutionCheckpointRequestRecord, ExecutionContinuation,
+    ExecutionCheckpointRequestRecord, ExecutionContinuation, WorkerLaunchPreparation,
 };
 pub use agent_projection::AgentProjection;
 pub use backup::{

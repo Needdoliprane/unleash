@@ -22,11 +22,12 @@ unleash-platform.workspace = true
 unleash-store.workspace = true
 unleash-model-router = { version = "0.1.0", path = "../unleash-model-router" }
 unleash-scheduler.workspace = true
+unleash-agent-worker.workspace = true
 unleash-browser.workspace = true
 unleash-action-broker.workspace = true
 unleash-process-host.workspace = true
 rusqlite.workspace = true
-tokio.workspace = true
+tokio = { workspace = true, features = ["process"] }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

@@ -21,4 +21,6 @@ Le sous-cas lecture de T-F003-001 vérifie l’identité et la session durable v
 
 Le sous-cas `GetInvocation` part d’un historique de fixture persisté. Il lit une ancienne tentative clôturée par fence puis une tentative terminée, avec les mêmes identités agent, session et invocation. La suite vérifie l’ordre des pages, la fin de pagination, les bornes, la portée et le watermark transactionnel.
 
+Le sous-cas de préparation d’un worker utilise l’admission SQLite et le binaire Rust de la même révision. Deux demandes concurrentes donnent une seule préparation et un seul enfant observé. Le fence altéré échoue, le manifeste et le PID sont corrélés au message `Ready`, et la fermeture du canal permet de récolter le processus. Le test vérifie que la préparation et l’arrêt sans permis laissent le slot réservé. L’historique des actions, la neutralisation attestée et le commit de continuation relèvent des scénarios complets.
+
 Les tests end-to-end doivent comparer le contexte envoyé et les actions observées, avec données synthétiques et prix fixes de fixture. Les intégrations réelles fournisseur sont séparées, facultatives par credentials de test mais obligatoires pour revendiquer cette compatibilité. Voir [concurrency-tests.md](../../testing/concurrency-tests.md).
