@@ -149,6 +149,61 @@ fn disposition_count(store: &UnleashStore) -> i64 {
 }
 
 #[test]
+fn t_f012_013_adoption_refuses_changed_dispatch_request_hash() {
+    let (store, _directory, mandate, pool) = fixture(Arc::new(NoopCutpointObserver));
+    let execution = dispatched(&store, mandate, pool);
+    let original: String = store
+        .read_snapshot(|conn, _| {
+            Ok(conn.query_row(
+                "SELECT request_hash FROM action_dispatches WHERE dispatch_id=?1",
+                [execution.dispatch.to_string()],
+                |row| row.get(0),
+            )?)
+        })
+        .unwrap();
+    let modified =
+        Sha256Digest::from_bytes(b"synthetic corruption of normalized dispatch envelope");
+    assert_ne!(original, modified.to_string());
+    let dispatch = execution.dispatch;
+    // One explicit storage-fault injection; no receipt, state, fence or proof is fabricated.
+    let changed=store.execute_in_writer_tx(WriteCriticality::Normal,move |tx,_| {
+        Ok(tx.execute("UPDATE action_dispatches SET request_hash=?2 WHERE dispatch_id=?1 AND request_hash=?3",
+            rusqlite::params![dispatch.to_string(),modified.to_string(),original])?)
+    }).unwrap();
+    assert_eq!(
+        changed, 1,
+        "only the real dispatch's normalized request hash changes"
+    );
+    let before = store
+        .inspect_broker_action(execution.ready.intent.action_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(before.state, ActionState::Dispatching);
+    assert_eq!(held_capacity(&store), 1);
+    let input = candidate(&store, &execution);
+    let result = store.adopt_provider_probe_connect_observation(&execution.ready.claim, input);
+    assert!(
+        result.is_err(),
+        "an altered normalized dispatch must not acquire a native fact capability"
+    );
+    let facts:i64=store.read_snapshot(|conn,_|Ok(conn.query_row(
+        "SELECT COUNT(*) FROM evidence WHERE action_id=?1 AND snapshot_ref LIKE 'provider-connect-fact:v1:%'",
+        [execution.ready.intent.action_id.to_string()],|row|row.get(0),
+    )?)).unwrap();
+    assert_eq!(facts, 0);
+    assert_eq!(
+        store
+            .inspect_broker_action(execution.ready.intent.action_id)
+            .unwrap()
+            .unwrap(),
+        before
+    );
+    assert_eq!(held_capacity(&store), 1);
+    assert_eq!(disposition_count(&store), 0);
+    assert_no_model(&store);
+}
+
+#[test]
 fn t_f012_013_completion_requires_adopted_fact_and_original_continuation() {
     let (store, _directory, mandate, pool) = fixture(Arc::new(NoopCutpointObserver));
     let execution = dispatched(&store, mandate, pool);
