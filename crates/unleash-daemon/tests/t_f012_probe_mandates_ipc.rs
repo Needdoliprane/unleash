@@ -10,9 +10,13 @@ use rusqlite::{Connection, OpenFlags};
 use serde_json::{Map, Value, json};
 use std::io::ErrorKind;
 use std::net::TcpListener;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::{
+    Arc,
+    atomic::{AtomicUsize, Ordering},
+};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use unleash_client::{ClientConfig, ClientError, UnleashClient};
-use unleash_daemon::{DaemonConfig, DaemonStartOutcome, UnleashDaemon};
+use unleash_daemon::{DaemonConfig, DaemonStartOutcome, StoreOverrides, UnleashDaemon};
 use unleash_domain::{
     AuthorityGeneration, CommandId, ProjectId, RequestId, Revision, Sha256Digest,
 };
@@ -20,6 +24,7 @@ use unleash_protocol::{
     ClientKind, CommandEnvelope, CommandReceipt, ErrorCode, ProtocolVersion, QueryEnvelope,
     QueryResponse,
 };
+use unleash_store::{CutpointObserver, StoreCutpoint, StoreError};
 use unleash_testkit::local_test_dir;
 use uuid::Uuid;
 
@@ -40,6 +45,12 @@ struct Profile {
 
 impl Fixture {
     async fn start() -> (Self, UnleashClient) {
+        Self::start_with_cutpoints(None).await
+    }
+
+    async fn start_with_cutpoints(
+        cutpoints: Option<Arc<dyn CutpointObserver>>,
+    ) -> (Self, UnleashClient) {
         use std::os::unix::fs::PermissionsExt;
         let rendezvous = local_test_dir("f012-mandates-rdv").unwrap();
         std::fs::set_permissions(rendezvous.path(), std::fs::Permissions::from_mode(0o700))
@@ -50,6 +61,10 @@ impl Fixture {
         let DaemonStartOutcome::Started(handle) = UnleashDaemon::start(DaemonConfig {
             data_root: Some(data.path().to_path_buf()),
             rendezvous_dir: Some(rendezvous.path().to_path_buf()),
+            store_overrides: StoreOverrides {
+                cutpoints,
+                ..StoreOverrides::default()
+            },
             ..DaemonConfig::default()
         })
         .await
@@ -236,7 +251,15 @@ fn issue(profile: &Profile, phase: &str, expires: u64) -> Value {
 }
 
 fn generation_limits() -> Value {
-    json!({"timeout_ms":1_000,"max_calls":1,"max_output_tokens":32,"max_cost_usd_micros":0})
+    json!({"timeout_ms":5_000,"max_calls":1,"max_output_tokens":32,"max_cost_usd_micros":0})
+}
+
+fn generation_issue(profile: &Profile) -> Value {
+    json!({
+        "kind":"issue","principal_id":profile.principal,"profile_id":profile.id,"profile_version":1,
+        "phase":"generation_probe","locality":"local_only","capability_set":["text"],
+        "limits":generation_limits(),"expires_at_ms":expires_at(),
+    })
 }
 
 fn generation_request(
@@ -260,7 +283,8 @@ fn assert_retained_generation_inputs(fixture: &Fixture, probe: Uuid) {
     let db = fixture.db();
     let (inputs, temporary): (i64, i64) = db.query_row(
         "SELECT
-          (SELECT COUNT(*) FROM object_references WHERE owner_kind='provider_probe' AND owner_id=?1 AND state='live'),
+          (SELECT COUNT(*) FROM object_references WHERE owner_kind='provider_probe' AND owner_id=?1
+           AND source_field IN ('fixture','request_payload','capabilities','model_policy','data_policy') AND state='live'),
           (SELECT COUNT(*) FROM object_references WHERE owner_kind='provider_generation_preparation' AND state='live')",
         [probe.to_string()], |row| Ok((row.get(0)?, row.get(1)?)),
     ).unwrap();
@@ -293,11 +317,7 @@ async fn t_f012_generation_exact_mandate_prepares_the_autonomous_context_once() 
         .configure(&mut admin, Uuid::from_u128(0xf012_9e01), None, 310)
         .await
         .unwrap();
-    let grant = json!({
-        "kind":"issue","principal_id":profile.principal,"profile_id":profile.id,"profile_version":1,
-        "phase":"generation_probe","locality":"local_only","capability_set":["text"],
-        "limits":generation_limits(),"expires_at_ms":expires_at(),
-    });
+    let grant = generation_issue(&profile);
     let issued = admin
         .send_command(&policy(&admin, 312, None, 0, Some(grant)))
         .await
@@ -331,13 +351,187 @@ async fn t_f012_generation_exact_mandate_prepares_the_autonomous_context_once() 
         matches!(fixture.endpoint.accept(), Err(error) if error.kind() == ErrorKind::WouldBlock)
     );
     let dispatches: i64 = db
-        .query_row(
-            "SELECT (SELECT COUNT(*) FROM action_dispatches)+(SELECT COUNT(*) FROM model_calls)",
-            [],
-            |row| row.get(0),
-        )
+        .query_row("SELECT COUNT(*) FROM action_dispatches", [], |row| {
+            row.get(0)
+        })
         .unwrap();
     assert_eq!(dispatches, 0);
+}
+
+async fn wait_for_generation_intent(fixture: &Fixture, probe: Uuid) -> bool {
+    use rusqlite::OptionalExtension;
+    tokio::time::timeout(Duration::from_secs(4), async {
+        loop {
+            let published = fixture
+                .db()
+                .query_row(
+                    "SELECT a.state FROM provider_probe_contexts p
+                 JOIN actions a ON a.action_id=p.action_id
+                 WHERE p.probe_id=?1",
+                    [probe.to_string()],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()
+                .unwrap();
+            if published.is_some() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .is_ok()
+}
+
+fn assert_generation_waiting_for_placement(
+    fixture: &Fixture,
+    probe: Uuid,
+    receipt: &CommandReceipt,
+) {
+    let db = fixture.db();
+    let (path, hash): (String,String) = db.query_row(
+        "SELECT o.relative_path,o.object_hash FROM provider_probe_contexts p
+         JOIN provider_probes u USING(probe_id)
+         JOIN actions a ON a.action_id=p.action_id AND a.state='authorizing'
+         JOIN model_calls c ON c.model_call_id=p.model_call_id AND c.action_id=a.action_id
+          AND c.provider_probe_id=p.probe_id AND c.state='prepared'
+         JOIN model_call_manifests m ON m.manifest_id=p.manifest_id AND m.model_call_id=c.model_call_id
+          AND m.context_kind='provider_probe_context' AND m.provider_probe_context_id=p.probe_id
+         JOIN object_records o ON o.object_hash=m.content_object_hash AND o.state='live'
+         JOIN object_references r ON r.object_hash=o.object_hash AND r.owner_id=p.probe_id
+          AND r.owner_kind='provider_probe' AND r.source_field='request_manifest' AND r.state='live'
+         JOIN broker_phase_records b ON b.action_id=a.action_id AND b.phase_key='authorizing' AND b.event_id=c.trigger_event_id
+         WHERE p.probe_id=?1 AND p.receipt_id=?2 AND u.state='queued' AND u.wait_reason='provider_probe_transport_unqualified'
+           AND NOT EXISTS(SELECT 1 FROM action_dispatches)
+           AND NOT EXISTS(SELECT 1 FROM capacity_reservations)
+           AND NOT EXISTS(SELECT 1 FROM budget_reservations)
+           AND (SELECT COUNT(*) FROM broker_phase_records WHERE action_id=a.action_id)=1",
+        [probe.to_string(), receipt.receipt_id.to_string()],
+        |row| Ok((row.get(0)?,row.get(1)?)),
+    ).unwrap();
+    let bytes = std::fs::read(fixture.data.path().join("artifacts").join(path)).unwrap();
+    assert_eq!(Sha256Digest::from_bytes(&bytes).to_string(), hash);
+    let manifest: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(field(&manifest, "manifest_kind"), &json!("request"));
+    assert_eq!(
+        field(field(&manifest, "origin_ref"), "provider_probe_id"),
+        &json!(probe)
+    );
+}
+
+#[tokio::test]
+async fn t_f012_generation_materializes_authorizing_and_waits_for_placement() {
+    let (fixture, mut admin) = Fixture::start().await;
+    let profile = fixture
+        .configure(&mut admin, Uuid::from_u128(0xf012_9e03), None, 330)
+        .await
+        .unwrap();
+    let grant = admin
+        .send_command(&policy(
+            &admin,
+            332,
+            None,
+            0,
+            Some(generation_issue(&profile)),
+        ))
+        .await
+        .unwrap();
+    let request = generation_request(&admin, &profile, &grant, 333);
+    let receipt = admin.send_command(&request).await.unwrap();
+    let appeared = wait_for_generation_intent(&fixture, request.aggregate_id).await;
+    let replay = admin.send_command(&request).await;
+    fixture.shutdown().await;
+    assert!(appeared, "le reçu doit atteindre le writer d'Authorizing");
+    assert_eq!(replay.unwrap(), receipt);
+    assert_generation_waiting_for_placement(&fixture, request.aggregate_id, &receipt);
+    assert!(
+        matches!(fixture.endpoint.accept(), Err(error) if error.kind() == ErrorKind::WouldBlock)
+    );
+}
+
+struct FailGenerationAuthorizing(AtomicUsize);
+
+impl CutpointObserver for FailGenerationAuthorizing {
+    fn hit(&self, point: StoreCutpoint) -> Result<(), StoreError> {
+        if point == StoreCutpoint::C1BeforeCommandCommit
+            && self
+                .0
+                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
+                    remaining.checked_sub(1)
+                })
+                == Ok(1)
+        {
+            return Err(StoreError::CutpointInjected {
+                cutpoint: "C1".to_owned(),
+                message: "generation authorizing rollback".to_owned(),
+            });
+        }
+        Ok(())
+    }
+}
+
+async fn wait_for_generation_rollback(
+    fixture: &Fixture,
+    fault: &FailGenerationAuthorizing,
+) -> bool {
+    tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            if fault.0.load(Ordering::SeqCst) == 0 {
+                let remaining: i64 = fixture.db().query_row(
+                    "SELECT (SELECT COUNT(*) FROM actions)
+                          + (SELECT COUNT(*) FROM model_calls)
+                          + (SELECT COUNT(*) FROM model_call_manifests)
+                          + (SELECT COUNT(*) FROM object_references WHERE source_field='request_manifest' AND state='live')",
+                    [], |row| row.get(0),
+                ).unwrap();
+                if remaining == 0 {
+                    break;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }).await.is_ok()
+}
+
+#[tokio::test]
+async fn t_f012_generation_replay_recovers_authorizing_after_atomic_rollback() {
+    let fault = Arc::new(FailGenerationAuthorizing(AtomicUsize::new(0)));
+    let (fixture, mut admin) = Fixture::start_with_cutpoints(Some(fault.clone())).await;
+    let profile = fixture
+        .configure(&mut admin, Uuid::from_u128(0xf012_9e04), None, 340)
+        .await
+        .unwrap();
+    let grant = admin
+        .send_command(&policy(
+            &admin,
+            342,
+            None,
+            0,
+            Some(generation_issue(&profile)),
+        ))
+        .await
+        .unwrap();
+    let request = generation_request(&admin, &profile, &grant, 343);
+    // The first C1 is the successful receipt. The second is Authorizing.
+    fault.0.store(2, Ordering::SeqCst);
+    let receipt = admin.send_command(&request).await.unwrap();
+    let rolled_back = wait_for_generation_rollback(&fixture, &fault).await;
+    let replay = admin.send_command(&request).await;
+    let appeared = wait_for_generation_intent(&fixture, request.aggregate_id).await;
+    fixture.shutdown().await;
+    assert!(
+        rolled_back,
+        "aucun fragment du broker ni manifeste visible après C1"
+    );
+    assert_eq!(replay.unwrap(), receipt);
+    assert!(
+        appeared,
+        "le rejeu doit reprendre la préparation au même agrégat"
+    );
+    assert_generation_waiting_for_placement(&fixture, request.aggregate_id, &receipt);
+    assert!(
+        matches!(fixture.endpoint.accept(), Err(error) if error.kind() == ErrorKind::WouldBlock)
+    );
 }
 
 #[tokio::test]

@@ -1202,6 +1202,12 @@ async fn handle_command_frame(
                     return false;
                 }
             };
+            if cmd.command_type == "TestProviderProfile"
+                && cmd.payload.get("phase").and_then(serde_json::Value::as_str)
+                    == Some("generation_probe")
+            {
+                crate::provider_probe_generation_service::start(state, session, &cmd);
+            }
             (outcome, 1, None, None)
         } else {
             let mut prepared = match prepare_command_request(state, session, cmd.clone()).await {

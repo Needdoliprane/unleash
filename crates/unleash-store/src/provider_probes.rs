@@ -37,6 +37,18 @@ const WIRE_KEYS: &[&str] = &[
     "locality",
     "mandate_ref",
 ];
+const WAIT_FOR_PLACEMENT: &str = "provider_probe_transport_unqualified";
+
+fn requires_generation_placement(
+    schema_version: i64,
+    preparation: &ProviderProbePreparation,
+) -> bool {
+    schema_version >= 15
+        && preparation
+            .requested_profile_id
+            .parse::<uuid::Uuid>()
+            .is_ok()
+}
 
 /// Bornes réduites par le serveur avant préparation, jamais une autorisation réseau.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -477,13 +489,7 @@ pub(crate) fn prepare_tx(
     if daemon.schema_version >= 11 {
         crate::provider_profiles::validate_probe_use(tx, preparation, project)?;
     }
-    if daemon.schema_version >= 15
-        && preparation
-            .requested_profile_id
-            .parse::<uuid::Uuid>()
-            .is_ok()
-        && grant.is_none()
-    {
+    if requires_generation_placement(daemon.schema_version, preparation) && grant.is_none() {
         return Err(StoreError::EvidenceUnavailable(
             "préparation configurée sans mandat de génération vérifié".into(),
         ));
@@ -707,7 +713,8 @@ fn verify_frozen_inputs(
 ) -> Result<(), StoreError> {
     let context = &record.context;
     ensure_scope_not_frozen_tx(tx, context.project_id, None, None)?;
-    if read_daemon_state_conn(tx)?.schema_version >= 11 {
+    let schema_version = read_daemon_state_conn(tx)?.schema_version;
+    if schema_version >= 11 {
         crate::provider_profiles::validate_probe_use(tx, &context.preparation, context.project_id)?;
     }
     for subject in [context.principal_id.as_str(), context.actor_id.as_str()] {
@@ -743,6 +750,20 @@ fn verify_frozen_inputs(
     )?;
     if !available {
         return Err(invalid("manifest request probe non publié"));
+    }
+    if requires_generation_placement(schema_version, &context.preparation) {
+        let owned: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM object_references WHERE object_hash=?1
+             AND owner_kind='provider_probe' AND owner_id=?2
+             AND source_field='request_manifest' AND state='live')",
+            params![manifest_hash.to_string(), context.probe_id.to_string()],
+            |row| row.get(0),
+        )?;
+        if !owned {
+            return Err(StoreError::EvidenceUnavailable(
+                "manifest request sans référence du probe exact".into(),
+            ));
+        }
     }
     let scope: i64 = if let Some(project) = context.project_id {
         tx.query_row(
@@ -781,7 +802,12 @@ pub(crate) fn materialize(
     }
     tx.execute("INSERT INTO model_calls(model_call_id,action_id,owner_kind,provider_probe_id,trigger_event_id,state,revision) VALUES(?1,?2,'provider_probe',?3,?4,'prepared',1)",params![context.model_call_id.to_string(),context.action_id.to_string(),context.probe_id.to_string(),trigger_event])?;
     tx.execute("INSERT INTO model_call_manifests(manifest_id,model_call_id,manifest_kind,ordinal,context_manifest_id,context_kind,provider_probe_context_id,provider_id,resolved_model_id,capabilities_hash,allowed_model_policy_hash,request_payload_hash,content_object_hash,created_at_ms) VALUES(?1,?2,'request',1,NULL,'provider_probe_context',?3,?4,?5,?6,?7,?8,?9,?10)",params![context.manifest_id.to_string(),context.model_call_id.to_string(),context.probe_id.to_string(),context.profile.provider_id,context.preparation.resolved_model_id,context.preparation.capability_snapshot_hash.to_string(),context.preparation.model_policy_hash.to_string(),context.preparation.payload_manifest_hash.to_string(),canonical_sha256(&record.request_manifest()?)?.to_string(),now.as_i64()])?;
-    let changed=tx.execute("UPDATE provider_probes SET wait_reason=NULL,revision=revision+1 WHERE probe_id=?1 AND state='queued' AND wait_reason='provider_probe_preparing' AND authority_generation=?2 AND daemon_epoch=?3 AND fence=0",params![context.probe_id.to_string(),context.authority_generation.to_string(),integer(context.daemon_epoch.as_u64())?])?;
+    let pending_placement = requires_generation_placement(
+        read_daemon_state_conn(tx)?.schema_version,
+        &context.preparation,
+    )
+    .then_some(WAIT_FOR_PLACEMENT);
+    let changed=tx.execute("UPDATE provider_probes SET wait_reason=?4,revision=revision+1 WHERE probe_id=?1 AND state='queued' AND wait_reason='provider_probe_preparing' AND authority_generation=?2 AND daemon_epoch=?3 AND fence=0",params![context.probe_id.to_string(),context.authority_generation.to_string(),integer(context.daemon_epoch.as_u64())?,pending_placement])?;
     if changed != 1 {
         return Err(invalid("état du probe ne permet pas sa matérialisation"));
     }
@@ -800,7 +826,13 @@ pub(crate) fn validate_admission(
         return Ok(());
     };
     let context = &record.context;
-    validate_incarnation(tx, &read_daemon_state_conn(tx)?, context.action_id)?;
+    let daemon = read_daemon_state_conn(tx)?;
+    validate_incarnation(tx, &daemon, context.action_id)?;
+    if requires_generation_placement(daemon.schema_version, &context.preparation) {
+        return Err(StoreError::EvidenceUnavailable(
+            "placement natif du probe génération indisponible".into(),
+        ));
+    }
     if context.deadline.as_i64() <= now.as_i64() {
         return Err(invalid("deadline probe expirée avant admission"));
     }

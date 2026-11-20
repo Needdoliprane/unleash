@@ -1,6 +1,8 @@
 //! Authenticated preparation of a bounded generation probe and its immutable inputs.
 //! The existing dispatch gate stays closed until the native producers are qualified.
 
+mod authorizing;
+
 use crate::commands::{DaemonStateRow, EventAppendSpec, read_daemon_state_conn};
 use crate::objects::{OwnedReferenceAdoption, PublishedObjectReference, tx_adopt_owned_reference};
 use crate::provider_probe_mandates::{ResolvedConnectGrant, resolve_generation_grant};
@@ -364,20 +366,31 @@ pub(crate) fn commit_tx(
     )?;
     let owner_id = probe.to_string();
     for candidate in &prepared.candidates {
-        tx_adopt_owned_reference(
-            tx,
-            config.id_generator.as_ref(),
-            daemon.authority_generation,
-            &OwnedReferenceAdoption {
-                candidate: &candidate.reference,
-                object_hash: candidate.hash,
-                producer_kind: PREPARATION_OWNER,
-                producer_field: candidate.field,
-                owner_kind: "provider_probe",
-                owner_id: &owner_id,
-                source_field: candidate.field,
-            },
-        )?;
+        adopt_candidate(tx, config, daemon, &owner_id, candidate)?;
     }
     Ok(revision)
+}
+
+fn adopt_candidate(
+    tx: &Transaction<'_>,
+    config: &StoreConfig,
+    daemon: &DaemonStateRow,
+    owner_id: &str,
+    candidate: &ArtifactCandidate,
+) -> Result<(), StoreError> {
+    tx_adopt_owned_reference(
+        tx,
+        config.id_generator.as_ref(),
+        daemon.authority_generation,
+        &OwnedReferenceAdoption {
+            candidate: &candidate.reference,
+            object_hash: candidate.hash,
+            producer_kind: PREPARATION_OWNER,
+            producer_field: candidate.field,
+            owner_kind: "provider_probe",
+            owner_id,
+            source_field: candidate.field,
+        },
+    )?;
+    Ok(())
 }
