@@ -31,6 +31,7 @@ pub mod paths;
 pub mod peer_cred;
 pub mod process_identity;
 pub mod rendezvous;
+pub mod tcp_listener;
 
 pub use authority::{
     AUTHORITY_LOCK_FILENAME, AuthorityLock, AuthorityLockMetadata, SOCKET_FILENAME,
@@ -57,4 +58,7 @@ pub use rendezvous::{
     ensure_private_rendezvous_dir, read_admin_credential, read_private_file_to_string,
     validate_rendezvous_dir, validate_socket_file, validate_unix_socket_path_len,
     write_private_file_atomic,
+};
+pub use tcp_listener::{
+    TcpListenerError, TcpListenerObservation, observe_owned_tcp_listener, verify_owned_tcp_listener,
 };
