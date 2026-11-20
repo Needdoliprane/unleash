@@ -6,6 +6,9 @@ use unleash_protocol::CommandReceipt;
 #[path = "terminal_resize_recovery_scenarios.rs"]
 mod resize_scenarios;
 
+#[path = "terminal_release_scenarios.rs"]
+mod release_scenarios;
+
 struct Harness {
     fixture: LiveFixture,
     paths: Paths,
@@ -104,7 +107,7 @@ fn registered(fixture: &LiveFixture, before: &Value, n: u128) -> CommandEnvelope
     )
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 struct State {
     intent: String,
     action: String,
