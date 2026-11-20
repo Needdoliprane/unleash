@@ -1,15 +1,31 @@
 //! Passive Ollama inventory boundary. No admission, provider qualification or
-//! product route is owned here. The first implementation remains fail-closed.
+//! product route is owned here. Only the caller's broker can dispatch the GET.
 
 use std::fmt;
+use std::net::SocketAddr;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
-use unleash_action_broker::{ActionReceipt, NormalizedResourceRef};
-use unleash_domain::Sha256Digest;
+use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
+use tokio::net::TcpStream;
+use tokio_rustls::{TlsConnector, rustls};
+use unleash_action_broker::{
+    ActionExecutionFailure, ActionExecutionResult, ActionExecutorPort, ActionIntent, ActionReceipt,
+    AuthorizationDecision, BoxFuture, EffectsClass, ExecutorKind, NormalizedResourceRef,
+    ResolvedSecret,
+};
+use unleash_domain::{ActionId, ActionState, ClockPort, DispatchId, Sha256Digest, TimestampMs};
 use unleash_protocol::canonical_sha256;
 
-use crate::connect_transport::FrozenConnectRequest;
+use crate::connect_transport::{
+    CertificateValidation, FrozenConnectRequest, SystemResolver, resolve_loopback_peer,
+    system_tls_validation,
+};
 use crate::transport::{BrokerDispatch, ProfileRef};
+
+mod http;
 
 /// This is metadata retrieval, not model generation or a connection-only proof.
 pub const INVENTORY_VERB: &str = "model.provider.inventory";
@@ -45,6 +61,7 @@ pub enum InventoryError {
 pub struct FrozenOllamaInventoryRequest {
     target: FrozenConnectRequest,
     digest: Sha256Digest,
+    max_response_bytes: usize,
 }
 
 impl fmt::Debug for FrozenOllamaInventoryRequest {
@@ -79,7 +96,11 @@ impl FrozenOllamaInventoryRequest {
         .map_err(|_| InventoryError::DigestUnavailable)?;
         let target = FrozenConnectRequest::new_loopback(endpoint, profile, timeout_ms)
             .map_err(|_| InventoryError::InvalidRequest)?;
-        Ok(Self { target, digest })
+        Ok(Self {
+            target,
+            digest,
+            max_response_bytes,
+        })
     }
 
     /// Identity that the actual broker intent and decision must both bind.
@@ -104,6 +125,14 @@ pub struct OllamaInventory {
     pub models: Vec<OllamaListedModel>,
 }
 
+impl fmt::Debug for OllamaInventory {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("OllamaInventory")
+            .field("model_count", &self.models.len())
+            .finish_non_exhaustive()
+    }
+}
+
 /// Native declarations are retained as observed; missing metadata stays absent.
 #[derive(Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -122,6 +151,12 @@ pub struct OllamaListedModel {
     pub details: Option<OllamaModelDetails>,
 }
 
+impl fmt::Debug for OllamaListedModel {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("OllamaListedModel").finish_non_exhaustive()
+    }
+}
+
 /// Details reported by `/api/tags`, distinct from tested capabilities.
 #[derive(Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -138,7 +173,41 @@ pub struct OllamaModelDetails {
     pub quantization_level: Option<String>,
 }
 
+impl fmt::Debug for OllamaModelDetails {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("OllamaModelDetails").finish_non_exhaustive()
+    }
+}
+
+/// Native, non-durable fact produced only after the complete bounded response
+/// was read and the channel was closed. It is not server/model qualification.
+#[derive(Serialize)]
+pub struct InventoryObservation {
+    schema_version: u32,
+    action_id: ActionId,
+    dispatch_id: DispatchId,
+    request_digest: Sha256Digest,
+    peer: SocketAddr,
+    certificate_validation: CertificateValidation,
+    revocation_checked: bool,
+    status_code: u16,
+    response_digest: Sha256Digest,
+    response_body_bytes: usize,
+    inventory_digest: Sha256Digest,
+    observed_at_ms: TimestampMs,
+}
+
+impl fmt::Debug for InventoryObservation {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("InventoryObservation")
+            .field("action_id", &self.action_id)
+            .field("dispatch_id", &self.dispatch_id)
+            .finish_non_exhaustive()
+    }
+}
+
 /// The local result is not a durable inventory observation.
+#[derive(Debug)]
 pub enum InventoryOutcome {
     /// The exact native inventory was observed.
     Listed(OllamaInventory),
@@ -147,21 +216,314 @@ pub enum InventoryOutcome {
 }
 
 /// The broker receipt remains authoritative for an uncertain dispatched effect.
+#[derive(Debug)]
 pub struct InventoryExecution {
     /// Actual result of the caller's broker.
     pub receipt: ActionReceipt,
     /// Correlated native list or closed local failure.
     pub outcome: InventoryOutcome,
+    /// The exact local fact matching the broker's output digest, if successful.
+    /// The caller still owns durable adoption and verified resource disposition.
+    pub observation: Option<InventoryObservation>,
 }
 
-/// Closed boundary for the test-first transport. No socket, secret access or
-/// generic-broker bypass is available while its implementation is unqualified.
+trait Channel: AsyncRead + AsyncWrite + Unpin + Send {}
+impl<T: AsyncRead + AsyncWrite + Unpin + Send> Channel for T {}
+
+struct ObservedInventory {
+    inventory: OllamaInventory,
+    observation: InventoryObservation,
+    digest: Sha256Digest,
+}
+
+type Stage = Arc<Mutex<Option<Result<ObservedInventory, InventoryError>>>>;
+
+struct InventoryExecutor {
+    request: FrozenOllamaInventoryRequest,
+    action: ActionId,
+    clock: Arc<dyn ClockPort>,
+    consumed: AtomicBool,
+    stage: Stage,
+}
+
+impl InventoryExecutor {
+    fn live(&self, intent: &ActionIntent, decision: &AuthorizationDecision) -> bool {
+        let now = self.clock.now_ms();
+        now < intent.action_deadline && decision.expiry.is_none_or(|expiry| now < expiry)
+    }
+
+    fn bound(
+        &self,
+        intent: &ActionIntent,
+        decision: &AuthorizationDecision,
+        secrets: &[ResolvedSecret],
+    ) -> bool {
+        intent.action_id == self.action
+            && decision.action_id == self.action
+            && intent.verb == INVENTORY_VERB
+            && intent.effects_class == EffectsClass::NetworkEgress
+            && intent.payload_digest == self.request.digest
+            && decision.payload_digest == self.request.digest
+            && intent.scope_revision == decision.scope_revision
+            && intent.policy_revision == decision.policy_revision
+            && decision.executor == ExecutorKind::Unleash
+            && intent.resource_refs.as_slice() == [self.request.resource()]
+            && intent.secret_refs.is_empty()
+            && secrets.is_empty()
+            && self.live(intent, decision)
+    }
+
+    fn remaining(
+        &self,
+        intent: &ActionIntent,
+        decision: &AuthorizationDecision,
+    ) -> Result<u64, InventoryError> {
+        decision
+            .expiry
+            .map_or(intent.action_deadline, |expiry| {
+                expiry.min(intent.action_deadline)
+            })
+            .as_i64()
+            .checked_sub(self.clock.now_ms().as_i64())
+            .and_then(|remaining| u64::try_from(remaining).ok())
+            .filter(|remaining| *remaining > 0)
+            .map(|remaining| remaining.min(self.request.target.timeout_ms()))
+            .ok_or(InventoryError::DeadlineExpired)
+    }
+
+    async fn channel(
+        &self,
+        intent: &ActionIntent,
+        decision: &AuthorizationDecision,
+    ) -> Result<(Box<dyn Channel>, SocketAddr, CertificateValidation), InventoryError> {
+        let tls = if self.request.target.endpoint().scheme() == "https" {
+            Some(
+                tokio::task::spawn_blocking(system_tls_validation)
+                    .await
+                    .map_err(|_| InventoryError::Unavailable)?
+                    .map_err(|_| InventoryError::Unavailable)?,
+            )
+        } else {
+            None
+        };
+        let peer = resolve_loopback_peer(&self.request.target, &SystemResolver)
+            .await
+            .map_err(|_| InventoryError::InvalidRequest)?;
+        if !self.live(intent, decision) {
+            return Err(InventoryError::DeadlineExpired);
+        }
+        // The already validated sockaddr, never a hostname, selects this single
+        // attempt. Recouple the actual peer BEFORE any HTTP application bytes.
+        let socket = TcpStream::connect(peer)
+            .await
+            .map_err(|_| InventoryError::Unavailable)?;
+        if socket
+            .peer_addr()
+            .map_err(|_| InventoryError::Unavailable)?
+            != peer
+        {
+            return Err(InventoryError::InvalidRequest);
+        }
+        let (channel, source): (Box<dyn Channel>, _) = if let Some(tls) = tls {
+            let name =
+                rustls::pki_types::ServerName::try_from(self.request.target.host().to_owned())
+                    .map_err(|_| InventoryError::InvalidRequest)?;
+            let stream = TlsConnector::from(tls.config)
+                .connect(name, socket)
+                .await
+                .map_err(|_| InventoryError::Unavailable)?;
+            (Box::new(stream), tls.source)
+        } else {
+            (Box::new(socket), CertificateValidation::NotTls)
+        };
+        if !self.live(intent, decision) {
+            return Err(InventoryError::DeadlineExpired);
+        }
+        Ok((channel, peer, source))
+    }
+
+    async fn observe(
+        &self,
+        dispatch: DispatchId,
+        intent: &ActionIntent,
+        decision: &AuthorizationDecision,
+    ) -> Result<ObservedInventory, InventoryError> {
+        let (mut channel, peer, certificate_validation) = self.channel(intent, decision).await?;
+        let host = self.request.target.host();
+        let authority = if host.contains(':') {
+            format!("[{host}]:{}", peer.port())
+        } else {
+            format!("{host}:{}", peer.port())
+        };
+        let request = format!(
+            "GET /api/tags HTTP/1.1\r\nHost: {authority}\r\nAccept: application/json\r\nConnection: close\r\n\r\n"
+        );
+        channel
+            .write_all(request.as_bytes())
+            .await
+            .map_err(|_| InventoryError::Unavailable)?;
+        let response =
+            http::read_response(channel.as_mut(), self.request.max_response_bytes).await?;
+        channel
+            .shutdown()
+            .await
+            .map_err(|_| InventoryError::Unavailable)?;
+        drop(channel);
+        let inventory: OllamaInventory =
+            serde_json::from_slice(&response.body).map_err(|_| InventoryError::InvalidResponse)?;
+        let observation = InventoryObservation {
+            schema_version: 1,
+            action_id: self.action,
+            dispatch_id: dispatch,
+            request_digest: self.request.digest,
+            peer,
+            certificate_validation,
+            revocation_checked: false,
+            status_code: response.status,
+            response_digest: Sha256Digest::from_bytes(&response.body),
+            response_body_bytes: response.body.len(),
+            inventory_digest: canonical_sha256(&inventory)
+                .map_err(|_| InventoryError::DigestUnavailable)?,
+            observed_at_ms: self.clock.now_ms(),
+        };
+        let digest =
+            canonical_sha256(&observation).map_err(|_| InventoryError::DigestUnavailable)?;
+        Ok(ObservedInventory {
+            inventory,
+            observation,
+            digest,
+        })
+    }
+}
+
+impl ActionExecutorPort for InventoryExecutor {
+    fn execute_action<'a>(
+        &'a self,
+        dispatch_id: DispatchId,
+        intent: &'a ActionIntent,
+        decision: &'a AuthorizationDecision,
+        secrets: &'a [ResolvedSecret],
+    ) -> BoxFuture<'a, Result<ActionExecutionResult, ActionExecutionFailure>> {
+        Box::pin(async move {
+            if !self.bound(intent, decision, secrets) {
+                return Err(ActionExecutionFailure::ConfirmedFailureNoEffect {
+                    dispatch_id,
+                    reason: "inventory_binding_rejected".to_owned(),
+                });
+            }
+            let unknown = || ActionExecutionFailure::OutcomeUnknown {
+                dispatch_id,
+                reason: "inventory_transport_outcome_unknown".to_owned(),
+            };
+            if self.consumed.swap(true, Ordering::SeqCst) {
+                return Err(unknown());
+            }
+            let remaining = self.remaining(intent, decision).map_err(|_| unknown())?;
+            let started = tokio::time::Instant::now();
+            let duration = Duration::from_millis(remaining);
+            let observed =
+                tokio::time::timeout(duration, self.observe(dispatch_id, intent, decision))
+                    .await
+                    .unwrap_or(Err(InventoryError::DeadlineExpired));
+            let observed = if self.live(intent, decision) && started.elapsed() < duration {
+                observed
+            } else {
+                Err(InventoryError::DeadlineExpired)
+            };
+            let mut stage = self.stage.lock().map_err(|_| unknown())?;
+            match observed {
+                Ok(observed) => {
+                    let result = ActionExecutionResult {
+                        dispatch_id,
+                        provider_request_id: None,
+                        output_digest: observed.digest,
+                        observed_at_ms: observed.observation.observed_at_ms,
+                    };
+                    *stage = Some(Ok(observed));
+                    Ok(result)
+                }
+                Err(error) => {
+                    *stage = Some(Err(error));
+                    Err(unknown())
+                }
+            }
+        })
+    }
+}
+
+/// Execute one explicit GET through the caller's broker. Only a complete native
+/// response with a matching local fact can yield a listed result. This component
+/// does not persist that fact or authorize admission/resource release.
 ///
 /// # Errors
-/// Returns `Unavailable` while the effect path is closed.
+/// Rejects an absent/divergent action or secret reference before resolution.
+/// The first transport does not support credential-bearing inventory.
+///
+/// # Cancellation
+/// Once the broker has dispatched, cancellation may leave an effect unknown.
+/// The owner must reconcile that same action; this function never retries it.
 pub async fn execute_ollama_inventory(
-    _request: FrozenOllamaInventoryRequest,
-    _dispatch: BrokerDispatch<'_>,
+    request: FrozenOllamaInventoryRequest,
+    dispatch: BrokerDispatch<'_>,
 ) -> Result<InventoryExecution, InventoryError> {
-    Err(InventoryError::Unavailable)
+    if dispatch.broker.action_has_secret_refs(dispatch.action) != Some(false)
+        || !dispatch
+            .broker
+            .action_audit(dispatch.action)
+            .is_some_and(|audit| {
+                audit.payload_digest == request.digest
+                    && audit.decision_ref.as_ref() == Some(dispatch.decision)
+            })
+    {
+        return Err(InventoryError::InvalidRequest);
+    }
+    let stage = Arc::new(Mutex::new(None));
+    let executor = InventoryExecutor {
+        request,
+        action: dispatch.action,
+        clock: dispatch.clock,
+        consumed: AtomicBool::new(false),
+        stage: Arc::clone(&stage),
+    };
+    let receipt = dispatch
+        .broker
+        .execute_authorized(
+            dispatch.action,
+            dispatch.decision,
+            dispatch.fence,
+            dispatch.authority,
+            &executor,
+            dispatch.secrets,
+        )
+        .await
+        .map_err(|_| InventoryError::Unavailable)?;
+    let result = stage
+        .lock()
+        .map_err(|_| InventoryError::Unavailable)?
+        .take();
+    match result {
+        Some(Ok(observed))
+            if receipt.state == ActionState::ObservedSuccess
+                && receipt.action_id == observed.observation.action_id
+                && receipt.dispatch_id == observed.observation.dispatch_id
+                && receipt.output_digest == Some(observed.digest) =>
+        {
+            Ok(InventoryExecution {
+                receipt,
+                outcome: InventoryOutcome::Listed(observed.inventory),
+                observation: Some(observed.observation),
+            })
+        }
+        other => {
+            let error = match other {
+                Some(Err(error)) => error,
+                _ => InventoryError::Unavailable,
+            };
+            Ok(InventoryExecution {
+                receipt,
+                outcome: InventoryOutcome::Failed(error),
+                observation: None,
+            })
+        }
+    }
 }

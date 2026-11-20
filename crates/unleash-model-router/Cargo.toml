@@ -12,6 +12,7 @@ description = "Bounded model stream framing and normalization"
 workspace = true
 
 [dependencies]
+httparse = "1.10.1"
 serde.workspace = true
 serde_json.workspace = true
 jsonschema.workspace = true

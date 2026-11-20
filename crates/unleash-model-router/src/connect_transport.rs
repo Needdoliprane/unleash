@@ -138,6 +138,18 @@ impl FrozenConnectRequest {
                 || self.host.parse::<IpAddr>().is_ok_and(|ip| ip.is_loopback()),
         }
     }
+
+    pub(crate) const fn endpoint(&self) -> &reqwest::Url {
+        &self.endpoint
+    }
+
+    pub(crate) fn host(&self) -> &str {
+        &self.host
+    }
+
+    pub(crate) const fn timeout_ms(&self) -> u64 {
+        self.timeout_ms
+    }
 }
 
 /// What actually verified the TLS peer; never a claim of provider/model readiness.
@@ -222,7 +234,7 @@ pub(crate) trait NameResolver: Send + Sync {
     ) -> BoxFuture<'a, Result<Vec<SocketAddr>, ConnectError>>;
 }
 
-struct SystemResolver;
+pub(crate) struct SystemResolver;
 impl NameResolver for SystemResolver {
     fn resolve<'a>(
         &'a self,
@@ -278,9 +290,9 @@ struct ConnectExecutor {
     closed_probe: Option<Arc<AtomicBool>>,
 }
 
-struct TlsValidation {
-    config: Arc<rustls::ClientConfig>,
-    source: CertificateValidation,
+pub(crate) struct TlsValidation {
+    pub(crate) config: Arc<rustls::ClientConfig>,
+    pub(crate) source: CertificateValidation,
 }
 
 fn tls_validation(
@@ -305,7 +317,7 @@ fn tls_validation(
     })
 }
 
-fn system_tls_validation() -> Result<TlsValidation, ConnectError> {
+pub(crate) fn system_tls_validation() -> Result<TlsValidation, ConnectError> {
     // The loader otherwise honors these overrides. An environment-provided root
     // file must not be described as the operating system's configured trust.
     if std::env::var_os("SSL_CERT_FILE").is_some() || std::env::var_os("SSL_CERT_DIR").is_some() {
@@ -322,6 +334,28 @@ fn system_tls_validation() -> Result<TlsValidation, ConnectError> {
             .map_err(|_| ConnectError::TrustUnavailable)?;
     }
     tls_validation(roots, CertificateValidation::OfflineSystemRoots)
+}
+
+pub(crate) async fn resolve_loopback_peer(
+    request: &FrozenConnectRequest,
+    resolver: &dyn NameResolver,
+) -> Result<SocketAddr, ConnectError> {
+    let addresses = resolver.resolve(&request.host, request.port).await?;
+    let literal = request.host.parse::<IpAddr>().ok();
+    if addresses.is_empty()
+        || addresses.len() > MAX_RESOLVED_ADDRESSES
+        || addresses.iter().any(|address| {
+            address.port() != request.port
+                || !address.ip().is_loopback()
+                || literal.is_some_and(|ip| address.ip() != ip)
+        })
+    {
+        return Err(ConnectError::DestinationRejected);
+    }
+    addresses
+        .first()
+        .copied()
+        .ok_or(ConnectError::DestinationRejected)
 }
 
 impl ConnectExecutor {
@@ -386,25 +420,7 @@ impl ConnectExecutor {
     }
 
     async fn peer(&self) -> Result<SocketAddr, ConnectError> {
-        let addresses = self
-            .resolver
-            .resolve(&self.request.host, self.request.port)
-            .await?;
-        let literal = self.request.host.parse::<IpAddr>().ok();
-        if addresses.is_empty()
-            || addresses.len() > MAX_RESOLVED_ADDRESSES
-            || addresses.iter().any(|address| {
-                address.port() != self.request.port
-                    || !address.ip().is_loopback()
-                    || literal.is_some_and(|ip| address.ip() != ip)
-            })
-        {
-            return Err(ConnectError::DestinationRejected);
-        }
-        addresses
-            .first()
-            .copied()
-            .ok_or(ConnectError::DestinationRejected)
+        resolve_loopback_peer(&self.request, self.resolver.as_ref()).await
     }
 
     async fn connect(
