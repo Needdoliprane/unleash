@@ -95,7 +95,8 @@ impl DaemonRuntimeState {
 
     pub(crate) fn mark_draining(&self) {
         self.set_mode(DaemonMode::Draining);
-        let _ = self.drain_started_tx.send(true);
+        // Retain the drain signal even if the next observer has not subscribed.
+        self.drain_started_tx.send_replace(true);
     }
 
     pub(crate) fn subscribe_drain_started(&self) -> watch::Receiver<bool> {

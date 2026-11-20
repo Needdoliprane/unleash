@@ -1359,6 +1359,47 @@ mod shutdown_ownership_tests {
     use super::*;
     use unleash_testkit::local_test_dir;
 
+    #[tokio::test]
+    async fn draining_is_visible_to_a_late_subscriber() {
+        let directory = local_test_dir("shutdown-late-subscriber").unwrap();
+        let configuration = DaemonConfig {
+            data_root: Some(directory.path().join("data")),
+            rendezvous_dir: Some(directory.path().join("rdv")),
+            shutdown_drain_timeout: Duration::from_secs(5),
+            ..DaemonConfig::default()
+        };
+        let DaemonStartOutcome::Started(handle) =
+            UnleashDaemon::start(configuration).await.unwrap()
+        else {
+            panic!("fixture requires a fresh daemon");
+        };
+        handle.wait_ready().await.unwrap();
+        let state = handle.test_runtime_state();
+        let active = state.broker_activity.admit().unwrap();
+        assert_eq!(state.drain_started_tx.receiver_count(), 0);
+        let stop = tokio::spawn(async move { handle.shutdown_graceful("fixture complete").await });
+
+        let signal = tokio::time::timeout(Duration::from_secs(5), async {
+            // The coordinator closes admission after publishing the drain signal.
+            while state.broker_activity.admit().is_some() {
+                tokio::task::yield_now().await;
+            }
+            (
+                state.current_mode(),
+                *state.subscribe_drain_started().borrow(),
+            )
+        })
+        .await;
+        drop(state);
+        drop(active);
+        stop.await.unwrap().unwrap();
+        assert_eq!(
+            signal.unwrap(),
+            (DaemonMode::Draining, true),
+            "the drain signal must outlive its subscribers"
+        );
+    }
+
     async fn failed_release_keeps_coordinator_authority(panics: bool) {
         let directory = local_test_dir("shutdown-release-failure").unwrap();
         let rendezvous = directory.path().join("rdv");
