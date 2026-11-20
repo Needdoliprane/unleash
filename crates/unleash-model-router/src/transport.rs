@@ -26,7 +26,7 @@ use zeroize::Zeroizing;
 use crate::openai::{OpenAiOutcome, OpenAiStream, OpenAiUsage};
 
 const MAX_INPUT: usize = 65_536;
-const MAX_RESPONSE: usize = 1_048_576;
+pub(crate) const MAX_RESPONSE: usize = 1_048_576;
 const MAX_MODEL: usize = 256;
 const VERB: &str = "model.responses.stream";
 

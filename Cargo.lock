@@ -6009,6 +6009,7 @@ dependencies = [
 name = "unleash-model-router"
 version = "0.1.0"
 dependencies = [
+ "httparse",
  "jsonschema",
  "reqwest",
  "rustls-native-certs",
