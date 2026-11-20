@@ -158,6 +158,13 @@ pub enum CommandMutation {
         /// Résolution exacte, relue dans la transaction du nouveau reçu.
         preparation: Box<crate::ProviderProbeConnectPreparation>,
     },
+    /// Prépare l'inventaire passif authentifié, sans action, réseau ou réservation.
+    PrepareProviderProbeInventory {
+        /// Autorité de la session réelle.
+        caller: CallerAuthority,
+        /// Résolution exacte de la phase inventory, relue par le writer.
+        preparation: Box<crate::ProviderProbeInventoryPreparation>,
+    },
     /// Prépare un terminal sans action OS ni action broker préinsérée.
     PrepareTerminalAllocation {
         /// Identité égale à l'agrégat de commande.
@@ -1155,7 +1162,8 @@ pub(crate) fn tx_commit_command(
     };
     let prepared_probe = match &req.mutation {
         CommandMutation::PrepareProviderProbe { probe_id, .. } => Some(*probe_id),
-        CommandMutation::PrepareProviderProbeConnect { .. } => Some(
+        CommandMutation::PrepareProviderProbeConnect { .. }
+        | CommandMutation::PrepareProviderProbeInventory { .. } => Some(
             unleash_domain::ProviderProbeId::from_uuid(req.envelope.aggregate_id),
         ),
         _ => None,
@@ -1443,6 +1451,24 @@ fn apply_command_mutation(
                 envelope,
                 caller,
                 preparation,
+                phase: crate::provider_probe_connect::TransportPhase::Connect,
+            },
+            receipt_id,
+            generated_events,
+        ),
+        CommandMutation::PrepareProviderProbeInventory {
+            caller,
+            preparation,
+        } => crate::provider_probe_connect::commit_tx(
+            tx,
+            config,
+            daemon,
+            now_ms,
+            &crate::provider_probe_connect::ConnectCommand {
+                envelope,
+                caller,
+                preparation: &preparation.inner,
+                phase: crate::provider_probe_connect::TransportPhase::Inventory,
             },
             receipt_id,
             generated_events,

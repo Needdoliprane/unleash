@@ -3,7 +3,10 @@
 
 use std::error::Error;
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 
 use rusqlite::{Connection, OpenFlags};
 use serde_json::json;
@@ -14,26 +17,50 @@ use unleash_domain::{
 use unleash_protocol::{CommandEnvelope, ProtocolVersion, ReceiptState, canonical_sha256};
 use unleash_store::{
     AggregateKind, BrokerCause, BrokerEvaluation, BrokerIntent, BrokerPhase, BrokerPhaseRequest,
-    CallerAuthority, CallerRole, CommandMutation, CommitCommandRequest, SettingsPatch,
-    SettingsScopeKind, StoreConfig, StoreError, UnleashStore,
+    CallerAuthority, CallerRole, CommandMutation, CommitCommandRequest, CutpointObserver,
+    SettingsPatch, SettingsScopeKind, StoreConfig, StoreCutpoint, StoreError, UnleashStore,
 };
 use unleash_testkit::{ManualClock, local_test_dir};
 use uuid::Uuid;
 
 type TestResult<T = ()> = Result<T, Box<dyn Error>>;
 
+#[path = "support/provider_probe_inventory_preparation.rs"]
+mod preparation;
+
+struct FailBeforeCommit(AtomicBool);
+
+impl CutpointObserver for FailBeforeCommit {
+    fn hit(&self, point: StoreCutpoint) -> Result<(), StoreError> {
+        if point == StoreCutpoint::C1BeforeCommandCommit && self.0.swap(false, Ordering::SeqCst) {
+            return Err(StoreError::CutpointInjected {
+                cutpoint: "C1".to_owned(),
+                message: "synthetic inventory rollback".to_owned(),
+            });
+        }
+        Ok(())
+    }
+}
+
 struct Fixture<D> {
     store: UnleashStore,
     root: D,
+    failure: Arc<FailBeforeCommit>,
 }
 
 fn fixture() -> TestResult<Fixture<impl AsRef<Path>>> {
     let root = local_test_dir("f012-inventory-store")?;
     let mut config = StoreConfig::new(root.path());
     config.clock = Arc::new(ManualClock::new(1_000));
+    let failure = Arc::new(FailBeforeCommit(AtomicBool::new(false)));
+    config.cutpoints = failure.clone();
     let store = UnleashStore::open(config)?;
     store.register_principal("inventory-principal", "user", "user:inventory-store")?;
-    Ok(Fixture { store, root })
+    Ok(Fixture {
+        store,
+        root,
+        failure,
+    })
 }
 
 impl<D: AsRef<Path>> Fixture<D> {
