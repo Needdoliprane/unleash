@@ -13,6 +13,43 @@ use unleash_domain::{
 };
 use unleash_protocol::{CommandEnvelope, ProviderTestLimits, ProviderTestPhase};
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TransportPhase {
+    Connect,
+    Inventory,
+}
+
+impl TransportPhase {
+    pub(crate) const fn wire(self) -> ProviderTestPhase {
+        match self {
+            Self::Connect => ProviderTestPhase::Connect,
+            Self::Inventory => ProviderTestPhase::Inventory,
+        }
+    }
+
+    pub(crate) const fn name(self) -> &'static str {
+        match self {
+            Self::Connect => "connect",
+            Self::Inventory => "inventory",
+        }
+    }
+
+    const fn verb(self) -> &'static str {
+        match self {
+            Self::Connect => "model.provider.connect",
+            Self::Inventory => "model.provider.inventory",
+        }
+    }
+
+    fn from_wire(phase: ProviderTestPhase) -> Result<Self, StoreError> {
+        match phase {
+            ProviderTestPhase::Connect => Ok(Self::Connect),
+            ProviderTestPhase::Inventory => Ok(Self::Inventory),
+            _ => Err(invalid("phase non transport")),
+        }
+    }
+}
+
 /// Contexte immuable de la demande authentifiée ; aucune identité OS ou modèle.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -67,6 +104,9 @@ pub struct ProviderProbeConnectContext {
     pub capability_set: Vec<String>,
     /// Bornes demandées et vérifiées.
     pub limits: ProviderTestLimits,
+    /// Inventory v2 only. Omission preserves historical connect JSON and digests.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inventory_limits: Option<crate::provider_probe_inventory::InventoryTransportLimits>,
     /// Échéance absolue réduite par le mandat et le profil.
     pub deadline: TimestampMs,
 }
@@ -210,19 +250,30 @@ pub(crate) fn validate_live_permission(
     now: TimestampMs,
     permission: &ConnectPhasePermission,
 ) -> Result<ProviderProbeConnectRecord, StoreError> {
-    let record = claim_identity(tx, daemon, &permission.request)?;
+    validate_live_transport_permission(tx, daemon, now, permission, TransportPhase::Connect)
+}
+
+pub(crate) fn validate_live_transport_permission(
+    tx: &Transaction<'_>,
+    daemon: &crate::DaemonStateRow,
+    now: TimestampMs,
+    permission: &ConnectPhasePermission,
+    phase: TransportPhase,
+) -> Result<ProviderProbeConnectRecord, StoreError> {
+    let record = claim_transport_identity(tx, daemon, &permission.request, phase)?;
     if record != permission.record || record.claim.is_none() {
         return Err(StoreError::StaleFence {
             message: "claim connect différente du propriétaire frais".to_owned(),
         });
     }
-    validate_live_context(tx, daemon, now, &permission.request, &record)?;
+    validate_live_transport_context(tx, daemon, now, &permission.request, &record, phase)?;
     Ok(record)
 }
 
 pub(crate) enum ConnectPhaseAccess<'a> {
     Live(&'a ConnectPhasePermission),
     Observation(&'a ConnectPhasePermission),
+    InventoryLive(&'a crate::provider_probe_inventory::InventoryPhasePermission),
 }
 
 impl ProviderProbeConnectClaim {
@@ -332,10 +383,12 @@ pub(crate) struct ConnectCommand<'a> {
     pub envelope: &'a CommandEnvelope,
     pub caller: &'a CallerAuthority,
     pub preparation: &'a ProviderProbeConnectPreparation,
+    pub phase: TransportPhase,
 }
 
 pub(crate) fn validate_identity(request: &crate::CommitCommandRequest) -> Result<bool, StoreError> {
-    let crate::CommandMutation::PrepareProviderProbeConnect { caller, .. } = &request.mutation
+    let (crate::CommandMutation::PrepareProviderProbeConnect { caller, .. }
+    | crate::CommandMutation::PrepareProviderProbeInventory { caller, .. }) = &request.mutation
     else {
         return Ok(false);
     };
@@ -376,9 +429,14 @@ pub(crate) fn verify_published(
     store: &UnleashStore,
     request: &crate::CommitCommandRequest,
 ) -> Result<(), StoreError> {
-    let crate::CommandMutation::PrepareProviderProbeConnect { preparation, .. } = &request.mutation
-    else {
-        return Ok(());
+    let preparation = match &request.mutation {
+        crate::CommandMutation::PrepareProviderProbeConnect { preparation, .. } => {
+            preparation.as_ref()
+        }
+        crate::CommandMutation::PrepareProviderProbeInventory { preparation, .. } => {
+            &preparation.inner
+        }
+        _ => return Ok(()),
     };
     crate::provider_profiles::verify_configuration_objects(
         store,
@@ -428,6 +486,7 @@ pub(crate) fn validate_intent(
 fn for_action(
     conn: &Connection,
     action: ActionId,
+    phase: TransportPhase,
 ) -> Result<Option<ProviderProbeConnectRecord>, StoreError> {
     if read_daemon_state_conn(conn)?.schema_version < 15 {
         return Ok(None);
@@ -440,7 +499,7 @@ fn for_action(
         )
         .optional()?;
     probe
-        .map(|id| read_context(conn, id.parse()?))
+        .map(|id| read_transport_context(conn, id.parse()?, phase))
         .transpose()
         .map(Option::flatten)
 }
@@ -453,9 +512,22 @@ pub(crate) fn guard_phase_access(
     phase: &crate::BrokerPhase,
     access: Option<ConnectPhaseAccess<'_>>,
 ) -> Result<bool, StoreError> {
-    let record = for_action(tx, phase.action_id())?;
+    let transport = if matches!(&access, Some(ConnectPhaseAccess::InventoryLive(_))) {
+        TransportPhase::Inventory
+    } else {
+        TransportPhase::Connect
+    };
+    if is_reserved_inventory_phase(tx, phase)? && transport != TransportPhase::Inventory {
+        // Classification only denies access. Neither inspection nor a connect
+        // permission can mint the original inventory execution owner.
+        return Err(StoreError::EvidenceUnavailable(
+            "inventory exige sa claim originale de transport".to_owned(),
+        ));
+    }
+    let record = for_action(tx, phase.action_id(), transport)?;
     let is_connect = matches!(phase, crate::BrokerPhase::Authorizing { intent }
-        if intent.manifest.get("verb") == Some(&serde_json::json!("model.provider.connect")));
+        if intent.manifest.get("verb") == Some(&serde_json::json!(TransportPhase::Connect.verb()))
+        || intent.manifest.get("verb") == Some(&serde_json::json!(TransportPhase::Inventory.verb())));
     let Some(record) = record else {
         return if is_connect || access.is_some() {
             Err(hidden())
@@ -471,6 +543,7 @@ pub(crate) fn guard_phase_access(
     let (permission, observation) = match access {
         ConnectPhaseAccess::Live(permission) => (permission, false),
         ConnectPhaseAccess::Observation(permission) => (permission, true),
+        ConnectPhaseAccess::InventoryLive(permission) => (permission.inner(), false),
     };
     if observation != matches!(phase, crate::BrokerPhase::Observation { .. }) {
         return Err(StoreError::EvidenceUnavailable(
@@ -480,7 +553,7 @@ pub(crate) fn guard_phase_access(
     let current = if observation {
         fact_context(tx, daemon, permission)?
     } else {
-        claim_identity(tx, daemon, &permission.request)?
+        claim_transport_identity(tx, daemon, &permission.request, transport)?
     };
     if current != record || record != permission.record || record.claim.is_none() {
         return Err(StoreError::StaleFence {
@@ -492,7 +565,8 @@ pub(crate) fn guard_phase_access(
         // shared exact replay lookup; it never qualifies a native fact itself.
         return Ok(true);
     }
-    let fresh = validate_live_context(tx, daemon, now, &permission.request, &record)?;
+    let fresh =
+        validate_live_transport_context(tx, daemon, now, &permission.request, &record, transport)?;
     if let crate::BrokerPhase::Authorizing { intent } = phase {
         validate_bound_intent(&record.context, &fresh.profile, intent)?;
     }
@@ -503,6 +577,30 @@ pub(crate) fn guard_phase_access(
         validate_execution_reservation(tx, daemon, now, &record.context)?;
     }
     Ok(true)
+}
+
+fn is_reserved_inventory_phase(
+    tx: &Transaction<'_>,
+    phase: &crate::BrokerPhase,
+) -> Result<bool, StoreError> {
+    // Later entries do not carry an intent. Read its immutable verb only to
+    // refuse generic access, never to reconstruct a permission from SQLite.
+    let verb: Option<String> = if let crate::BrokerPhase::Authorizing { intent } = phase {
+        intent
+            .manifest
+            .get("verb")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned)
+    } else {
+        tx.query_row(
+            "SELECT json_extract(intent_json,'$.manifest.verb') FROM broker_intents WHERE action_id=?1",
+            [phase.action_id().to_string()],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .optional()?
+        .flatten()
+    };
+    Ok(verb.as_deref() == Some("model.provider.inventory"))
 }
 
 fn validate_bound_intent(
@@ -532,6 +630,7 @@ fn validate_bound_destination(
     intent: &crate::BrokerIntent,
 ) -> Result<(), StoreError> {
     use unleash_domain::{ActionOrigin, Fence, LineageFence, ReconcileStrategy};
+    let phase = TransportPhase::from_wire(context.phase)?;
     if intent.lineage_fence
         != LineageFence::new(
             context.authority_generation,
@@ -561,7 +660,7 @@ fn validate_bound_destination(
         || intent.policy_revision != context.policy_revision
         || intent.action_deadline != context.deadline
         || intent.reconcile_strategy != ReconcileStrategy::ObserveThenDecide
-        || intent.manifest.get("verb") != Some(&serde_json::json!("model.provider.connect"))
+        || intent.manifest.get("verb") != Some(&serde_json::json!(phase.verb()))
         || intent.manifest.get("effects_class") != Some(&serde_json::json!("network_egress"))
         || intent.manifest.get("resource_refs") != Some(&resources)
         || intent.manifest.get("secret_refs") != Some(&serde_json::json!([]))
@@ -661,6 +760,17 @@ fn prepare_tx(
     envelope: &CommandEnvelope,
     caller: &CallerAuthority,
 ) -> Result<ProviderProbeConnectPreparation, StoreError> {
+    prepare_transport_tx(tx, daemon, now, envelope, caller, TransportPhase::Connect)
+}
+
+pub(crate) fn prepare_transport_tx(
+    tx: &Transaction<'_>,
+    daemon: &crate::DaemonStateRow,
+    now: TimestampMs,
+    envelope: &CommandEnvelope,
+    caller: &CallerAuthority,
+    phase: TransportPhase,
+) -> Result<ProviderProbeConnectPreparation, StoreError> {
     crate::provider_profile_validation::validate_envelope_identity(envelope, caller)?;
     if envelope.authority_generation != daemon.authority_generation {
         return Err(StoreError::StaleAuthorityGeneration {
@@ -680,8 +790,8 @@ fn prepare_tx(
     let wire: unleash_protocol::TestProviderProfilePayload =
         serde_json::from_value(serde_json::Value::Object(envelope.payload.clone()))
             .map_err(|_| invalid("payload connect invalide"))?;
-    if wire.phase() != ProviderTestPhase::Connect {
-        return Err(invalid("phase connect exacte attendue"));
+    if wire.phase() != phase.wire() {
+        return Err(invalid("phase transport exacte attendue"));
     }
     let profile_id: uuid::Uuid = wire.profile_id().parse().map_err(|_| hidden())?;
     if profile_id.is_nil() || profile_id.to_string() != wire.profile_id() {
@@ -689,9 +799,28 @@ fn prepare_tx(
     }
     let profile = crate::provider_profiles::resolve(tx, profile_id, wire.profile_version())?
         .ok_or_else(hidden)?;
-    let grant = crate::provider_probe_mandates::resolve_connect_grant(
-        tx, daemon, now, envelope, caller, &wire, &profile,
-    )?;
+    let grant = if phase == TransportPhase::Connect {
+        crate::provider_probe_mandates::resolve_connect_grant(
+            tx, daemon, now, envelope, caller, &wire, &profile,
+        )?
+    } else {
+        crate::provider_probe_mandates::resolve_transport_grant(
+            tx,
+            daemon,
+            now,
+            &crate::provider_probe_mandates::TransportGrantRequest {
+                envelope,
+                caller,
+                wire: &wire,
+                profile: &profile,
+                phase,
+            },
+        )?
+    };
+    if phase == TransportPhase::Inventory {
+        crate::provider_probe_inventory::request_endpoint(&profile)?;
+        crate::provider_probe_inventory::bounds(&profile, &wire)?;
+    }
     let scope_revision = scope_revision(tx, envelope.project_id)?;
     let (policy_revision, policy_digest) = policy(tx, envelope.project_id)?;
     Ok(ProviderProbeConnectPreparation {
@@ -715,17 +844,29 @@ fn validate_preparation(
     now: TimestampMs,
     command: &ConnectCommand<'_>,
 ) -> Result<TimestampMs, StoreError> {
-    let current = prepare_tx(tx, daemon, now, command.envelope, command.caller)?;
+    let current = prepare_transport_tx(
+        tx,
+        daemon,
+        now,
+        command.envelope,
+        command.caller,
+        command.phase,
+    )?;
     let mut original = command.preparation.clone();
     original.prepared_at_ms = now;
     if current != original || command.preparation.prepared_at_ms > now {
         return Err(invalid("préparation connect périmée ou divergente"));
     }
+    let timeout = if command.phase == TransportPhase::Inventory {
+        crate::provider_probe_inventory::bounds(&current.profile, &current.wire)?.timeout_ms
+    } else {
+        current.wire.limits().timeout_ms()
+    };
     let expiry = command
         .preparation
         .prepared_at_ms
         .as_i64()
-        .checked_add(integer(current.wire.limits().timeout_ms())?)
+        .checked_add(integer(timeout)?)
         .ok_or_else(|| invalid("échéance connect hors plage"))?
         .min(current.grant.expires_at_ms.as_i64());
     if expiry <= now.as_i64() {
@@ -736,7 +877,11 @@ fn validate_preparation(
 
 fn transport_digest(
     preparation: &ProviderProbeConnectPreparation,
+    phase: TransportPhase,
 ) -> Result<Sha256Digest, StoreError> {
+    if phase == TransportPhase::Inventory {
+        return crate::provider_probe_inventory::request_digest(preparation);
+    }
     // This is the closed loopback component's request identity, not a claim that
     // a configured name is loopback or that a model runs there. Its executor
     // still rejects every target outside that constraint before any socket.
@@ -771,7 +916,7 @@ fn context(
         action_id: ActionId::from_uuid(config.id_generator.new_uuid()),
         mandate_ref: preparation.grant.mandate_ref,
         mandate_digest: preparation.grant.mandate_digest,
-        phase: ProviderTestPhase::Connect,
+        phase: command.phase.wire(),
         profile_id: profile.configuration.profile_id,
         profile_version: profile.configuration.profile_version,
         profile_version_ref: profile.profile_version_ref.clone(),
@@ -781,10 +926,18 @@ fn context(
         policy_revision: preparation.policy_revision,
         policy_digest: preparation.policy_digest,
         command_digest: preparation.command_digest,
-        request_digest: transport_digest(preparation)?,
+        request_digest: transport_digest(preparation, command.phase)?,
         locality: preparation.wire.locality(),
         capability_set: preparation.wire.capability_set().to_vec(),
         limits: preparation.wire.limits().clone(),
+        inventory_limits: if command.phase == TransportPhase::Inventory {
+            Some(crate::provider_probe_inventory::bounds(
+                &preparation.profile,
+                &preparation.wire,
+            )?)
+        } else {
+            None
+        },
         deadline,
     })
 }
@@ -810,13 +963,13 @@ pub(crate) fn commit_tx(
     let context = context(config, command, receipt, deadline)?;
     let digest = unleash_protocol::canonical_sha256(&context)?;
     tx.pragma_update(None, "defer_foreign_keys", "ON")?;
-    tx.execute("INSERT INTO provider_probes(probe_id,command_receipt_id,principal_id,source_run_id,profile_version_ref,context_hash,phase,state,wait_reason,admission_class,authority_generation,daemon_epoch,fence,revision,queued_at_ms) VALUES(?1,?2,?3,NULL,?4,?5,'connect','queued',NULL,'work',?6,?7,0,1,?8)", params![context.probe_id.to_string(),receipt.to_string(),context.principal_id.as_str(),context.profile_version_ref,digest.to_string(),context.authority_generation.to_string(),integer(context.daemon_epoch.as_u64())?,now.as_i64()])?;
-    tx.execute("INSERT INTO provider_probe_transport_contexts(probe_id,receipt_id,actor_id,principal_id,project_id,profile_version_ref,authority_generation,daemon_epoch,action_id,mandate_ref,phase,context_digest,context_json,created_at_ms) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,'connect',?11,?12,?13)", params![context.probe_id.to_string(),receipt.to_string(),context.actor_id.as_str(),context.principal_id.as_str(),context.project_id.map(|id|id.to_string()),context.profile_version_ref,context.authority_generation.to_string(),integer(context.daemon_epoch.as_u64())?,context.action_id.to_string(),context.mandate_ref.to_string(),digest.to_string(),serde_json::to_string(&context)?,now.as_i64()])?;
+    tx.execute("INSERT INTO provider_probes(probe_id,command_receipt_id,principal_id,source_run_id,profile_version_ref,context_hash,phase,state,wait_reason,admission_class,authority_generation,daemon_epoch,fence,revision,queued_at_ms) VALUES(?1,?2,?3,NULL,?4,?5,?9,'queued',NULL,'work',?6,?7,0,1,?8)", params![context.probe_id.to_string(),receipt.to_string(),context.principal_id.as_str(),context.profile_version_ref,digest.to_string(),context.authority_generation.to_string(),integer(context.daemon_epoch.as_u64())?,now.as_i64(),command.phase.name()])?;
+    tx.execute("INSERT INTO provider_probe_transport_contexts(probe_id,receipt_id,actor_id,principal_id,project_id,profile_version_ref,authority_generation,daemon_epoch,action_id,mandate_ref,phase,context_digest,context_json,created_at_ms) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?14,?11,?12,?13)", params![context.probe_id.to_string(),receipt.to_string(),context.actor_id.as_str(),context.principal_id.as_str(),context.project_id.map(|id|id.to_string()),context.profile_version_ref,context.authority_generation.to_string(),integer(context.daemon_epoch.as_u64())?,context.action_id.to_string(),context.mandate_ref.to_string(),digest.to_string(),serde_json::to_string(&context)?,now.as_i64(),command.phase.name()])?;
     events.push(crate::EventAppendSpec {
         event_type:"ProviderProbePrepared".to_owned(), aggregate_type:crate::AggregateKind::ProviderProbe,
         aggregate_id:context.probe_id.as_uuid(), aggregate_revision:Revision::new(1), project_id:context.project_id,
         correlation_id:command.envelope.command_id.as_uuid(), causation_kind:unleash_protocol::EventCausationKind::Command,
-        causation_id:None, payload:serde_json::json!({"probe_id":context.probe_id,"action_id":context.action_id,"phase":"connect","context_digest":digest,"mandate_ref":context.mandate_ref}).as_object().cloned().ok_or_else(|| invalid("événement connect invalide"))?,
+        causation_id:None, payload:serde_json::json!({"probe_id":context.probe_id,"action_id":context.action_id,"phase":context.phase,"context_digest":digest,"mandate_ref":context.mandate_ref}).as_object().cloned().ok_or_else(|| invalid("événement transport invalide"))?,
         sensitivity:unleash_protocol::Sensitivity::Restricted, outbox_destinations:vec!["clients".to_owned(),"harness".to_owned()],
     });
     Ok(Revision::new(1))
@@ -828,22 +981,42 @@ struct ConnectContextRow {
     claim_id: Option<String>,
     claim_revision: i64,
     claimed_at_ms: Option<i64>,
+    phase: String,
 }
 
 pub(crate) fn read_context(
     conn: &Connection,
     probe: ProviderProbeId,
 ) -> Result<Option<ProviderProbeConnectRecord>, StoreError> {
-    let row: Option<ConnectContextRow> = conn.query_row("SELECT context_json,context_digest,claim_id,claim_revision,claimed_at_ms FROM provider_probe_transport_contexts WHERE probe_id=?1", [probe.to_string()], |row| Ok(ConnectContextRow { json:row.get(0)?,digest:row.get(1)?,claim_id:row.get(2)?,claim_revision:row.get(3)?,claimed_at_ms:row.get(4)? })).optional()?;
+    read_transport_context(conn, probe, TransportPhase::Connect)
+}
+
+pub(crate) fn read_transport_context(
+    conn: &Connection,
+    probe: ProviderProbeId,
+    phase: TransportPhase,
+) -> Result<Option<ProviderProbeConnectRecord>, StoreError> {
+    let row: Option<ConnectContextRow> = conn.query_row("SELECT context_json,context_digest,claim_id,claim_revision,claimed_at_ms,phase FROM provider_probe_transport_contexts WHERE probe_id=?1", [probe.to_string()], |row| Ok(ConnectContextRow { json:row.get(0)?,digest:row.get(1)?,claim_id:row.get(2)?,claim_revision:row.get(3)?,claimed_at_ms:row.get(4)?,phase:row.get(5)? })).optional()?;
     row.map(|row| {
         let context: ProviderProbeConnectContext = serde_json::from_str(&row.json)?;
         let digest: Sha256Digest = row.digest.parse()?;
         if context.probe_id != probe
             || context.schema_version != 1
-            || context.phase != ProviderTestPhase::Connect
+            || context.phase != phase.wire()
+            || row.phase != phase.name()
             || unleash_protocol::canonical_sha256(&context)? != digest
         {
             return Err(invalid("contexte connect durable incohérent"));
+        }
+        match (phase, &context.inventory_limits) {
+            (TransportPhase::Connect, None) => {}
+            (TransportPhase::Inventory, Some(limits)) => {
+                limits.validate()?;
+                if limits.timeout_ms > context.limits.timeout_ms() {
+                    return Err(invalid("délai inventory supérieur à sa demande"));
+                }
+            }
+            _ => return Err(invalid("bornes de transport absentes ou d'une autre phase")),
         }
         let claim = match (row.claim_id, row.claimed_at_ms, row.claim_revision) {
             (None, None, 0) => None,
@@ -865,6 +1038,30 @@ pub(crate) fn read_context(
     .transpose()
 }
 
+fn read_any_transport_context(
+    conn: &Connection,
+    probe: ProviderProbeId,
+) -> Result<Option<ProviderProbeConnectRecord>, StoreError> {
+    // This only classifies an admission candidate's persisted variant. It never
+    // reconstructs a caller, an original claim or a broker append capability.
+    let phase: Option<String> = conn
+        .query_row(
+            "SELECT phase FROM provider_probe_transport_contexts WHERE probe_id=?1",
+            [probe.to_string()],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let Some(phase) = phase else {
+        return Ok(None);
+    };
+    let phase = match phase.as_str() {
+        "connect" => TransportPhase::Connect,
+        "inventory" => TransportPhase::Inventory,
+        _ => return Err(invalid("phase transport durable inconnue")),
+    };
+    read_transport_context(conn, probe, phase)
+}
+
 fn current_profile(
     tx: &Transaction<'_>,
     daemon: &crate::DaemonStateRow,
@@ -872,6 +1069,7 @@ fn current_profile(
     record: &ProviderProbeConnectRecord,
 ) -> Result<crate::ConfiguredProviderProfile, StoreError> {
     let c = &record.context;
+    let phase = TransportPhase::from_wire(c.phase)?;
     if c.authority_generation != daemon.authority_generation {
         return Err(StoreError::StaleAuthorityGeneration {
             expected: daemon.authority_generation,
@@ -886,8 +1084,14 @@ fn current_profile(
     }
     let profile = crate::provider_profiles::resolve(tx, c.profile_id, c.profile_version)?
         .ok_or_else(hidden)?;
-    let grant =
-        crate::provider_probe_mandates::revalidate_connect_grant(tx, daemon, now, c, &profile)?;
+    let grant = if phase == TransportPhase::Connect {
+        crate::provider_probe_mandates::revalidate_connect_grant(tx, daemon, now, c, &profile)?
+    } else {
+        crate::provider_probe_inventory::validate_context_profile(c, &profile)?;
+        crate::provider_probe_mandates::revalidate_transport_grant(
+            tx, daemon, now, c, &profile, phase,
+        )?
+    };
     let (revision, digest) = policy(tx, c.project_id)?;
     if profile.profile_version_ref != c.profile_version_ref
         || profile.configuration_digest != c.configuration_digest
@@ -924,14 +1128,14 @@ pub(crate) fn validate_admission(
     if daemon.schema_version < 15 {
         return Ok(false);
     }
-    let Some(record) = read_context(tx, probe)? else {
+    let Some(record) = read_any_transport_context(tx, probe)? else {
         return Ok(false);
     };
     let profile = current_profile(tx, &daemon, now, &record)?;
     let c = &record.context;
     let intent: Option<String> = tx.query_row(
-        "SELECT b.intent_json FROM provider_probes p JOIN actions a ON a.action_id=?2 JOIN broker_intents b ON b.action_id=a.action_id WHERE p.probe_id=?1 AND p.state='queued' AND p.phase='connect' AND p.admission_class='work' AND p.fence=0 AND p.authority_generation=?3 AND p.daemon_epoch=?4 AND p.context_hash=?5 AND p.command_receipt_id=?6 AND p.principal_id=?7 AND p.profile_version_ref=?8 AND a.state='authorizing' AND a.authority_generation=?3 AND a.daemon_epoch=?4 AND a.fence=0 AND a.origin_kind='control_plane' AND a.control_principal_id=?7",
-        params![probe.to_string(),c.action_id.to_string(),c.authority_generation.to_string(),integer(c.daemon_epoch.as_u64())?,record.context_digest.to_string(),c.receipt_id.to_string(),c.principal_id.as_str(),c.profile_version_ref], |row| row.get(0),
+        "SELECT b.intent_json FROM provider_probes p JOIN actions a ON a.action_id=?2 JOIN broker_intents b ON b.action_id=a.action_id WHERE p.probe_id=?1 AND p.state='queued' AND p.phase=?9 AND p.admission_class='work' AND p.fence=0 AND p.authority_generation=?3 AND p.daemon_epoch=?4 AND p.context_hash=?5 AND p.command_receipt_id=?6 AND p.principal_id=?7 AND p.profile_version_ref=?8 AND a.state='authorizing' AND a.authority_generation=?3 AND a.daemon_epoch=?4 AND a.fence=0 AND a.origin_kind='control_plane' AND a.control_principal_id=?7",
+        params![probe.to_string(),c.action_id.to_string(),c.authority_generation.to_string(),integer(c.daemon_epoch.as_u64())?,record.context_digest.to_string(),c.receipt_id.to_string(),c.principal_id.as_str(),c.profile_version_ref,TransportPhase::from_wire(c.phase)?.name()], |row| row.get(0),
     ).optional()?;
     let intent: crate::BrokerIntent = serde_json::from_str(&intent.ok_or_else(hidden)?)?;
     validate_bound_intent(c, &profile, &intent)?;
@@ -945,11 +1149,11 @@ pub(crate) fn validate_admission(
 }
 
 fn unresolved_connect_occupation(tx: &Transaction<'_>) -> Result<i64, StoreError> {
-    // No qualified server identity exists in this first transport. All connect
+    // No qualified server identity exists in this first transport. Both passive
     // contexts share one conservative bound, independent of profile/locality,
     // authority generation and epoch. This is not Q-19 server qualification.
     Ok(tx.query_row(
-        "SELECT COUNT(*) FROM capacity_reservations r JOIN capacity_pools pool ON pool.pool_id=r.pool_id JOIN execution_reservation_owners o ON o.reservation_id=r.reservation_id JOIN provider_probe_transport_contexts c ON c.probe_id=o.provider_probe_id WHERE r.state IN ('held','reconciling') AND r.amount>0 AND r.owner_type='provider_probe' AND c.phase='connect' AND pool.pool_kind='execution' AND pool.scope_key='global'",
+        "SELECT COUNT(*) FROM capacity_reservations r JOIN capacity_pools pool ON pool.pool_id=r.pool_id JOIN execution_reservation_owners o ON o.reservation_id=r.reservation_id JOIN provider_probe_transport_contexts c ON c.probe_id=o.provider_probe_id WHERE r.state IN ('held','reconciling') AND r.amount>0 AND r.owner_type='provider_probe' AND c.phase IN ('connect','inventory') AND pool.pool_kind='execution' AND pool.scope_key='global'",
         [], |row| row.get(0),
     )?)
 }
@@ -980,7 +1184,7 @@ pub(crate) fn validate_admission_budgets(
     if read_daemon_state_conn(tx)?.schema_version < 15 {
         return Ok(false);
     }
-    let Some(record) = read_context(tx, probe)? else {
+    let Some(record) = read_any_transport_context(tx, probe)? else {
         return Ok(false);
     };
     if !budgets.is_empty() {
@@ -1000,10 +1204,11 @@ pub(crate) fn validate_admission_budgets(
     Ok(true)
 }
 
-fn claim_identity(
+fn claim_transport_identity(
     tx: &Transaction<'_>,
     daemon: &crate::DaemonStateRow,
     request: &ClaimProviderProbeConnectRequest,
+    phase: TransportPhase,
 ) -> Result<ProviderProbeConnectRecord, StoreError> {
     crate::provider_profile_validation::validate_envelope_identity(
         &request.envelope,
@@ -1042,9 +1247,10 @@ fn claim_identity(
         digest,
     )?
     .ok_or_else(hidden)?;
-    let record = read_context(
+    let record = read_transport_context(
         tx,
         ProviderProbeId::from_uuid(request.envelope.aggregate_id),
+        phase,
     )?
     .ok_or_else(hidden)?;
     let c = &record.context;
@@ -1081,15 +1287,16 @@ fn claim_identity(
     Ok(record)
 }
 
-fn validate_live_context(
+fn validate_live_transport_context(
     tx: &Transaction<'_>,
     daemon: &crate::DaemonStateRow,
     now: TimestampMs,
     request: &ClaimProviderProbeConnectRequest,
     record: &ProviderProbeConnectRecord,
+    phase: TransportPhase,
 ) -> Result<ProviderProbeConnectPreparation, StoreError> {
     let c = &record.context;
-    let fresh = prepare_tx(tx, daemon, now, &request.envelope, &request.caller)?;
+    let fresh = prepare_transport_tx(tx, daemon, now, &request.envelope, &request.caller, phase)?;
     if c.deadline <= now
         || fresh.principal_id != c.principal_id
         || fresh.profile.profile_version_ref != c.profile_version_ref
@@ -1100,7 +1307,7 @@ fn validate_live_context(
         || fresh.policy_digest != c.policy_digest
         || fresh.grant.mandate_ref != c.mandate_ref
         || fresh.grant.mandate_digest != c.mandate_digest
-        || transport_digest(&fresh)? != c.request_digest
+        || transport_digest(&fresh, phase)? != c.request_digest
     {
         return Err(StoreError::StaleFence {
             message: "préconditions du contexte connect modifiées avant claim".to_owned(),
@@ -1115,10 +1322,11 @@ fn validate_fresh_claim(
     now: TimestampMs,
     request: &ClaimProviderProbeConnectRequest,
     record: &ProviderProbeConnectRecord,
+    phase: TransportPhase,
 ) -> Result<unleash_protocol::provider_profile::ProviderEndpointDestination, StoreError> {
-    let fresh = validate_live_context(tx, daemon, now, request, record)?;
+    let fresh = validate_live_transport_context(tx, daemon, now, request, record, phase)?;
     let c = &record.context;
-    let queued: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM provider_probes WHERE probe_id=?1 AND state='queued' AND phase='connect' AND revision=1 AND fence=0 AND principal_id=?2 AND authority_generation=?3 AND daemon_epoch=?4) AND NOT EXISTS(SELECT 1 FROM actions WHERE action_id=?5)", params![c.probe_id.to_string(),c.principal_id.as_str(),c.authority_generation.to_string(),integer(c.daemon_epoch.as_u64())?,c.action_id.to_string()], |row|row.get(0))?;
+    let queued: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM provider_probes WHERE probe_id=?1 AND state='queued' AND phase=?6 AND revision=1 AND fence=0 AND principal_id=?2 AND authority_generation=?3 AND daemon_epoch=?4) AND NOT EXISTS(SELECT 1 FROM actions WHERE action_id=?5)", params![c.probe_id.to_string(),c.principal_id.as_str(),c.authority_generation.to_string(),integer(c.daemon_epoch.as_u64())?,c.action_id.to_string(),phase.name()], |row|row.get(0))?;
     if !queued {
         return Err(invalid(
             "probe connect non disponible pour sa première claim",
@@ -1138,14 +1346,24 @@ fn claim_tx(
     now: TimestampMs,
     request: &ClaimProviderProbeConnectRequest,
 ) -> Result<ProviderProbeConnectClaimOutcome, StoreError> {
+    claim_transport_tx(tx, config, now, request, TransportPhase::Connect)
+}
+
+pub(crate) fn claim_transport_tx(
+    tx: &Transaction<'_>,
+    config: &crate::StoreConfig,
+    now: TimestampMs,
+    request: &ClaimProviderProbeConnectRequest,
+    phase: TransportPhase,
+) -> Result<ProviderProbeConnectClaimOutcome, StoreError> {
     let daemon = read_daemon_state_conn(tx)?;
-    let record = claim_identity(tx, &daemon, request)?;
+    let record = claim_transport_identity(tx, &daemon, request, phase)?;
     if record.claim.is_some() {
         // This is a readonly inspection. It never returns a new execution token,
         // including if a prior acknowledgement was lost or the mandate expired.
         return Ok(ProviderProbeConnectClaimOutcome::AlreadyClaimed(record));
     }
-    let destination = validate_fresh_claim(tx, &daemon, now, request, &record)?;
+    let destination = validate_fresh_claim(tx, &daemon, now, request, &record, phase)?;
     let claim_id = config.id_generator.new_uuid();
     if claim_id.is_nil() {
         return Err(invalid("identité de claim nulle"));
@@ -1156,7 +1374,7 @@ fn claim_tx(
             message: "CAS claim connect refusé".to_owned(),
         });
     }
-    let record = read_context(tx, record.context.probe_id)?.ok_or_else(hidden)?;
+    let record = read_transport_context(tx, record.context.probe_id, phase)?.ok_or_else(hidden)?;
     let claim = record
         .claim
         .clone()

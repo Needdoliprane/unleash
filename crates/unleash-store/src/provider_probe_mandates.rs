@@ -433,6 +433,41 @@ pub(crate) fn resolve_connect_grant(
     wire: &TestProviderProfilePayload,
     profile: &crate::ConfiguredProviderProfile,
 ) -> Result<ResolvedConnectGrant, StoreError> {
+    resolve_transport_grant(
+        tx,
+        daemon,
+        now,
+        &TransportGrantRequest {
+            envelope,
+            caller,
+            wire,
+            profile,
+            phase: crate::provider_probe_connect::TransportPhase::Connect,
+        },
+    )
+}
+
+pub(crate) struct TransportGrantRequest<'a> {
+    pub envelope: &'a CommandEnvelope,
+    pub caller: &'a CallerAuthority,
+    pub wire: &'a TestProviderProfilePayload,
+    pub profile: &'a crate::ConfiguredProviderProfile,
+    pub phase: crate::provider_probe_connect::TransportPhase,
+}
+
+pub(crate) fn resolve_transport_grant(
+    tx: &Transaction<'_>,
+    daemon: &DaemonStateRow,
+    now: TimestampMs,
+    request: &TransportGrantRequest<'_>,
+) -> Result<ResolvedConnectGrant, StoreError> {
+    let TransportGrantRequest {
+        envelope,
+        caller,
+        wire,
+        profile,
+        phase,
+    } = request;
     require_security_admin(caller, "TestProviderProfile")?;
     if envelope.authority_generation != daemon.authority_generation {
         return Err(StoreError::StaleAuthorityGeneration {
@@ -450,6 +485,7 @@ pub(crate) fn resolve_connect_grant(
             project_id: envelope.project_id,
             wire,
             profile,
+            phase: *phase,
         },
     )
 }
@@ -459,6 +495,7 @@ struct ConnectGrantBinding<'a> {
     project_id: Option<ProjectId>,
     wire: &'a TestProviderProfilePayload,
     profile: &'a crate::ConfiguredProviderProfile,
+    phase: crate::provider_probe_connect::TransportPhase,
 }
 
 /// Checks the already authorized context's facts for admission. This does not
@@ -469,6 +506,24 @@ pub(crate) fn revalidate_connect_grant(
     now: TimestampMs,
     context: &crate::ProviderProbeConnectContext,
     profile: &crate::ConfiguredProviderProfile,
+) -> Result<ResolvedConnectGrant, StoreError> {
+    revalidate_transport_grant(
+        tx,
+        daemon,
+        now,
+        context,
+        profile,
+        crate::provider_probe_connect::TransportPhase::Connect,
+    )
+}
+
+pub(crate) fn revalidate_transport_grant(
+    tx: &Transaction<'_>,
+    daemon: &DaemonStateRow,
+    now: TimestampMs,
+    context: &crate::ProviderProbeConnectContext,
+    profile: &crate::ConfiguredProviderProfile,
+    phase: crate::provider_probe_connect::TransportPhase,
 ) -> Result<ResolvedConnectGrant, StoreError> {
     let wire = TestProviderProfilePayload::try_new(
         context.profile_id.to_string(),
@@ -489,6 +544,7 @@ pub(crate) fn revalidate_connect_grant(
             project_id: context.project_id,
             wire: &wire,
             profile,
+            phase,
         },
     )
 }
@@ -504,6 +560,7 @@ fn resolve_connect_binding(
         project_id,
         wire,
         profile,
+        phase,
     } = binding;
     let reference: ReceiptId = wire.mandate_ref().parse().map_err(|_| hidden())?;
     if reference.as_uuid().is_nil() || reference.to_string() != wire.mandate_ref() {
@@ -519,8 +576,8 @@ fn resolve_connect_binding(
     let target = project(grant.scope_kind, &grant.scope_id)?;
     if stored.revocation.is_some()
         || grant.authority_generation != daemon.authority_generation
-        || grant.permission.phase != ProviderTestPhase::Connect
-        || wire.phase() != ProviderTestPhase::Connect
+        || grant.permission.phase != phase.wire()
+        || wire.phase() != phase.wire()
         || grant.permission.expires_at_ms <= now
         || grant.issued_at_ms > now
         || !current_principal
@@ -537,7 +594,7 @@ fn resolve_connect_binding(
     {
         return Err(hidden());
     }
-    validate_connect_bounds(wire, &grant.permission, profile)?;
+    validate_connect_bounds(wire, &grant.permission, profile, *phase)?;
     let source: bool = tx.query_row(
         "SELECT EXISTS(SELECT 1 FROM command_receipts WHERE receipt_id=?1 AND command_type='SetPolicy' AND command_id=?2 AND actor_id=?3 AND authority_generation=?4 AND state IN ('accepted','completed'))",
         params![reference.to_string(),grant.command_id.to_string(),grant.issued_by_actor.as_str(),daemon.authority_generation.to_string()], |row|row.get(0),
@@ -562,10 +619,12 @@ fn validate_connect_bounds(
     wire: &TestProviderProfilePayload,
     permission: &ProviderProbeMandateIssue,
     profile: &crate::ConfiguredProviderProfile,
+    phase: crate::provider_probe_connect::TransportPhase,
 ) -> Result<(), StoreError> {
     let limits = wire.limits();
     if limits.timeout_ms() > permission.limits.timeout_ms()
-        || limits.timeout_ms() > profile.configuration.payload.limits().connect_timeout_ms
+        || (phase == crate::provider_probe_connect::TransportPhase::Connect
+            && limits.timeout_ms() > profile.configuration.payload.limits().connect_timeout_ms)
         || limits.max_calls() > permission.limits.max_calls()
         || limits.max_output_tokens() > permission.limits.max_output_tokens()
         || limits.max_cost_usd_micros() > permission.limits.max_cost_usd_micros()
