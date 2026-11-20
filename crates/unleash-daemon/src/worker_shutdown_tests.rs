@@ -10,7 +10,10 @@ use unleash_platform::{ProcessVerification, verify_process_identity};
 use unleash_protocol::{ClientKind, CommandEnvelope, ProtocolVersion, QueryEnvelope, ReceiptState};
 use unleash_testkit::local_test_dir;
 
-use crate::execution_scheduler::{ExecutionSchedulingInputs, schedule_execution};
+use crate::execution_scheduler::{
+    ExecutionSchedulingInputs, schedule_execution, schedule_invocation_execution,
+};
+use crate::worker_launch::{InvocationWorkerStep, WorkerLaunchError};
 use crate::{DaemonConfig, DaemonHandle, DaemonStartOutcome, UnleashDaemon};
 
 #[allow(
@@ -20,35 +23,94 @@ use crate::{DaemonConfig, DaemonHandle, DaemonStartOutcome, UnleashDaemon};
 #[path = "../../unleash-store/tests/common/admission_fixture.rs"]
 mod admission_fixture;
 #[path = "../tests/support/worker_admission_fixture.rs"]
+#[allow(dead_code, reason = "Shared with the existing integration tests")]
 mod worker_admission_fixture;
+
+#[test]
+fn invocation_worker_turn_preserves_an_earlier_replay() {
+    use unleash_scheduler::{Decision, ExecutionUnit};
+    use unleash_store::{AdmissionOutcome, StoreConfig, UnleashStore, WriteCriticality};
+
+    let directory = local_test_dir("worker-turn-replay").unwrap();
+    let store = UnleashStore::open(StoreConfig::new(directory.path())).unwrap();
+    let evidence = admission_fixture::seed(&store, false);
+    worker_admission_fixture::set_fixture_order(&store);
+    let replay = unleash_domain::ReplayWorkerId::from_u128(3);
+    store
+        .execute_in_writer_tx(WriteCriticality::Critical, move |tx, _| {
+            assert_eq!(
+                tx.execute(
+                    "UPDATE replay_workers SET queued_at_ms=0 WHERE replay_worker_id=?1",
+                    [replay.to_string()],
+                )?,
+                1
+            );
+            Ok(())
+        })
+        .unwrap();
+    admission_fixture::observe(&store, evidence);
+    let pool = admission_fixture::POOL;
+    let snapshot = store.execution_admission_snapshot(pool).unwrap();
+    let candidate = admission_fixture::unit(3);
+    let mut inputs = ExecutionSchedulingInputs::default();
+    inputs.budgets.insert(candidate, vec![]);
+    let (admission, proposed) =
+        schedule_invocation_execution(&store, pool, snapshot.token, inputs).unwrap();
+
+    assert!(
+        matches!(proposed, Decision::Admit(plan) if plan.unit == ExecutionUnit::ReplayWorker(replay))
+    );
+    assert!(matches!(admission, AdmissionOutcome::Unchanged));
+    assert_eq!(
+        store.execution_pool_state(pool).unwrap().current_occupation,
+        0
+    );
+    store.shutdown().unwrap();
+}
 
 #[tokio::test]
 #[ignore = "requires the packaged Rust worker via UNLEASH_TEST_AGENT_WORKER_BIN"]
 async fn stop_daemon_reaps_the_admitted_worker_before_reporting_completion() {
     let directory = local_test_dir("stop-daemon-worker").unwrap();
-    let configuration = DaemonConfig {
-        data_root: Some(directory.path().join("data")),
-        rendezvous_dir: Some(directory.path().join("rdv")),
-        ..DaemonConfig::default()
-    };
-    let DaemonStartOutcome::Started(handle) = UnleashDaemon::start(configuration).await.unwrap()
-    else {
-        panic!("fixture requires a new daemon");
-    };
-    let runtime = handle.test_runtime_state();
-    let store = Arc::clone(&runtime.store);
-    drop(runtime);
+    let handle = fixture_daemon(directory.path()).await;
+    let store = Arc::clone(&handle.test_runtime_state().store);
     let fixture_store = Arc::clone(&store);
-    let (admission, _) = tokio::task::spawn_blocking(move || {
-        worker_admission_fixture::admit_worker_fixture(&fixture_store)
+    let (token, inputs, _) = tokio::task::spawn_blocking(move || {
+        worker_admission_fixture::prepare_worker_fixture(&fixture_store)
     })
     .await
     .unwrap();
     let executable = worker_admission_fixture::worker_test_executable();
-    let (start, identity) = handle
-        .start_invocation_worker(admission.clone(), &executable)
-        .await
-        .unwrap();
+    let competing_inputs = ExecutionSchedulingInputs {
+        budgets: inputs.budgets.clone(),
+        ..ExecutionSchedulingInputs::default()
+    };
+    let (first, second) = tokio::join!(
+        handle.schedule_invocation_worker(admission_fixture::POOL, token, inputs, &executable),
+        handle.schedule_invocation_worker(
+            admission_fixture::POOL,
+            token,
+            competing_inputs,
+            &executable,
+        ),
+    );
+    let (admission, start) = match (first, second) {
+        (
+            Ok(InvocationWorkerStep::Admitted { admission, start }),
+            Err(WorkerLaunchError::Admission(unleash_store::StoreError::RevisionConflict {
+                ..
+            })),
+        )
+        | (
+            Err(WorkerLaunchError::Admission(unleash_store::StoreError::RevisionConflict {
+                ..
+            })),
+            Ok(InvocationWorkerStep::Admitted { admission, start }),
+        ) => (admission, start),
+        (first, second) => panic!("one worker and one stale turn expected: {first:?}, {second:?}"),
+    };
+    let (start, identity) = start.unwrap();
+    assert_eq!(admission.unit, admission_fixture::unit(1));
     assert_eq!(start.stream_id, handle.stream_id());
     assert!(start.sequence > admission.event_cursor.sequence);
     let database = store.config().db_path.clone();
@@ -68,7 +130,81 @@ async fn stop_daemon_reaps_the_admitted_worker_before_reporting_completion() {
         verify_process_identity(&identity).unwrap(),
         ProcessVerification::Exited
     );
-    assert_reconciliation(database, admission, start).await;
+    assert_reconciliation(database, *admission, start).await;
+}
+
+#[tokio::test]
+async fn unavailable_worker_returns_the_durable_admission_for_reconciliation() {
+    let directory = local_test_dir("schedule-unavailable-worker").unwrap();
+    let handle = fixture_daemon(directory.path()).await;
+    let store = Arc::clone(&handle.test_runtime_state().store);
+    let fixture_store = Arc::clone(&store);
+    let (token, inputs, _) = tokio::task::spawn_blocking(move || {
+        worker_admission_fixture::prepare_worker_fixture(&fixture_store)
+    })
+    .await
+    .unwrap();
+    let InvocationWorkerStep::Admitted { admission, start } = handle
+        .schedule_invocation_worker(
+            admission_fixture::POOL,
+            token,
+            inputs,
+            &directory.path().join("absent-worker"),
+        )
+        .await
+        .unwrap()
+    else {
+        panic!("expected a committed admission");
+    };
+    assert!(matches!(start, Err(WorkerLaunchError::NativeProcess)));
+    assert_eq!(admission.unit, admission_fixture::unit(1));
+    let state = tokio::task::spawn_blocking(move || {
+        store
+            .read_snapshot(|connection, _| {
+                Ok(connection.query_row(
+                    "SELECT i.state,r.state,(SELECT count(*) FROM events
+                    WHERE aggregate_id=i.invocation_id AND event_type='InvocationStarted')
+                 FROM invocations i JOIN capacity_reservations r ON r.reservation_id=?2
+                 WHERE i.invocation_id=?1",
+                    rusqlite::params![
+                        admission.unit.id().to_string(),
+                        admission.reservation_id.to_string()
+                    ],
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, i64>(2)?,
+                        ))
+                    },
+                )?)
+            })
+            .unwrap()
+    })
+    .await
+    .unwrap();
+    assert_eq!(state, ("admitted".into(), "held".into(), 0));
+    assert_eq!(
+        handle
+            .shutdown_graceful("fixture complete")
+            .await
+            .unwrap()
+            .outcome,
+        StopOutcome::Complete
+    );
+}
+
+async fn fixture_daemon(path: &std::path::Path) -> DaemonHandle {
+    let configuration = DaemonConfig {
+        data_root: Some(path.join("data")),
+        rendezvous_dir: Some(path.join("rdv")),
+        ..DaemonConfig::default()
+    };
+    let DaemonStartOutcome::Started(handle) = UnleashDaemon::start(configuration).await.unwrap()
+    else {
+        panic!("fixture requires a new daemon");
+    };
+    handle
 }
 
 async fn request_stop(handle: &DaemonHandle) {

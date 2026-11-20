@@ -1,15 +1,18 @@
 //! Owns invocation workers admitted by the daemon until their controller is closed.
 
+use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use tokio::sync::{Mutex, oneshot, watch};
 use tokio::task::{JoinError, JoinSet};
+use unleash_domain::PoolId;
 use unleash_platform::OsProcessIdentity;
 use unleash_protocol::EventCursor;
-use unleash_store::{AdmissionCommit, UnleashStore};
+use unleash_store::{AdmissionCommit, AdmissionOutcome, AdmissionSnapshotToken, UnleashStore};
 
-use crate::worker_launch::{WorkerLaunchError, prepare_invocation_worker};
+use crate::execution_scheduler::{ExecutionSchedulingInputs, schedule_invocation_execution};
+use crate::worker_launch::{InvocationWorkerStep, WorkerLaunchError, prepare_invocation_worker};
 
 #[derive(Default)]
 pub(crate) struct ManagedWorkers(Mutex<WorkerTasks>);
@@ -47,6 +50,75 @@ impl ManagedWorkers {
         executable: &Path,
         draining: watch::Receiver<bool>,
     ) -> Result<Started, WorkerLaunchError> {
+        let gate = draining.clone();
+        let executable = executable.to_path_buf();
+        self.track(&gate, move |reply| {
+            run_worker(store, admission, executable, draining, move |start| {
+                let _ = reply.send(start);
+            })
+        })
+        .await?
+    }
+
+    pub(crate) async fn schedule(
+        &self,
+        store: Arc<UnleashStore>,
+        pool: PoolId,
+        token: AdmissionSnapshotToken,
+        inputs: ExecutionSchedulingInputs,
+        executable: &Path,
+        draining: watch::Receiver<bool>,
+    ) -> Result<InvocationWorkerStep, WorkerLaunchError> {
+        let gate = draining.clone();
+        let executable = executable.to_path_buf();
+        self.track(&gate, move |reply| async move {
+            if *draining.borrow() {
+                let _ = reply.send(Err(WorkerLaunchError::Draining));
+                return Ok(());
+            }
+            let scheduler_store = Arc::clone(&store);
+            let scheduled = tokio::task::spawn_blocking(move || {
+                schedule_invocation_execution(&scheduler_store, pool, token, inputs)
+            })
+            .await;
+            let admission = match scheduled {
+                Ok(Ok((AdmissionOutcome::Admitted(admission), _))) => admission,
+                Ok(Ok((AdmissionOutcome::Unchanged, decision))) => {
+                    let _ = reply.send(Ok(InvocationWorkerStep::Deferred(decision)));
+                    return Ok(());
+                }
+                Ok(Err(error)) => {
+                    let _ = reply.send(Err(error.into()));
+                    return Ok(());
+                }
+                Err(_) => {
+                    let _ = reply.send(Err(WorkerLaunchError::NativeProcess));
+                    return Ok(());
+                }
+            };
+            run_worker(
+                store,
+                (*admission).clone(),
+                executable,
+                draining,
+                move |start| {
+                    let _ = reply.send(Ok(InvocationWorkerStep::Admitted { admission, start }));
+                },
+            )
+            .await
+        })
+        .await?
+    }
+
+    async fn track<T, F>(
+        &self,
+        draining: &watch::Receiver<bool>,
+        task: impl FnOnce(oneshot::Sender<T>) -> F,
+    ) -> Result<T, WorkerLaunchError>
+    where
+        F: Future<Output = Result<(), WorkerLaunchError>> + Send + 'static,
+        T: Send + 'static,
+    {
         let mut workers = self.0.lock().await;
         if workers.closed || *draining.borrow() {
             return Err(WorkerLaunchError::Draining);
@@ -58,17 +130,9 @@ impl ManagedWorkers {
             return Err(WorkerLaunchError::ProcessExitUnconfirmed);
         }
         let (reply, started) = oneshot::channel();
-        workers.tasks.spawn(run_worker(
-            store,
-            admission,
-            executable.to_path_buf(),
-            draining,
-            reply,
-        ));
+        workers.tasks.spawn(task(reply));
         drop(workers);
-        started
-            .await
-            .map_err(|_| WorkerLaunchError::NativeProcess)?
+        started.await.map_err(|_| WorkerLaunchError::NativeProcess)
     }
 
     /// The coordinator can time this out and then continue waiting on the same tasks.
@@ -87,19 +151,19 @@ async fn run_worker(
     admission: AdmissionCommit,
     executable: PathBuf,
     mut draining: watch::Receiver<bool>,
-    reply: oneshot::Sender<Result<Started, WorkerLaunchError>>,
+    report: impl FnOnce(Result<Started, WorkerLaunchError>),
 ) -> Result<(), WorkerLaunchError> {
     if *draining.borrow() {
-        let _ = reply.send(Err(WorkerLaunchError::Draining));
+        report(Err(WorkerLaunchError::Draining));
         return Ok(());
     }
     let pending = match prepare_invocation_worker(Arc::clone(&store), admission, &executable).await
     {
         Ok(pending) => pending,
-        Err(error) => return report_start_error(reply, error),
+        Err(error) => return report_start_error(report, error),
     };
     if *draining.borrow() {
-        let _ = reply.send(Err(WorkerLaunchError::Draining));
+        report(Err(WorkerLaunchError::Draining));
         return pending.close().await;
     }
     let identity = pending.identity().clone();
@@ -108,9 +172,9 @@ async fn run_worker(
         .await
     {
         Ok(worker) => worker,
-        Err(error) => return report_start_error(reply, error),
+        Err(error) => return report_start_error(report, error),
     };
-    let _ = reply.send(Ok((worker.start_cursor(), identity)));
+    report(Ok((worker.start_cursor(), identity)));
     wait_for_drain(&mut draining).await;
     let closed = worker.close().await;
     drop(store);
@@ -122,7 +186,7 @@ async fn wait_for_drain(draining: &mut watch::Receiver<bool>) {
 }
 
 fn report_start_error(
-    reply: oneshot::Sender<Result<Started, WorkerLaunchError>>,
+    report: impl FnOnce(Result<Started, WorkerLaunchError>),
     error: WorkerLaunchError,
 ) -> Result<(), WorkerLaunchError> {
     let incomplete = match error {
@@ -134,7 +198,7 @@ fn report_start_error(
         }
         _ => None,
     };
-    let _ = reply.send(Err(error));
+    report(Err(error));
     incomplete.map_or(Ok(()), Err)
 }
 

@@ -21,6 +21,21 @@ use unleash_store::{
 
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// Result of one invocation-worker scheduling turn.
+#[derive(Debug)]
+pub enum InvocationWorkerStep {
+    /// The policy did not admit an invocation. Its proposal remains observable.
+    Deferred(unleash_scheduler::Decision),
+    /// The writer committed the invocation before the native start was attempted.
+    Admitted {
+        /// Durable attempt, lease and reservation.
+        admission: Box<AdmissionCommit>,
+        /// Durable start cursor and native identity on success. On error the
+        /// admission remains engaged.
+        start: Result<(EventCursor, OsProcessIdentity), WorkerLaunchError>,
+    },
+}
+
 /// Preparation could not establish an owned, waiting worker.
 #[derive(Debug, thiserror::Error)]
 pub enum WorkerLaunchError {

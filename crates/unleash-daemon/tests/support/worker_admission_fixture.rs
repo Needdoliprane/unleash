@@ -4,7 +4,7 @@ use std::path::PathBuf;
 
 use unleash_domain::Sha256Digest;
 use unleash_store::{
-    AdmissionCommit, AdmissionOutcome, AdmissionUnit, PrepareObjectRequest,
+    AdmissionCommit, AdmissionOutcome, AdmissionSnapshotToken, AdmissionUnit, PrepareObjectRequest,
     PublishObjectReferenceRequest, UnleashStore, WriteCriticality,
 };
 use uuid::Uuid;
@@ -51,7 +51,13 @@ pub(crate) fn set_fixture_order(store: &UnleashStore) {
         .unwrap();
 }
 
-pub(crate) fn admit_worker_fixture(store: &UnleashStore) -> (AdmissionCommit, Sha256Digest) {
+pub(crate) fn prepare_worker_fixture(
+    store: &UnleashStore,
+) -> (
+    AdmissionSnapshotToken,
+    ExecutionSchedulingInputs,
+    Sha256Digest,
+) {
     let eligibility = seed(store, false);
     set_fixture_order(store);
     let bytes = br#"{"schema_version":1,"entries":[],"fixture":"owned-worker"}"#;
@@ -98,7 +104,12 @@ pub(crate) fn admit_worker_fixture(store: &UnleashStore) -> (AdmissionCommit, Sh
             .iter()
             .map(|candidate| (candidate.unit, vec![])),
     );
-    let (outcome, _) = schedule_execution(store, POOL, snapshot.token, plan).unwrap();
+    (snapshot.token, plan, digest)
+}
+
+pub(crate) fn admit_worker_fixture(store: &UnleashStore) -> (AdmissionCommit, Sha256Digest) {
+    let (token, plan, digest) = prepare_worker_fixture(store);
+    let (outcome, _) = schedule_execution(store, POOL, token, plan).unwrap();
     let AdmissionOutcome::Admitted(grant) = outcome else {
         panic!("expected a committed invocation admission");
     };

@@ -39,7 +39,28 @@ pub fn schedule_execution(
     store: &UnleashStore,
     pool: PoolId,
     token: AdmissionSnapshotToken,
+    inputs: ExecutionSchedulingInputs,
+) -> Result<(AdmissionOutcome, Decision), StoreError> {
+    schedule_where(store, pool, token, inputs, |_| true)
+}
+
+pub(crate) fn schedule_invocation_execution(
+    store: &UnleashStore,
+    pool: PoolId,
+    token: AdmissionSnapshotToken,
+    inputs: ExecutionSchedulingInputs,
+) -> Result<(AdmissionOutcome, Decision), StoreError> {
+    schedule_where(store, pool, token, inputs, |unit| {
+        matches!(unit, AdmissionUnit::Invocation(_))
+    })
+}
+
+fn schedule_where(
+    store: &UnleashStore,
+    pool: PoolId,
+    token: AdmissionSnapshotToken,
     mut inputs: ExecutionSchedulingInputs,
+    owns: fn(AdmissionUnit) -> bool,
 ) -> Result<(AdmissionOutcome, Decision), StoreError> {
     store.commit_execution_admission_with_report(pool, token, move |snapshot| {
         let decision = decide(snapshot, &inputs)?;
@@ -48,6 +69,10 @@ pub fn schedule_execution(
             Decision::Wait { .. } => AdmissionDecision::Wait,
             Decision::Admit(plan) => {
                 let unit = store_unit(plan.unit);
+                // Keep global ordering when this executor cannot run the selected unit.
+                if !owns(unit) {
+                    return Ok((AdmissionDecision::Wait, decision));
+                }
                 let budgets = inputs.budgets.remove(&unit).ok_or_else(|| {
                     StoreError::InvariantViolation("Plan budgétaire de l’admission absent".into())
                 })?;

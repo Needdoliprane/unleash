@@ -240,6 +240,40 @@ impl DaemonHandle {
             .await
     }
 
+    /// Run one trusted scheduling turn and give an admitted invocation to the
+    /// daemon-owned worker controller.
+    ///
+    /// The scheduler still considers the whole pool. If its selected unit
+    /// belongs to another executor, the writer leaves it queued. An invocation
+    /// that was admitted and could not start remains available for reconciliation.
+    ///
+    /// # Errors
+    /// Returns an error if the daemon is draining or the writer refuses the turn.
+    pub async fn schedule_invocation_worker(
+        &self,
+        pool: unleash_domain::PoolId,
+        token: unleash_store::AdmissionSnapshotToken,
+        inputs: crate::execution_scheduler::ExecutionSchedulingInputs,
+        packaged_worker: &Path,
+    ) -> Result<crate::worker_launch::InvocationWorkerStep, crate::worker_launch::WorkerLaunchError>
+    {
+        let runtime = self
+            .runtime
+            .upgrade()
+            .ok_or(crate::worker_launch::WorkerLaunchError::Draining)?;
+        runtime
+            .invocation_workers
+            .schedule(
+                Arc::clone(&runtime.store),
+                pool,
+                token,
+                inputs,
+                packaged_worker,
+                runtime.subscribe_drain_started(),
+            )
+            .await
+    }
+
     /// Déclenche un arrêt contrôlé et attend le rapport final de drainage.
     ///
     /// # Errors
