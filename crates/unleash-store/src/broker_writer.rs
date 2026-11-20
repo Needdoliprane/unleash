@@ -14,8 +14,8 @@ use crate::{StoreConfig, StoreCutpoint, StoreError};
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde_json::{Value, json};
 use unleash_domain::{
-    ActionId, ActionOrigin, ActionState, DaemonMode, Fence, Revision, Sequence, Sha256Digest,
-    TimestampMs,
+    ActionId, ActionOrigin, ActionState, DaemonMode, DispatchId, Fence, LineageFence, Revision,
+    Sequence, Sha256Digest, TimestampMs,
 };
 use unleash_protocol::{EventCursor, RetryClass, canonical_sha256};
 
@@ -740,7 +740,13 @@ fn commit_phase_tx_inner(
                 return Err(invalid("décision dispatch différente du résultat durable"));
             }
             validate_executor_profile(tx, &intent, decision)?;
-            let normalized = json!({"schema_version":1,"action_id":action,"evaluation":request.evaluation,"intent_digest":intent.intent_digest,"payload_digest":intent.payload_digest,"decision":decision,"dispatch_id":dispatch_id,"fence":fence});
+            let request_hash = normalized_dispatch_request_hash(
+                &intent,
+                request.evaluation,
+                decision,
+                *dispatch_id,
+                *fence,
+            )?;
             crate::recovery_ops::record_action_dispatch_tx(
                 tx,
                 now,
@@ -753,7 +759,7 @@ fn commit_phase_tx_inner(
                         BrokerExecutor::Guard => "guard",
                     }
                     .to_owned(),
-                    request_hash: canonical_sha256(&normalized)?,
+                    request_hash,
                     provider_request_id: None,
                     transport_state: "dispatch_committed".to_owned(),
                     receipt_hash: None,
@@ -1014,14 +1020,104 @@ pub(crate) fn validate_execution_dispatch_tx(
     require_policy_unchanged(tx, &intent, evaluation)?;
     validate_decision(&intent, evaluation, now, &decision)?;
     validate_executor_profile(tx, &intent, &decision)?;
-    let expected = canonical_sha256(
-        &json!({"schema_version":1,"action_id":action,"evaluation":evaluation,"intent_digest":intent.intent_digest,"payload_digest":intent.payload_digest,"decision":decision,"dispatch_id":dispatch,"fence":current.fence}),
-    )?;
+    let expected =
+        normalized_dispatch_request_hash(&intent, evaluation, &decision, dispatch, current.fence)?;
+    require_normalized_dispatch_hash(tx, action, dispatch, expected)
+}
+
+fn normalized_dispatch_request_hash(
+    intent: &BrokerIntent,
+    evaluation: BrokerEvaluation,
+    decision: &BrokerAuthorizationDecision,
+    dispatch: DispatchId,
+    fence: LineageFence,
+) -> Result<Sha256Digest, StoreError> {
+    Ok(canonical_sha256(
+        &json!({"schema_version":1,"action_id":intent.action_id,
+        "evaluation":evaluation,"intent_digest":intent.intent_digest,"payload_digest":intent.payload_digest,
+        "decision":decision,"dispatch_id":dispatch,"fence":fence}),
+    )?)
+}
+
+fn require_normalized_dispatch_hash(
+    tx: &Transaction<'_>,
+    action: ActionId,
+    dispatch: DispatchId,
+    expected: Sha256Digest,
+) -> Result<(), StoreError> {
     let valid:i64=tx.query_row("SELECT COUNT(*) FROM action_dispatches WHERE dispatch_id=?1 AND action_id=?2 AND request_hash=?3 AND transport_state='dispatch_committed' AND ended_at_ms IS NULL",params![dispatch.to_string(),action.to_string(),expected.as_prefixed_str()],|r|r.get(0)).map_err(StoreError::from_rusqlite)?;
     if valid != 1 {
         return Err(invalid("requête normalisée du dispatch divergente"));
     }
     Ok(())
+}
+
+struct RecordedDispatchRow {
+    decision: String,
+    evaluation: String,
+    previous_evaluation: Option<String>,
+    authority: String,
+    epoch: i64,
+    fence: i64,
+}
+
+/// Checks immutable dispatch attribution after I/O, without granting a new effect.
+/// Current policy, decision expiry and active subject checks belong before dispatch.
+pub(crate) fn validate_recorded_dispatch_binding_tx(
+    tx: &Transaction<'_>,
+    intent: &BrokerIntent,
+    dispatch: DispatchId,
+) -> Result<(), StoreError> {
+    let recorded=tx.query_row(
+        "SELECT d.decision_json,d.evaluation_id,e.previous_evaluation_id,d.authority_generation,d.daemon_epoch,d.fence FROM broker_dispatches d JOIN broker_evaluations e ON e.evaluation_id=d.evaluation_id AND e.action_id=d.action_id WHERE d.dispatch_id=?1 AND d.action_id=?2",
+        params![dispatch.to_string(),intent.action_id.to_string()],|row|Ok(RecordedDispatchRow {
+            decision:row.get(0)?,evaluation:row.get(1)?,previous_evaluation:row.get(2)?,authority:row.get(3)?,epoch:row.get(4)?,fence:row.get(5)?,
+        }),
+    )?;
+    let evaluation = BrokerEvaluation {
+        evaluation_id: recorded.evaluation.parse()?,
+        previous_evaluation_id: recorded
+            .previous_evaluation
+            .map(|id| id.parse())
+            .transpose()?,
+    };
+    let fence = LineageFence::new(
+        recorded.authority.parse()?,
+        unleash_domain::DaemonEpoch::new(
+            u64::try_from(recorded.epoch).map_err(|_| invalid("époque du marqueur négative"))?,
+        ),
+        Fence::new(
+            u64::try_from(recorded.fence).map_err(|_| invalid("fence du marqueur négatif"))?,
+        ),
+    );
+    let decision: BrokerAuthorizationDecision = serde_json::from_str(&recorded.decision)?;
+    if fence != intent.lineage_fence
+        || decision.action_id != intent.action_id
+        || decision.evaluation_id != evaluation.evaluation_id
+        || decision.payload_digest != intent.payload_digest
+        || decision.scope_revision != intent.scope_revision
+        || decision.policy_revision != intent.policy_revision
+    {
+        return Err(invalid("faisceau du dispatch enregistré divergent"));
+    }
+    let (encoded,digest):(String,String)=tx.query_row(
+        "SELECT phase_json,phase_digest FROM broker_phase_records WHERE action_id=?1 AND evaluation_id=?2 AND phase_key='authorization'",
+        params![intent.action_id.to_string(),evaluation.evaluation_id.to_string()],|row|Ok((row.get(0)?,row.get(1)?)),
+    )?;
+    let authorized: Value = serde_json::from_str(&encoded)?;
+    if canonical_sha256(&authorized)?.as_prefixed_str() != digest
+        || authorized.get("evaluation") != Some(&serde_json::to_value(evaluation)?)
+        || authorized.pointer("/phase/intent_digest")
+            != Some(&serde_json::to_value(intent.intent_digest)?)
+        || authorized.pointer("/phase/outcome/decision") != Some(&serde_json::to_value(&decision)?)
+    {
+        return Err(invalid(
+            "décision du dispatch différente de l'autorisation durable",
+        ));
+    }
+    let expected =
+        normalized_dispatch_request_hash(intent, evaluation, &decision, dispatch, fence)?;
+    require_normalized_dispatch_hash(tx, intent.action_id, dispatch, expected)
 }
 
 #[expect(

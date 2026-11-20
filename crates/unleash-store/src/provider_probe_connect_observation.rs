@@ -261,6 +261,7 @@ fn validate_native_dispatch(
     )?;
     let intent: crate::BrokerIntent = serde_json::from_str(&encoded)?;
     crate::provider_probe_connect::validate_fact_intent(permission, &intent)?;
+    crate::broker_writer::validate_recorded_dispatch_binding_tx(tx, &intent, document.dispatch_id)?;
     Ok(())
 }
 
@@ -540,6 +541,7 @@ pub(crate) fn validate_completion(
                 return Err(invalid("preuve native d'une autre admission"));
             }
             validate_continuation(tx, daemon, now, &record, &permission.continuation, true)?;
+            validate_native_dispatch(tx, &record, &fact.binding.document, &permission.original)?;
             validate_success_fact(tx, config, daemon, now, &record, fact, receipt)?;
             Some(fact.clone())
         }
