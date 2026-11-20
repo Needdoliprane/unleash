@@ -28,6 +28,10 @@ pub enum HostInputCutpoint {
     /// Handshake state and manifest are published, before sending its ACK.
     /// The operation gate has been released; EOF closes this response only.
     HandshakeAppliedBeforeAck,
+    /// A new correlated transfer and its ACK are committed, before sending the
+    /// response. The operation gate is released; cached inspection skips this.
+    #[cfg(test)]
+    TransferAppliedBeforeAck,
     /// A native resize was attempted, before sending its ACK or error response.
     /// Both the operation gate and the PTY master guard have been released.
     ResizeAttemptedBeforeReply,
@@ -450,6 +454,7 @@ mod tests {
                 HostInputCutpoint::C5AfterPtyWriteBeforeReceipt => Cutpoint::C5,
                 // Input tests keep their existing C3/C4/C5 counters and scope.
                 HostInputCutpoint::HandshakeAppliedBeforeAck
+                | HostInputCutpoint::TransferAppliedBeforeAck
                 | HostInputCutpoint::ResizeAttemptedBeforeReply
                 | HostInputCutpoint::ReleaseAppliedBeforeAck => return Ok(()),
             };

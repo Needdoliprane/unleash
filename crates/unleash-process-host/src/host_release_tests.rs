@@ -1,8 +1,4 @@
 //! Native component: actual socket, owned child and PTY. No Store/daemon claim.
-#![expect(
-    clippy::unwrap_used,
-    reason = "Owned native fixtures and contract assertions"
-)]
 use super::*;
 use crate::{
     ControlReacquisitionRequest, ControlReacquisitionResponse, ControlReleaseKey,

@@ -781,6 +781,8 @@ fn respond_to_control_transfer(
 ) -> Result<(), ProcessHostError> {
     let response = {
         let _operation = lock_operation(shared);
+        #[cfg(test)]
+        let auth_before = shared.auth_generation.load(Ordering::SeqCst);
         let response = match process_control_transfer(request, shared) {
             Ok(ack) => crate::ControlTransferResponse::Ack { ack: Box::new(ack) },
             Err(error) => crate::ControlTransferResponse::Refused {
@@ -790,9 +792,23 @@ fn respond_to_control_transfer(
         if matches!(response, crate::ControlTransferResponse::Ack { .. }) {
             *bound_auth_gen = shared.auth_generation.load(Ordering::SeqCst);
         }
+        #[cfg(test)]
+        let response = {
+            let transfer_applied = matches!(response, crate::ControlTransferResponse::Ack { .. })
+                && shared.auth_generation.load(Ordering::SeqCst) != auth_before;
+            (response, transfer_applied)
+        };
         response
     };
+    #[cfg(test)]
+    let (response, transfer_applied) = response;
     let payload = serde_json::to_vec(&response)?;
+    #[cfg(test)]
+    if transfer_applied {
+        shared
+            .cutpoints
+            .hit(HostInputCutpoint::TransferAppliedBeforeAck)?;
+    }
     write_frame(stream, &payload)?;
     Ok(())
 }
