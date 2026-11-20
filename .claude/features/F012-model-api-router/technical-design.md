@@ -72,6 +72,17 @@ la restitue dans le manifeste et l’accusé de handshake. Cette empreinte
 couvre l’environnement fourni par le host. Le processus et les bibliothèques
 chargées peuvent ensuite modifier leur environnement.
 
+L’attestation de lancement reçoit le bootstrap autorisé et l’identité
+OS complète du host détenu. Sur le socket Unix privé, le client compare
+l’UID et le PID du pair fournis par le noyau, puis l’incarnation OS
+avant d’envoyer le secret conservé par le propriétaire du lancement.
+Après le handshake corrélé à la lignée, à l’époque et au fence attendus,
+il relit le manifeste, le profil Seatbelt et l’identité fraîche de
+l’enfant. Les empreintes du contexte, de l’environnement et du profil
+doivent correspondre. Le handshake suit le protocole privé existant
+sans rotation du secret. Le rattachement durable d’un lancement F012
+au profil exact reste une obligation du daemon et du writer.
+
 Le banc natif couple ce lancement à une fixture TCP loopback. Il vérifie
 l’identité OS issue de l’enfant détenu, l’écoute, le socket accepté et le
 descripteur client exact avant d’envoyer des octets synthétiques. Un second

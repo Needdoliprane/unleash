@@ -282,3 +282,35 @@ fn t_f011_003_divergent_effective_digest_refuses_before_prepared_or_child() {
     assert!(!runtime.join(HOST_SOCKET_FILENAME).exists());
     assert!(!runtime.join("child-tmp/child-ran").exists());
 }
+
+#[test]
+fn t_f012_015_same_uid_socket_still_requires_the_exact_host_incarnation() {
+    use unleash_platform::{bind_private_unix_listener, inspect_process_identity};
+    use unleash_process_host::ProcessHostError;
+
+    let dir = local_test_dir("host-peer-incarnation").unwrap();
+    let spec = spec(&private_runtime(dir.path()));
+    let socket = spec.runtime_dir.join(HOST_SOCKET_FILENAME);
+    let _listener = bind_private_unix_listener(&socket).unwrap();
+    let client = HostClient::connect(
+        &socket,
+        spec.process_run_uuid,
+        spec.authority_generation,
+        spec.daemon_epoch,
+        spec.resource_fence,
+    )
+    .unwrap();
+    let peer = inspect_process_identity(std::process::id()).unwrap();
+    client.verify_owned_peer(&peer).unwrap();
+
+    let mut unexpected_pid = peer.clone();
+    unexpected_pid.pid = peer.pid.wrapping_add(1);
+    let mut unexpected_group = peer.clone();
+    unexpected_group.pgid = peer.pgid.wrapping_add(1);
+    for wrong in [unexpected_pid, unexpected_group] {
+        assert!(matches!(
+            client.verify_owned_peer(&wrong),
+            Err(ProcessHostError::IdentityUnverified { .. })
+        ));
+    }
+}

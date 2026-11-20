@@ -519,8 +519,8 @@ fn spawn_and_observe(
 ) -> Result<unleash_store::terminal_allocations::TerminalLaunchObservation, TerminalError> {
     let profile = resolve_launch_permit(state, record, dispatch)?;
     let launch = prepare_host_launch(state, record, profile)?;
-    spawn_registered_host(state, &launch)?;
-    let observation = observe_spawned_host(state, record, dispatch, &launch)?;
+    let expected_host = spawn_registered_host(state, &launch)?;
+    let observation = observe_spawned_host(state, record, dispatch, &launch, &expected_host)?;
     publish_launch_observation(state, &observation)?;
     Ok(observation)
 }
@@ -643,7 +643,7 @@ fn prepare_host_launch(
 fn spawn_registered_host(
     state: &Arc<DaemonRuntimeState>,
     launch: &HostLaunch,
-) -> Result<(), TerminalError> {
+) -> Result<unleash_platform::OsProcessIdentity, TerminalError> {
     let spec = &launch.spec;
     let c = spec;
     let bootstrap = spec.runtime_dir.join("bootstrap.json");
@@ -670,17 +670,18 @@ fn spawn_registered_host(
                 pid: Some(host_identity.pid),
                 boot_identity: Some(host_identity.boot_identity.as_str().into()),
                 start_identity: Some(host_identity.start_identity.as_str().into()),
-                os_identity: Some(host_identity),
+                os_identity: Some(host_identity.clone()),
                 state: crate::executors::ExecutorState::Active,
             },
         )?;
     }
-    Ok(())
+    Ok(host_identity)
 }
 
 fn connect_spawned_host(
     record: &unleash_store::TerminalAllocationRecord,
     launch: &HostLaunch,
+    expected_host: &unleash_platform::OsProcessIdentity,
 ) -> Result<HostClient, TerminalError> {
     let c = &record.context;
     let process = &c.preparation.process_spec;
@@ -704,6 +705,7 @@ fn connect_spawned_host(
             Err(error) => return Err(error.into()),
         }
     };
+    client.verify_owned_peer(expected_host)?;
     let before = HostManifest::load_private(&runtime.join(HOST_MANIFEST_FILENAME))?;
     if before.allocation_context_digest != Some(record.context_digest)
         || before.effective_environment_digest != Some(expected)
@@ -760,13 +762,15 @@ fn observe_spawned_host(
     record: &unleash_store::TerminalAllocationRecord,
     dispatch: unleash_domain::DispatchId,
     launch: &HostLaunch,
+    expected_host: &unleash_platform::OsProcessIdentity,
 ) -> Result<unleash_store::terminal_allocations::TerminalLaunchObservation, TerminalError> {
     let c = &record.context;
     let runtime = &launch.spec.runtime_dir;
     let secret = &launch.secret;
     let expected = launch.expected;
-    let mut client = connect_spawned_host(record, launch)?;
+    let mut client = connect_spawned_host(record, launch, expected_host)?;
     let os_identity = acknowledge_spawned_host(state, record, launch, &mut client)?;
+    client.verify_owned_peer(expected_host)?;
     let header = client.make_header(
         state.store.config().id_generator.new_command_id(),
         c.action_id,

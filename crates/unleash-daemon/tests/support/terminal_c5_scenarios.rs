@@ -31,15 +31,17 @@ struct C5FixtureLauncher {
 
 impl unleash_daemon::terminal_host_launcher::TerminalHostLauncher for C5FixtureLauncher {
     fn spawn(&self, _packaged: &Path, bootstrap: &Path) -> std::io::Result<Child> {
-        let mut child = Command::new(&self.executable)
+        let mut command = Command::new(&self.executable);
+        command
             .arg("--bootstrap")
             .arg(bootstrap)
             .env_clear()
             .env("UNLEASH_HOST_CUTPOINT_TARGET", "C5")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()?;
+            .stderr(Stdio::null());
+        unleash_process_host::configure_setsid_pre_exec(&mut command);
+        let mut child = command.spawn()?;
         // Only the daemon subprocess owns this writer. Its SIGKILL must close
         // every copy so the still-live host sees EOF at C5 before any receipt.
         let controller_input = child

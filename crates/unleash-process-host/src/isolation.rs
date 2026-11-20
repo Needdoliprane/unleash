@@ -390,6 +390,8 @@ pub(crate) fn prepare_strict_launch_command(
     }
 }
 
+pub(crate) const MACOS_SEATBELT_PROFILE_FILENAME: &str = "seatbelt-strict.sb";
+
 #[cfg(any(target_os = "macos", test))]
 fn prepare_macos_seatbelt_launch(
     program: &str,
@@ -404,7 +406,9 @@ fn prepare_macos_seatbelt_launch(
     assert_not_under_claude(&spec.profile_output_dir)?;
     ensure_private_rendezvous_dir(&spec.profile_output_dir)?;
 
-    let profile_path = spec.profile_output_dir.join("seatbelt-strict.sb");
+    let profile_path = spec
+        .profile_output_dir
+        .join(MACOS_SEATBELT_PROFILE_FILENAME);
     write_private_file_atomic(&profile_path, profile_text.as_bytes())?;
 
     let mut hasher = Sha256::new();

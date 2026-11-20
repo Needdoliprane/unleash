@@ -19,9 +19,9 @@ use unleash_platform::{
     observe_owned_tcp_listener, verify_owned_tcp_connection, write_private_file_atomic,
 };
 use unleash_process_host::{
-    EnvironmentMode, HOST_MANIFEST_FILENAME, HOST_READY_PREFIX, HOST_SOCKET_FILENAME,
-    HostBootstrapSpec, HostClient, HostManifest, HostRequest, HostResponse, IsolationMode,
-    IsolationProfileKind, ResourceKind, StrictIsolationSpec, effective_environment_digest_v1,
+    EnvironmentMode, HOST_MANIFEST_FILENAME, HOST_READY_PREFIX, HostBootstrapSpec,
+    HostControlSecret, HostManifest, IsolationMode, IsolationProfileKind, ResourceKind,
+    StrictIsolationSpec, attest_strict_service_launch, effective_environment_digest_v1,
     explicit_environment_v1,
 };
 use unleash_testkit::local_test_dir;
@@ -231,7 +231,10 @@ fn t_f012_015_service_strict_accepts_owned_loopback_fd_and_denies_egress() {
         manifest.start_identity.as_ref(),
         Some(&identity.start_identity)
     );
-    assert_authenticated_manifest(&spec, &manifest, &identity);
+    let host_identity = inspect_process_identity(host.0.id()).unwrap();
+    assert_authenticated_manifest(&spec, &host_identity, &manifest, &identity);
+    assert_proof_refusals(&spec, &host_identity);
+
     assert_same_connection(&identity, report.endpoint);
 }
 
@@ -257,52 +260,67 @@ fn assert_same_connection(identity: &unleash_platform::OsProcessIdentity, endpoi
 
 fn assert_authenticated_manifest(
     spec: &HostBootstrapSpec,
+    host: &unleash_platform::OsProcessIdentity,
     manifest: &HostManifest,
     identity: &unleash_platform::OsProcessIdentity,
 ) {
-    let mut client = HostClient::connect(
-        &spec.runtime_dir.join(HOST_SOCKET_FILENAME),
-        spec.process_run_uuid,
-        spec.authority_generation,
-        spec.daemon_epoch,
-        spec.resource_fence,
-    )
-    .unwrap();
-    let header = client.make_header(
-        CommandId::from_u128(0xf012_0151),
-        spec.action_id,
-        Sha256Digest::from_bytes(b"fixture-handshake"),
-    );
-    let ack = client
-        .call(&HostRequest::Handshake {
-            header,
-            current_secret: SECRET.into(),
-            rotate_to_secret: None,
-            require_higher_epoch: false,
-        })
-        .unwrap();
-    let HostResponse::HandshakeAck {
-        process_run_uuid,
-        authority_generation,
-        effective_environment_digest,
-        allocation_context_digest,
-        os_identity,
-        ..
-    } = ack
-    else {
-        panic!("native handshake refused")
-    };
-    assert_eq!(os_identity, *identity);
-    assert_eq!(process_run_uuid, spec.process_run_uuid);
-    assert_eq!(authority_generation, spec.authority_generation);
+    let secret = HostControlSecret::new(SECRET).unwrap();
+    let proof =
+        attest_strict_service_launch(spec, host, &secret, CommandId::from_u128(0xf012_0151))
+            .unwrap();
+    assert_eq!(proof.child_identity(), identity);
     assert_eq!(
-        effective_environment_digest,
+        Some(proof.allocation_context_digest()),
+        manifest.allocation_context_digest
+    );
+    assert_eq!(
+        Some(proof.environment_digest()),
         manifest.effective_environment_digest
     );
     assert_eq!(
-        allocation_context_digest,
-        manifest.allocation_context_digest
+        Some(proof.isolation_profile_digest()),
+        manifest.isolation_profile_digest
     );
+}
+
+fn assert_proof_refusals(spec: &HostBootstrapSpec, host: &unleash_platform::OsProcessIdentity) {
+    let secret = HostControlSecret::new(SECRET).unwrap();
+
+    let mut wrong_host = host.clone();
+    wrong_host.pgid = host.pgid.wrapping_add(1);
+    assert!(
+        attest_strict_service_launch(
+            spec,
+            &wrong_host,
+            &secret,
+            CommandId::from_u128(0xf012_0152)
+        )
+        .is_err()
+    );
+    let mut other_launch = spec.clone();
+    other_launch.allocation_context_digest = Some(Sha256Digest::from_bytes(b"another allocation"));
+    assert!(
+        attest_strict_service_launch(
+            &other_launch,
+            host,
+            &secret,
+            CommandId::from_u128(0xf012_0153)
+        )
+        .is_err()
+    );
+    let wrong_token = HostControlSecret::new("synthetic-wrong-host-token").unwrap();
+    assert!(
+        attest_strict_service_launch(spec, host, &wrong_token, CommandId::from_u128(0xf012_0154))
+            .is_err()
+    );
+
+    let path = spec.runtime_dir.join("seatbelt-strict.sb");
+    let original = std::fs::read(&path).unwrap();
+    write_private_file_atomic(&path, b"unrelated fixture bytes").unwrap();
+    let tampered =
+        attest_strict_service_launch(spec, host, &secret, CommandId::from_u128(0xf012_0155));
+    write_private_file_atomic(&path, &original).unwrap();
+    assert!(tampered.is_err());
 }
 
 #[test]

@@ -60,6 +60,8 @@ mod release;
 #[path = "host_strict_service.rs"]
 mod strict_service;
 
+pub use strict_service::{StrictServiceLaunchObservation, attest_strict_service_launch};
+
 const IO_CHUNK_BYTES: usize = 8192;
 const SOCKET_IO_TIMEOUT: Duration = Duration::from_secs(15);
 const MAX_CONCURRENT_CONNECTIONS: usize = 16;
@@ -1494,6 +1496,28 @@ impl HostClient {
             daemon_epoch,
             fence,
         })
+    }
+
+    /// Confirm that the connected Unix peer is the supplied owned host process.
+    ///
+    /// # Errors
+    /// Returns a closed identity error when the peer cannot be qualified.
+    pub fn verify_owned_peer(
+        &self,
+        expected: &unleash_platform::OsProcessIdentity,
+    ) -> Result<(), ProcessHostError> {
+        let refused = || ProcessHostError::IdentityUnverified {
+            reason: "connected Unix peer is not the owned host".into(),
+        };
+        let peer = verify_same_uid_peer(&self.stream)?;
+        if peer.pid != Some(expected.pid)
+            || peer.uid != expected.owner_uid
+            || unleash_platform::inspect_process_identity(expected.pid).map_err(|_| refused())?
+                != *expected
+        {
+            return Err(refused());
+        }
+        Ok(())
     }
 
     /// Met à jour les coordonnées de lignée/époque/fence envoyées par ce client (utile pour tester le rejet).
