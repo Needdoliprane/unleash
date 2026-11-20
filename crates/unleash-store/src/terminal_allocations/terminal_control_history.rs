@@ -17,6 +17,7 @@ mod validation;
 mod writer;
 
 pub(super) use validation::validate_historical_dispatch;
+pub(super) use writer::{MAX_PROOF_BYTES, reliable_clock, replay_historical_pin};
 
 pub(super) fn observed_launch_environment(
     conn: &rusqlite::Connection,

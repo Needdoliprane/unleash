@@ -22,6 +22,12 @@ use crate::{
     BrokerActionSnapshot, BrokerCause, BrokerIntent, CallerAuthority, DaemonStateRow, StoreError,
 };
 
+mod seal;
+pub use seal::{
+    SealTerminalReleaseHistoryRequest, TERMINAL_RELEASE_HISTORY_EVENT,
+    TerminalReleaseHistoryCommit, TerminalReleaseHistoryFact,
+};
+
 /// Exact target selected for historical terminal retirement inspection.
 #[derive(Debug, Clone, Copy)]
 pub struct TerminalReleaseHistoryTarget {
@@ -50,6 +56,7 @@ pub struct TerminalReleaseHistorySource {
     pub intent_digest: Sha256Digest,
     /// Start of the original dispatch, distinct from any effect observation.
     pub dispatched_at_ms: TimestampMs,
+    action_revision: unleash_domain::Revision,
 }
 
 /// Qualify the durable source of an ambiguous retirement inside a read
@@ -133,6 +140,7 @@ pub fn qualify_terminal_release_history_source(
         evaluation_id: evaluation.evaluation_id,
         intent_digest: intent.intent_digest,
         dispatched_at_ms,
+        action_revision: broker.revision,
     })
 }
 

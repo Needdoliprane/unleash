@@ -73,7 +73,7 @@ fn commit_tx(
     let record = read_conn_release(tx, action)?
         .ok_or_else(|| invalid("terminal release intention missing"))?;
     let digest = canonical_sha256(observation)?;
-    validate_native(&record, observation)?;
+    validate_native(&record.context, record.context_digest, observation)?;
     let BrokerPhase::Observation {
         action_id, receipt, ..
     } = &phase.phase
@@ -150,18 +150,18 @@ fn commit_tx(
     crate::broker_writer::commit_terminal_observation_tx(tx, config, final_now, phase, &proof)
 }
 
-fn validate_native(
-    record: &TerminalReleaseRecord,
+pub(super) fn validate_native(
+    c: &super::terminal_release_types::TerminalReleaseContext,
+    context_digest: Sha256Digest,
     observation: &TerminalReleaseObservation,
 ) -> Result<(), StoreError> {
-    let c = &record.context;
     let ack = &observation.ack;
     let h = &ack.key.header;
     if observation.schema_version != 1
         || h.protocol_version != 1
         || h.action_id != c.action_id
         || h.command_id != c.command_id
-        || h.payload_hash != record.context_digest
+        || h.payload_hash != context_digest
         || h.authority_generation != c.authority_generation
         || h.daemon_epoch != c.daemon_epoch
         || h.resource_fence != c.resource_fence
@@ -202,7 +202,7 @@ pub(super) fn read_published(
     if canonical_sha256(&observation)? != hash || observation.ack.key.dispatch_id != dispatch {
         return Err(invalid("terminal release proof integrity differs"));
     }
-    validate_native(record, &observation)?;
+    validate_native(&record.context, record.context_digest, &observation)?;
     Ok(observation)
 }
 

@@ -1,10 +1,15 @@
 //! Native prerequisite of historical Release reconciliation, with no proposed wire.
-//! This test does not seal a Store fact or grant a current terminal capability.
+//! The observed historical ACK grants no current terminal capability.
 use super::*;
 use unleash_process_host::{ControlReleaseAck, ControlReleaseRequest, ControlReleaseResponse};
 use unleash_store::terminal_allocations::terminal_release_history::{
+    SealTerminalReleaseHistoryRequest, TERMINAL_RELEASE_HISTORY_EVENT,
     TerminalReleaseHistoryTarget, qualify_terminal_release_history_source,
 };
+use unleash_store::terminal_allocations::terminal_release_types::{
+    TerminalReleaseContext, TerminalReleaseObservation,
+};
+use unleash_store::{CutpointObserver, StoreCutpoint, StoreError, UnleashStore};
 
 struct LostRelease {
     harness: Harness,
@@ -122,19 +127,14 @@ fn assert_quarantined(lost: &LostRelease) {
     );
 }
 
-fn qualify_source(lost: &LostRelease) -> unleash_process_host::ControlReleaseKey {
-    let conn = rusqlite::Connection::open_with_flags(
-        lost.harness
-            .fixture
-            .data
-            .path()
-            .join("unleash-authority.db"),
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-    )
-    .unwrap();
-    let snapshot = conn.unchecked_transaction().unwrap();
-    let context: unleash_store::terminal_allocations::terminal_release_types::TerminalReleaseContext =
-        serde_json::from_str(&lost.context_json).unwrap();
+fn history_target(
+    lost: &LostRelease,
+) -> (
+    unleash_store::CallerAuthority,
+    TerminalReleaseHistoryTarget,
+    TerminalReleaseContext,
+) {
+    let context: TerminalReleaseContext = serde_json::from_str(&lost.context_json).unwrap();
     let caller = unleash_store::CallerAuthority {
         actor_id: context.actor_id.clone(),
         role: unleash_store::CallerRole::HumanOperator,
@@ -146,6 +146,21 @@ fn qualify_source(lost: &LostRelease) -> unleash_process_host::ControlReleaseKey
         action_id: lost.ack.key.header.action_id,
         dispatch_id: lost.ack.key.dispatch_id,
     };
+    (caller, target, context)
+}
+
+fn qualify_source(lost: &LostRelease) -> unleash_process_host::ControlReleaseKey {
+    let conn = rusqlite::Connection::open_with_flags(
+        lost.harness
+            .fixture
+            .data
+            .path()
+            .join("unleash-authority.db"),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .unwrap();
+    let snapshot = conn.unchecked_transaction().unwrap();
+    let (caller, target, context) = history_target(lost);
     assert_scope_refused(&snapshot, &caller, target);
     let source = qualify_terminal_release_history_source(&snapshot, &caller, target).unwrap();
     assert_eq!(source.context, context);
@@ -238,13 +253,188 @@ fn exact_native_ack(
     client: &mut HostClient,
     request: &ControlReleaseRequest,
     expected: &ControlReleaseAck,
-) {
+) -> ControlReleaseAck {
     match client.release_control(request).unwrap() {
-        ControlReleaseResponse::Ack { ack } => assert_eq!(*ack, *expected),
+        ControlReleaseResponse::Ack { ack } => {
+            assert_eq!(*ack, *expected);
+            *ack
+        }
         other @ ControlReleaseResponse::Refused { .. } => {
             panic!("exact historical native acknowledgement unavailable: {other:?}")
         }
     }
+}
+
+fn prepare_history(
+    store: &unleash_store::UnleashStore,
+    caller: unleash_store::CallerAuthority,
+    target: TerminalReleaseHistoryTarget,
+    observation: &TerminalReleaseObservation,
+) -> SealTerminalReleaseHistoryRequest {
+    let bytes = unleash_protocol::canonicalize_to_vec(observation).unwrap();
+    let prepared_proof = store
+        .prepare_object(unleash_store::PrepareObjectRequest {
+            object_hash: unleash_domain::Sha256Digest::from_bytes(&bytes),
+            byte_length: u64::try_from(bytes.len()).unwrap(),
+            media_type: "application/json".into(),
+            owner_kind: "action".into(),
+            owner_id: target.action_id.to_string(),
+        })
+        .unwrap();
+    store
+        .write_prepared_object_bytes(&prepared_proof, &bytes)
+        .unwrap();
+    SealTerminalReleaseHistoryRequest {
+        caller,
+        target,
+        prepared_proof,
+    }
+}
+
+#[tokio::test]
+async fn t_f011_010_historical_native_release_can_be_sealed_without_disposition() {
+    let mut lost = lose_native_ack().await;
+    assert_quarantined(&lost);
+    let (mut client, request) = inspector(&lost);
+    drain(&mut lost.harness.fixture).await;
+    let ack = exact_native_ack(&mut client, &request, &lost.ack);
+    let manifest_digest =
+        unleash_protocol::canonical_sha256(&lost.harness.fixture.host_manifest()).unwrap();
+    let (caller, target, _) = history_target(&lost);
+    let data = lost.harness.fixture.data.path().to_path_buf();
+    let accepted = lost.receipt.receipt_id;
+    tokio::task::spawn_blocking(move || {
+        assert_history_seals(data, caller, target, ack, manifest_digest, accepted);
+    })
+    .await
+    .unwrap();
+    assert_quarantined(&lost);
+}
+
+fn assert_history_seals(
+    data: PathBuf,
+    caller: unleash_store::CallerAuthority,
+    target: TerminalReleaseHistoryTarget,
+    ack: ControlReleaseAck,
+    manifest_digest: unleash_domain::Sha256Digest,
+    accepted: unleash_domain::ReceiptId,
+) {
+    let fault = std::sync::Arc::new(HistoryFault::default());
+    let mut config = unleash_store::StoreConfig::new(data);
+    config.cutpoints = fault.clone();
+    let store = UnleashStore::open(config.clone()).unwrap();
+    let observation = TerminalReleaseObservation {
+        schema_version: 1,
+        ack: serde_json::from_value(serde_json::to_value(ack).unwrap()).unwrap(),
+        manifest_digest,
+        captured_at_ms: store.config().clock.now_ms(),
+    };
+    let seal = prepare_history(&store, caller.clone(), target, &observation);
+    let (events, refs, outbox, revision) = history_counts(&store, target);
+    assert_eq!((events, refs, outbox), (0, 0, 0));
+    fault.arm(StoreCutpoint::C1BeforeCommandCommit);
+    assert!(matches!(
+        store.seal_terminal_release_history(seal.clone()),
+        Err(StoreError::CutpointInjected { .. })
+    ));
+    assert_eq!(history_counts(&store, target), (0, 0, 0, revision));
+
+    fault.arm(StoreCutpoint::C2AfterCommandCommit);
+    assert!(matches!(
+        store.seal_terminal_release_history(seal.clone()),
+        Err(StoreError::CutpointInjected { .. })
+    ));
+    assert_eq!(history_counts(&store, target), (1, 1, 1, revision));
+    store.shutdown().unwrap();
+    let store = UnleashStore::open(config).unwrap();
+    let first = store.seal_terminal_release_history(seal).unwrap();
+    assert!(first.replayed);
+    assert_eq!(first.fact.source_receipt_id, accepted);
+    assert_eq!(
+        first.fact.native_ack_digest,
+        unleash_protocol::canonical_sha256(&observation.ack).unwrap()
+    );
+
+    let duplicate = prepare_history(&store, caller.clone(), target, &observation);
+    assert_eq!(
+        store.seal_terminal_release_history(duplicate).unwrap(),
+        first
+    );
+    let mut later = observation.clone();
+    // Simulate a later inspection of the same complete cached ACK.
+    std::thread::sleep(std::time::Duration::from_millis(2));
+    later.captured_at_ms = store.config().clock.now_ms();
+    assert!(later.captured_at_ms > observation.captured_at_ms);
+    let update = prepare_history(&store, caller.clone(), target, &later);
+    assert_ne!(
+        update.prepared_proof.object_hash,
+        first.fact.observation_object_hash
+    );
+    assert_eq!(store.seal_terminal_release_history(update).unwrap(), first);
+    later.ack.durable_log_seq += 1;
+    let divergent = prepare_history(&store, caller, target, &later);
+    assert!(matches!(
+        store.seal_terminal_release_history(divergent),
+        Err(StoreError::InvalidArgument { .. })
+    ));
+    assert_eq!(history_counts(&store, target), (1, 1, 1, revision));
+    let event_receipt: String = store
+        .read_snapshot(|conn, _| {
+            Ok(conn.query_row(
+                "SELECT causation_receipt_id FROM events
+             WHERE aggregate_id=?1 AND event_type=?2 AND sequence=?3",
+                rusqlite::params![
+                    target.action_id.to_string(),
+                    TERMINAL_RELEASE_HISTORY_EVENT,
+                    i64::try_from(first.fact.event_cursor.sequence.as_u64()).unwrap()
+                ],
+                |row| row.get(0),
+            )?)
+        })
+        .unwrap();
+    assert_eq!(event_receipt, accepted.to_string());
+    store.shutdown().unwrap();
+}
+
+#[derive(Default)]
+struct HistoryFault(std::sync::Mutex<Option<StoreCutpoint>>);
+
+impl HistoryFault {
+    fn arm(&self, cutpoint: StoreCutpoint) {
+        *self.0.lock().unwrap() = Some(cutpoint);
+    }
+}
+
+impl CutpointObserver for HistoryFault {
+    fn hit(&self, cutpoint: StoreCutpoint) -> Result<(), StoreError> {
+        let mut armed = self.0.lock().unwrap();
+        if *armed == Some(cutpoint) {
+            armed.take();
+            return Err(StoreError::CutpointInjected {
+                cutpoint: format!("{cutpoint:?}"),
+                message: "fixture interruption of historical release publication".into(),
+            });
+        }
+        Ok(())
+    }
+}
+
+fn history_counts(
+    store: &UnleashStore,
+    target: TerminalReleaseHistoryTarget,
+) -> (i64, i64, i64, i64) {
+    store.read_snapshot(|conn, _| {
+        Ok(conn.query_row(
+            "SELECT
+             (SELECT COUNT(*) FROM events WHERE aggregate_id=?1 AND event_type=?2),
+             (SELECT COUNT(*) FROM object_references WHERE owner_kind='action' AND owner_id=?1 AND source_field=?3),
+             (SELECT COUNT(*) FROM outbox JOIN events USING(event_id) WHERE aggregate_id=?1 AND event_type=?2),
+             (SELECT revision FROM terminal_release_intents WHERE action_id=?1)",
+            rusqlite::params![target.action_id.to_string(), TERMINAL_RELEASE_HISTORY_EVENT,
+                format!("terminal_release_history:{}", target.dispatch_id)],
+            |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?)),
+        )?)
+    }).unwrap()
 }
 
 fn foreign_key_refused(client: &mut HostClient, request: &ControlReleaseRequest) {

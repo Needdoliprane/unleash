@@ -4,7 +4,8 @@ use std::sync::atomic::Ordering;
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
 use unleash_domain::{
-    ActionId, ActorId, DaemonEpoch, DispatchId, Sequence, Sha256Digest, TimestampMs,
+    ActionId, ActorId, AuthorityGeneration, DaemonEpoch, DispatchId, Sequence, Sha256Digest,
+    TimestampMs,
 };
 use unleash_protocol::{EventCursor, canonical_sha256, canonicalize_to_vec};
 
@@ -19,11 +20,11 @@ use crate::objects::{
     read_verified_evidence_bytes_bounded, tx_publish_owned_reference, tx_release_pin,
 };
 use crate::{
-    PublishObjectReferenceRequest, SnapshotProjection, StoreConfig, StoreCutpoint, StoreError,
-    UnleashStore, WriteCriticality,
+    PreparedObjectHandle, PublishObjectReferenceRequest, SnapshotProjection, StoreConfig,
+    StoreCutpoint, StoreError, UnleashStore, WriteCriticality,
 };
 
-const MAX_PROOF_BYTES: usize = 2 * 1024 * 1024;
+pub(in crate::terminal_allocations) const MAX_PROOF_BYTES: usize = 2 * 1024 * 1024;
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -153,7 +154,7 @@ fn decode_proof(bytes: &[u8]) -> Result<TerminalControlHistoryProof, StoreError>
     Ok(proof)
 }
 
-fn reliable_clock(
+pub(in crate::terminal_allocations) fn reliable_clock(
     config: &StoreConfig,
     entered: TimestampMs,
     captured: TimestampMs,
@@ -178,7 +179,15 @@ fn replay(
     let now = context.now;
     let source = context.source;
     if request.prepared_proof.object_hash == sealed.fact.observation_object_hash {
-        same_object_pin(tx, context, request, publication, &sealed.producer_pin_id)?;
+        replay_historical_pin(
+            tx,
+            config,
+            now,
+            daemon.authority_generation,
+            &request.prepared_proof,
+            publication,
+            &sealed.producer_pin_id,
+        )?;
     } else {
         let bytes = read_prepared_evidence_bytes_bounded(
             tx,
@@ -208,16 +217,18 @@ fn replay(
     })
 }
 
-fn same_object_pin(
+pub(in crate::terminal_allocations) fn replay_historical_pin(
     tx: &Transaction<'_>,
-    context: &WriteContext<'_>,
-    request: &SealTerminalControlHistoryRequest,
+    config: &StoreConfig,
+    now: TimestampMs,
+    authority: AuthorityGeneration,
+    prepared: &PreparedObjectHandle,
     publication: &PublishObjectReferenceRequest,
     original_pin: &str,
 ) -> Result<(), StoreError> {
-    let record = read_object_record_conn(tx, request.prepared_proof.object_hash)?;
-    if record.object_generation != request.prepared_proof.object_generation
-        || record.relative_path != request.prepared_proof.relative_path
+    let record = read_object_record_conn(tx, prepared.object_hash)?;
+    if record.object_generation != prepared.object_generation
+        || record.relative_path != prepared.relative_path
     {
         return Err(invalid(
             "historical proof handle differs from the sealed object",
@@ -228,9 +239,9 @@ fn same_object_pin(
         if let Some(pin) = pin
             && (pin.hash != publication.object_hash.to_string()
                 || pin.generation != publication.object_generation
-                || pin.owner_kind != "action"
-                || pin.owner_id != request.source_action_id.to_string()
-                || pin.authority != context.daemon.authority_generation.to_string()
+                || pin.owner_kind != publication.owner_kind
+                || pin.owner_id != publication.owner_id
+                || pin.authority != authority.to_string()
                 || pin.kind != "preparation"
                 || pin.state != "released")
         {
@@ -243,13 +254,13 @@ fn same_object_pin(
     } else {
         read_prepared_evidence_bytes_bounded(
             tx,
-            context.config,
-            &request.prepared_proof,
+            config,
+            prepared,
             publication,
-            context.daemon.authority_generation,
+            authority,
             MAX_PROOF_BYTES,
         )?;
-        tx_release_pin(tx, context.now, &publication.pin_id)?;
+        tx_release_pin(tx, now, &publication.pin_id)?;
     }
     Ok(())
 }
