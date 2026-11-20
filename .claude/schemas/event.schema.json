@@ -151,7 +151,7 @@
                   "terminal_id": { "type": "string", "format": "uuid" },
                   "context_digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
                   "reason": { "enum": ["daemon_superseded", "policy_changed", "authorization_denied"] },
-                  "operation": { "enum": ["renewal", "resize"] }
+                  "operation": { "enum": ["renewal", "resize", "release"] }
                 }
               },
               { "const": { "tombstoned": true } }

@@ -10,12 +10,15 @@ pub mod terminal_input_types;
 pub(crate) mod terminal_input_writer;
 pub(crate) mod terminal_release;
 pub(crate) mod terminal_release_observation;
+mod terminal_release_recovery;
 pub mod terminal_release_types;
 pub(crate) mod terminal_renewal;
 mod terminal_renewal_observation;
 mod terminal_renewal_recovery;
 mod terminal_renewal_refusal;
 pub mod terminal_renewal_types;
+
+pub use terminal_release_recovery::recover_undispatched_terminal_releases_tx;
 
 use crate::{CallerAuthority, FenceAssertion, StoreError};
 use serde::{Deserialize, Serialize};

@@ -167,6 +167,7 @@ pub fn classify_and_finish_recovery(
     previous_mode: DaemonMode,
     started_event_id: Uuid,
 ) -> Result<(DaemonStateRow, Vec<EventEnvelope>), DaemonError> {
+    let config = store.config().clone();
     let id_gen = Arc::clone(&store.config().id_generator);
     let ready_event_id = id_gen.new_uuid();
 
@@ -273,6 +274,11 @@ pub fn classify_and_finish_recovery(
             let next_mode = unleash_domain::transition_daemon_mode(row.mode, target_mode)?;
             let next_rev = row.revision.next();
             if next_mode == DaemonMode::Ready {
+                emitted_events.extend(
+                    unleash_store::terminal_allocations::recover_undispatched_terminal_releases_tx(
+                        tx, &config, now_ms,
+                    )?,
+                );
                 ensure_global_execution_pool_tx(tx, id_gen.as_ref())?;
             }
 

@@ -89,6 +89,14 @@ viser exactement l'ancien header, son dispatch et sa preuve de retrait ; une
 preuve absente ou divergente ferme la reprise. Une inspection historique ne
 réactive aucun bail d'une ancienne époque.
 
+En reprise, une intention de retrait préparée dans une époque précédente de
+la même lignée devient `not_dispatched` si le writer établit l’absence de
+marqueur de dispatch ou d’observation. La transaction engage
+`TerminalControlDispatchRefused` avec `operation=release` et
+`reason=daemon_superseded` avant `Ready`. Le reçu original, son contexte et
+les réservations physiques sont conservés. Le bail suit la règle de reprise
+ordinaire et le PTY conserve son état natif.
+
 Une nouvelle commande enregistrée `AcquireTerminal` peut reprendre le même PTY
 après un retrait qualifié. Cette branche est distincte du renouvellement : elle
 crée un nouveau bail et un fence strictement supérieur, même dans la même époque.

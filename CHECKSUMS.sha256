@@ -121,7 +121,7 @@ fd66815a76ace8b136778face8afcfd940d6b6d02d1f2dbe1c2a162d5ef3e666  .claude/brief/
 08e0a0152f290d07fa66453243218c404530afc1dcb92e9fc5d8e24aa366b6eb  .claude/catalog/README.md
 a87fbd5d995747bc222abdef47db8fb9c561b93c0ba0846c08ead13d1a1c6529  .claude/catalog/design-catalog.json
 bcdc9be2f4559a4d743d08307d710c818606896b4c59f55cb831b01539ddd3d7  .claude/catalog/operations.json
-a8718a175290633db9225b0a2a6d026f40bfc1c18f28f99bcdb2df6652734378  .claude/catalog/package-manifest.json
+72d6400e6d241121972f5b895543d62c96fd40e8376f6291a6b852850cc8c222  .claude/catalog/package-manifest.json
 dc670318f9a2834c72d589fa921567ab3c2da5a6777d6d348697fd54b643f60b  .claude/design/activity-timeline.md
 7e66e407555c2cd16175e2f26c9515ede0d802d8e2bc53b2675d3883dfbfa2a8  .claude/design/agent-tree-and-status.md
 1558c901b73b4ce6ca5963a1b2a1c06864afc92f61b4f9ed1950ff841669c6ed  .claude/design/cli-tui-design.md
@@ -248,10 +248,10 @@ f33538055049b5438f4b330a8ff2f73966359a091f8e353f55f32fbea96111da  .claude/featur
 bf59eaa15d7376552e9b974fbaf4f7304e005e6a10c763015a3ebacf8ec11bd3  .claude/features/F011-terminal-pool/README.md
 a1c4ab1ab5adcdfca2cb885b0c38cdcedb55bf543e55e028308ecad266b6a2f5  .claude/features/F011-terminal-pool/acceptance.md
 2dc6f32dac6f7e1ed975b31267a14a21a4177da431db037edc77ed222c45e302  .claude/features/F011-terminal-pool/dependencies.md
-7e2424a49d093680d150d7056300ebdf8d7a2d6bc7097e5828df0eff6bff92ac  .claude/features/F011-terminal-pool/interfaces.md
+a9de427aaf8b08b9fbd45a3d048ecfda490ebce1c149c500fa4a638a1a9c52b9  .claude/features/F011-terminal-pool/interfaces.md
 b85a03aa29a31be6b4b1bd2c71551c6eef762e124533f404db91c2ac698e0b4a  .claude/features/F011-terminal-pool/requirements.md
 73e761dbf3d5ade7b1b45d17974aefca2fdf03dd015bed648d8cf6a7603d2542  .claude/features/F011-terminal-pool/technical-design.md
-a15f18a0ac93f7d8b291252a41734398904843ef98a9a2d29089acd33d47487c  .claude/features/F011-terminal-pool/tests.md
+03afb9ae2ccbe8bf255404a6b85778761343d18a205b3798325deb37d72dffe3  .claude/features/F011-terminal-pool/tests.md
 b9f21c2478166b16d4bbe1b4822fe5acab37e13eda7fc6964accfaac72d54ce8  .claude/features/F012-model-api-router/README.md
 78cefdee2a746ebe369e2e6ac1e41ad8dae2f8af30ab57c8236a3566219accb8  .claude/features/F012-model-api-router/acceptance.md
 17eabd25f5c6da4c3ccedde0df06f286383ff140d82bd7f5b8f75b4f5e8582d6  .claude/features/F012-model-api-router/dependencies.md
@@ -339,7 +339,7 @@ e361bd16b0c7ea77bbeefa8f6227b2cb92c7caf40a8af2cceda9f98c438bd295  .claude/schema
 4e9dd328413176a1a8c7ec575e4112a1775e8784f46a54ca7824d4a2a8c6654e  .claude/schemas/design-package-manifest.schema.json
 b96ee02bfb702f1a18cd74f0f1f3e1946eb3b4d8d5b64d5c27d86dcaa5b7363a  .claude/schemas/design-traceability.schema.json
 b5ebfd04e59ce75b7cce2c1bebcb3b8da70a20fb7f1e04e10823b552a891e185  .claude/schemas/discovery-receipt.schema.json
-92920bdddc8ab0cda7ee5e3c8542c26e15269beb2a2b57e89ee8ea15cf30a8db  .claude/schemas/event.schema.json
+edce6c09345b7cd58ffc3ea7e92f9275be3f4b7d445ce6a874d3961cdd881e15  .claude/schemas/event.schema.json
 1a99cbe714a0483467439a131498ae30c9c3e4fae7cdcb3806b169cb5c09e1af  .claude/schemas/expected-execution-binding.schema.json
 aa92d205cdecb94568aba7dd81bc8aff146eb7fdcaed9a0c6c7ec8a72269927b  .claude/schemas/expected-test-execution.schema.json
 0917d3e7a88f6b6e6b47df46782306fed09c7dd7f9356d3beec01d88a5498e85  .claude/schemas/ipc-client-upload-segment.schema.json

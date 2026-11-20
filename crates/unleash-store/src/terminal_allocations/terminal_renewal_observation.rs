@@ -11,8 +11,13 @@ use crate::{
     UnleashStore, WriteCriticality,
 };
 use rusqlite::{Connection, Transaction, params};
-use unleash_domain::{ActionState, DispatchId, Sha256Digest, TimestampMs};
-use unleash_protocol::canonical_sha256;
+use unleash_domain::{
+    ActionId, ActionState, ActorId, DispatchId, ProjectId, ReceiptId, Revision, Sequence,
+    Sha256Digest, TerminalId, TimestampMs,
+};
+use unleash_protocol::{
+    EventCausation, EventCausationKind, EventCursor, EventEnvelope, Sensitivity, canonical_sha256,
+};
 
 impl UnleashStore {
     /// Consume one dispatch after identity preflight, without contacting a host.
@@ -101,26 +106,91 @@ pub(super) fn append_intent_event(
     record: &TerminalRenewalRecord,
     event_type: &str,
     payload: &serde_json::Value,
-) -> Result<(String, unleash_protocol::EventCursor), StoreError> {
+) -> Result<(String, EventCursor), StoreError> {
     let c = &record.context;
-    let event = config.id_generator.new_uuid().to_string();
-    let revision = integer(
-        record
-            .revision
-            .as_u64()
-            .checked_add(1)
-            .ok_or_else(|| invalid("terminal intention revision overflow"))?,
+    let event = append_terminal_intent_event(
+        tx,
+        config,
+        d,
+        now,
+        TerminalIntentEventTarget {
+            action: c.action_id,
+            project: c.project_id,
+            actor: &c.actor_id,
+            receipt: c.receipt_id,
+            terminal: c.terminal_id,
+            previous_revision: record.revision,
+        },
+        event_type,
+        payload,
     )?;
+    Ok((
+        event.event_id.to_string(),
+        EventCursor::new(event.stream_id, event.sequence),
+    ))
+}
+
+#[derive(Clone, Copy)]
+pub(super) struct TerminalIntentEventTarget<'a> {
+    pub(super) action: ActionId,
+    pub(super) project: ProjectId,
+    pub(super) actor: &'a ActorId,
+    pub(super) receipt: ReceiptId,
+    pub(super) terminal: TerminalId,
+    pub(super) previous_revision: Revision,
+}
+
+pub(super) fn append_terminal_intent_event(
+    tx: &Transaction<'_>,
+    config: &StoreConfig,
+    d: &crate::DaemonStateRow,
+    now: TimestampMs,
+    target: TerminalIntentEventTarget<'_>,
+    event_type: &str,
+    payload: &serde_json::Value,
+) -> Result<EventEnvelope, StoreError> {
+    let event_id = config.id_generator.new_uuid();
+    let event = event_id.to_string();
+    let revision = target
+        .previous_revision
+        .as_u64()
+        .checked_add(1)
+        .ok_or_else(|| invalid("terminal intention revision overflow"))?;
+    let receipt = target.receipt.to_string();
+    let payload_hash = canonical_sha256(payload)?;
+    let payload = payload
+        .as_object()
+        .ok_or_else(|| invalid("terminal event payload must be an object"))?;
     tx.execute("INSERT INTO events(event_id,stream_id,aggregate_type,aggregate_id,aggregate_revision,event_ordinal,event_type,schema_version,project_id,actor_ref,actor_id,occurred_at_ms,recorded_at_ms,payload_json,payload_state,payload_hash,sensitivity,causation_kind,causation_id,causation_receipt_id,correlation_id) VALUES(?1,?2,'terminal_control_intent',?3,?11,0,?12,1,?4,?5,?5,?6,?6,?7,'full',?8,'restricted','command',?9,?9,?10)",
-        params![event,d.stream_id.to_string(),c.action_id.to_string(),c.project_id.to_string(),c.actor_id.as_str(),now.as_i64(),serde_json::to_string(payload)?,canonical_sha256(payload)?.to_string(),c.receipt_id.to_string(),c.terminal_id.to_string(),revision,event_type])?;
+        params![event,d.stream_id.to_string(),target.action.to_string(),target.project.to_string(),target.actor.as_str(),now.as_i64(),serde_json::to_string(payload)?,payload_hash.to_string(),receipt,target.terminal.to_string(),integer(revision)?,event_type])?;
     let sequence = u64::try_from(tx.last_insert_rowid())
         .map_err(|_| invalid("terminal event sequence invalid"))?;
     tx.execute("INSERT INTO outbox(event_id,destination,state,delivery_attempt,next_attempt_at_ms,authority_generation,consumer_version,delivery_key,rearm_count) VALUES(?1,'clients','pending',0,?2,?3,?4,?5,0)",
         params![event,now.as_i64(),d.authority_generation.to_string(),config.consumer_version,format!("{event}:clients")])?;
-    Ok((
-        event,
-        unleash_protocol::EventCursor::new(d.stream_id, unleash_domain::Sequence::new(sequence)),
-    ))
+    let timestamp = chrono::DateTime::from_timestamp_millis(now.as_i64())
+        .unwrap_or(chrono::DateTime::UNIX_EPOCH);
+    Ok(EventEnvelope {
+        event_id,
+        stream_id: d.stream_id,
+        sequence: Sequence::new(sequence),
+        event_type: event_type.to_owned(),
+        schema_version: 1,
+        occurred_at: timestamp,
+        recorded_at: timestamp,
+        project_id: Some(target.project),
+        aggregate_id: target.action.as_uuid(),
+        aggregate_revision: Revision::new(revision),
+        actor_ref: target.actor.to_string(),
+        correlation_id: target.terminal.as_uuid(),
+        causation: EventCausation {
+            kind: EventCausationKind::Command,
+            id: receipt,
+        },
+        command_id: None,
+        payload_hash,
+        payload: payload.clone(),
+        sensitivity: Sensitivity::Restricted,
+    })
 }
 
 fn commit_tx(

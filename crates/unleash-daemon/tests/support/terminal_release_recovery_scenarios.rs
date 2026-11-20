@@ -425,3 +425,194 @@ async fn t_f011_010_release_c4_lost_ack_quarantines_without_second_retirement() 
     )
     .await;
 }
+
+// The broker dispatch exists before the release intent consumes its own permit.
+fn release_before_permit_snapshot(data: &std::path::Path, receipt: &CommandReceipt) -> Value {
+    let conn = rusqlite::Connection::open_with_flags(
+        data.join("unleash-authority.db"),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .unwrap();
+    let text: String = conn.query_row(
+        "SELECT json_object('action_id',r.action_id,'context',json(r.context_json),
+          'digest',r.context_digest,'authority',r.authority_generation,'epoch',r.daemon_epoch,
+          'state',r.state,'revision',r.revision,'permit_dispatch',r.dispatch_id,
+          'proof',r.observation_object_hash,'refusal',r.refusal_event_id,
+          'disposition',r.disposition_event_id,'action_state',a.state,
+          'dispatch_id',b.dispatch_id,'evaluation_id',b.evaluation_id,
+          'request_hash',d.request_hash,'dispatch_phase_digest',p.phase_digest,
+          'dispatches',(SELECT COUNT(*) FROM action_dispatches WHERE action_id=r.action_id),
+          'broker_dispatches',(SELECT COUNT(*) FROM broker_dispatches WHERE action_id=r.action_id),
+          'dispatch_phases',(SELECT COUNT(*) FROM broker_phase_records WHERE action_id=r.action_id AND phase_key='dispatch'),
+          'observations',(SELECT COUNT(*) FROM broker_phase_records WHERE action_id=r.action_id AND phase_key LIKE 'observation:%'),
+          'proof_refs',(SELECT COUNT(*) FROM object_references WHERE owner_kind='terminal_release_observation' AND owner_id=r.action_id),
+          'refusal_events',(SELECT COUNT(*) FROM events WHERE event_type='TerminalControlDispatchRefused' AND causation_receipt_id=r.receipt_id),
+          'success_events',(SELECT COUNT(*) FROM events WHERE event_type='ActionObserved' AND aggregate_id=r.action_id AND json_extract(payload_json,'$.state')='observed_success'))
+         FROM terminal_release_intents r JOIN actions a ON a.action_id=r.action_id
+         JOIN broker_dispatches b ON b.action_id=r.action_id
+         JOIN action_dispatches d ON d.action_id=r.action_id AND d.dispatch_id=b.dispatch_id
+         JOIN broker_phase_records p ON p.action_id=r.action_id AND p.evaluation_id=b.evaluation_id AND p.phase_key='dispatch'
+         WHERE r.receipt_id=?1",
+        [receipt.receipt_id.to_string()], |r| r.get(0),
+    ).unwrap();
+    serde_json::from_str(&text).unwrap()
+}
+
+fn assert_release_permit_unconsumed(state: &Value) {
+    assert_eq!(state.get("state"), Some(&json!("prepared")));
+    assert_eq!(state.get("revision"), Some(&json!(1)));
+    for field in ["permit_dispatch", "proof", "refusal", "disposition"] {
+        assert!(
+            state.get(field).is_some_and(Value::is_null),
+            "no native permit/disposition: {field}"
+        );
+    }
+    for field in ["dispatches", "broker_dispatches", "dispatch_phases"] {
+        assert_eq!(
+            state.get(field),
+            Some(&json!(1)),
+            "exact broker marker retained: {field}"
+        );
+    }
+    for field in [
+        "observations",
+        "proof_refs",
+        "refusal_events",
+        "success_events",
+    ] {
+        assert_eq!(
+            state.get(field),
+            Some(&json!(0)),
+            "no invented observation/refusal: {field}"
+        );
+    }
+}
+
+fn assert_same_release_dispatch(marked: &Value, unknown: &Value) {
+    for field in [
+        "action_id",
+        "context",
+        "digest",
+        "authority",
+        "epoch",
+        "dispatch_id",
+        "evaluation_id",
+        "request_hash",
+        "dispatch_phase_digest",
+    ] {
+        assert_eq!(
+            unknown.get(field),
+            marked.get(field),
+            "old durable marker unchanged: {field}"
+        );
+    }
+}
+
+fn read_native_secret(native: &unleash_process_host::HostManifest) -> HostControlSecret {
+    unleash_process_host::load_control_secret(
+        &native
+            .socket_path
+            .parent()
+            .unwrap()
+            .join(unleash_process_host::CONTROL_SECRET_FILENAME),
+    )
+    .unwrap()
+}
+
+#[tokio::test]
+async fn t_f011_010_prepared_release_with_broker_marker_is_never_abandoned_as_c2() {
+    let mut harness = harness(true).await;
+    let fixture = &mut harness.fixture;
+    let acquired = acquire(fixture).await;
+    let native = fixture.host_manifest();
+    let host = host_identity(&harness.paths);
+    let before = facts(fixture, &acquired);
+    let original_authority = fixture.authority;
+    let original_epoch = fixture.client.hello().daemon_epoch;
+    let native_before = release_count(&harness.paths);
+    let handshakes_before = count(&harness.paths);
+    assert_eq!(native_before, 0);
+    assert_eq!(before.lease_state, "held");
+    assert!(matches!(
+        native.control_state,
+        Some(unleash_process_host::HostControlState::Active { .. })
+    ));
+    let secret_before = read_native_secret(&native);
+    let request = release_request(fixture, &acquired, 0xf011_81b0);
+    // Generic Store C4 is AFTER broker commit and BEFORE its return to the
+    // journal, hence before ReleaseExecutor::observe_once / resolve permit.
+    unleash_platform::write_private_file_atomic(&harness.paths.arm, b"armed").unwrap();
+    let accepted = fixture.client.send_command(&request).await.unwrap();
+    assert_eq!(accepted.state, ReceiptState::Accepted);
+    let retained = receive(harness.listener.as_ref().unwrap(), DISPATCH).await;
+    let marked = release_before_permit_snapshot(fixture.data.path(), &accepted);
+    assert_release_permit_unconsumed(&marked);
+    assert_eq!(marked.get("action_state"), Some(&json!("dispatching")));
+    assert_eq!(marked.get("authority"), Some(&json!(original_authority)));
+    assert_eq!(marked.get("epoch"), Some(&json!(original_epoch)));
+    let mut marked_facts = facts(fixture, &acquired);
+    assert_eq!(marked_facts.dispatches, before.dispatches + 1);
+    marked_facts.dispatches = before.dispatches;
+    assert_eq!(
+        marked_facts, before,
+        "the native permit has not changed the held lease"
+    );
+    assert_eq!(release_count(&harness.paths), native_before);
+    assert_eq!(count(&harness.paths), handshakes_before);
+    same_live_host(fixture, &harness.paths, &host, &native);
+    assert_eq!(fixture.host_manifest().control_state, native.control_state);
+
+    fixture.daemon.kill_for_restart();
+    std::fs::remove_file(&harness.paths.arm).unwrap();
+    drop(retained);
+    fixture.start_successor().await;
+    assert_eq!(fixture.authority, original_authority);
+    assert!(fixture.client.hello().daemon_epoch > original_epoch);
+    let unknown = release_before_permit_snapshot(fixture.data.path(), &accepted);
+    assert_release_permit_unconsumed(&unknown);
+    assert_eq!(unknown.get("action_state"), Some(&json!("outcome_unknown")));
+    assert_same_release_dispatch(&marked, &unknown);
+    let after = facts(fixture, &acquired);
+    retained_resources(&before, &after);
+    assert_eq!(after.lease_state, "suspect");
+    assert_eq!(release_count(&harness.paths), native_before);
+    assert_eq!(count(&harness.paths), handshakes_before);
+    same_live_host(fixture, &harness.paths, &host, &native);
+    let current = fixture.host_manifest();
+    assert_eq!(current.control_state, native.control_state);
+    let secret_after = read_native_secret(&current);
+    assert!(
+        secret_before.expose_secret() == secret_after.expose_secret(),
+        "no native retirement or reactivation capability rotation"
+    );
+    assert_eq!(
+        fixture
+            .client
+            .get_command_receipt(RequestId::from_u128(0xf011_81b1), request.command_id,)
+            .await
+            .unwrap()
+            .receipt,
+        accepted
+    );
+    for _ in 0..2 {
+        assert_eq!(
+            fixture.client.send_command(&request).await.unwrap(),
+            accepted
+        );
+        assert_eq!(
+            release_before_permit_snapshot(fixture.data.path(), &accepted),
+            unknown
+        );
+    }
+    // Real final drain waits for all broker readers/jobs before counting effects.
+    drain(fixture).await;
+    assert_eq!(
+        release_before_permit_snapshot(fixture.data.path(), &accepted),
+        unknown
+    );
+    assert_eq!(release_count(&harness.paths), native_before);
+    assert_eq!(count(&harness.paths), handshakes_before);
+    assert_eq!(facts(fixture, &acquired), after);
+    same_live_host(fixture, &harness.paths, &host, &native);
+    assert_eq!(fixture.host_manifest().control_state, native.control_state);
+}

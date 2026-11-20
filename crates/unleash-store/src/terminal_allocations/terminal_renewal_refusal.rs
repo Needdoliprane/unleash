@@ -9,7 +9,9 @@ use crate::{
 };
 use rusqlite::{OptionalExtension, Transaction, params};
 use serde::Serialize;
-use unleash_domain::{ActionId, ActionState, Sha256Digest, TimestampMs};
+use unleash_domain::{
+    ActionId, ActionState, ActorId, AuthorityGeneration, DaemonEpoch, Sha256Digest, TimestampMs,
+};
 use unleash_protocol::{EventCursor, RetryClass, canonical_sha256};
 
 #[derive(Clone, Copy, Serialize)]
@@ -18,6 +20,83 @@ pub(super) enum RefusalReason {
     DaemonSuperseded,
     PolicyChanged,
     AuthorizationDenied,
+}
+
+pub(super) struct UndispatchedTerminalAction<'a> {
+    pub(super) action_id: ActionId,
+    pub(super) principal: &'a ActorId,
+    pub(super) authority: AuthorityGeneration,
+    pub(super) epoch: DaemonEpoch,
+    pub(super) context_digest: Sha256Digest,
+}
+
+impl UndispatchedTerminalAction<'_> {
+    pub(super) fn has_no_effect_markers(&self, tx: &Transaction<'_>) -> Result<bool, StoreError> {
+        Ok(tx.query_row(
+            "SELECT NOT EXISTS(SELECT 1 FROM action_dispatches WHERE action_id=?1)
+             AND NOT EXISTS(SELECT 1 FROM broker_dispatches WHERE action_id=?1)
+             AND NOT EXISTS(SELECT 1 FROM broker_phase_records WHERE action_id=?1
+                 AND (phase_key='dispatch' OR phase_key LIKE 'observation:%'))
+             AND NOT EXISTS(SELECT 1 FROM actions a WHERE a.action_id=?1 AND
+                (a.state NOT IN ('prepared','authorizing','authorized','denied','cancelled')
+                 OR a.control_principal_id IS NOT ?2 OR a.authority_generation!=?3 OR a.daemon_epoch!=?4
+                 OR NOT EXISTS(SELECT 1 FROM broker_intents i WHERE i.action_id=a.action_id
+                               AND json_extract(i.intent_json,'$.payload_digest')=?5)))",
+            params![
+                self.action_id.to_string(),
+                self.principal.as_str(),
+                self.authority.to_string(),
+                integer(self.epoch.as_u64())?,
+                self.context_digest.to_string(),
+            ],
+            |row| row.get(0),
+        )?)
+    }
+
+    pub(super) fn cancel_pending(
+        &self,
+        tx: &Transaction<'_>,
+        state: Option<ActionState>,
+    ) -> Result<(), StoreError> {
+        if matches!(
+            state,
+            Some(ActionState::Prepared | ActionState::Authorizing | ActionState::Authorized)
+        ) {
+            let changed = tx.execute(
+                "UPDATE actions SET state='cancelled',revision=revision+1
+                 WHERE action_id=?1 AND state IN ('prepared','authorizing','authorized')
+                 AND authority_generation=?2 AND daemon_epoch=?3 AND control_principal_id=?4
+                 AND EXISTS(SELECT 1 FROM broker_intents i WHERE i.action_id=actions.action_id
+                            AND json_extract(i.intent_json,'$.payload_digest')=?5)",
+                params![
+                    self.action_id.to_string(),
+                    self.authority.to_string(),
+                    integer(self.epoch.as_u64())?,
+                    self.principal.as_str(),
+                    self.context_digest.to_string(),
+                ],
+            )?;
+            if changed != 1 {
+                return Err(invalid(
+                    "terminal refusal differs from its broker intention",
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+impl<'a> From<&'a TerminalRenewalRecord> for UndispatchedTerminalAction<'a> {
+    fn from(record: &'a TerminalRenewalRecord) -> Self {
+        let c = &record.context;
+        Self {
+            action_id: c.action_id,
+            principal: &c.principal_id,
+            authority: c.authority_generation,
+            epoch: c.daemon_epoch,
+            context_digest: record.context_digest,
+        }
+    }
 }
 
 fn can_refuse(tx: &Transaction<'_>, record: &TerminalRenewalRecord) -> Result<bool, StoreError> {
@@ -36,26 +115,7 @@ fn can_refuse(tx: &Transaction<'_>, record: &TerminalRenewalRecord) -> Result<bo
     {
         return Ok(false);
     }
-    let c = &record.context;
-    Ok(tx.query_row(
-        "SELECT NOT EXISTS(SELECT 1 FROM action_dispatches WHERE action_id=?1)
-         AND NOT EXISTS(SELECT 1 FROM broker_dispatches WHERE action_id=?1)
-         AND NOT EXISTS(SELECT 1 FROM broker_phase_records WHERE action_id=?1
-             AND (phase_key='dispatch' OR phase_key LIKE 'observation:%'))
-         AND NOT EXISTS(SELECT 1 FROM actions a WHERE a.action_id=?1 AND
-            (a.state NOT IN ('prepared','authorizing','authorized','denied')
-             OR a.control_principal_id IS NOT ?2 OR a.authority_generation!=?3 OR a.daemon_epoch!=?4
-             OR NOT EXISTS(SELECT 1 FROM broker_intents i WHERE i.action_id=a.action_id
-                           AND json_extract(i.intent_json,'$.payload_digest')=?5)))",
-        params![
-            c.action_id.to_string(),
-            c.principal_id.as_str(),
-            c.authority_generation.to_string(),
-            integer(c.daemon_epoch.as_u64())?,
-            record.context_digest.to_string()
-        ],
-        |row| row.get(0),
-    )?)
+    UndispatchedTerminalAction::from(record).has_no_effect_markers(tx)
 }
 
 fn current_reason(
@@ -113,27 +173,7 @@ pub(super) fn refuse_tx(
         ));
     }
     let c = &record.context;
-    if matches!(record.broker_action_state, Some(state) if state != ActionState::Denied) {
-        let changed = tx.execute(
-            "UPDATE actions SET state='cancelled',revision=revision+1
-             WHERE action_id=?1 AND state IN ('prepared','authorizing','authorized')
-             AND authority_generation=?2 AND daemon_epoch=?3 AND control_principal_id=?4
-             AND EXISTS(SELECT 1 FROM broker_intents i WHERE i.action_id=actions.action_id
-                        AND json_extract(i.intent_json,'$.payload_digest')=?5)",
-            params![
-                c.action_id.to_string(),
-                c.authority_generation.to_string(),
-                integer(c.daemon_epoch.as_u64())?,
-                c.principal_id.as_str(),
-                record.context_digest.to_string()
-            ],
-        )?;
-        if changed != 1 {
-            return Err(invalid(
-                "terminal refusal differs from its broker intention",
-            ));
-        }
-    }
+    UndispatchedTerminalAction::from(record).cancel_pending(tx, record.broker_action_state)?;
     let payload = serde_json::json!({
         "action_id": c.action_id, "command_id": c.command_id, "receipt_id": c.receipt_id,
         "terminal_id": c.terminal_id, "context_digest": record.context_digest, "reason": reason,

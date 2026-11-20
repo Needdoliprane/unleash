@@ -10,6 +10,9 @@ use unleash_store::terminal_allocations::terminal_acquisition_query::TerminalAcq
 #[path = "terminal_release_recovery_scenarios.rs"]
 mod recovery_scenarios;
 
+#[path = "terminal_release_c2_scenarios.rs"]
+mod c2_scenarios;
+
 async fn acquire(fixture: &mut LiveFixture) -> TerminalAcquisitionResult {
     fixture.start_terminal().await;
     let receipt = fixture

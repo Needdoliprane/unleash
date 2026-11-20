@@ -55,3 +55,9 @@ divergente. Une libération logique de bail seule ne qualifie pas ce parcours.
 Après acquisition sous Standard, engager une politique Strict puis demander
 le retrait. Vérifier un refus avant reçu et l’intégrité du contrôle natif,
 du bail, de la révision et des réservations.
+
+À C2, perdre la réponse après le commit du reçu de retrait et avant dispatch.
+Exiger au redémarrage un seul refus causal `not_dispatched` avec le contexte
+original, zéro dispatch et l’intégrité du PTY et des ressources. Rejouer le
+reçu et redémarrer une deuxième fois. Vérifier le refus d’un marqueur tardif
+et l’absence de toute nouvelle rotation ou observation native.
