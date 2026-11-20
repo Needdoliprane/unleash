@@ -58,19 +58,44 @@ Le mandat tient dans un message utilisable à la reprise. Il précise :
 - **Périmètre** — chemin du checkout, branche et SHA de départ, fichiers
   attribués, autres writers concernés, lecture seule si applicable.
 - **Preuve** — commandes exactes, résultat attendu, emplacement des preuves
-  et limites de la fixture. Pour une revue de sécurité défensive, demander
-  les invariants à vérifier, les écarts dans le diff et les corrections.
-  Les tests utilisent des données synthétiques locales. Le mandat exclut le
-  développement d’exploits et la reproduction d’intrusions.
+  et limites de la fixture.
 - **Remise ou interruption** — SHA, changements en cours, commandes exécutées
-  et résultat par critère, première action encore nécessaire. Si un contrôle de
-  la plateforme masque un résultat, le root laisse ce résultat non vérifié,
-  conserve le travail disponible et poursuit les lots indépendants. Il ne
-  réitère pas la demande filtrée.
+  et résultat par critère, première action encore nécessaire.
 
 Parallélisme : au plus 4 sous-agents écrivains simultanés, plus des sous-agents en lecture seule. Le root ne code pas lui-même une tâche déléguée ; il garde le contexte du goal.
 
 Compte rendu attendu de chaque sous-agent : branche et commit, fichiers modifiés, commandes exécutées avec leur sortie réelle, exigences couvertes, écarts et risques. « Terminé » sans sortie de commande n'est pas un compte rendu.
+
+#### Travaux de sécurité informatique
+
+Cette règle s’applique au root comme aux sous-agents, y compris lors d’une
+reprise ou d’une revue en lecture seule. Avant de déléguer ou d’exécuter,
+consigner les quatre éléments suivants dans le mandat existant. Une
+demande porte sur une seule propriété de sécurité. Si un élément manque ou
+reste ambigu, suspendre cette exécution jusqu’à clarification du périmètre.
+
+- **Finalité défensive** — propriété à vérifier ou défaut de code à corriger,
+  raison pour laquelle ce contrôle est nécessaire et résultat observable.
+- **Périmètre autorisé** — checkout et SHA, fichiers ou suite de tests,
+  environnement et données. Privilégier la lecture du diff et les fixtures
+  synthétiques locales du dépôt. Identifier expressément tout accès réseau
+  nécessaire, sa destination et son autorisation avant l’appel.
+- **Commande exacte** — répertoire de travail, exécutable, arguments, filtre
+  de test et effets attendus en lecture ou en écriture. Employer la commande
+  la plus étroite qui vérifie la propriété. Pour une lecture par outil,
+  indiquer les fichiers ou plages de lignes. Avant toute commande qui change
+  de données, de cible ou d’effet, actualiser le mandat et réexaminer le
+  périmètre.
+- **Critère et remise** — oracle de réussite ou de refus, preuve à retenir,
+  résultat réellement obtenu et limites de la vérification.
+
+Les mandats couvrent la revue de code, les corrections défensives et leurs
+tests de contrat. Ils excluent le développement d’exploits, la reproduction
+d’intrusions et le contournement des contrôles de la plateforme. Si celle-ci
+refuse ou masque un résultat, arrêter la vérification concernée. Inscrire
+son état non vérifié et conserver seulement les résultats déjà disponibles.
+La demande filtrée ne doit être ni réitérée, ni reformulée pour être relancée,
+ni transférée à un autre agent ou outil. Les autres lots autorisés continuent.
 
 ### 4. Vérification indépendante
 

@@ -14,7 +14,7 @@
     "cache/"
   ],
   "hash_algorithm": "sha256",
-  "source_tree_digest": "414498c7f169baea34b675b008a034d79299b74154d36d857dde2f63c5b1f630",
+  "source_tree_digest": "ec998e4e65df74e5d6b4b389ce9ae92489fbf1218ab264c7b64ce3e90d38c89f",
   "files": [
     {
       "path": "INDEX.md",
@@ -858,8 +858,8 @@
     },
     {
       "path": "dev/goal-protocol.md",
-      "sha256": "b78903768f94b5efdd6bcaf1d613119062c87c4ad90653aef76888301b57b4b5",
-      "bytes": 14501,
+      "sha256": "5c5d35028b6e56fe408a59c39b1c5b696f467145adaabceb39a5f582362cc3e5",
+      "bytes": 16039,
       "media_type": "text/markdown"
     },
     {
