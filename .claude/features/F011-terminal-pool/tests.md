@@ -24,3 +24,21 @@ La lecture causale est testée après acquisition et après transfert sur le vra
 Le contrôle de forme de T-F011-005 couvre les charges de 1 et 65 536 octets, les valeurs 0 et 255, le projet obligatoire et les six champs fermés. Vérifier le refus des dépassements, du payload vide, des valeurs hors octet et des champs d’autorité ajoutés. Le banc du daemon vérifie séparément le rapprochement de l’agrégat, de la génération, du bail, du fence et de la séquence avec l’état réobservé.
 
 Les EV contiennent OS/version, gestionnaire de service, identités avant/après, commande normalisée, logs redigés, reservations et résultat. Le test ne déclare pas une sandbox complète ; il démontre exactement quels descendants ont été observés et arrêtés. Toute impossibilité sur un OS reste un blocage de qualification identifié.
+
+Pour la tranche Release de T-F011-010, acquérir un vrai PTY puis retirer son
+contrôle avec les acteur, projet, génération, bail et fence exacts. Lire le
+résultat causal et le reçu initial, rejouer la commande puis drainer le writer.
+Exiger une seule observation et un seul dispatch. Les anciens canaux et une
+nouvelle connexion avec l'ancien secret doivent recevoir un refus typé avant
+effet, sans accepter EOF comme preuve d'absence d'effet. Les anciennes commandes
+publiques d'entrée et de redimensionnement sont refusées, même avec la révision
+de contrôle courante. Conserver processus, host, génération, PTY, échéance et les
+trois réservations physiques. Une acquisition explicite distincte doit ensuite
+obtenir un nouveau bail et un fence supérieur sur le même PTY, sans spawn.
+
+Tester séparément mauvaise portée, acteur usurpé, génération et fence divergents,
+puis un marqueur d'effet retenu à C4 et une issue inconnue après restart. Vérifier
+zéro reçu Release et l'intégrité de l'action, du dispatch, du contexte, des preuves
+et de la barrière initialement inconnus. Tester la perte de l'ACK natif de retrait
+sans seconde rotation, son inspection exacte et les refus de preuve absente ou
+divergente. Une libération logique de bail seule ne qualifie pas ce parcours.

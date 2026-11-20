@@ -240,6 +240,38 @@ Skill Registry et Role Registry restent distincts dans le domaine, les commandes
 
 Aucune clé d'unicité ne contient de NULL, car SQLite tient deux NULL pour distincts. Les reçus de découverte restent la propriété de F009 (`discovery_receipts`, `discovery_uses`) ; aucune table `reuse_decision` n'existe. Le `namespace_ref` d'un TypedSourceRef `registry_version` vaut `scope_owner_key`.
 
+## Retrait du contrôle terminal V018
+
+La migration V018 est additive après le préfixe V001–V017 conservé à l'octet.
+`terminal_release_intents` conserve l'intention immuable, son contexte et son
+digest, le reçu et l'action, le terminal et sa génération, le bail/fence/révision
+sources et l'incarnation qualifiée. Ce retrait ne réutilise pas la disposition
+V010 d'une ressource physique ni une intention V016 portant une proposition de
+TTL. Les preuves historiques restent lisibles sous leur format d'origine.
+
+Le writer accepte une intention `prepared` seulement pour le contrôleur exact,
+dans sa portée, sa politique et son incarnation courantes. Les exclusions avec
+entrée, renouvellement/redimensionnement et transfert sont réciproques. Les
+requêtes sur V018 sont précédées d'un contrôle de version afin que les bases et
+fixtures V010–V017 restent utilisables sans cette table.
+
+La résolution consomme le marqueur durable exact et pose `retire_resolved` avant
+tout contact mutateur avec le host. Le bail source devient `reconciling` ; aucune
+réservation auxiliaire n'est rendue. Une preuve native qualifiée engage
+atomiquement `observed`, le bail `released`, la nouvelle révision du contrôle,
+l'objet référencé, l'observation du broker et son événement causal/outbox. Le
+pointeur vers le bail historique libéré ne constitue pas un contrôleur actif.
+Ni l'échéance, ni l'identité du processus, ni les réservations physiques ne sont
+renouvelées ou supprimées par ce retrait.
+
+Après perte de l'ACK ou autre issue ambiguë, l'action et l'intention restent en
+réconciliation, sans succès ni nouvelle permission native. L'ACK d'inspection
+doit correspondre au header original entier, au dispatch, au contexte source,
+au host et à la même génération vivante. L'époque d'inspection reste distincte
+de l'époque du retrait. Un ACK ancien ne peut activer un bail ancien. Une
+réacquisition explicite lie le retrait qualifié comme source, réserve un nouveau
+bail/fence et engage son activation uniquement avec sa nouvelle observation.
+
 ## Catalogue de modèles R7
 
 Les versions établies par `SetProviderProfile` portent la paire unique `(profile_id, profile_version)` dans `provider_profiles`, la référence du contenu canonique et son digest, la portée autorisée, le principal et le reçu de configuration. La clé technique `profile_version_ref` reste la référence des probes et des appels. Le writer résout la paire exacte et contrôle le lien entre les métadonnées et le contenu. Il attribue la nouvelle version et engage le reçu dans la même transaction. Les lignes historiques dépourvues de cette liaison restent accessibles selon leurs références existantes. Elles ne peuvent servir de versions configurées sans preuve de provenance et de contenu.

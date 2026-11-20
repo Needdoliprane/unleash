@@ -17,6 +17,34 @@
     "payload"
   ],
   "$defs": {
+    "terminal_release": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "terminal_id",
+        "process_run_uuid",
+        "lease_id",
+        "fence"
+      ],
+      "properties": {
+        "terminal_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "process_run_uuid": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "lease_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "fence": {
+          "$ref": "#/$defs/wire_unsigned_integer",
+          "minimum": 1
+        }
+      }
+    },
     "terminal_input": {
       "type": "object",
       "additionalProperties": false,
@@ -421,6 +449,26 @@
     }
   },
   "allOf": [
+    {
+      "if": {
+        "properties": {
+          "command_type": {
+            "const": "ReleaseTerminal"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "project_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "payload": {
+            "$ref": "#/$defs/terminal_release"
+          }
+        }
+      }
+    },
     {
       "if": { "properties": { "command_type": { "const": "SetPolicy" } } },
       "then": { "properties": { "payload": { "$ref": "#/$defs/set_policy" } } }

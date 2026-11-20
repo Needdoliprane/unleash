@@ -40,6 +40,53 @@ Le payload enregistré contient `terminal_id`, `process_run_uuid`, `scope_revisi
 
 ResizeTerminal reçoit terminal_id, process_run_uuid, lease_id, fence, rows et cols bornés strictement positifs ; l’autorité revalide génération et droit de contrôle avant appel OS. Réponse : reçu puis taille observée ou erreur explicite, sans déduire un redimensionnement réussi d’un simple envoi. ReleaseTerminal indique la disposition du lease ; détacher une vue seule n’est ni ReleaseTerminal ni StopProcess. Les noms de discussion SpawnProcess, WriteTerminal et ReadProcessLog ne sont des alias publics dans aucune version du protocole, y compris `unleash.ipc.v2` (voir [IPC](../../architecture/ipc-and-apis.md)).
 
+## Libération explicite du contrôle
+
+`ReleaseTerminal` exige le projet exact dans l'enveloppe, le terminal comme
+agrégat et la révision courante du contrôle dans `expected_revision`. Le payload
+fermé contient `terminal_id`, `process_run_uuid`, `lease_id` et `fence`. Le fence
+est un entier de 1 à 2⁵³−1. Le writer résout le titulaire authentifié ; aucun champ
+client ne peut fournir un principal, une preuve de retrait ou une disposition.
+
+Le reçu accepte une intention de retrait distincte du renouvellement et de
+l'arrêt du processus. Il ne constate pas encore la libération. Le writer refuse
+une entrée, un transfert ou un renouvellement/redimensionnement préparé,
+dispatché ou inconnu qui empêche de qualifier le retrait. La même exclusion
+s'applique réciproquement pendant une intention de retrait non disposée.
+
+Le host retire le contrôle sous le même verrou que ses mutations natives. Il
+invalide les anciens canaux et l'ancien secret et enregistre l'absence de
+contrôleur. Il ne ferme ni le PTY ni le processus. Un ancien secret sur une
+nouvelle connexion n'autorise pas davantage d'entrée ou de redimensionnement.
+Les lectures autorisées et l'arrêt explicitement autorisé conservent leur
+contrat propre. Un ancien manifeste sans qualification de ce protocole reste
+lisible ; il ne prouve pas une capacité de retrait et ne déclenche aucun repli.
+
+Après ACK natif attribuable et observation engagée, `ActionObserved` contient
+`terminal_release` : `command_id`, `receipt_id`, `terminal_id`,
+`process_run_uuid`, `lease_id`, `fence`, `control_revision` et
+`disposition="released"`. Le lease et le fence sont ceux du contrôle retiré,
+pas une capacité nouvelle. Le writer engage ensemble la preuve, la phase du
+broker, la révision du contrôle et le bail `released`. L'échéance reste inchangée.
+Les trois réservations du host, de l'enfant et du PTY restent détenues tant que
+ces ressources vivent. Le reçu initial reste identique au rejeu ; aucune seconde
+rotation ni seconde observation n'est produite.
+
+Une erreur après dispatch sans ACK qualifié conserve une issue inconnue et la
+barrière de concurrence. Le retrait n'est ni réémis ni déclaré réussi d'après
+un UPDATE SQLite ou le seul changement du manifeste. L'inspection native doit
+viser exactement l'ancien header, son dispatch et sa preuve de retrait ; une
+preuve absente ou divergente ferme la reprise. Une inspection historique ne
+réactive aucun bail d'une ancienne époque.
+
+Une nouvelle commande enregistrée `AcquireTerminal` peut reprendre le même PTY
+après un retrait qualifié. Cette branche est distincte du renouvellement : elle
+crée un nouveau bail et un fence strictement supérieur, même dans la même époque.
+Elle lie explicitement la preuve du retrait antérieur. Seule l'observation
+d'activation engage ce contrôle. L'ancienne commande et son ancien bail ne
+retrouvent aucun droit par rejeu. Le transfert d'un contrôle encore détenu garde
+sa règle d'époque strictement supérieure.
+
 ## Entrée binaire du terminal
 
 `SendTerminalInput` exige l’UUID du projet dans l’enveloppe. L’agrégat est le terminal visé et `expected_revision` vise sa révision de contrôle. Le [schéma de commande](../../schemas/ipc-command.schema.json) ferme le payload à `terminal_id`, `process_run_uuid`, `lease_id`, `fence`, `input_seq` et `payload_bytes`. Les trois identifiants sont des UUID. Le fence et la séquence sont des entiers de 1 à 2⁵³−1. `payload_bytes` contient 1 à 65 536 entiers de 0 à 255 et accepte les octets non textuels.
