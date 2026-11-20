@@ -240,11 +240,19 @@ impl Fixture {
                 socket.shutdown().await?;
             }
             let mut remaining = Vec::new();
-            tokio::time::timeout(
+            let closed = tokio::time::timeout(
                 Duration::from_secs(2),
                 socket.take(8192).read_to_end(&mut remaining),
             )
-            .await??;
+            .await?;
+            // A client rejecting an oversized unread response may reset TCP.
+            // This only collects its already received request bytes; it is not
+            // a successful product observation or permission to drain/retry.
+            if let Err(error) = closed
+                && error.kind() != io::ErrorKind::ConnectionReset
+            {
+                return Err(error);
+            }
             request.extend(remaining);
             let extra_connection =
                 tokio::time::timeout(Duration::from_millis(30), listener.accept())
