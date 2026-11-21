@@ -15,6 +15,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::io::AsyncReadExt;
+use tokio::sync::{Semaphore, SemaphorePermit};
 use unleash_client::{ClientConfig, ClientError, EventStreamReader, UnleashClient};
 use unleash_daemon::{DaemonConfig, DaemonStartOutcome, StoreOverrides, UnleashDaemon};
 use unleash_domain::{
@@ -34,11 +35,16 @@ mod observation_scenarios;
 #[path = "support/provider_probe_connect_trace.rs"]
 mod connect_trace;
 
+// Each fixture opens its own daemon and SQLite writer. Limit contention
+// between independent scenarios while their IPC timing assertions run.
+static CONNECT_FIXTURE_SLOTS: Semaphore = Semaphore::const_new(2);
+
 struct ConnectFixture {
     rendezvous: tempfile::TempDir,
     data: tempfile::TempDir,
     handle: unleash_daemon::DaemonHandle,
     endpoint: TcpListener,
+    _fixture_slot: SemaphorePermit<'static>,
 }
 
 struct DispatchPause {
@@ -110,6 +116,7 @@ impl ConnectFixture {
     }
 
     async fn start_with_store_overrides(store_overrides: StoreOverrides) -> (Self, UnleashClient) {
+        let fixture_slot = CONNECT_FIXTURE_SLOTS.acquire().await.unwrap();
         connect_trace::install();
         let rendezvous = local_test_dir("f012-connect-rdv").unwrap();
         std::fs::set_permissions(rendezvous.path(), std::fs::Permissions::from_mode(0o700))
@@ -140,6 +147,7 @@ impl ConnectFixture {
                 data,
                 handle,
                 endpoint,
+                _fixture_slot: fixture_slot,
             },
             client,
         )
