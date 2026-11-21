@@ -57,7 +57,8 @@ impl UnleashStore {
     /// retained definition and selects the initial task from its entry node.
     /// # Errors
     /// Refuses invalid or stale commands, missing evidence, unavailable scopes
-    /// and workflows whose entry needs a different reducer decision.
+    /// and workflows whose entry needs a different reducer decision or exceeds
+    /// the activation budget.
     pub fn start_prepared_workflow_run(
         &self,
         mut envelope: CommandEnvelope,
@@ -365,6 +366,9 @@ fn record_start(
         })?;
     let revision = decode_revision(revision_i64)?;
     let entry = &start.entry;
+    if entry.activations > entry.max_step_activations {
+        return Err(StoreError::WorkflowActivationBudgetExhausted);
+    }
     let task = WorkflowTaskActivationPlan {
         daemon_epoch: start.epoch,
         definition_hash: run.definition,
@@ -379,8 +383,17 @@ fn record_start(
         scope_revision: entry.scope.scope_revision,
     };
     tx.execute(
-        "UPDATE workflow_runs SET state=?1,revision=?2,started_at_ms=?3 WHERE run_id=?4",
-        params![next.to_string(), revision_i64, now.as_i64(), id.to_string()],
+        "UPDATE workflow_runs
+            SET state=?1,revision=?2,started_at_ms=?3,max_step_activations=?4,step_activations_used=?5
+          WHERE run_id=?6",
+        params![
+            next.to_string(),
+            revision_i64,
+            now.as_i64(),
+            entry.max_step_activations,
+            entry.activations,
+            id.to_string(),
+        ],
     )?;
     insert_ready_task(tx, &task, id, &run.mission, "[]")?;
     let due = deadline(now, entry.max_duration_seconds)?;

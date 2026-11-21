@@ -74,7 +74,27 @@ impl Fixture {
         };
         fixture.retain_object(&bytes, "workflow_version", owner, "content_hash");
         fixture.start_run();
+        if fixture.store.daemon_state().unwrap().schema_version >= 20 {
+            let limit = definition
+                .pointer("/budget/max_step_activations")
+                .and_then(Value::as_i64)
+                .unwrap();
+            fixture.seed_activation_budget(fixture.run, limit);
+        }
         fixture
+    }
+
+    pub(crate) fn seed_activation_budget(&self, run: RunId, limit: i64) {
+        self.store
+            .execute_in_writer_tx(WriteCriticality::Normal, move |tx, _| {
+                tx.execute(
+                    "UPDATE workflow_runs SET max_step_activations=?1,step_activations_used=0
+                      WHERE run_id=?2",
+                    rusqlite::params![limit, run.to_string()],
+                )?;
+                Ok(())
+            })
+            .unwrap();
     }
 
     pub(crate) fn retain_object(

@@ -637,6 +637,7 @@ pub(crate) struct EntryTask {
     pub contract_version_id: String,
     pub max_duration_seconds: u32,
     pub max_step_activations: u32,
+    pub activations: u32,
     pub timeout_seconds: u32,
 }
 
@@ -701,7 +702,7 @@ impl RunPlan {
         {
             return Err(invalid("the retained budget cannot admit an initial task"));
         }
-        let node_id = entry_task_id(&workflow)?;
+        let (node_id, activations) = entry_task_path(&workflow)?;
         let task = crate::workflow_activation::verify_task_node(&workflow, node_id, 1)?;
         let timeout_seconds = task
             .get("timeout_seconds")
@@ -739,6 +740,7 @@ impl RunPlan {
             contract_version_id: contract,
             max_duration_seconds: budget.duration_seconds,
             max_step_activations: budget.step_activations,
+            activations,
             timeout_seconds,
         })
     }
@@ -781,11 +783,13 @@ fn retained_entry_contract(
     })
 }
 
-fn entry_task_id(workflow: &Value) -> Result<&str, StoreError> {
+fn entry_task_path(workflow: &Value) -> Result<(&str, u32), StoreError> {
     let mut node = workflow
         .get("body")
         .ok_or_else(|| invalid("missing workflow body"))?;
+    let mut activations = 1;
     while node.get("kind").and_then(Value::as_str) == Some("sequence") {
+        activations += 1;
         node = node
             .get("steps")
             .and_then(Value::as_array)
@@ -797,10 +801,12 @@ fn entry_task_id(workflow: &Value) -> Result<&str, StoreError> {
             "workflow entry requires a reducer decision before a task is ready".to_owned(),
         ));
     }
-    node.get("id")
+    let node_id = node
+        .get("id")
         .and_then(Value::as_str)
         .filter(|id| !id.trim().is_empty())
-        .ok_or_else(|| invalid("missing entry task identity"))
+        .ok_or_else(|| invalid("missing entry task identity"))?;
+    Ok((node_id, activations))
 }
 
 pub(crate) fn invalid(message: &str) -> StoreError {

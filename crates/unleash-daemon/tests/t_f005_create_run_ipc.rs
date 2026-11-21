@@ -36,8 +36,16 @@ fn local_store_config(path: &Path) -> StoreConfig {
 }
 
 fn wire_command(config: StoreConfig) -> (CommandEnvelope, Sha256Digest) {
+    wire_command_with_workflow(config, |_| {})
+}
+
+fn wire_command_with_workflow(
+    config: StoreConfig,
+    customize: impl FnOnce(&mut Value),
+) -> (CommandEnvelope, Sha256Digest) {
     let actor = ActorId::new(format!("uid:{}", effective_uid())).unwrap();
-    let (fixture, mut envelope, _) = workflow_run::prepare(config, actor);
+    let (fixture, mut envelope, _) =
+        workflow_run::prepare(config, actor, |workflow, _, _| customize(workflow));
     let hash: String = fixture
         .store
         .read_snapshot(|db, _| {
@@ -149,6 +157,8 @@ async fn assert_refuses_different_workflow_version(
     assert!(client.send_command(&different_version).await.is_err());
 }
 
+// T-F004-003 couvre ici la portée initiale et le refus d’une révision périmée.
+// T-F005-001 et T-F005-009 couvrent ici le plan épinglé et le rejeu.
 #[tokio::test]
 async fn t_f005_creates_one_prepared_run_and_replays_its_wire_receipt() {
     let data = local_test_dir("f005-run-data").unwrap();

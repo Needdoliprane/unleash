@@ -56,7 +56,8 @@ impl UnleashStore {
     ///
     /// # Errors
     /// Refuses invalid, stale or conflicting activation plans and missing
-    /// definitions.
+    /// definitions. Each task consumes one activation, including retries.
+    /// If the run has no established budget, a new activation is refused.
     pub fn activate_workflow_task(
         &self,
         mut envelope: CommandEnvelope,
@@ -139,6 +140,7 @@ struct RunBinding {
     version_id: String,
     revision: i64,
     has_manifest: bool,
+    activation_available: Option<bool>,
 }
 
 fn verify_run(
@@ -148,7 +150,8 @@ fn verify_run(
 ) -> Result<RunBinding, StoreError> {
     let project = envelope.project_id.map(|project| project.to_string());
     let (mut run, definition_hash, bundle_hash): (RunBinding, String, String) = conn.query_row(
-        "SELECT r.mission_id,r.workflow_version_id,r.revision,v.content_hash,r.effective_bundle_hash
+        "SELECT r.mission_id,r.workflow_version_id,r.revision,v.content_hash,r.effective_bundle_hash,
+                r.step_activations_used < r.max_step_activations
            FROM workflow_runs r
            JOIN missions m ON m.mission_id=r.mission_id
            JOIN projects p ON p.project_id=m.project_id
@@ -159,7 +162,13 @@ fn verify_run(
                  OR (r.purpose='evaluation' AND v.visibility='qualification_only'))",
         params![envelope.aggregate_id.to_string(), project],
         |row| Ok((
-            RunBinding { mission_id: row.get(0)?, version_id: row.get(1)?, revision: row.get(2)?, has_manifest: false },
+            RunBinding {
+                mission_id: row.get(0)?,
+                version_id: row.get(1)?,
+                revision: row.get(2)?,
+                has_manifest: false,
+                activation_available: row.get(5)?,
+            },
             row.get(3)?,
             row.get(4)?,
         )),
@@ -357,11 +366,20 @@ pub(crate) fn activate_tx(
         StoreError::InvariantViolation("workflow run revision overflow".to_owned())
     })?;
 
-    insert_ready_task(tx, &plan, run_id, &run.mission_id, &vector)?;
+    match run.activation_available {
+        Some(true) => {}
+        Some(false) => return Err(StoreError::WorkflowActivationBudgetExhausted),
+        None => {
+            return Err(StoreError::EvidenceUnavailable(
+                "workflow activation budget is unavailable for this run".to_owned(),
+            ));
+        }
+    }
     tx.execute(
-        "UPDATE workflow_runs SET revision=?1 WHERE run_id=?2",
+        "UPDATE workflow_runs SET revision=?1,step_activations_used=step_activations_used+1 WHERE run_id=?2",
         params![revision, run_id.to_string()],
     )?;
+    insert_ready_task(tx, &plan, run_id, &run.mission_id, &vector)?;
     let revision =
         Revision::new(u64::try_from(revision).map_err(|_| {
             StoreError::InvariantViolation("invalid workflow run revision".to_owned())

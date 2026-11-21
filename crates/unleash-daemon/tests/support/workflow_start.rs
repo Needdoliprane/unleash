@@ -2,22 +2,29 @@
 
 use std::{os::unix::fs::PermissionsExt, path::Path};
 
-use serde_json::{Map, json};
+use serde_json::{Map, Value, json};
 use unleash_client::ClientError;
 use unleash_daemon::DaemonConfig;
 use unleash_domain::{CommandId, ReceiptId, RequestId, Revision};
-use unleash_protocol::{CommandEnvelope, ErrorCode, ReceiptState};
+use unleash_protocol::{CommandEnvelope, ErrorCode, ReasonCode, ReceiptState};
 use unleash_store::{StoreConfig, UnleashStore};
 
-use super::{RUN, local_store_config, publish_mandate, scoped_run_query, start, wire_command};
+use super::{
+    RUN, local_store_config, publish_mandate, scoped_run_query, start, wire_command_with_workflow,
+};
 
-async fn fixture(data: &Path, rendezvous: &Path) -> (StoreConfig, DaemonConfig, CommandEnvelope) {
+async fn fixture(
+    data: &Path,
+    rendezvous: &Path,
+    customize: impl FnOnce(&mut Value) + Send + 'static,
+) -> (StoreConfig, DaemonConfig, CommandEnvelope) {
     std::fs::set_permissions(rendezvous, PermissionsExt::from_mode(0o700)).unwrap();
     let store = local_store_config(data);
     let seed = store.clone();
-    let (create, _) = tokio::task::spawn_blocking(move || wire_command(seed))
-        .await
-        .unwrap();
+    let (create, _) =
+        tokio::task::spawn_blocking(move || wire_command_with_workflow(seed, customize))
+            .await
+            .unwrap();
     let config = DaemonConfig {
         data_root: Some(data.to_owned()),
         rendezvous_dir: Some(rendezvous.to_owned()),
@@ -37,11 +44,24 @@ fn start_command(create: &CommandEnvelope) -> CommandEnvelope {
     }
 }
 
+fn sequence_at_budget(workflow: &mut Value, activation_limit: u32) {
+    let mut task = workflow.get_mut("body").unwrap().take();
+    *task.get_mut("max_attempts").unwrap() = json!(1);
+    *workflow.get_mut("body").unwrap() =
+        json!({"id": "delivery", "kind": "sequence", "steps": [task]});
+    *workflow
+        .pointer_mut("/budget/max_step_activations")
+        .unwrap() = json!(activation_limit);
+}
+
 #[tokio::test]
-async fn starts_once_and_recovers_the_ready_task() {
+async fn t_f005_004_starts_at_exact_activation_budget_and_recovers_once() {
     let data = unleash_testkit::local_test_dir("f005-start-data").unwrap();
     let rendezvous = unleash_testkit::local_test_dir("f005-start-rdv").unwrap();
-    let (store, config, mut create) = fixture(data.path(), rendezvous.path()).await;
+    let (store, config, mut create) = fixture(data.path(), rendezvous.path(), |workflow| {
+        sequence_at_budget(workflow, 2);
+    })
+    .await;
     let (daemon, mut client) = start(config.clone()).await;
     let initial_epoch = client.hello().daemon_epoch;
     publish_mandate(&mut client, &mut create).await;
@@ -85,7 +105,7 @@ async fn starts_once_and_recovers_the_ready_task() {
         .await
         .unwrap();
     drop(daemon);
-    tokio::task::spawn_blocking(move || assert_start_effects(store, Some(receipt.receipt_id)))
+    tokio::task::spawn_blocking(move || assert_start_effects(store, Some((receipt.receipt_id, 2))))
         .await
         .unwrap();
 }
@@ -111,11 +131,12 @@ fn revise_project(create: &CommandEnvelope) -> CommandEnvelope {
     }
 }
 
+// T-F005-001 — Refus de démarrer avec une portée épinglée périmée.
 #[tokio::test]
 async fn refuses_a_stale_project_scope_without_allocating_work() {
     let data = unleash_testkit::local_test_dir("f005-stale-data").unwrap();
     let rendezvous = unleash_testkit::local_test_dir("f005-stale-rdv").unwrap();
-    let (store, config, mut create) = fixture(data.path(), rendezvous.path()).await;
+    let (store, config, mut create) = fixture(data.path(), rendezvous.path(), |_| {}).await;
     let (daemon, mut client) = start(config).await;
     publish_mandate(&mut client, &mut create).await;
     client.send_command(&create).await.unwrap();
@@ -143,9 +164,9 @@ async fn refuses_a_stale_project_scope_without_allocating_work() {
         .unwrap();
 }
 
-fn assert_start_effects(config: StoreConfig, receipt: Option<ReceiptId>) {
+fn assert_start_effects(config: StoreConfig, receipt: Option<(ReceiptId, i64)>) {
     let store = UnleashStore::open(config).unwrap();
-    let causal_receipt = receipt.map_or_else(String::new, |id| id.to_string());
+    let causal_receipt = receipt.map_or_else(String::new, |(id, _)| id.to_string());
     let effects: (i64, i64, i64, i64, i64) = store
         .read_snapshot(|db, _| {
             Ok(db.query_row(
@@ -176,6 +197,16 @@ fn assert_start_effects(config: StoreConfig, receipt: Option<ReceiptId>) {
             (0, 0, 0, 0, 0)
         }
     );
+    let charged: Option<i64> = store
+        .read_snapshot(|db, _| {
+            Ok(db.query_row(
+                "SELECT step_activations_used FROM workflow_runs WHERE run_id=?1",
+                [RUN.to_string()],
+                |row| row.get(0),
+            )?)
+        })
+        .unwrap();
+    assert_eq!(charged, receipt.map(|(_, activations)| activations));
     store.shutdown().unwrap();
 }
 
@@ -195,6 +226,7 @@ impl unleash_store::CutpointObserver for InterruptStart {
     }
 }
 
+// T-F005-009 — Coupure avant commit et rejeu de l’ordre de démarrage.
 #[tokio::test]
 async fn rolls_back_the_start_transaction_and_retries_the_same_command() {
     use std::sync::{
@@ -204,7 +236,7 @@ async fn rolls_back_the_start_transaction_and_retries_the_same_command() {
 
     let data = unleash_testkit::local_test_dir("f005-start-c1-data").unwrap();
     let rendezvous = unleash_testkit::local_test_dir("f005-start-c1-rdv").unwrap();
-    let (store, mut config, mut create) = fixture(data.path(), rendezvous.path()).await;
+    let (store, mut config, mut create) = fixture(data.path(), rendezvous.path(), |_| {}).await;
     let interrupt = Arc::new(InterruptStart(AtomicBool::new(false)));
     config.store_overrides.cutpoints = Some(interrupt.clone());
     let (daemon, mut client) = start(config.clone()).await;
@@ -240,18 +272,19 @@ async fn rolls_back_the_start_transaction_and_retries_the_same_command() {
         .await
         .unwrap();
     drop(daemon);
-    tokio::task::spawn_blocking(move || assert_start_effects(store, Some(receipt.receipt_id)))
+    tokio::task::spawn_blocking(move || assert_start_effects(store, Some((receipt.receipt_id, 1))))
         .await
         .unwrap();
 }
 
+// T-F005-001 — Versions épinglées après dépréciation.
 #[tokio::test]
 async fn uses_the_same_retained_plan_after_its_versions_are_deprecated() {
     use unleash_store::WriteCriticality;
 
     let data = unleash_testkit::local_test_dir("f005-start-pinned-data").unwrap();
     let rendezvous = unleash_testkit::local_test_dir("f005-start-pinned-rdv").unwrap();
-    let (store, config, mut create) = fixture(data.path(), rendezvous.path()).await;
+    let (store, config, mut create) = fixture(data.path(), rendezvous.path(), |_| {}).await;
     let (daemon, mut client) = start(config.clone()).await;
     publish_mandate(&mut client, &mut create).await;
     client.send_command(&create).await.unwrap();
@@ -302,7 +335,39 @@ async fn uses_the_same_retained_plan_after_its_versions_are_deprecated() {
         .await
         .unwrap();
     drop(daemon);
-    tokio::task::spawn_blocking(move || assert_start_effects(store, Some(receipt.receipt_id)))
+    tokio::task::spawn_blocking(move || assert_start_effects(store, Some((receipt.receipt_id, 1))))
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn t_f005_004_refuses_the_entry_above_the_activation_budget() {
+    let data = unleash_testkit::local_test_dir("f005-budget-data").unwrap();
+    let rendezvous = unleash_testkit::local_test_dir("f005-budget-rdv").unwrap();
+    let (store, config, mut create) = fixture(data.path(), rendezvous.path(), |workflow| {
+        sequence_at_budget(workflow, 1);
+    })
+    .await;
+    let (daemon, mut client) = start(config).await;
+    publish_mandate(&mut client, &mut create).await;
+    client.send_command(&create).await.unwrap();
+
+    let result = client.send_command(&start_command(&create)).await;
+    let snapshot = client.query(&scoped_run_query(&create)).await.unwrap();
+    drop(client);
+    daemon
+        .shutdown_graceful("inspect refused budget")
+        .await
+        .unwrap();
+    drop(daemon);
+
+    let error = result.expect_err("the sequence and its first task cost two activations");
+    assert!(matches!(error, ClientError::Remote(error)
+        if error.code == ErrorCode::BudgetExceeded
+            && error.reason_code == Some(ReasonCode::BudgetExhausted)));
+    assert_eq!(snapshot.result.get("state"), Some(&json!("prepared")));
+    assert_eq!(snapshot.result.get("revision"), Some(&json!(1)));
+    tokio::task::spawn_blocking(move || assert_start_effects(store, None))
         .await
         .unwrap();
 }

@@ -41,7 +41,7 @@ impl CutpointObserver for InterruptCommit {
 }
 
 fn prepare(config: StoreConfig) -> (Fixture, CommandEnvelope, CallerAuthority) {
-    workflow_run::prepare(config, ActorId::new(OWNER).unwrap())
+    workflow_run::prepare(config, ActorId::new(OWNER).unwrap(), |_, _, _| {})
 }
 
 fn effects(store: &UnleashStore) -> (i64, i64, i64, i64) {
@@ -212,6 +212,7 @@ fn t_f005_activation_uses_the_scope_and_contract_pinned_to_its_slot() {
             budget_reservations: vec![],
         })
         .unwrap();
+    fixture.seed_activation_budget(RUN, 100);
 
     let (definition, plan_hash): (String, String) = fixture
         .store
@@ -278,4 +279,163 @@ fn t_f005_activation_uses_the_scope_and_contract_pinned_to_its_slot() {
         )
     );
     fixture.store.shutdown().unwrap();
+}
+
+#[test]
+fn t_f005_004_debits_later_tasks_once_and_refuses_exhaustion_after_reopen() {
+    use unleash_domain::{StepId, TaskId};
+
+    let directory = local_test_dir("f005-budget-continuation").unwrap();
+    let (fixture, create, caller) = workflow_run::prepare(
+        StoreConfig::new(directory.path()),
+        ActorId::new(OWNER).unwrap(),
+        |workflow, scope, project| {
+            *scope.pointer_mut("/scopes/implementation").unwrap() = json!({
+                "scope_id": project,
+                "scope_revision": 1,
+            });
+            let mut first = workflow.get_mut("body").unwrap().take();
+            *first.get_mut("max_attempts").unwrap() = json!(1);
+            let mut second = first.clone();
+            *second.get_mut("id").unwrap() = json!("second");
+            let mut third = first.clone();
+            *third.get_mut("id").unwrap() = json!("third");
+            *workflow.get_mut("body").unwrap() = json!({
+                "id": "delivery", "kind": "sequence", "steps": [first, second, third],
+            });
+            *workflow
+                .pointer_mut("/budget/max_step_activations")
+                .unwrap() = json!(3);
+        },
+    );
+    let project = create.project_id.unwrap();
+    fixture
+        .store
+        .create_prepared_workflow_run(create, caller.clone())
+        .unwrap();
+    fixture
+        .store
+        .start_prepared_workflow_run(
+            fixture.envelope(23, RUN.as_uuid(), Revision::new(1), "StartRun"),
+            caller,
+        )
+        .unwrap();
+
+    let mut plan = fixture.plan.clone();
+    (plan.definition_hash, plan.effective_bundle_hash) = fixture
+        .store
+        .read_snapshot(|db, _| {
+            let (definition, bundle): (String, String) = db.query_row(
+                "SELECT v.content_hash,r.effective_bundle_hash FROM workflow_runs r
+               JOIN workflow_versions v USING(workflow_version_id) WHERE r.run_id=?1",
+                [RUN.to_string()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )?;
+            Ok((definition.parse().unwrap(), bundle.parse().unwrap()))
+        })
+        .unwrap();
+    plan.scope_id = project.to_string();
+    plan.scope_revision = Revision::new(1);
+    plan.contract_version_id = "contract-v1".to_owned();
+    plan.definition_node_id = "second".to_owned();
+    plan.step_id = StepId::from_u128(0x5933);
+    plan.task_id = TaskId::from_u128(0x5934);
+    let mut second = fixture.envelope(24, RUN.as_uuid(), Revision::new(2), "ActivateWorkflowTask");
+    second.payload = serde_json::from_value(serde_json::to_value(&plan).unwrap()).unwrap();
+    let receipt = fixture
+        .store
+        .activate_workflow_task(second.clone())
+        .unwrap();
+    assert_eq!(receipt.receipt().new_revision, Revision::new(3));
+
+    let mut third = fixture.envelope(25, RUN.as_uuid(), Revision::new(3), "ActivateWorkflowTask");
+    let store = fixture.store.restart_same_lineage().unwrap();
+    let replay = store.activate_workflow_task(second).unwrap();
+    assert!(matches!(replay, CommitOutcome::IdempotentReplay(_)));
+    assert_eq!(receipt.receipt(), replay.receipt());
+
+    plan.daemon_epoch = store.daemon_state().unwrap().daemon_epoch;
+    plan.definition_node_id = "third".to_owned();
+    plan.step_id = StepId::from_u128(0x5935);
+    plan.task_id = TaskId::from_u128(0x5936);
+    third.payload = serde_json::from_value(serde_json::to_value(&plan).unwrap()).unwrap();
+    assert!(matches!(
+        store.activate_workflow_task(third),
+        Err(StoreError::WorkflowActivationBudgetExhausted)
+    ));
+    let state: (i64, i64, i64, i64, i64) = store
+        .read_snapshot(|db, _| {
+            Ok(db.query_row(
+                "SELECT revision,max_step_activations,step_activations_used,
+                    (SELECT count(*) FROM tasks WHERE run_id=?1),
+                    (SELECT count(*) FROM command_receipts WHERE aggregate_id=?1
+                        AND command_type='ActivateWorkflowTask')
+             FROM workflow_runs WHERE run_id=?1",
+                [RUN.to_string()],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
+            )?)
+        })
+        .unwrap();
+    assert_eq!(state, (3, 3, 3, 2, 1));
+    store.shutdown().unwrap();
+}
+
+#[test]
+fn t_f002_005_preserves_legacy_run_and_refuses_activation_with_unknown_budget() {
+    use unleash_store::{BackupRetentionTier, PrepareBackupRequest};
+
+    let directory = local_test_dir("f005-budget-v019").unwrap();
+    let mut previous = StoreConfig::new(directory.path());
+    previous.max_supported_schema_version = 19;
+    let actor = ActorId::new(OWNER).unwrap();
+    let fixture = Fixture::on_store(UnleashStore::open(previous).unwrap(), OWNER, actor, true);
+    let run = fixture.run;
+    let plan = fixture.activation(26, 2, &fixture.plan);
+    let backup = fixture
+        .store
+        .prepare_backup(PrepareBackupRequest {
+            destination_dir: directory.path().join("v019-backup"),
+            retention_tier: BackupRetentionTier::Manual,
+            coverage: "db_and_objects".to_owned(),
+        })
+        .unwrap();
+    fixture.store.shutdown().unwrap();
+
+    let config = StoreConfig::new(directory.path());
+    let store = UnleashStore::open_with_migration_backup(config, Some(backup.backup_id)).unwrap();
+    assert_eq!(store.daemon_state().unwrap().schema_version, 20);
+    let inspect = || {
+        store
+            .read_snapshot(|db, _| {
+                Ok(db.query_row(
+                    "SELECT state,revision,max_step_activations,step_activations_used
+               FROM workflow_runs WHERE run_id=?1",
+                    [run.to_string()],
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, i64>(1)?,
+                            row.get::<_, Option<i64>>(2)?,
+                            row.get::<_, Option<i64>>(3)?,
+                        ))
+                    },
+                )?)
+            })
+            .unwrap()
+    };
+    assert_eq!(inspect(), ("running".to_owned(), 2, None, None));
+    assert!(matches!(
+        store.activate_workflow_task(plan),
+        Err(StoreError::EvidenceUnavailable(_))
+    ));
+    assert_eq!(inspect(), ("running".to_owned(), 2, None, None));
+    store.shutdown().unwrap();
 }

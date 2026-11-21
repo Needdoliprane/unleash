@@ -8,7 +8,7 @@
 mod workflow_task;
 
 use serde_json::{Value, json};
-use unleash_domain::{ActorId, Revision, RunId, Sha256Digest};
+use unleash_domain::{ActorId, ProjectId, Revision, RunId, Sha256Digest};
 use unleash_protocol::{CommandEnvelope, canonicalize_to_vec};
 use unleash_store::{CallerAuthority, CallerRole, StoreConfig, UnleashStore, WriteCriticality};
 
@@ -20,6 +20,7 @@ pub(crate) const PUBLISHED: &str = "fixture.prepared-workflow:v1";
 pub(crate) fn prepare(
     config: StoreConfig,
     actor: ActorId,
+    customize: impl FnOnce(&mut Value, &mut Value, ProjectId),
 ) -> (Fixture, CommandEnvelope, CallerAuthority) {
     let store = UnleashStore::open(config).unwrap();
     let principal = actor.to_string();
@@ -37,6 +38,13 @@ pub(crate) fn prepare(
         "future": {"mode":"late","level":"N","capability_ceiling":[],"contract_profile":{"id":"contract.fixture","version":1}}
     }));
     workflow_fields.insert("body".to_owned(), task);
+    let mut scope_document = json!({
+        "schema_version": 1,
+        "mission_id": fixture.mission,
+        "mission_revision": 1,
+        "scopes": {"implementation": {"scope_id":"fixture.restricted", "scope_revision":7}},
+    });
+    customize(&mut workflow, &mut scope_document, project);
     let definition = canonicalize_to_vec(&workflow).unwrap();
     let definition_hash = Sha256Digest::from_bytes(&definition);
     fixture.retain_object(&definition, "workflow_version", PUBLISHED, "content_hash");
@@ -45,12 +53,6 @@ pub(crate) fn prepare(
         .register_workflow_version(PUBLISHED, "published", definition_hash)
         .unwrap();
 
-    let scope_document = json!({
-        "schema_version": 1,
-        "mission_id": fixture.mission,
-        "mission_revision": 1,
-        "scopes": {"implementation": {"scope_id":"fixture.restricted", "scope_revision":7}},
-    });
     let scope_bytes = canonicalize_to_vec(&scope_document).unwrap();
     let scope_hash = Sha256Digest::from_bytes(&scope_bytes);
     fixture.retain_object(
