@@ -332,7 +332,7 @@ impl Fixture {
                 self.run.as_uuid(),
                 Revision::new(1),
             ),
-            "StartRun",
+            "FixtureTransitionRun",
             CommandMutation::TransitionWorkflowRun {
                 run_id: self.run,
                 target_state: RunState::Running,

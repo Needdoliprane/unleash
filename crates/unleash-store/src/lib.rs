@@ -50,6 +50,7 @@ mod workflow_activation;
 mod workflow_run_creation;
 mod workflow_run_plan;
 mod workflow_run_projection;
+mod workflow_run_start;
 pub mod writer;
 
 pub use admission::{
@@ -193,5 +194,6 @@ pub use broker_phases::{
 pub use workflow_activation::WorkflowTaskActivationPlan;
 pub use workflow_run_creation::PreparedRunPublication;
 pub use workflow_run_projection::WorkflowRunProjection;
+pub use workflow_run_start::PreparedRunStart;
 
 pub use task_assignment::PreparedTaskAssignment;

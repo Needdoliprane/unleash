@@ -1238,9 +1238,14 @@ async fn handle_command_frame(
                 return false;
             }
         }
-    } else if cmd.command_type == "CreateRun" {
-        match commit_create_run(Arc::clone(&state.store), session, cmd.clone()).await {
-            Ok(outcome) => (outcome, 1, None, None),
+    } else if matches!(cmd.command_type.as_str(), "CreateRun" | "StartRun") {
+        let event_count = if cmd.command_type == "CreateRun" {
+            1
+        } else {
+            2
+        };
+        match commit_workflow_run(Arc::clone(&state.store), session, cmd.clone()).await {
+            Ok(outcome) => (outcome, event_count, None, None),
             Err(ipc) => {
                 let _ = write_json_frame_timeout(stream, &ipc, RESPONSE_WRITE_TIMEOUT).await;
                 return false;
@@ -1450,32 +1455,46 @@ async fn commit_task_assignment(
         .map_err(|error| store_error_to_ipc_error(&error, Some(id)))
 }
 
-async fn commit_create_run(
+async fn commit_workflow_run(
     store: Arc<UnleashStore>,
     session: &AuthenticatedSession,
     command: CommandEnvelope,
 ) -> Result<CommitOutcome, IpcError> {
     let id = command.command_id;
-    serde_json::from_value::<unleash_protocol::CreateRunPayload>(Value::Object(
-        command.payload.clone(),
-    ))
-    .map_err(|_| {
-        IpcError::new(
-            ErrorCode::InvalidArgument,
-            None,
-            "Payload de préparation de run invalide",
-            RetryClass::Never,
-        )
-        .with_command_id(id)
-    })?;
+    let creating = command.command_type == "CreateRun";
+    if creating {
+        serde_json::from_value::<unleash_protocol::CreateRunPayload>(Value::Object(
+            command.payload.clone(),
+        ))
+        .map_err(|_| {
+            IpcError::new(
+                ErrorCode::InvalidArgument,
+                None,
+                "Payload de préparation de run invalide",
+                RetryClass::Never,
+            )
+            .with_command_id(id)
+        })?;
+    }
     let caller = CallerAuthority {
         actor_id: session.actor_id.clone(),
         role: CallerRole::HumanOperator,
     };
-    tokio::task::spawn_blocking(move || store.create_prepared_workflow_run(command, caller))
-        .await
-        .map_err(|error| internal_ipc_error(&format!("Join error CreateRun: {error}"), Some(id)))?
-        .map_err(|error| store_error_to_ipc_error(&error, Some(id)))
+    tokio::task::spawn_blocking(move || {
+        if creating {
+            store.create_prepared_workflow_run(command, caller)
+        } else {
+            store.start_prepared_workflow_run(command, caller)
+        }
+    })
+    .await
+    .map_err(|error| {
+        internal_ipc_error(
+            &format!("Join error workflow run command: {error}"),
+            Some(id),
+        )
+    })?
+    .map_err(|error| store_error_to_ipc_error(&error, Some(id)))
 }
 
 async fn reconcile_accepted_backup(

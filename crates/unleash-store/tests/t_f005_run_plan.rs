@@ -195,7 +195,7 @@ fn t_f005_activation_uses_the_scope_and_contract_pinned_to_its_slot() {
         .store
         .commit_command(CommitCommandRequest {
             actor_id: caller.actor_id,
-            envelope: fixture.envelope(23, RUN.as_uuid(), Revision::new(1), "StartRun"),
+            envelope: fixture.envelope(23, RUN.as_uuid(), Revision::new(1), "FixtureTransitionRun"),
             target_aggregate: AggregateKind::WorkflowRun,
             operation_id: None,
             receipt_state: ReceiptState::Completed,

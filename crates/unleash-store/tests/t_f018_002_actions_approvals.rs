@@ -203,7 +203,7 @@ fn test_t_f018_002_recovery_approval_and_subject_controls() {
                 Some(project_id),
                 run_id.as_uuid(),
                 Revision::new(1),
-                "StartRun",
+                "FixtureTransitionRun",
             ),
             target_aggregate: AggregateKind::WorkflowRun,
             operation_id: None,

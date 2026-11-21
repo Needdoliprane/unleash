@@ -14,7 +14,7 @@
     "cache/"
   ],
   "hash_algorithm": "sha256",
-  "source_tree_digest": "2250ec85f72a6d1f18cd41bd694c8ec7101bcc5ad0edcd77dfa55f70d473e608",
+  "source_tree_digest": "7d01f3758f5ecc21722db256d14f3dfc3d4cf0ec72664a40a2b2b35a7c8eed62",
   "files": [
     {
       "path": "INDEX.md",
@@ -1248,8 +1248,8 @@
     },
     {
       "path": "features/F005-workflow-engine/interfaces.md",
-      "sha256": "045a5091301c24caacbe2db90e2c941a393d9f210c6c94f1f15003370ff200bb",
-      "bytes": 8693,
+      "sha256": "4e77942889336522cf1c7a59d55bd11f3a5bfbee2e692c3557d9ebb902d69f96",
+      "bytes": 9918,
       "media_type": "text/markdown"
     },
     {
@@ -2070,8 +2070,8 @@
     },
     {
       "path": "schemas/ipc-command.schema.json",
-      "sha256": "2f8fb6cdb5324aeebf639911ee01bc2cdc37afcb5fc35c83f9d47d5c37254290",
-      "bytes": 28339,
+      "sha256": "f9d0593dfab112d7e5902e99643229bd74c6fc19f124eb94a5c09e44f046e4eb",
+      "bytes": 28723,
       "media_type": "application/json"
     },
     {

@@ -146,7 +146,7 @@ pub(crate) fn resolve(
     config: &StoreConfig,
     source: &PlanSource<'_>,
 ) -> Result<RunPlan, StoreError> {
-    let definition_hash = workflow_hash(conn, source.workflow_version_id)?;
+    let definition_hash = workflow_hash(conn, source.workflow_version_id, false)?;
     let scope_id = source.mission_id.to_string();
     require_reference(
         conn,
@@ -383,11 +383,22 @@ pub(crate) fn resolve_workflow_version(
     Ok(key.clone())
 }
 
-fn workflow_hash(conn: &Connection, version: &str) -> Result<Sha256Digest, StoreError> {
-    let hash: String = conn.query_row(
-        "SELECT content_hash FROM workflow_versions WHERE workflow_version_id=?1 AND visibility='published'",
-        [version], |row| row.get(0),
-    ).optional()?.ok_or_else(|| StoreError::EvidenceUnavailable("published workflow version unavailable".to_owned()))?;
+fn workflow_hash(
+    conn: &Connection,
+    version: &str,
+    allow_deprecated: bool,
+) -> Result<Sha256Digest, StoreError> {
+    let hash: String = conn
+        .query_row(
+            "SELECT content_hash FROM workflow_versions WHERE workflow_version_id=?1
+          AND (visibility='published' OR (?2 AND visibility='deprecated'))",
+            params![version, allow_deprecated],
+            |row| row.get(0),
+        )
+        .optional()?
+        .ok_or_else(|| {
+            StoreError::EvidenceUnavailable("published workflow version unavailable".to_owned())
+        })?;
     let hash = parse_hash(&hash)?;
     require_reference(conn, "workflow_version", version, "content_hash", hash)?;
     Ok(hash)
@@ -430,7 +441,17 @@ pub(crate) fn read_run_manifest(
     if !has_committed_plan(conn, &run)? {
         return Ok(None);
     }
-    require_run_manifest(conn, &run, target.bundle_hash)?;
+    Ok(Some(serde_json::to_value(load_run_manifest(
+        conn, config, target,
+    )?)?))
+}
+
+pub(crate) fn load_run_manifest(
+    conn: &Connection,
+    config: &StoreConfig,
+    target: &RunManifestTarget<'_>,
+) -> Result<RunPlan, StoreError> {
+    require_run_manifest(conn, &target.run.to_string(), target.bundle_hash)?;
     let plan: RunPlan = read_document(conn, config, target.bundle_hash)?;
     verify_manifest_coordinates(
         &plan,
@@ -438,7 +459,7 @@ pub(crate) fn read_run_manifest(
         target.version,
         target.definition_hash,
     )?;
-    Ok(Some(serde_json::to_value(plan)?))
+    Ok(plan)
 }
 
 pub(crate) fn require_run_manifest(
@@ -564,7 +585,20 @@ impl RunPlan {
     }
 
     pub(crate) fn revalidate(&self, conn: &Connection) -> Result<(), StoreError> {
-        if workflow_hash(conn, &self.workflow_version_id)? != self.definition_hash {
+        self.verify_available_versions(conn, false)
+    }
+
+    pub(crate) fn revalidate_start(&self, conn: &Connection) -> Result<(), StoreError> {
+        self.verify_available_versions(conn, true)
+    }
+
+    fn verify_available_versions(
+        &self,
+        conn: &Connection,
+        allow_deprecated: bool,
+    ) -> Result<(), StoreError> {
+        if workflow_hash(conn, &self.workflow_version_id, allow_deprecated)? != self.definition_hash
+        {
             return Err(StoreError::EvidenceUnavailable(
                 "workflow definition changed during preparation".to_owned(),
             ));
@@ -579,8 +613,10 @@ impl RunPlan {
         for (version, hash) in self.registry_versions() {
             let published: bool = conn.query_row(
                 "SELECT EXISTS(SELECT 1 FROM registry_versions
-                 WHERE registry_version_id=?1 AND content_hash=?2 AND publication_state='published')",
-                params![version, hash.to_string()], |row| row.get(0),
+                 WHERE registry_version_id=?1 AND content_hash=?2
+                   AND (publication_state='published' OR (?3 AND publication_state='deprecated')))",
+                params![version, hash.to_string(), allow_deprecated],
+                |row| row.get(0),
             )?;
             if !published {
                 return Err(StoreError::EvidenceUnavailable(
@@ -591,6 +627,180 @@ impl RunPlan {
         }
         Ok(())
     }
+}
+
+/// Resolved input of the first task, derived entirely from the retained run plan.
+#[derive(Debug, Clone)]
+pub(crate) struct EntryTask {
+    pub node_id: String,
+    pub scope: ExecutionScope,
+    pub contract_version_id: String,
+    pub max_duration_seconds: u32,
+    pub max_step_activations: u32,
+    pub timeout_seconds: u32,
+}
+
+#[derive(Deserialize)]
+struct StartBudget {
+    #[serde(rename = "max_duration_seconds")]
+    duration_seconds: u32,
+    #[serde(rename = "max_step_activations")]
+    step_activations: u32,
+    #[serde(rename = "max_agent_executions")]
+    agent_executions: u32,
+}
+
+#[derive(Deserialize)]
+struct EntrySkill {
+    schema_version: String,
+    contract_profile: VersionRef,
+}
+
+impl RunPlan {
+    pub(crate) fn require_current_project_scopes(
+        &self,
+        project: ProjectId,
+        current: Revision,
+        command: unleash_domain::CommandId,
+    ) -> Result<(), StoreError> {
+        let project = project.to_string();
+        for scope in self.scopes.values() {
+            if scope.scope_id != project {
+                return Err(StoreError::EvidenceUnavailable(
+                    "operational run requires exact project scopes".to_owned(),
+                ));
+            }
+            if scope.scope_revision != current {
+                return Err(StoreError::RevisionConflict {
+                    current_revision: current,
+                    expected_revision: scope.scope_revision,
+                    command_id: Some(command),
+                });
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn entry_task(
+        &self,
+        conn: &Connection,
+        config: &StoreConfig,
+    ) -> Result<EntryTask, StoreError> {
+        self.revalidate_start(conn)?;
+        let workflow: Value = read_document(conn, config, self.definition_hash)?;
+        let budget: StartBudget = serde_json::from_value(
+            workflow
+                .get("budget")
+                .cloned()
+                .ok_or_else(|| invalid("missing run budget"))?,
+        )
+        .map_err(|_| invalid("invalid retained run budget"))?;
+        if !(1..=2_592_000).contains(&budget.duration_seconds)
+            || !(1..=100_000).contains(&budget.step_activations)
+            || !(1..=50).contains(&budget.agent_executions)
+        {
+            return Err(invalid("the retained budget cannot admit an initial task"));
+        }
+        let node_id = entry_task_id(&workflow)?;
+        let task = crate::workflow_activation::verify_task_node(&workflow, node_id, 1)?;
+        let timeout_seconds = task
+            .get("timeout_seconds")
+            .and_then(Value::as_u64)
+            .and_then(|seconds| u32::try_from(seconds).ok())
+            .filter(|&seconds| seconds > 0)
+            .ok_or_else(|| invalid("invalid retained task timeout"))?;
+        let scope = task
+            .get("scope_key")
+            .and_then(Value::as_str)
+            .and_then(|key| self.scopes.get(key))
+            .ok_or_else(|| invalid("entry task scope is unavailable"))?;
+        let binding = task
+            .get("binding")
+            .and_then(Value::as_str)
+            .and_then(|key| self.bindings.get(key));
+        let Some(RunBinding::Bound {
+            entry_skill,
+            contracts,
+            ..
+        }) = binding
+        else {
+            return Err(StoreError::EvidenceUnavailable(
+                "entry task slot is unbound".to_owned(),
+            ));
+        };
+        let skill: EntrySkill = read_document(conn, config, entry_skill.content_hash)?;
+        if skill.schema_version != "unleash.skill.v1" {
+            return Err(invalid("unsupported entry skill definition"));
+        }
+        let contract = retained_entry_contract(conn, contracts, &skill.contract_profile)?;
+        Ok(EntryTask {
+            node_id: node_id.to_owned(),
+            scope: scope.clone(),
+            contract_version_id: contract,
+            max_duration_seconds: budget.duration_seconds,
+            max_step_activations: budget.step_activations,
+            timeout_seconds,
+        })
+    }
+}
+
+fn retained_entry_contract(
+    conn: &Connection,
+    versions: &[RegistryVersion],
+    requested: &VersionRef,
+) -> Result<String, StoreError> {
+    let mut selected = None;
+    for version in versions {
+        if requested.scope.as_ref().is_some_and(|scope| {
+            scope.kind != version.scope.kind || scope.owner() != version.scope.owner()
+        }) {
+            continue;
+        }
+        let matches: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM registry_versions
+                  WHERE registry_version_id=?1 AND entry_kind='contract'
+                    AND entry_id=?2 AND version=?3 AND content_hash=?4)",
+            params![
+                version.id,
+                requested.id,
+                requested.version,
+                version.content_hash.to_string()
+            ],
+            |row| row.get(0),
+        )?;
+        if matches && selected.replace(version.id.as_str()).is_some() {
+            return Err(StoreError::EvidenceUnavailable(
+                "entry skill contract is ambiguous in its retained binding".to_owned(),
+            ));
+        }
+    }
+    selected.map(str::to_owned).ok_or_else(|| {
+        StoreError::EvidenceUnavailable(
+            "entry skill contract is absent from its retained binding".to_owned(),
+        )
+    })
+}
+
+fn entry_task_id(workflow: &Value) -> Result<&str, StoreError> {
+    let mut node = workflow
+        .get("body")
+        .ok_or_else(|| invalid("missing workflow body"))?;
+    while node.get("kind").and_then(Value::as_str) == Some("sequence") {
+        node = node
+            .get("steps")
+            .and_then(Value::as_array)
+            .and_then(|steps| steps.first())
+            .ok_or_else(|| invalid("empty workflow entry sequence"))?;
+    }
+    if node.get("kind").and_then(Value::as_str) != Some("task") {
+        return Err(StoreError::EvidenceUnavailable(
+            "workflow entry requires a reducer decision before a task is ready".to_owned(),
+        ));
+    }
+    node.get("id")
+        .and_then(Value::as_str)
+        .filter(|id| !id.trim().is_empty())
+        .ok_or_else(|| invalid("missing entry task identity"))
 }
 
 pub(crate) fn invalid(message: &str) -> StoreError {

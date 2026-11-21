@@ -13,7 +13,7 @@ use crate::errors::DomainTransitionError;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RunState {
-    /// Préparé : définitions et liaisons engagées, budgets alloués, prêt à démarrer.
+    /// Préparé : plan engagé et démarrage soumis aux préconditions et au budget.
     Prepared,
     /// En cours d'exécution active.
     Running,

@@ -318,6 +318,8 @@ pub enum CommandMutation {
     },
     /// Prépare le run et publie son plan effectif dans la transaction du reçu.
     CreatePreparedWorkflowRun(Box<crate::PreparedRunPublication>),
+    /// Start a prepared workflow and commit its first activation and deadlines.
+    StartPreparedWorkflowRun(Box<crate::PreparedRunStart>),
     /// Fait transiter un `WorkflowRun` (`StartRun`, `PauseRun`, `ResumeRun`, `CancelRun`, etc.).
     TransitionWorkflowRun {
         /// Identifiant du run.
@@ -937,6 +939,7 @@ pub(crate) fn classify_command_replay(
             | "ResizeTerminal"
             | "ReconcileProcess"
             | crate::workflow_activation::COMMAND
+            | crate::workflow_run_start::COMMAND
             | crate::task_assignment::COMMAND
     ) || (envelope.command_type == "AcquireTerminal"
         && envelope.payload.contains_key("terminal_id"));
@@ -995,6 +998,7 @@ pub(crate) fn tx_commit_command(
     crate::task_assignment::validate_identity(req)?;
     crate::agent_creation::validate_identity(req)?;
     crate::workflow_run_creation::validate_identity(req)?;
+    crate::workflow_run_start::validate_identity(req)?;
     crate::mission_scope::validate_identity(req)?;
     crate::terminal_allocations::validate_command(tx, req)?;
 
@@ -2065,6 +2069,13 @@ fn apply_command_mutation(
                 generated_events,
             )
         }
+        CommandMutation::StartPreparedWorkflowRun(start) => crate::workflow_run_start::commit_tx(
+            tx,
+            (config, daemon, now_ms),
+            envelope,
+            start,
+            generated_events,
+        ),
         CommandMutation::TransitionWorkflowRun {
             run_id,
             target_state,
@@ -2896,7 +2907,7 @@ fn ensure_creation_rev(expected_rev: Revision, cmd_id: CommandId) -> Result<(), 
     Ok(())
 }
 
-fn parse_run_state(s: &str) -> Result<RunState, StoreError> {
+pub(crate) fn parse_run_state(s: &str) -> Result<RunState, StoreError> {
     match s {
         "prepared" => Ok(RunState::Prepared),
         "running" => Ok(RunState::Running),

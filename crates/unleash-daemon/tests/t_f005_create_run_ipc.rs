@@ -9,6 +9,9 @@
 #[path = "../../unleash-store/tests/support/workflow_run.rs"]
 mod workflow_run;
 
+#[path = "support/workflow_start.rs"]
+mod start_run;
+
 use serde_json::{Map, Value, json};
 use std::{os::unix::fs::PermissionsExt, path::Path};
 use unleash_client::{ClientConfig, UnleashClient};

@@ -613,6 +613,19 @@
       }
     },
     {
+      "if": { "properties": { "command_type": { "const": "StartRun" } } },
+      "then": {
+        "properties": {
+          "project_id": { "type": "string", "format": "uuid" },
+          "payload": {
+            "description": "Démarrage opérationnel d'un workflow publié.",
+            "type": "object",
+            "maxProperties": 0
+          }
+        }
+      }
+    },
+    {
       "if": { "properties": { "command_type": { "const": "AssignMission" } } },
       "then": {
         "properties": {
