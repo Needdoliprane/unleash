@@ -2074,6 +2074,25 @@ fn t_f011_010_external_sigkill_on_child_observed_by_reconcile_and_shutdown() {
     .unwrap();
     let mut eof_b = Vec::new();
     let _ = reader_b.read_to_end(&mut eof_b);
+    #[cfg(target_os = "linux")]
+    {
+        // An unreaped child keeps its process identity on Linux.
+        let stat_path = format!("/proc/{}/stat", id_b.pid);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let status = fs::read_to_string(&stat_path).unwrap();
+            let (_, fields) = status.rsplit_once(')').unwrap();
+            if fields.split_ascii_whitespace().next() == Some("Z") {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "l'enfant de la fixture doit être sorti avant Shutdown"
+            );
+            std::thread::yield_now();
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
     while matches!(
         OsProcessInspector.verify_identity(&id_b),
         Ok(ProcessVerification::Match)
