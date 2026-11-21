@@ -1,4 +1,4 @@
-//! Local StopDaemon lifecycle test using the packaged invocation worker.
+//! Local `StopDaemon` lifecycle test using the packaged invocation worker.
 
 use std::sync::Arc;
 use std::time::Duration;
