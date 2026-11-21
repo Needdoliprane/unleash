@@ -251,6 +251,11 @@ pub enum CommandMutation {
         /// État initial.
         state: AgentState,
     },
+    /// Crée l'agent, sa session primaire et l'affectation résolue par le harness.
+    CreateAssignedAgent {
+        /// Autorité humaine du propriétaire de la mission.
+        caller: CallerAuthority,
+    },
     /// Crée un objectif.
     CreateGoal {
         /// Identifiant de l'objectif.
@@ -984,6 +989,7 @@ pub(crate) fn tx_commit_command(
     crate::provider_service_launch::validate_command(req)?;
     crate::workflow_activation::validate_identity(req)?;
     crate::task_assignment::validate_identity(req)?;
+    crate::agent_creation::validate_identity(req)?;
     crate::terminal_allocations::validate_command(tx, req)?;
 
     // Étape 2 : Rechercher `(actor_id, command_id)` dans `command_receipts`
@@ -1386,6 +1392,43 @@ pub(crate) fn tx_commit_command(
     Ok(CommitOutcome::Committed(receipt))
 }
 
+pub(crate) struct NewAgent {
+    pub agent_id: AgentId,
+    pub level: AgentLevel,
+    pub organization_parent_id: Option<AgentId>,
+    pub created_by_agent_id: Option<AgentId>,
+    pub project_id: Option<ProjectId>,
+    pub state: AgentState,
+}
+
+pub(crate) fn insert_agent_and_session(
+    tx: &Transaction<'_>,
+    config: &StoreConfig,
+    now: TimestampMs,
+    identity: &NewAgent,
+) -> Result<unleash_domain::SessionId, StoreError> {
+    let agent = identity.agent_id.to_string();
+    tx.execute(
+        "INSERT INTO agents (agent_id, level, organization_parent_id, created_by_agent_id, project_id, state, revision)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, 1)",
+        rusqlite::params![
+            agent,
+            identity.level.to_string(),
+            identity.organization_parent_id.map(|a| a.to_string()),
+            identity.created_by_agent_id.map(|a| a.to_string()),
+            identity.project_id.map(|p| p.to_string()),
+            identity.state.to_string(),
+        ],
+    )?;
+    let session = config.id_generator.new_session_id();
+    tx.execute(
+        "INSERT INTO sessions (session_id, agent_id, revision, state, created_at_ms)
+         VALUES (?1, ?2, 0, 'open', ?3)",
+        rusqlite::params![session.to_string(), agent, now.as_i64()],
+    )?;
+    Ok(session)
+}
+
 pub(crate) fn ensure_scope_not_frozen_tx(
     tx: &Transaction<'_>,
     project_id: Option<ProjectId>,
@@ -1723,31 +1766,28 @@ fn apply_command_mutation(
             state,
         } => {
             ensure_creation_rev(expected_rev, cmd_id)?;
-            tx.execute(
-                "INSERT INTO agents (agent_id, level, organization_parent_id, created_by_agent_id, project_id, state, revision)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, 1)",
-                rusqlite::params![
-                    agent_id.to_string(),
-                    level.to_string(),
-                    organization_parent_id.map(|a| a.to_string()),
-                    created_by_agent_id.map(|a| a.to_string()),
-                    project_id.map(|p| p.to_string()),
-                    state.to_string()
-                ],
-            )
-            .map_err(StoreError::from_rusqlite)?;
-            tx.execute(
-                "INSERT INTO sessions (session_id, agent_id, revision, state, created_at_ms)
-                 VALUES (?1, ?2, 0, 'open', ?3)",
-                rusqlite::params![
-                    config.id_generator.new_session_id().to_string(),
-                    agent_id.to_string(),
-                    now_ms.as_i64(),
-                ],
-            )
-            .map_err(StoreError::from_rusqlite)?;
+            insert_agent_and_session(
+                tx,
+                config,
+                now_ms,
+                &NewAgent {
+                    agent_id: *agent_id,
+                    level: *level,
+                    organization_parent_id: *organization_parent_id,
+                    created_by_agent_id: *created_by_agent_id,
+                    project_id: *project_id,
+                    state: *state,
+                },
+            )?;
             Ok(Revision::new(1))
         }
+        CommandMutation::CreateAssignedAgent { caller } => crate::agent_creation::commit_tx(
+            tx,
+            (config, daemon, now_ms),
+            envelope,
+            caller,
+            generated_events,
+        ),
         CommandMutation::CreateGoal {
             goal_id,
             project_id,
