@@ -14,7 +14,7 @@
     "cache/"
   ],
   "hash_algorithm": "sha256",
-  "source_tree_digest": "9e353e4424fd7f1b59b3ba5e782414efc2722d96bd93cb6a9ad7782cf3a89791",
+  "source_tree_digest": "c283b3f408f936f2230ce510712ae8e7e5f6125e236a9f346fc097e8640234c2",
   "files": [
     {
       "path": "INDEX.md",
@@ -312,8 +312,8 @@
     },
     {
       "path": "architecture/client-operation-catalog.md",
-      "sha256": "5c2200966ba9de2500bb1cff8bd12c02be6c1120daf151a6b02f594d146ad3ac",
-      "bytes": 38911,
+      "sha256": "211d28a2551da5858d09014fd6dc11d20fe9226732b2909911bd383b35a1cd06",
+      "bytes": 39531,
       "media_type": "text/markdown"
     },
     {
@@ -396,8 +396,8 @@
     },
     {
       "path": "architecture/sqlite-design.md",
-      "sha256": "05574ca2d87cc6b3ab9b05b3a5ff532eff36bd47c6d579b3ecab877208d7a35d",
-      "bytes": 76691,
+      "sha256": "1716bc52edbf1d59bde37db40fc0f3b8d8c216747234758bf315aab6af9b2698",
+      "bytes": 77105,
       "media_type": "text/markdown"
     },
     {
@@ -1164,8 +1164,8 @@
     },
     {
       "path": "features/F003-agent-runtime/interfaces.md",
-      "sha256": "db808a8ca4daa19d462fea1d570ddae6edcf6d00f0f23510e9929a3a869f7426",
-      "bytes": 5583,
+      "sha256": "e2e37a37f7d192db700eef9751c62eed0b4778433430d99f94298e4c51cb7032",
+      "bytes": 7225,
       "media_type": "text/markdown"
     },
     {
@@ -1182,8 +1182,8 @@
     },
     {
       "path": "features/F003-agent-runtime/tests.md",
-      "sha256": "f2c577977f19fbac4f1ef95991a44b8677842958c564986478deb40376be940c",
-      "bytes": 4472,
+      "sha256": "7aa7b41dc5fbf7ee3190da8e19e09ed82aa3e3d646f10c238575516fcdba33ca",
+      "bytes": 5691,
       "media_type": "text/markdown"
     },
     {
@@ -1248,8 +1248,8 @@
     },
     {
       "path": "features/F005-workflow-engine/interfaces.md",
-      "sha256": "4088e221b6d98ea06cfc3c588c6a52edbde91c9f1a9f3dfde69bacd1a74b271e",
-      "bytes": 4679,
+      "sha256": "b5f927c0f3c33b0476e0c50e3acedaff87aa637db0c474d7ed6949a852d34d71",
+      "bytes": 6039,
       "media_type": "text/markdown"
     },
     {
@@ -1266,8 +1266,8 @@
     },
     {
       "path": "features/F005-workflow-engine/tests.md",
-      "sha256": "1e6c0e48db3a67a9c83c9a42ae1560625b7b52bdf93394ff16d74cd264b7de43",
-      "bytes": 2964,
+      "sha256": "62fb112b6a80ca22dcfd2a25b634934adbed67ae2f9640aac6643639e151eb88",
+      "bytes": 3394,
       "media_type": "text/markdown"
     },
     {
@@ -2070,8 +2070,8 @@
     },
     {
       "path": "schemas/ipc-command.schema.json",
-      "sha256": "6de4fc41160332a39b5535937c59739d25de691cc2314b83f02936b45da8310d",
-      "bytes": 24972,
+      "sha256": "5621610107ce3a6c0c4407359f919db812bb695ba8eb831c8081263a75f3fce3",
+      "bytes": 25351,
       "media_type": "application/json"
     },
     {
