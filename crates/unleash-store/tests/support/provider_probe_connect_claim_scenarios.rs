@@ -12,7 +12,7 @@ use unleash_store::{
     NoopCutpointObserver, ProviderProbeConnectClaimOutcome, StoreConfig, StoreCutpoint, StoreError,
     UnleashStore,
 };
-use unleash_testkit::local_test_dir;
+use unleash_testkit::{ManualClock, local_test_dir};
 
 struct LostClaimAck(AtomicBool);
 
@@ -40,6 +40,8 @@ fn fixture(
     let directory = local_test_dir("f012-connect-claim").unwrap();
     let mut config = StoreConfig::new(directory.path());
     config.cutpoints = observer;
+    // Leave the claim window stable while the contenders wait for the writer.
+    config.clock = Arc::new(ManualClock::default());
     let store = UnleashStore::open(config).unwrap();
     store
         .register_principal(PRINCIPAL, "user", caller().actor_id.as_str())
