@@ -10,7 +10,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 use ts_rs::TS;
 use unleash_domain::{
-    AuthorityGeneration, CommandId, DaemonEpoch, DaemonInstanceId, OperationId, ProjectId,
+    AgentId, AuthorityGeneration, CommandId, DaemonEpoch, DaemonInstanceId, OperationId, ProjectId,
     ReceiptId, RequestId, Revision, Sequence, Sha256Digest, StreamId,
 };
 
@@ -102,6 +102,15 @@ pub struct CommandEnvelope {
     /// Charge utile métier de la commande (objet JSON).
     #[ts(type = "Record<string, unknown>")]
     pub payload: serde_json::Map<String, serde_json::Value>,
+}
+
+/// Charge utile fermée d’une affectation de tâche durable par `AssignTask`.
+/// L’enveloppe cible la tâche et porte sa révision attendue.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AssignTaskPayload {
+    /// Identité de l’agent logique à affecter.
+    pub agent_id: AgentId,
 }
 
 /// État d'avancement d'une commande dans son cycle de vie serveur.

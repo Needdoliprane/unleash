@@ -14,7 +14,7 @@
     "cache/"
   ],
   "hash_algorithm": "sha256",
-  "source_tree_digest": "22fcdebf9ed427880e85355a1bbea65a1b967951a18d90900f8231e417adc793",
+  "source_tree_digest": "01f8390292224a3f67e809a0d508bcc2eaa17d48f02f916073e18e1e60857340",
   "files": [
     {
       "path": "INDEX.md",
@@ -312,8 +312,8 @@
     },
     {
       "path": "architecture/client-operation-catalog.md",
-      "sha256": "5c2200966ba9de2500bb1cff8bd12c02be6c1120daf151a6b02f594d146ad3ac",
-      "bytes": 38911,
+      "sha256": "211d28a2551da5858d09014fd6dc11d20fe9226732b2909911bd383b35a1cd06",
+      "bytes": 39531,
       "media_type": "text/markdown"
     },
     {
@@ -1164,8 +1164,8 @@
     },
     {
       "path": "features/F003-agent-runtime/interfaces.md",
-      "sha256": "db808a8ca4daa19d462fea1d570ddae6edcf6d00f0f23510e9929a3a869f7426",
-      "bytes": 5583,
+      "sha256": "6b6aef281e9e538a55698af42d42d96f02017a13f5830b58636b3a2a2683e06e",
+      "bytes": 5893,
       "media_type": "text/markdown"
     },
     {
@@ -1182,8 +1182,8 @@
     },
     {
       "path": "features/F003-agent-runtime/tests.md",
-      "sha256": "f2c577977f19fbac4f1ef95991a44b8677842958c564986478deb40376be940c",
-      "bytes": 4472,
+      "sha256": "e7b435e60653c81b316458161716b6c77a1d4eb790d88b83eec1707635322069",
+      "bytes": 4798,
       "media_type": "text/markdown"
     },
     {
@@ -2070,8 +2070,8 @@
     },
     {
       "path": "schemas/ipc-command.schema.json",
-      "sha256": "6de4fc41160332a39b5535937c59739d25de691cc2314b83f02936b45da8310d",
-      "bytes": 24972,
+      "sha256": "5621610107ce3a6c0c4407359f919db812bb695ba8eb831c8081263a75f3fce3",
+      "bytes": 25351,
       "media_type": "application/json"
     },
     {

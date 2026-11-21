@@ -17,6 +17,14 @@
     "payload"
   ],
   "$defs": {
+    "assign_task": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["agent_id"],
+      "properties": {
+        "agent_id": {"type": "string", "format": "uuid"}
+      }
+    },
     "terminal_release_reconcile": {
       "type": "object",
       "additionalProperties": false,
@@ -494,6 +502,10 @@
     }
   },
   "allOf": [
+    {
+      "if": { "properties": { "command_type": { "const": "AssignTask" } } },
+      "then": { "properties": { "payload": { "$ref": "#/$defs/assign_task" } } }
+    },
     {
       "if": {
         "properties": {

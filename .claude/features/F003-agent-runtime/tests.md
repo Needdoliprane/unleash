@@ -19,6 +19,8 @@ La campagne distingue requested_limit pending et effective_limit pendant la cond
 
 Le sous-cas lecture de T-F003-001 vérifie l’identité et la session durable via `GetAgent` sur le socket du daemon. Il contrôle le watermark, le refus sans preuve administrative, la portée exacte, le masquage d’un parent ou créateur hors scope et le rejet d’un payload non fermé. La création authentifiée, l’assignation et le crash du worker ont leurs propres preuves.
 
+Le sous-cas wire de T-F003-002 vérifie le payload fermé d’`AssignTask` dans le schéma et le DTO Rust. Il accepte l’identifiant d’un agent et rejette un UUID invalide, un identifiant manquant et la provenance fournie par le client. La production du bundle, la mise en file et l’admission ont leurs propres preuves.
+
 Le sous-cas `GetInvocation` part d’un historique de fixture persisté. Il lit une ancienne tentative clôturée par fence puis une tentative terminée, avec les mêmes identités agent, session et invocation. La suite vérifie l’ordre des pages, la fin de pagination, les bornes, la portée et le watermark transactionnel.
 
 Le sous-cas de préparation d’un worker utilise l’admission SQLite et le binaire Rust de la même révision. Deux demandes concurrentes donnent une seule préparation et un seul enfant observé. Le fence altéré échoue, le manifeste et le PID sont corrélés au message `Ready`, et la fermeture du canal permet de récolter le processus. Le test vérifie que la préparation et l’arrêt sans permis laissent le slot réservé. L’historique des actions, la neutralisation attestée et le commit de continuation relèvent des scénarios complets.
