@@ -810,9 +810,9 @@ impl UnleashStore {
         Ok(validated)
     }
 
-    // F012 replays are reads of the authoritative wire receipt, not revalidation
-    // of a newly resolved configuration. The writer repeats this classifier.
-    fn preflight_provider_profile(
+    // Replays of published-object commands read the authoritative receipt.
+    // The writer repeats this classifier before applying a fresh mutation.
+    fn preflight_published_command(
         &self,
         request: &CommitCommandRequest,
         digest: Sha256Digest,
@@ -820,7 +820,9 @@ impl UnleashStore {
         let configuration = crate::provider_profiles::validate_identity(request)?;
         let validation = crate::provider_profile_validation::validate_identity(request)?;
         let connect = crate::provider_probe_connect::validate_identity(request)?;
-        if !configuration && !validation && !connect {
+        let activation = crate::workflow_activation::validate_identity(request)?;
+        let assignment = crate::task_assignment::validate_identity(request)?;
+        if !configuration && !validation && !connect && !activation && !assignment {
             return Ok(None);
         }
         let lookup = || {
@@ -838,7 +840,11 @@ impl UnleashStore {
         if let Some(receipt) = lookup()? {
             return Ok(Some(CommitOutcome::IdempotentReplay(receipt)));
         }
-        let verified = if connect {
+        let verified = if assignment {
+            crate::task_assignment::verify_published(self, request)
+        } else if activation {
+            crate::workflow_activation::verify_definition(self, request)
+        } else if connect {
             crate::provider_probe_connect::verify_published(self, request)
         } else if validation {
             crate::provider_profile_validation::verify_published(self, request)
@@ -874,7 +880,7 @@ impl UnleashStore {
             crate::commands::CommandMutation::PurgeHistory { .. }
         );
         let (digest, retention_days) = self.run_command_prechecks(&req)?;
-        if let Some(replay) = self.preflight_provider_profile(&req, digest)? {
+        if let Some(replay) = self.preflight_published_command(&req, digest)? {
             return Ok(replay);
         }
         let cfg = self.config.clone();
@@ -928,7 +934,7 @@ impl UnleashStore {
             crate::commands::CommandMutation::PurgeHistory { .. }
         );
         let (digest, retention_days) = self.run_command_prechecks(&req)?;
-        if let Some(replay) = self.preflight_provider_profile(&req, digest)? {
+        if let Some(replay) = self.preflight_published_command(&req, digest)? {
             return Ok(replay);
         }
         let cfg = self.config.clone();

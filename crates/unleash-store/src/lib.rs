@@ -19,6 +19,7 @@ pub mod config;
 pub mod error;
 pub mod events;
 pub mod fs_sync;
+mod initial_context;
 mod invocation_projection;
 pub mod leases;
 pub mod migrations;
@@ -40,7 +41,10 @@ pub mod qualification;
 pub mod recovery_ops;
 pub mod restore;
 pub mod store;
+mod task_assignment;
+mod task_bundle;
 pub mod terminal_allocations;
+mod workflow_activation;
 pub mod writer;
 
 pub use admission::{
@@ -84,6 +88,7 @@ pub use events::{
     MAX_OUTBOX_NON_TRANSIENT_ATTEMPTS, OutboxDispatchItem, OutboxState, PurgeStats,
     ReadEventsOutcome, RetentionPurgeReport, RetentionPurgeRequest, RetentionPurgeStatusRecord,
 };
+pub use initial_context::InitialContextPlan;
 pub use invocation_projection::{InvocationAttemptProjection, InvocationProjection};
 pub use leases::{AcquireLeaseRequest, FenceAssertion, LeaseState, ResourceLeaseRecord};
 pub use migrations::{CURRENT_SCHEMA_VERSION, MigrationRecord, MigrationReport, MigrationState};
@@ -177,3 +182,7 @@ pub use broker_phases::{
     BrokerAuthorizationOutcome, BrokerCause, BrokerEvaluation, BrokerExecutor, BrokerIntent,
     BrokerObservationCause, BrokerPhase, BrokerPhaseCommit, BrokerPhaseRequest, BrokerPhaseStore,
 };
+
+pub use workflow_activation::WorkflowTaskActivationPlan;
+
+pub use task_assignment::PreparedTaskAssignment;

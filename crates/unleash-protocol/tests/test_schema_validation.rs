@@ -16,15 +16,15 @@ use serde_json::{Map, Value, json};
 use std::fs;
 use std::path::Path;
 use unleash_domain::{
-    AuthorityGeneration, CommandId, DaemonEpoch, DaemonInstanceId, OperationId, ProjectId,
+    AgentId, AuthorityGeneration, CommandId, DaemonEpoch, DaemonInstanceId, OperationId, ProjectId,
     ReceiptId, RequestId, Revision, Sequence, Sha256Digest, StreamId,
 };
 use unleash_protocol::{
-    ClientKind, ClientUploadSegment, CommandEnvelope, CommandReceipt, CommandReceiptInspection,
-    ErrorCode, EventCausation, EventCursor, EventEnvelope, HelloRequest, HelloResponse, IpcError,
-    LineageStatus, MAX_CLIENT_UPLOAD_BYTES, ProtocolError, ProtocolVersion, QueryEnvelope,
-    QueryResponse, ReasonCode, ReceiptState, RetryClass, Sensitivity, SubscribeEventsFrame,
-    SubscribeEventsRequest, from_json_str_strict,
+    AssignTaskPayload, ClientKind, ClientUploadSegment, CommandEnvelope, CommandReceipt,
+    CommandReceiptInspection, ErrorCode, EventCausation, EventCursor, EventEnvelope, HelloRequest,
+    HelloResponse, IpcError, LineageStatus, MAX_CLIENT_UPLOAD_BYTES, ProtocolError,
+    ProtocolVersion, QueryEnvelope, QueryResponse, ReasonCode, ReceiptState, RetryClass,
+    Sensitivity, SubscribeEventsFrame, SubscribeEventsRequest, from_json_str_strict,
 };
 
 fn json_obj(value: Value) -> Map<String, Value> {
@@ -54,6 +54,41 @@ fn ipc_command_fixture() -> String {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     fs::read_to_string(root.join(".claude/examples/ipc-command.json"))
         .expect("Lecture fixture ipc-command.json")
+}
+
+// REQ-AGENT-002: la provenance du bundle est résolue par le serveur.
+#[test]
+fn test_validate_assign_task_payload_schema() {
+    let validator = build_validator("ipc-command.schema.json");
+    let mut command: Value = serde_json::from_str(&ipc_command_fixture()).unwrap();
+    let agent = "00000000-0000-4000-8000-000000000021";
+    command["command_type"] = json!("AssignTask");
+    command["aggregate_id"] = json!("00000000-0000-4000-8000-000000000022");
+    command["expected_revision"] = json!(1);
+    command["payload"] = json!({"agent_id": agent});
+    assert!(validator.is_valid(&command));
+    let payload: AssignTaskPayload = serde_json::from_value(command["payload"].clone()).unwrap();
+    assert_eq!(payload.agent_id, AgentId::from_uuid(agent.parse().unwrap()));
+    assert_eq!(serde_json::to_value(payload).unwrap(), command["payload"]);
+
+    let mut extra = command.clone();
+    extra["payload"]["run_id"] = json!("00000000-0000-4000-8000-000000000023");
+
+    let mut invalid = command.clone();
+    invalid["payload"]["agent_id"] = json!("invalid-uuid");
+
+    command["payload"] = json!({});
+    for (bad, reason) in [
+        (extra, "run_id is resolved by the server"),
+        (invalid, "agent_id must be a UUID"),
+        (command, "agent_id is required"),
+    ] {
+        assert!(!validator.is_valid(&bad), "{reason}");
+        assert!(
+            serde_json::from_value::<AssignTaskPayload>(bad["payload"].clone()).is_err(),
+            "{reason}"
+        );
+    }
 }
 
 #[test]

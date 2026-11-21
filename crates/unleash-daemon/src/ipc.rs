@@ -26,9 +26,9 @@ use unleash_protocol::{
     SubscribeEventsRequest, from_json_str_strict, parse_json_value_strict,
 };
 use unleash_store::{
-    AggregateKind, AlertSeverity, CommandMutation, CommitCommandRequest, CommitOutcome,
-    EventAppendSpec, NewAlertSpec, ReadEventsOutcome, ReceiptInspectionOutcome, StoreError,
-    UnleashStore,
+    AggregateKind, AlertSeverity, CallerAuthority, CallerRole, CommandMutation,
+    CommitCommandRequest, CommitOutcome, EventAppendSpec, NewAlertSpec, ReadEventsOutcome,
+    ReceiptInspectionOutcome, StoreError, UnleashStore,
 };
 use uuid::Uuid;
 
@@ -1205,6 +1205,14 @@ async fn handle_command_frame(
                 return false;
             }
         }
+    } else if cmd.command_type == "AssignTask" {
+        match commit_task_assignment(Arc::clone(&state.store), session, cmd.clone()).await {
+            Ok(outcome) => (outcome, 2, None, None),
+            Err(ipc) => {
+                let _ = write_json_frame_timeout(stream, &ipc, RESPONSE_WRITE_TIMEOUT).await;
+                return false;
+            }
+        }
     } else if is_provider_profile_command(&cmd) {
         let committed = if cmd.command_type == "SetProviderProfile" {
             crate::provider_profile_service::commit(
@@ -1381,6 +1389,22 @@ async fn handle_command_frame(
 
     let _ = write_json_frame_timeout(stream, &receipt, RESPONSE_WRITE_TIMEOUT).await;
     false
+}
+
+async fn commit_task_assignment(
+    store: Arc<UnleashStore>,
+    session: &AuthenticatedSession,
+    command: CommandEnvelope,
+) -> Result<CommitOutcome, IpcError> {
+    let id = command.command_id;
+    let authority = CallerAuthority {
+        actor_id: session.actor_id.clone(),
+        role: CallerRole::HumanOperator,
+    };
+    tokio::task::spawn_blocking(move || store.assign_published_task(command, authority))
+        .await
+        .map_err(|error| internal_ipc_error(&format!("Join error AssignTask: {error}"), Some(id)))?
+        .map_err(|error| store_error_to_ipc_error(&error, Some(id)))
 }
 
 async fn reconcile_accepted_backup(

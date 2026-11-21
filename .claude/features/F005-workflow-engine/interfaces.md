@@ -26,6 +26,31 @@ Les événements comprennent RunCreated, RunStarted, NodeActivated, EffectReques
 
 Une erreur contient code, run, activation éventuelle, révision courante et action recommandée. `UnresolvedEffect` retourne les références nécessaires à la réconciliation, sans autoriser la répétition. `BindingAlreadyEngaged` retourne la version effective et l'identifiant d'engagement. Les interfaces sont internes proposées ; aucune de ces méthodes n'est annoncée comme API existante d'un fournisseur.
 
+### Persistance d'une activation de tâche
+
+`ActivateWorkflowTask` est un port interne du Store. Le reducer
+fournit les coordonnées de l'activation logique, le contrat et le
+scope résolus ainsi que les digests de la définition et du plan
+effectif. L'enveloppe cible la révision exacte du run. La disponibilité
+de l'étape, le binding et le budget relèvent de la décision du reducer.
+
+Le Store vérifie que le run actif référence les mêmes digests et que
+la définition est retenue par la version épinglée. Il vérifie les octets
+et le nœud `task` hors transaction, avec sa borne de tentatives. Le
+writer revalide la lignée, l'époque, le run, la portée et la référence
+active. Il engage dans la même transaction l'étape et la tâche
+initiales `ready`, la révision suivante du run, le reçu et
+`NodeActivated`. La tâche commence en révision 1.
+
+Pour ce nœud, l'événement appartient à l'agrégat du run. Il porte
+`run_id`, `workflow_version_id`, `definition_hash`,
+`definition_node_id`, `step_id`, `task_id`, `iteration_vector`,
+`step_attempt` et `state`. Le vecteur vient de l'itération
+persistante ou vaut `[]` hors boucle. Le reçu référence `task:<task_id>`.
+Le rejeu exact relit le reçu. Une autre commande sur la même activation
+logique ne duplique pas la tâche. Affectation et admission suivent leurs
+propres transitions.
+
 ### Snapshot de qualification
 
 Une évaluation F019 utilise le Run commun de source workflow_version avec purpose=evaluation, candidat/digest et cible autorisée. Le snapshot immuable est marqué qualification_only dans les métadonnées de version ; il n’est pas une version publiée sélectionnable en exécution opérationnelle. Le broker vérifie cette visibilité et l’autorité de qualification avant CreateRun/StartRun. Les colonnes purpose/candidate_ref du Run et visibility du snapshot relient les preuves sans modifier les octets exécutés. Le contrat détaillé est dans [F019](../F019-reusable-automations/technical-design.md).

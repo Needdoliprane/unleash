@@ -46,6 +46,19 @@ Les noms ci-dessous sont des **opérations internes proposées**, pas des appels
 | Autorité / F017 | SetPolicy, SuspendSubject, ResumeSubject, RevokeSubject, ResolveActionApproval, ConfigureGuard | Policy/subject/GuardConfig, version et motif ; contrôles d’autorité et journal. SuspendSubject, ResumeSubject et RevokeSubject portent sujet typé, portée, motif et révision. La suspension locale bloque immédiatement les nouvelles actions du sujet et reste réversible par ResumeSubject ; les effets en vol sont réconciliés ; la révocation en reste distincte. La propagation vers AI-Guard n’a lieu que si GuardPort la négocie ; sinon la limitation est visible. ResolveActionApproval porte action_id, approval_scope, payload_digest, décision approve/deny, motif et révision attendue ; décision humaine autorisée sur l’approval_scope et le digest exacts, jamais par un modèle ni un agent ; il mène une action `approval_required` à `authorized` ou `denied` ([AI-Guard](../specs/ai-guard.md)), sans secret résolu ni dispatch avant l’autorisation. Ces noms sont côté Unleash ; le mapping réel vers AI-Guard est une preuve EXT-GUARD (ADR-10). |
 | Maintenance / F018 F009 | RequestBackup, ValidateBackup, RestoreBackup, RebuildIndex, PurgeHistory, ReconcileAction, ResolveActionOutcome, ResumeRecoveredInvocation | Périmètre exact, manifeste/cible, politique de rétention et raison. Restore reste une opération administrative exclusive/offline selon failure-recovery : le daemon `ready` ou `degraded` passe en `read_only_recovery`, ou y reste s’il y est déjà (cas principal après StorageCorrupt), sous exclusion de maintenance, puis bascule vers une nouvelle lignée ; le client passe en état déconnecté attendu puis se resynchronise. ReconcileAction applique une observation autorisée ; ResolveActionOutcome porte décision/motif/preuves et ne fabrique pas un succès ; ResumeRecoveredInvocation exige neutralisation de l’ancien exécuteur, contexte et budget valides. |
 
+### Affecter une tâche
+
+`AssignTask` cible une tâche existante. L’`aggregate_id` de
+l’enveloppe est le `task_id` et `expected_revision` est la révision
+de la tâche. Son [payload fermé](../schemas/ipc-command.schema.json)
+contient uniquement `agent_id`, l’UUID de l’agent choisi.
+
+Le serveur vérifie la révision, la portée du projet et le mandat courant.
+Il résout les liens de la tâche et le binding engagé pour constituer le
+bundle selon le [modèle de session](session-model.md). Le reçu référence
+l’activation et son état en file. Le démarrage se constate dans l’état
+de l’invocation.
+
 ## Lectures et correspondance des dix espaces
 
 | Espace / groupes PAR | Requêtes communes | Résultat minimal et références |
