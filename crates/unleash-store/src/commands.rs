@@ -288,6 +288,8 @@ pub enum CommandMutation {
         /// État initial (`proposed` ou `ready`).
         state: MissionState,
     },
+    /// Crée une mission et retient le manifeste de sa portée initiale.
+    CreateScopedMission(Box<crate::PreparedMissionScope>),
     /// Met à jour l'état d'une mission (ex: `PauseMission`, `ResumeMission`, `CancelMission`).
     TransitionMission {
         /// Identifiant de mission.
@@ -316,6 +318,8 @@ pub enum CommandMutation {
     },
     /// Prépare le run et publie son plan effectif dans la transaction du reçu.
     CreatePreparedWorkflowRun(Box<crate::PreparedRunPublication>),
+    /// Start a prepared workflow and commit its first activation and deadlines.
+    StartPreparedWorkflowRun(Box<crate::PreparedRunStart>),
     /// Fait transiter un `WorkflowRun` (`StartRun`, `PauseRun`, `ResumeRun`, `CancelRun`, etc.).
     TransitionWorkflowRun {
         /// Identifiant du run.
@@ -935,6 +939,7 @@ pub(crate) fn classify_command_replay(
             | "ResizeTerminal"
             | "ReconcileProcess"
             | crate::workflow_activation::COMMAND
+            | crate::workflow_run_start::COMMAND
             | crate::task_assignment::COMMAND
     ) || (envelope.command_type == "AcquireTerminal"
         && envelope.payload.contains_key("terminal_id"));
@@ -993,6 +998,8 @@ pub(crate) fn tx_commit_command(
     crate::task_assignment::validate_identity(req)?;
     crate::agent_creation::validate_identity(req)?;
     crate::workflow_run_creation::validate_identity(req)?;
+    crate::workflow_run_start::validate_identity(req)?;
+    crate::mission_scope::validate_identity(req)?;
     crate::terminal_allocations::validate_command(tx, req)?;
 
     // Étape 2 : Rechercher `(actor_id, command_id)` dans `command_receipts`
@@ -1497,6 +1504,72 @@ pub(crate) fn ensure_scope_not_frozen_tx(
 }
 
 #[derive(Clone, Copy)]
+pub(crate) struct NewMission<'a> {
+    pub mission_id: MissionId,
+    pub goal_id: Option<GoalId>,
+    pub project_id: ProjectId,
+    pub owner_principal_id: Option<&'a str>,
+    pub owner_agent_id: Option<AgentId>,
+    pub completion_policy: CompletionPolicy,
+    pub state: MissionState,
+    pub expected_revision: Revision,
+    pub command_id: CommandId,
+}
+
+pub(crate) fn insert_mission(
+    tx: &Transaction<'_>,
+    input: NewMission<'_>,
+) -> Result<Revision, StoreError> {
+    let NewMission {
+        mission_id,
+        goal_id,
+        project_id,
+        owner_principal_id,
+        owner_agent_id,
+        completion_policy,
+        state,
+        expected_revision: expected_rev,
+        command_id: cmd_id,
+    } = input;
+    ensure_creation_rev(expected_rev, cmd_id)?;
+    let exists: i64 = tx
+        .query_row(
+            "SELECT COUNT(*) FROM missions WHERE mission_id = ?1",
+            [mission_id.to_string()],
+            |r| r.get(0),
+        )
+        .map_err(StoreError::from_rusqlite)?;
+    if exists > 0 {
+        return Err(StoreError::RevisionConflict {
+            current_revision: Revision::new(1),
+            expected_revision: expected_rev,
+            command_id: Some(cmd_id),
+        });
+    }
+    let owner_kind = if owner_principal_id.is_some() {
+        "user"
+    } else {
+        "agent"
+    };
+    tx.execute(
+        "INSERT INTO missions (mission_id, goal_id, project_id, owner_kind, owner_user_id, owner_agent_id, completion_policy, leader_agent_id, worktree_id, state, revision)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL, NULL, ?8, 1)",
+        rusqlite::params![
+            mission_id.to_string(),
+            goal_id.map(|g| g.to_string()),
+            project_id.to_string(),
+            owner_kind,
+            owner_principal_id,
+            owner_agent_id.map(|a| a.to_string()),
+            completion_policy.to_string(),
+            state.to_string()
+        ],
+    )
+    .map_err(StoreError::from_rusqlite)?;
+    Ok(Revision::new(1))
+}
+
+#[derive(Clone, Copy)]
 pub(crate) struct NewWorkflowRun<'a> {
     pub run_id: RunId,
     pub mission_id: MissionId,
@@ -1911,44 +1984,27 @@ fn apply_command_mutation(
             owner_agent_id,
             completion_policy,
             state,
-        } => {
-            ensure_creation_rev(expected_rev, cmd_id)?;
-            let exists: i64 = tx
-                .query_row(
-                    "SELECT COUNT(*) FROM missions WHERE mission_id = ?1",
-                    [mission_id.to_string()],
-                    |r| r.get(0),
-                )
-                .map_err(StoreError::from_rusqlite)?;
-            if exists > 0 {
-                return Err(StoreError::RevisionConflict {
-                    current_revision: Revision::new(1),
-                    expected_revision: expected_rev,
-                    command_id: Some(cmd_id),
-                });
-            }
-            let owner_kind = if owner_principal_id.is_some() {
-                "user"
-            } else {
-                "agent"
-            };
-            tx.execute(
-                "INSERT INTO missions (mission_id, goal_id, project_id, owner_kind, owner_user_id, owner_agent_id, completion_policy, leader_agent_id, worktree_id, state, revision)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL, NULL, ?8, 1)",
-                rusqlite::params![
-                    mission_id.to_string(),
-                    goal_id.map(|g| g.to_string()),
-                    project_id.to_string(),
-                    owner_kind,
-                    owner_principal_id,
-                    owner_agent_id.map(|a| a.to_string()),
-                    completion_policy.to_string(),
-                    state.to_string()
-                ],
-            )
-            .map_err(StoreError::from_rusqlite)?;
-            Ok(Revision::new(1))
-        }
+        } => insert_mission(
+            tx,
+            NewMission {
+                mission_id: *mission_id,
+                goal_id: *goal_id,
+                project_id: *project_id,
+                owner_principal_id: owner_principal_id.as_deref(),
+                owner_agent_id: *owner_agent_id,
+                completion_policy: *completion_policy,
+                state: *state,
+                expected_revision: expected_rev,
+                command_id: cmd_id,
+            },
+        ),
+        CommandMutation::CreateScopedMission(publication) => crate::mission_scope::commit_tx(
+            tx,
+            (config, daemon, now_ms),
+            envelope,
+            actor_id,
+            publication,
+        ),
         CommandMutation::TransitionMission {
             mission_id,
             target_state,
@@ -2013,6 +2069,13 @@ fn apply_command_mutation(
                 generated_events,
             )
         }
+        CommandMutation::StartPreparedWorkflowRun(start) => crate::workflow_run_start::commit_tx(
+            tx,
+            (config, daemon, now_ms),
+            envelope,
+            start,
+            generated_events,
+        ),
         CommandMutation::TransitionWorkflowRun {
             run_id,
             target_state,
@@ -2844,7 +2907,7 @@ fn ensure_creation_rev(expected_rev: Revision, cmd_id: CommandId) -> Result<(), 
     Ok(())
 }
 
-fn parse_run_state(s: &str) -> Result<RunState, StoreError> {
+pub(crate) fn parse_run_state(s: &str) -> Result<RunState, StoreError> {
     match s {
         "prepared" => Ok(RunState::Prepared),
         "running" => Ok(RunState::Running),

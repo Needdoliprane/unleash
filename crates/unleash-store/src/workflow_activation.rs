@@ -56,7 +56,8 @@ impl UnleashStore {
     ///
     /// # Errors
     /// Refuses invalid, stale or conflicting activation plans and missing
-    /// definitions.
+    /// definitions. Each task consumes one activation, including retries.
+    /// If the run has no established budget, a new activation is refused.
     pub fn activate_workflow_task(
         &self,
         mut envelope: CommandEnvelope,
@@ -139,6 +140,7 @@ struct RunBinding {
     version_id: String,
     revision: i64,
     has_manifest: bool,
+    activation_available: Option<bool>,
 }
 
 fn verify_run(
@@ -148,7 +150,8 @@ fn verify_run(
 ) -> Result<RunBinding, StoreError> {
     let project = envelope.project_id.map(|project| project.to_string());
     let (mut run, definition_hash, bundle_hash): (RunBinding, String, String) = conn.query_row(
-        "SELECT r.mission_id,r.workflow_version_id,r.revision,v.content_hash,r.effective_bundle_hash
+        "SELECT r.mission_id,r.workflow_version_id,r.revision,v.content_hash,r.effective_bundle_hash,
+                r.step_activations_used < r.max_step_activations
            FROM workflow_runs r
            JOIN missions m ON m.mission_id=r.mission_id
            JOIN projects p ON p.project_id=m.project_id
@@ -159,7 +162,13 @@ fn verify_run(
                  OR (r.purpose='evaluation' AND v.visibility='qualification_only'))",
         params![envelope.aggregate_id.to_string(), project],
         |row| Ok((
-            RunBinding { mission_id: row.get(0)?, version_id: row.get(1)?, revision: row.get(2)?, has_manifest: false },
+            RunBinding {
+                mission_id: row.get(0)?,
+                version_id: row.get(1)?,
+                revision: row.get(2)?,
+                has_manifest: false,
+                activation_available: row.get(5)?,
+            },
             row.get(3)?,
             row.get(4)?,
         )),
@@ -223,7 +232,7 @@ pub(crate) fn verify_definition(
         let json = std::str::from_utf8(&bytes)
             .map_err(|_| invalid("workflow definition must be UTF-8"))?;
         let definition: Value = from_json_str_strict(json)?;
-        let node = verify_task_node(&definition, &plan)?;
+        let node = verify_task_node(&definition, &plan.definition_node_id, plan.step_attempt)?;
         if run.has_manifest {
             crate::workflow_run_plan::verify_activation(
                 conn,
@@ -238,9 +247,10 @@ pub(crate) fn verify_definition(
     })
 }
 
-fn verify_task_node<'definition>(
+pub(crate) fn verify_task_node<'definition>(
     definition: &'definition Value,
-    plan: &WorkflowTaskActivationPlan,
+    node_id: &str,
+    step_attempt: u32,
 ) -> Result<&'definition Value, StoreError> {
     if !matches!(
         definition.get("schema_version").and_then(Value::as_str),
@@ -256,7 +266,7 @@ fn verify_task_node<'definition>(
     let mut matching = None;
     while let Some(node) = pending.pop() {
         let kind = node.get("kind").and_then(Value::as_str);
-        if node.get("id").and_then(Value::as_str) == Some(plan.definition_node_id.as_str()) {
+        if node.get("id").and_then(Value::as_str) == Some(node_id) {
             if matching.is_some() || kind != Some("task") {
                 return Err(invalid(
                     "workflow activation must reference one exact task node",
@@ -266,7 +276,7 @@ fn verify_task_node<'definition>(
                 .get("max_attempts")
                 .and_then(Value::as_u64)
                 .ok_or_else(|| invalid("invalid task attempt limit"))?;
-            if u64::from(plan.step_attempt) > maximum {
+            if u64::from(step_attempt) > maximum {
                 return Err(invalid("step attempt above the pinned definition limit"));
             }
             matching = Some(node);
@@ -356,16 +366,42 @@ pub(crate) fn activate_tx(
         StoreError::InvariantViolation("workflow run revision overflow".to_owned())
     })?;
 
-    insert_ready_task(tx, &plan, run_id, &run.mission_id, &vector)?;
+    match run.activation_available {
+        Some(true) => {}
+        Some(false) => return Err(StoreError::WorkflowActivationBudgetExhausted),
+        None => {
+            return Err(StoreError::EvidenceUnavailable(
+                "workflow activation budget is unavailable for this run".to_owned(),
+            ));
+        }
+    }
     tx.execute(
-        "UPDATE workflow_runs SET revision=?1 WHERE run_id=?2",
+        "UPDATE workflow_runs SET revision=?1,step_activations_used=step_activations_used+1 WHERE run_id=?2",
         params![revision, run_id.to_string()],
     )?;
+    insert_ready_task(tx, &plan, run_id, &run.mission_id, &vector)?;
     let revision =
         Revision::new(u64::try_from(revision).map_err(|_| {
             StoreError::InvariantViolation("invalid workflow run revision".to_owned())
         })?);
-    events.push(EventAppendSpec {
+    events.push(node_activated_event(
+        envelope,
+        &run.version_id,
+        revision,
+        &plan,
+        &iterations,
+    )?);
+    Ok(revision)
+}
+
+pub(crate) fn node_activated_event(
+    envelope: &CommandEnvelope,
+    version_id: &str,
+    revision: Revision,
+    plan: &WorkflowTaskActivationPlan,
+    iterations: &[Value],
+) -> Result<EventAppendSpec, StoreError> {
+    Ok(EventAppendSpec {
         event_type: "NodeActivated".to_owned(),
         aggregate_type: AggregateKind::WorkflowRun,
         aggregate_id: envelope.aggregate_id,
@@ -375,8 +411,8 @@ pub(crate) fn activate_tx(
         causation_kind: EventCausationKind::Command,
         causation_id: None,
         payload: serde_json::from_value(json!({
-            "run_id": run_id,
-            "workflow_version_id": run.version_id,
+            "run_id": envelope.aggregate_id,
+            "workflow_version_id": version_id,
             "definition_hash": plan.definition_hash,
             "definition_node_id": plan.definition_node_id,
             "step_id": plan.step_id,
@@ -387,11 +423,10 @@ pub(crate) fn activate_tx(
         }))?,
         sensitivity: Sensitivity::Project,
         outbox_destinations: vec!["clients".to_owned(), "harness".to_owned()],
-    });
-    Ok(revision)
+    })
 }
 
-fn insert_ready_task(
+pub(crate) fn insert_ready_task(
     tx: &Transaction<'_>,
     plan: &WorkflowTaskActivationPlan,
     run_id: RunId,

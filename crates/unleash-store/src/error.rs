@@ -150,6 +150,10 @@ pub enum StoreError {
         account_id: String,
     },
 
+    /// Une activation dépasserait le plafond cumulatif du run.
+    #[error("Budget d’activations du workflow épuisé")]
+    WorkflowActivationBudgetExhausted,
+
     /// Tarif absent pour l'action demandée.
     #[error("Tarif inconnu pour le modèle '{model_id}'")]
     PricingUnknown {
@@ -436,6 +440,7 @@ impl StoreError {
             | Self::IdValidation(_) => ErrorCode::InvalidArgument,
 
             Self::BudgetExhausted { .. }
+            | Self::WorkflowActivationBudgetExhausted
             | Self::PricingUnknown { .. }
             | Self::PricingStale { .. } => ErrorCode::BudgetExceeded,
 
@@ -465,7 +470,9 @@ impl StoreError {
             Self::StaleFence { .. } => Some(ReasonCode::StaleEpoch),
             Self::IdempotencyWindowExpired { .. } => Some(ReasonCode::IdempotencyWindowExpired),
             Self::ObjectDeleting { .. } => Some(ReasonCode::ObjectDeleting),
-            Self::BudgetExhausted { .. } => Some(ReasonCode::BudgetExhausted),
+            Self::BudgetExhausted { .. } | Self::WorkflowActivationBudgetExhausted => {
+                Some(ReasonCode::BudgetExhausted)
+            }
             Self::PricingUnknown { .. } => Some(ReasonCode::PricingUnknown),
             Self::PricingStale { .. } => Some(ReasonCode::PricingStale),
             Self::ControlReserveIncoherent(_) => Some(ReasonCode::ControlReserveIncoherent),

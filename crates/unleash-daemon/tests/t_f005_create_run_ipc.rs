@@ -9,16 +9,21 @@
 #[path = "../../unleash-store/tests/support/workflow_run.rs"]
 mod workflow_run;
 
+#[path = "support/workflow_start.rs"]
+mod start_run;
+
 use serde_json::{Map, Value, json};
 use std::{os::unix::fs::PermissionsExt, path::Path};
 use unleash_client::{ClientConfig, UnleashClient};
 use unleash_daemon::{DaemonConfig, DaemonHandle, DaemonStartOutcome, UnleashDaemon};
-use unleash_domain::{ActorId, CommandId, RequestId, Revision, Sha256Digest};
+use unleash_domain::{ActorId, CommandId, MissionId, ReceiptId, RequestId, Revision, Sha256Digest};
 use unleash_platform::{current_boot_identity, effective_uid};
 use unleash_protocol::{ClientKind, CommandEnvelope, ProtocolVersion, QueryEnvelope, ReceiptState};
 use unleash_store::{StoreConfig, UnleashStore};
 use unleash_testkit::local_test_dir;
 use workflow_run::{PUBLISHED, RUN};
+
+const MISSION: MissionId = MissionId::from_u128(0x5910);
 
 fn local_store_config(path: &Path) -> StoreConfig {
     let mut config = StoreConfig::new(path);
@@ -31,8 +36,16 @@ fn local_store_config(path: &Path) -> StoreConfig {
 }
 
 fn wire_command(config: StoreConfig) -> (CommandEnvelope, Sha256Digest) {
+    wire_command_with_workflow(config, |_| {})
+}
+
+fn wire_command_with_workflow(
+    config: StoreConfig,
+    customize: impl FnOnce(&mut Value),
+) -> (CommandEnvelope, Sha256Digest) {
     let actor = ActorId::new(format!("uid:{}", effective_uid())).unwrap();
-    let (fixture, mut envelope, _) = workflow_run::prepare(config, actor);
+    let (fixture, mut envelope, _) =
+        workflow_run::prepare(config, actor, |workflow, _, _| customize(workflow));
     let hash: String = fixture
         .store
         .read_snapshot(|db, _| {
@@ -45,13 +58,12 @@ fn wire_command(config: StoreConfig) -> (CommandEnvelope, Sha256Digest) {
         .unwrap();
     let hash: Sha256Digest = hash.parse().unwrap();
     envelope.payload = serde_json::from_value(json!({
-        "mission_id": fixture.mission,
+        "mission_id": MISSION,
         "source": { "kind": "workflow_version", "id": "workflow.merge-only",
                     "version": 1, "digest": hash },
         "purpose": "operational",
         "predecessor_run_id": null,
         "selection_reason": "fixture workflow selected",
-        "scope_ref": envelope.payload.get("scope_manifest_hash").unwrap(),
     }))
     .unwrap();
     fixture.store.shutdown().unwrap();
@@ -72,6 +84,53 @@ async fn start(config: DaemonConfig) -> (DaemonHandle, UnleashClient) {
     (daemon, client)
 }
 
+fn assign_scoped_mission(run: &CommandEnvelope) -> CommandEnvelope {
+    CommandEnvelope {
+        request_id: RequestId::from_u128(0x5911),
+        command_id: CommandId::from_u128(0x5911),
+        aggregate_id: MISSION.as_uuid(),
+        expected_revision: Revision::INITIAL,
+        command_type: "AssignMission".to_owned(),
+        payload: serde_json::from_value(json!({
+            "completion_policy": "mechanical",
+            "scopes": {"implementation": {"kind":"project", "revision":1}},
+        }))
+        .unwrap(),
+        ..run.clone()
+    }
+}
+
+async fn publish_mandate(
+    client: &mut UnleashClient,
+    run: &mut CommandEnvelope,
+) -> (CommandEnvelope, unleash_protocol::CommandReceipt) {
+    let mission = assign_scoped_mission(run);
+    let receipt = client.send_command(&mission).await.unwrap();
+    assert_eq!(receipt.new_revision, Revision::new(1));
+    let hash: Sha256Digest = receipt
+        .result_ref
+        .as_deref()
+        .unwrap()
+        .strip_prefix("mission-scope:")
+        .unwrap()
+        .parse()
+        .unwrap();
+    run.payload.insert("scope_ref".to_owned(), json!(hash));
+
+    let mut stale = mission.clone();
+    stale.request_id = RequestId::from_u128(0x5912);
+    stale.command_id = CommandId::from_u128(0x5912);
+    stale.aggregate_id = MissionId::from_u128(0x5912).as_uuid();
+    stale.payload.insert(
+        "scopes".to_owned(),
+        json!({"implementation":{"kind":"project","revision":2}}),
+    );
+    let error = client.send_command(&stale).await.unwrap_err();
+    assert!(matches!(error, unleash_client::ClientError::Remote(error)
+        if error.code == unleash_protocol::ErrorCode::RevisionConflict));
+    (mission, receipt)
+}
+
 fn scoped_run_query(command: &CommandEnvelope) -> QueryEnvelope {
     QueryEnvelope {
         protocol_version: ProtocolVersion,
@@ -82,6 +141,24 @@ fn scoped_run_query(command: &CommandEnvelope) -> QueryEnvelope {
     }
 }
 
+async fn assert_refuses_different_workflow_version(
+    client: &mut UnleashClient,
+    command: &CommandEnvelope,
+) {
+    let mut different_version = command.clone();
+    different_version.command_id = CommandId::from_u128(0x5902);
+    different_version.request_id = RequestId::from_u128(0x5905);
+    different_version
+        .payload
+        .get_mut("source")
+        .and_then(Value::as_object_mut)
+        .unwrap()
+        .insert("version".to_owned(), json!(2));
+    assert!(client.send_command(&different_version).await.is_err());
+}
+
+// T-F004-003 couvre ici la portée initiale et le refus d’une révision périmée.
+// T-F005-001 et T-F005-009 couvrent ici le plan épinglé et le rejeu.
 #[tokio::test]
 async fn t_f005_creates_one_prepared_run_and_replays_its_wire_receipt() {
     let data = local_test_dir("f005-run-data").unwrap();
@@ -100,16 +177,8 @@ async fn t_f005_creates_one_prepared_run_and_replays_its_wire_receipt() {
     };
     let (daemon, mut client) = start(config.clone()).await;
     let epoch = client.hello().daemon_epoch;
-    let mut different_version = command.clone();
-    different_version.command_id = CommandId::from_u128(0x5902);
-    different_version.request_id = RequestId::from_u128(0x5905);
-    different_version
-        .payload
-        .get_mut("source")
-        .and_then(Value::as_object_mut)
-        .unwrap()
-        .insert("version".to_owned(), json!(2));
-    assert!(client.send_command(&different_version).await.is_err());
+    let (mut assignment, assigned) = publish_mandate(&mut client, &mut command).await;
+    assert_refuses_different_workflow_version(&mut client, &command).await;
     let receipt = client.send_command(&command).await.unwrap();
     assert_eq!(receipt.state, ReceiptState::Completed);
     assert_eq!(receipt.new_revision, Revision::new(1));
@@ -118,6 +187,20 @@ async fn t_f005_creates_one_prepared_run_and_replays_its_wire_receipt() {
     let query = scoped_run_query(&command);
     let before = client.query(&query).await.unwrap();
     assert!(before.watermark.is_some());
+    assert_eq!(before.result.get("mission_id"), Some(&json!(MISSION)));
+    assert_eq!(
+        before
+            .result
+            .pointer("/plan/scopes/implementation/scope_id"),
+        Some(&json!(command.project_id.unwrap()))
+    );
+    assert_eq!(
+        before
+            .result
+            .pointer("/plan/scopes/implementation/scope_revision"),
+        Some(&json!(1))
+    );
+
     assert_eq!(before.result.get("state"), Some(&json!("prepared")));
     assert_eq!(
         before.result.get("definition_hash"),
@@ -139,6 +222,8 @@ async fn t_f005_creates_one_prepared_run_and_replays_its_wire_receipt() {
 
     let (daemon, mut client) = start(config).await;
     assert!(client.hello().daemon_epoch.as_u64() > epoch.as_u64());
+    assignment.request_id = RequestId::from_u128(0x5913);
+    assert_eq!(client.send_command(&assignment).await.unwrap(), assigned);
     command.request_id = RequestId::from_u128(0x5904);
     assert_eq!(client.send_command(&command).await.unwrap(), receipt);
     let after = client.query(&query).await.unwrap();
@@ -172,18 +257,44 @@ async fn t_f005_creates_one_prepared_run_and_replays_its_wire_receipt() {
     drop(daemon);
 
     tokio::task::spawn_blocking(move || {
-        let store = UnleashStore::open(store_config).unwrap();
-        let effects: (i64, i64, i64, i64) = store.read_snapshot(|db, _| {
+        assert_durable_run(store_config, receipt.receipt_id, assigned.receipt_id);
+    })
+    .await
+    .unwrap();
+}
+
+fn assert_durable_run(
+    store_config: StoreConfig,
+    run_receipt: ReceiptId,
+    mission_receipt: ReceiptId,
+) {
+    let store = UnleashStore::open(store_config).unwrap();
+    let effects: (i64, i64, i64, i64) = store.read_snapshot(|db, _| {
+        Ok(db.query_row(
+            "SELECT (SELECT count(*) FROM workflow_runs WHERE run_id=?1 AND state='prepared' AND revision=1),
+              (SELECT count(*) FROM command_receipts WHERE command_type='CreateRun' AND aggregate_id=?1),
+              (SELECT count(*) FROM events WHERE event_type='RunCreated' AND causation_receipt_id=?2),
+              (SELECT count(*) FROM invocations WHERE run_id=?1)",
+            rusqlite::params![RUN.to_string(), run_receipt.to_string()],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )?)
+    }).unwrap();
+    assert_eq!(effects, (1, 1, 1, 0));
+    let mandate: (i64, i64, i64) = store
+        .read_snapshot(|db, _| {
             Ok(db.query_row(
-                "SELECT (SELECT count(*) FROM workflow_runs WHERE run_id=?1 AND state='prepared' AND revision=1),
-                  (SELECT count(*) FROM command_receipts WHERE command_type='CreateRun' AND aggregate_id=?1),
-                  (SELECT count(*) FROM events WHERE event_type='RunCreated' AND causation_receipt_id=?2),
-                  (SELECT count(*) FROM invocations WHERE run_id=?1)",
-                rusqlite::params![RUN.to_string(), receipt.receipt_id.to_string()],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                "SELECT (SELECT count(*) FROM missions WHERE mission_id=?1 AND revision=1),
+              (SELECT count(*) FROM object_references
+                WHERE owner_kind='mission' AND owner_id=?1 AND source_field='scope_manifest:1'
+                  AND state='live'),
+              (SELECT count(*) FROM events WHERE event_type='MissionAssigned'
+                AND aggregate_id=?1 AND causation_receipt_id=?2)",
+                rusqlite::params![MISSION.to_string(), mission_receipt.to_string()],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )?)
-        }).unwrap();
-        assert_eq!(effects, (1, 1, 1, 0));
-        store.shutdown().unwrap();
-    }).await.unwrap();
+        })
+        .unwrap();
+    assert_eq!(mandate, (1, 1, 1));
+
+    store.shutdown().unwrap();
 }

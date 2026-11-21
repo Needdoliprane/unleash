@@ -24,6 +24,7 @@ mod initial_context;
 mod invocation_projection;
 pub mod leases;
 pub mod migrations;
+mod mission_scope;
 pub mod objects;
 pub mod policies_secrets;
 pub mod projects_settings;
@@ -49,6 +50,7 @@ mod workflow_activation;
 mod workflow_run_creation;
 mod workflow_run_plan;
 mod workflow_run_projection;
+mod workflow_run_start;
 pub mod writer;
 
 pub use admission::{
@@ -97,6 +99,7 @@ pub use initial_context::InitialContextPlan;
 pub use invocation_projection::{InvocationAttemptProjection, InvocationProjection};
 pub use leases::{AcquireLeaseRequest, FenceAssertion, LeaseState, ResourceLeaseRecord};
 pub use migrations::{CURRENT_SCHEMA_VERSION, MigrationRecord, MigrationReport, MigrationState};
+pub use mission_scope::PreparedMissionScope;
 pub use objects::{
     DeletionIntent, ObjectReconciliationReport, ObjectRecordView, ObjectState, PinKind, PinState,
     PrepareObjectDeletionRequest, PrepareObjectRequest, PreparedObjectHandle,
@@ -191,5 +194,6 @@ pub use broker_phases::{
 pub use workflow_activation::WorkflowTaskActivationPlan;
 pub use workflow_run_creation::PreparedRunPublication;
 pub use workflow_run_projection::WorkflowRunProjection;
+pub use workflow_run_start::PreparedRunStart;
 
 pub use task_assignment::PreparedTaskAssignment;

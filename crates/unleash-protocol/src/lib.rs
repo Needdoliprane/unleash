@@ -19,6 +19,7 @@ pub mod canonical;
 pub mod codec;
 pub mod envelopes;
 pub mod errors;
+pub mod mission_scope;
 pub mod operations;
 pub mod provider_inventory;
 pub mod provider_probe;
@@ -43,6 +44,7 @@ pub use envelopes::{
 pub use errors::{
     ErrorCode, IpcError, ProtocolError, ReasonCode, RetryClass, UnknownReasonCodeError,
 };
+pub use mission_scope::MissionScopeSelector;
 pub use operations::{OperationKind, OperationName, UnknownOperationError};
 pub use provider_probe::{
     ProviderTestLimits, ProviderTestPayloadError, ProviderTestPhase, TestProviderProfilePayload,
