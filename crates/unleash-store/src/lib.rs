@@ -8,6 +8,7 @@
 #![warn(missing_docs)]
 
 pub mod admission;
+mod agent_creation;
 mod agent_projection;
 pub mod backup;
 pub mod backup_requests;
@@ -54,6 +55,7 @@ pub use admission::{
     ExecutionCheckpointRequestRecord, ExecutionContinuation, WorkerLaunchPreparation,
     WorkerProcessObservation,
 };
+pub use agent_creation::PreparedAgentCreation;
 pub use agent_projection::AgentProjection;
 pub use backup::{
     BackupJobState, BackupManifest, BackupObjectEntry, BackupRetentionTier, BoundedExportOutcome,

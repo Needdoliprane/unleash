@@ -2,19 +2,21 @@
 
 use serde_json::Value;
 use unleash_domain::{
-    ActorId, AgentId, AgentLevel, AgentState, CommandId, CompletionPolicy, InvocationId, MissionId,
-    MissionState, ProjectId, RequestId, Revision, RunId, RunState, Sha256Digest, StepId, TaskId,
+    ActorId, AgentId, CommandId, CompletionPolicy, InvocationId, MissionId, MissionState,
+    ProjectId, RequestId, Revision, RunId, RunState, Sha256Digest, StepId, TaskId,
 };
 use unleash_protocol::{CommandEnvelope, ProtocolVersion, ReceiptState, canonicalize_to_vec};
 use unleash_store::{
     AggregateKind, CallerAuthority, CallerRole, CommandMutation, CommitCommandRequest,
-    CommitOutcome, InitialContextPlan, PrepareObjectRequest, PreparedTaskAssignment,
-    PublishObjectReferenceRequest, UnleashStore, WorkflowTaskActivationPlan, WriteCriticality,
-    objects::PublishedObjectReference,
+    CommitOutcome, InitialContextPlan, PrepareObjectRequest, PreparedAgentCreation,
+    PreparedTaskAssignment, PublishObjectReferenceRequest, UnleashStore,
+    WorkflowTaskActivationPlan, WriteCriticality, objects::PublishedObjectReference,
 };
 use uuid::Uuid;
 
 pub(crate) const VERSION: &str = "workflow.fixture.m2-task:v1";
+pub(crate) const ROLE: &str = "fixture-role:v1";
+const ASSIGNMENT: Uuid = Uuid::from_u128(0x500a);
 
 pub(crate) struct Fixture {
     pub(crate) store: UnleashStore,
@@ -107,24 +109,86 @@ impl Fixture {
             .unwrap()
     }
 
+    pub(crate) fn prepare_agent_creation(
+        &self,
+        command: u128,
+        agent: AgentId,
+        assignment: Uuid,
+    ) -> (CommandEnvelope, CallerAuthority) {
+        let bytes = br#"{"role":"fixture.developer","version":1}"#;
+        let role_content_hash = Sha256Digest::from_bytes(bytes);
+        self.retain_object(bytes, "registry_version", ROLE, "content_hash");
+        let lineage = self.store.active_authority_generation().unwrap();
+        let project = self.project;
+        let principal = self.principal.clone();
+        self.store
+            .execute_in_writer_tx(WriteCriticality::Normal, move |tx, time| {
+                tx.execute(
+                    "INSERT INTO discovery_receipts
+                        (discovery_receipt_id, authority_generation, decision, content_hash, created_at_ms)
+                     VALUES ('fixture-discovery', ?1, 'reuse', ?2, ?3)",
+                    rusqlite::params![lineage.to_string(), role_content_hash.to_string(), time.as_i64()],
+                )?;
+                tx.execute(
+                    "INSERT INTO evaluation_reports
+                        (evaluation_report_id, subject_kind, subject_id, required_checks, judge_policy,
+                         result, content_hash, created_at_ms)
+                     VALUES ('fixture-evaluation', 'role', ?1, '[]', 'fixture', 'passed', ?2, ?3)",
+                    rusqlite::params![ROLE, role_content_hash.to_string(), time.as_i64()],
+                )?;
+                tx.execute(
+                    "INSERT INTO registry_entries
+                        (entry_kind, scope_kind, scope_owner_key, entry_id, state, revision)
+                     VALUES ('role', 'project', ?1, 'fixture.developer', 'active', 1)",
+                    [project.to_string()],
+                )?;
+                tx.execute(
+                    "INSERT INTO registry_versions
+                        (registry_version_id, entry_kind, scope_kind, scope_owner_key, entry_id,
+                         version, schema_version, content_hash, publication_state, author_principal_id,
+                         discovery_receipt_id, evaluation_report_id, published_at_ms)
+                     VALUES (?1, 'role', 'project', ?2, 'fixture.developer', 1, 1, ?3, 'published', ?4,
+                             'fixture-discovery', 'fixture-evaluation', ?5)",
+                    rusqlite::params![
+                        ROLE,
+                        project.to_string(),
+                        role_content_hash.to_string(),
+                        principal,
+                        time.as_i64()
+                    ],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        let plan = PreparedAgentCreation {
+            daemon_epoch: self.plan.daemon_epoch,
+            assignment_id: assignment,
+            mission_id: self.mission,
+            mission_revision: Revision::new(1),
+            task_id: self.plan.task_id,
+            task_revision: Revision::new(1),
+            scope_id: self.plan.scope_id.clone(),
+            scope_revision: self.plan.scope_revision,
+            role_version_id: ROLE.to_owned(),
+            role_content_hash,
+        };
+        let mut envelope =
+            self.envelope(command, agent.as_uuid(), Revision::INITIAL, "CreateAgent");
+        envelope.payload = serde_json::from_value(serde_json::to_value(plan).unwrap()).unwrap();
+        let caller = CallerAuthority {
+            actor_id: self.actor.clone(),
+            role: CallerRole::HumanOperator,
+        };
+        (envelope, caller)
+    }
+
     pub(crate) fn activate_with_assignee(&self) -> (AgentId, String, String) {
         self.store
             .activate_workflow_task(self.activation(5, 2, &self.plan))
             .unwrap();
         let agent = AgentId::from_u128(0x5008);
-        self.commit_setup(
-            7,
-            (AggregateKind::Agent, agent.as_uuid(), Revision::INITIAL),
-            "CreateAgent",
-            CommandMutation::CreateAgent {
-                agent_id: agent,
-                level: AgentLevel::N,
-                organization_parent_id: None,
-                created_by_agent_id: None,
-                project_id: Some(self.project),
-                state: AgentState::Eligible,
-            },
-        );
+        let (envelope, caller) = self.prepare_agent_creation(7, agent, ASSIGNMENT);
+        self.store.create_assigned_agent(envelope, caller).unwrap();
         let (session_id, trigger_event_id): (String, String) = self
             .store
             .read_snapshot(|conn, _| {
@@ -148,7 +212,6 @@ impl Fixture {
         &self,
     ) -> (CommandEnvelope, CallerAuthority, PreparedTaskAssignment) {
         let (agent, session_id, trigger_event_id) = self.activate_with_assignee();
-        let assignment_id = Uuid::from_u128(0x500a);
         let (context_plan, context) = initial_context_fixture(&self.store, &session_id, &[]);
         let manifest = context_plan.manifest_id.to_string();
         let policy_hash = Sha256Digest::from_bytes(b"policy defined for the assignment fixture");
@@ -164,7 +227,7 @@ impl Fixture {
             "run_id": self.run,
             "step_id": self.plan.step_id,
             "task_id": self.plan.task_id,
-            "role_version_id": "fixture-role:v1",
+            "role_version_id": ROLE,
             "workflow_version_id": VERSION,
             "contract_version_ids": [&self.plan.contract_version_id],
             "requested_model_profile_version_id": "fixture-profile:v1",
@@ -174,26 +237,6 @@ impl Fixture {
             "initial_context_manifest_id": manifest,
         });
         let bundle_hash = Sha256Digest::from_bytes(&canonicalize_to_vec(&bundle).unwrap());
-        // Seed only the assigned mission binding, which the harness still supplies.
-        let mission = self.mission;
-        let scope = self.plan.scope_id.clone();
-        self.store
-            .execute_in_writer_tx(WriteCriticality::Normal, move |tx, _| {
-                tx.execute(
-                    "INSERT INTO mission_assignments
-                 (assignment_id, mission_id, agent_id, role_version_id, scope_id,
-                  scope_revision, assignment_epoch, state, revision)
-                 VALUES (?1, ?2, ?3, 'fixture-role:v1', ?4, 1, 1, 'active', 1)",
-                    rusqlite::params![
-                        assignment_id.to_string(),
-                        mission.to_string(),
-                        agent.to_string(),
-                        scope
-                    ],
-                )?;
-                Ok(())
-            })
-            .unwrap();
         let mut envelope = self.envelope(
             8,
             self.plan.task_id.as_uuid(),
@@ -209,7 +252,7 @@ impl Fixture {
         };
         let preparation = PreparedTaskAssignment {
             daemon_epoch: self.plan.daemon_epoch,
-            assignment_id,
+            assignment_id: ASSIGNMENT,
             assignment_epoch: 1,
             assignment_revision: Revision::new(1),
             trigger_event_id: trigger_event_id.parse().unwrap(),
