@@ -54,3 +54,6 @@ pub use executors::{
 };
 pub use recovery::RecoveryGate;
 pub use subscriptions::SubscriptionHub;
+
+#[cfg(test)]
+mod start_assignment_tests;

@@ -256,6 +256,8 @@ pub enum CommandMutation {
         /// Autorité humaine du propriétaire de la mission.
         caller: CallerAuthority,
     },
+    /// Create an assigned agent from a sealed workflow task binding.
+    CreateAgentFromWorkflowTask(Box<crate::AgentWorkflowPreparation>),
     /// Crée un objectif.
     CreateGoal {
         /// Identifiant de l'objectif.
@@ -942,7 +944,9 @@ pub(crate) fn classify_command_replay(
             | crate::workflow_run_start::COMMAND
             | crate::task_assignment::COMMAND
     ) || (envelope.command_type == "AcquireTerminal"
-        && envelope.payload.contains_key("terminal_id"));
+        && envelope.payload.contains_key("terminal_id"))
+        || (envelope.command_type == crate::agent_creation::COMMAND
+            && envelope.payload.contains_key("task_id"));
     let historical_command =
         lineage_bound && row.authority_generation != daemon.authority_generation.to_string();
     if historical_command || row.digest != digest.as_prefixed_str() {
@@ -997,6 +1001,7 @@ pub(crate) fn tx_commit_command(
     crate::workflow_activation::validate_identity(req)?;
     crate::task_assignment::validate_identity(req)?;
     crate::agent_creation::validate_identity(req)?;
+    crate::agent_from_task::validate_identity(req)?;
     crate::workflow_run_creation::validate_identity(req)?;
     crate::workflow_run_start::validate_identity(req)?;
     crate::mission_scope::validate_identity(req)?;
@@ -1945,6 +1950,15 @@ fn apply_command_mutation(
             caller,
             generated_events,
         ),
+        CommandMutation::CreateAgentFromWorkflowTask(prepared) => {
+            crate::agent_from_task::commit_tx(
+                tx,
+                (config, daemon, now_ms),
+                envelope,
+                prepared,
+                generated_events,
+            )
+        }
         CommandMutation::CreateGoal {
             goal_id,
             project_id,

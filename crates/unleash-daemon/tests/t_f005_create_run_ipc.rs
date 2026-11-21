@@ -12,11 +12,16 @@ mod workflow_run;
 #[path = "support/workflow_start.rs"]
 mod start_run;
 
+#[path = "support/workflow_agent.rs"]
+mod create_agent;
+
 use serde_json::{Map, Value, json};
 use std::{os::unix::fs::PermissionsExt, path::Path};
 use unleash_client::{ClientConfig, UnleashClient};
 use unleash_daemon::{DaemonConfig, DaemonHandle, DaemonStartOutcome, UnleashDaemon};
-use unleash_domain::{ActorId, CommandId, MissionId, ReceiptId, RequestId, Revision, Sha256Digest};
+use unleash_domain::{
+    ActorId, AgentLevel, CommandId, MissionId, ReceiptId, RequestId, Revision, Sha256Digest,
+};
 use unleash_platform::{current_boot_identity, effective_uid};
 use unleash_protocol::{ClientKind, CommandEnvelope, ProtocolVersion, QueryEnvelope, ReceiptState};
 use unleash_store::{StoreConfig, UnleashStore};
@@ -36,16 +41,19 @@ fn local_store_config(path: &Path) -> StoreConfig {
 }
 
 fn wire_command(config: StoreConfig) -> (CommandEnvelope, Sha256Digest) {
-    wire_command_with_workflow(config, |_| {})
+    wire_command_with_workflow(config, AgentLevel::N, |_| {})
 }
 
 fn wire_command_with_workflow(
     config: StoreConfig,
+    role_level: AgentLevel,
     customize: impl FnOnce(&mut Value),
 ) -> (CommandEnvelope, Sha256Digest) {
     let actor = ActorId::new(format!("uid:{}", effective_uid())).unwrap();
     let (fixture, mut envelope, _) =
-        workflow_run::prepare(config, actor, |workflow, _, _| customize(workflow));
+        workflow_run::prepare(config, actor, role_level, |workflow, _, _| {
+            customize(workflow);
+        });
     let hash: String = fixture
         .store
         .read_snapshot(|db, _| {

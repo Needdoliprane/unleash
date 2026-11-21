@@ -5,7 +5,7 @@ use std::{os::unix::fs::PermissionsExt, path::Path};
 use serde_json::{Map, Value, json};
 use unleash_client::ClientError;
 use unleash_daemon::DaemonConfig;
-use unleash_domain::{CommandId, ReceiptId, RequestId, Revision};
+use unleash_domain::{AgentLevel, CommandId, ReceiptId, RequestId, Revision};
 use unleash_protocol::{CommandEnvelope, ErrorCode, ReasonCode, ReceiptState};
 use unleash_store::{StoreConfig, UnleashStore};
 
@@ -13,18 +13,20 @@ use super::{
     RUN, local_store_config, publish_mandate, scoped_run_query, start, wire_command_with_workflow,
 };
 
-async fn fixture(
+pub(super) async fn fixture(
     data: &Path,
     rendezvous: &Path,
+    role_level: AgentLevel,
     customize: impl FnOnce(&mut Value) + Send + 'static,
 ) -> (StoreConfig, DaemonConfig, CommandEnvelope) {
     std::fs::set_permissions(rendezvous, PermissionsExt::from_mode(0o700)).unwrap();
     let store = local_store_config(data);
     let seed = store.clone();
-    let (create, _) =
-        tokio::task::spawn_blocking(move || wire_command_with_workflow(seed, customize))
-            .await
-            .unwrap();
+    let (create, _) = tokio::task::spawn_blocking(move || {
+        wire_command_with_workflow(seed, role_level, customize)
+    })
+    .await
+    .unwrap();
     let config = DaemonConfig {
         data_root: Some(data.to_owned()),
         rendezvous_dir: Some(rendezvous.to_owned()),
@@ -33,7 +35,7 @@ async fn fixture(
     (store, config, create)
 }
 
-fn start_command(create: &CommandEnvelope) -> CommandEnvelope {
+pub(super) fn start_command(create: &CommandEnvelope) -> CommandEnvelope {
     CommandEnvelope {
         request_id: RequestId::from_u128(0x5920),
         command_id: CommandId::from_u128(0x5920),
@@ -58,10 +60,11 @@ fn sequence_at_budget(workflow: &mut Value, activation_limit: u32) {
 async fn t_f005_004_starts_at_exact_activation_budget_and_recovers_once() {
     let data = unleash_testkit::local_test_dir("f005-start-data").unwrap();
     let rendezvous = unleash_testkit::local_test_dir("f005-start-rdv").unwrap();
-    let (store, config, mut create) = fixture(data.path(), rendezvous.path(), |workflow| {
-        sequence_at_budget(workflow, 2);
-    })
-    .await;
+    let (store, config, mut create) =
+        fixture(data.path(), rendezvous.path(), AgentLevel::N, |workflow| {
+            sequence_at_budget(workflow, 2);
+        })
+        .await;
     let (daemon, mut client) = start(config.clone()).await;
     let initial_epoch = client.hello().daemon_epoch;
     publish_mandate(&mut client, &mut create).await;
@@ -136,7 +139,8 @@ fn revise_project(create: &CommandEnvelope) -> CommandEnvelope {
 async fn refuses_a_stale_project_scope_without_allocating_work() {
     let data = unleash_testkit::local_test_dir("f005-stale-data").unwrap();
     let rendezvous = unleash_testkit::local_test_dir("f005-stale-rdv").unwrap();
-    let (store, config, mut create) = fixture(data.path(), rendezvous.path(), |_| {}).await;
+    let (store, config, mut create) =
+        fixture(data.path(), rendezvous.path(), AgentLevel::N, |_| {}).await;
     let (daemon, mut client) = start(config).await;
     publish_mandate(&mut client, &mut create).await;
     client.send_command(&create).await.unwrap();
@@ -236,7 +240,8 @@ async fn rolls_back_the_start_transaction_and_retries_the_same_command() {
 
     let data = unleash_testkit::local_test_dir("f005-start-c1-data").unwrap();
     let rendezvous = unleash_testkit::local_test_dir("f005-start-c1-rdv").unwrap();
-    let (store, mut config, mut create) = fixture(data.path(), rendezvous.path(), |_| {}).await;
+    let (store, mut config, mut create) =
+        fixture(data.path(), rendezvous.path(), AgentLevel::N, |_| {}).await;
     let interrupt = Arc::new(InterruptStart(AtomicBool::new(false)));
     config.store_overrides.cutpoints = Some(interrupt.clone());
     let (daemon, mut client) = start(config.clone()).await;
@@ -284,7 +289,8 @@ async fn uses_the_same_retained_plan_after_its_versions_are_deprecated() {
 
     let data = unleash_testkit::local_test_dir("f005-start-pinned-data").unwrap();
     let rendezvous = unleash_testkit::local_test_dir("f005-start-pinned-rdv").unwrap();
-    let (store, config, mut create) = fixture(data.path(), rendezvous.path(), |_| {}).await;
+    let (store, config, mut create) =
+        fixture(data.path(), rendezvous.path(), AgentLevel::N, |_| {}).await;
     let (daemon, mut client) = start(config.clone()).await;
     publish_mandate(&mut client, &mut create).await;
     client.send_command(&create).await.unwrap();
@@ -344,10 +350,11 @@ async fn uses_the_same_retained_plan_after_its_versions_are_deprecated() {
 async fn t_f005_004_refuses_the_entry_above_the_activation_budget() {
     let data = unleash_testkit::local_test_dir("f005-budget-data").unwrap();
     let rendezvous = unleash_testkit::local_test_dir("f005-budget-rdv").unwrap();
-    let (store, config, mut create) = fixture(data.path(), rendezvous.path(), |workflow| {
-        sequence_at_budget(workflow, 1);
-    })
-    .await;
+    let (store, config, mut create) =
+        fixture(data.path(), rendezvous.path(), AgentLevel::N, |workflow| {
+            sequence_at_budget(workflow, 1);
+        })
+        .await;
     let (daemon, mut client) = start(config).await;
     publish_mandate(&mut client, &mut create).await;
     client.send_command(&create).await.unwrap();

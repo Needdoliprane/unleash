@@ -9,6 +9,7 @@
 
 pub mod admission;
 mod agent_creation;
+mod agent_from_task;
 mod agent_projection;
 pub mod backup;
 pub mod backup_requests;
@@ -61,6 +62,7 @@ pub use admission::{
     WorkerProcessObservation,
 };
 pub use agent_creation::PreparedAgentCreation;
+pub use agent_from_task::AgentWorkflowPreparation;
 pub use agent_projection::AgentProjection;
 pub use backup::{
     BackupJobState, BackupManifest, BackupObjectEntry, BackupRetentionTier, BoundedExportOutcome,

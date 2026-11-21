@@ -1230,9 +1230,14 @@ async fn handle_command_frame(
                 return false;
             }
         }
-    } else if cmd.command_type == "AssignTask" {
-        match commit_task_assignment(Arc::clone(&state.store), session, cmd.clone()).await {
-            Ok(outcome) => (outcome, 2, None, None),
+    } else if matches!(cmd.command_type.as_str(), "CreateAgent" | "AssignTask") {
+        let event_count = if cmd.command_type == "CreateAgent" {
+            1
+        } else {
+            2
+        };
+        match commit_agent_task_command(Arc::clone(&state.store), session, cmd.clone()).await {
+            Ok(outcome) => (outcome, event_count, None, None),
             Err(ipc) => {
                 let _ = write_json_frame_timeout(stream, &ipc, RESPONSE_WRITE_TIMEOUT).await;
                 return false;
@@ -1439,7 +1444,7 @@ async fn handle_command_frame(
     false
 }
 
-async fn commit_task_assignment(
+async fn commit_agent_task_command(
     store: Arc<UnleashStore>,
     session: &AuthenticatedSession,
     command: CommandEnvelope,
@@ -1449,10 +1454,18 @@ async fn commit_task_assignment(
         actor_id: session.actor_id.clone(),
         role: CallerRole::HumanOperator,
     };
-    tokio::task::spawn_blocking(move || store.assign_published_task(command, authority))
-        .await
-        .map_err(|error| internal_ipc_error(&format!("Join error AssignTask: {error}"), Some(id)))?
-        .map_err(|error| store_error_to_ipc_error(&error, Some(id)))
+    tokio::task::spawn_blocking(move || {
+        if command.command_type == "CreateAgent" {
+            store.create_agent_from_task(command, authority)
+        } else {
+            store.assign_published_task(command, authority)
+        }
+    })
+    .await
+    .map_err(|error| {
+        internal_ipc_error(&format!("Join error agent task command: {error}"), Some(id))
+    })?
+    .map_err(|error| store_error_to_ipc_error(&error, Some(id)))
 }
 
 async fn commit_workflow_run(
