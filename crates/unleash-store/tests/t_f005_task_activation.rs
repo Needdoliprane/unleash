@@ -17,9 +17,10 @@ use unleash_domain::{
 use unleash_protocol::{CommandEnvelope, ProtocolVersion, ReceiptState, canonicalize_to_vec};
 use unleash_store::{
     AdmissionUnit, AggregateKind, CallerAuthority, CallerRole, CommandMutation,
-    CommitCommandRequest, CommitOutcome, CutpointObserver, ExecutionPoolParams,
+    CommitCommandRequest, CommitOutcome, CutpointObserver, ExecutionPoolParams, InitialContextPlan,
     PrepareObjectRequest, PreparedTaskAssignment, PublishObjectReferenceRequest, StoreConfig,
     StoreCutpoint, StoreError, UnleashStore, WorkflowTaskActivationPlan, WriteCriticality,
+    objects::PublishedObjectReference,
 };
 use unleash_testkit::local_test_dir;
 use uuid::Uuid;
@@ -98,7 +99,13 @@ impl Fixture {
         (directory, fixture)
     }
 
-    fn retain_object(&self, bytes: &[u8], kind: &str, owner: &str, field: &str) {
+    fn retain_object(
+        &self,
+        bytes: &[u8],
+        kind: &str,
+        owner: &str,
+        field: &str,
+    ) -> PublishedObjectReference {
         let source = self
             .store
             .prepare_object(PrepareObjectRequest {
@@ -113,7 +120,7 @@ impl Fixture {
             .write_prepared_object_bytes(&source, bytes)
             .unwrap();
         self.store
-            .publish_object_reference(PublishObjectReferenceRequest {
+            .publish_owned_object_reference(PublishObjectReferenceRequest {
                 pin_id: source.pin_id,
                 object_hash: source.object_hash,
                 object_generation: source.object_generation,
@@ -121,7 +128,7 @@ impl Fixture {
                 owner_id: owner.to_owned(),
                 source_field: field.to_owned(),
             })
-            .unwrap();
+            .unwrap()
     }
 
     fn activate_with_assignee(&self) -> (AgentId, String, String) {
@@ -164,17 +171,12 @@ impl Fixture {
     fn prepared_assignment(&self) -> (CommandEnvelope, CallerAuthority, PreparedTaskAssignment) {
         let (agent, session_id, trigger_event_id) = self.activate_with_assignee();
         let assignment_id = Uuid::from_u128(0x500a);
-        let manifest = Uuid::from_u128(0x500b).to_string();
+        let (context_plan, context) = initial_context_fixture(&self.store, &session_id, &[]);
+        let manifest = context_plan.manifest_id.to_string();
         let policy_hash = Sha256Digest::from_bytes(b"policy defined for the assignment fixture");
-        let context = canonicalize_to_vec(&serde_json::json!({
-            "schema_version": 1,
-            "session_id": session_id,
-            "base_session_revision": 0,
-            "entries": [],
-        }))
-        .unwrap();
-        let context_hash = Sha256Digest::from_bytes(&context);
-        self.retain_object(&context, "context_manifest", &manifest, "content_hash");
+        self.store
+            .publish_initial_context(context_plan, &context, vec![])
+            .unwrap();
         let bundle = canonicalize_to_vec(&serde_json::json!({
             "schema_version": 1,
             "agent_id": agent,
@@ -202,33 +204,40 @@ impl Fixture {
             "content_object_hash",
         );
         // The real activation and session start are above. Seed only the already
-        // resolved mission binding, context and bundle expected from the harness.
+        // resolved mission binding and bundle expected from the harness.
         let mission = self.mission;
         let scope = self.plan.scope_id.clone();
-        self.store.execute_in_writer_tx(WriteCriticality::Normal, move |tx, now| {
-            tx.execute(
-                "INSERT INTO mission_assignments
+        self.store
+            .execute_in_writer_tx(WriteCriticality::Normal, move |tx, _| {
+                tx.execute(
+                    "INSERT INTO mission_assignments
                  (assignment_id, mission_id, agent_id, role_version_id, scope_id,
                   scope_revision, assignment_epoch, state, revision)
                  VALUES (?1, ?2, ?3, 'fixture-role:v1', ?4, 1, 1, 'active', 1)",
-                rusqlite::params![assignment_id.to_string(), mission.to_string(), agent.to_string(), scope],
-            )?;
-            tx.execute(
-                "INSERT INTO context_manifests
-                 (manifest_id, session_id, base_session_revision, content_hash, schema_version, created_at_ms)
-                 VALUES (?1, ?2, 0, ?3, 1, ?4)",
-                rusqlite::params![manifest, session_id, context_hash.to_string(), now.as_i64()],
-            )?;
-            tx.execute(
-                "INSERT INTO effective_bundles
+                    rusqlite::params![
+                        assignment_id.to_string(),
+                        mission.to_string(),
+                        agent.to_string(),
+                        scope
+                    ],
+                )?;
+                tx.execute(
+                    "INSERT INTO effective_bundles
                  (bundle_hash, schema_version, role_version_id, workflow_version_id,
                   requested_model_profile_version_id, allowed_model_policy_hash,
                   initial_context_manifest_id, scope_id, scope_revision, content_object_hash)
                  VALUES (?1, 1, 'fixture-role:v1', ?2, 'fixture-profile:v1', ?3, ?4, ?5, 1, ?1)",
-                rusqlite::params![bundle_hash.to_string(), VERSION, policy_hash.to_string(), manifest, scope],
-            )?;
-            Ok(())
-        }).unwrap();
+                    rusqlite::params![
+                        bundle_hash.to_string(),
+                        VERSION,
+                        policy_hash.to_string(),
+                        manifest,
+                        scope
+                    ],
+                )?;
+                Ok(())
+            })
+            .unwrap();
         let mut envelope = self.envelope(
             8,
             self.plan.task_id.as_uuid(),
@@ -570,6 +579,183 @@ fn rolls_back_activation_and_retries_the_same_command() {
         fixture.store.activate_workflow_task(request).unwrap(),
         CommitOutcome::Committed(_)
     ));
+}
+
+#[test]
+fn publishes_initial_context_once_with_its_ordered_input() {
+    let (_directory, fixture) = Fixture::new(true);
+    let (_, session, _) = fixture.activate_with_assignee();
+    let data = b"operator input retained in the session fixture";
+    let input = fixture.retain_object(data, "session", &session, "fixture_input");
+    let (plan, document) =
+        initial_context_fixture(&fixture.store, &session, &[Sha256Digest::from_bytes(data)]);
+    let bytes = canonicalize_to_vec(&document).unwrap();
+    let digest = fixture
+        .store
+        .publish_initial_context(plan, &document, vec![input.clone()])
+        .unwrap();
+    assert_eq!(digest, Sha256Digest::from_bytes(&bytes));
+    assert_eq!(
+        fixture
+            .store
+            .publish_initial_context(plan, &document, vec![input])
+            .unwrap(),
+        digest
+    );
+    assert_eq!(
+        fixture.store.read_verified_object_bytes(digest).unwrap(),
+        bytes
+    );
+    fixture
+        .store
+        .read_snapshot(|conn, _| {
+            let state: (i64, i64, i64, Option<String>, i64) = conn.query_row(
+                "SELECT
+                (SELECT COUNT(*) FROM context_manifests WHERE manifest_id=?1 AND content_hash=?2
+                    AND session_id=?3 AND base_session_revision=0 AND parent_manifest_id IS NULL),
+                (SELECT COUNT(*) FROM object_references WHERE owner_kind='context_manifest'
+                    AND owner_id=?1 AND state='live'),
+                revision,head_manifest_id,
+                (SELECT COUNT(*) FROM object_pins WHERE owner_kind='context_manifest'
+                    AND owner_id=?1 AND state='held')
+             FROM sessions WHERE session_id=?3",
+                [plan.manifest_id.to_string(), digest.to_string(), session],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
+            )?;
+            assert_eq!(state, (1, 2, 0, None, 0));
+            Ok(())
+        })
+        .unwrap();
+}
+
+#[test]
+fn preserves_the_published_context_when_the_session_moves() {
+    let (_directory, fixture) = Fixture::new(true);
+    let (_, session, _) = fixture.activate_with_assignee();
+    let (plan, document) = initial_context_fixture(&fixture.store, &session, &[]);
+    let digest = fixture
+        .store
+        .publish_initial_context(plan, &document, vec![])
+        .unwrap();
+
+    let mut changed = document.clone();
+    changed.as_object_mut().unwrap().insert(
+        "selection_reason".to_owned(),
+        serde_json::json!("another legitimate selection"),
+    );
+    assert!(matches!(
+        fixture
+            .store
+            .publish_initial_context(plan, &changed, vec![]),
+        Err(StoreError::InvalidArgument { .. })
+    ));
+    let original_session = session.clone();
+    fixture
+        .store
+        .execute_in_writer_tx(WriteCriticality::Normal, move |tx, _| {
+            tx.execute(
+                "UPDATE sessions SET revision=1 WHERE session_id=?1",
+                [original_session],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    let pending = InitialContextPlan {
+        manifest_id: Uuid::from_u128(0x5011),
+        ..plan
+    };
+    assert!(matches!(
+        fixture
+            .store
+            .publish_initial_context(pending, &document, vec![]),
+        Err(StoreError::RevisionConflict { .. })
+    ));
+    assert_eq!(
+        fixture
+            .store
+            .publish_initial_context(plan, &document, vec![])
+            .unwrap(),
+        digest
+    );
+    assert_unpublished_context(&fixture.store, pending.manifest_id);
+}
+
+#[test]
+fn releases_the_context_pin_if_an_input_is_retired() {
+    let (_directory, fixture) = Fixture::new(true);
+    let (_, session, _) = fixture.activate_with_assignee();
+    let first = b"first authorized fixture entry";
+    let last = b"last authorized fixture entry";
+    let first_ref = fixture.retain_object(first, "session", &session, "first_entry");
+    let last_ref = fixture.retain_object(last, "session", &session, "last_entry");
+    let (plan, document) = initial_context_fixture(
+        &fixture.store,
+        &session,
+        &[
+            Sha256Digest::from_bytes(first),
+            Sha256Digest::from_bytes(last),
+        ],
+    );
+    fixture
+        .store
+        .retire_owned_object_reference(last_ref.clone(), "fixture_input_retired")
+        .unwrap();
+
+    assert!(matches!(
+        fixture
+            .store
+            .publish_initial_context(plan, &document, vec![first_ref, last_ref]),
+        Err(StoreError::EvidenceUnavailable(_))
+    ));
+    assert_unpublished_context(&fixture.store, plan.manifest_id);
+}
+
+fn initial_context_fixture(
+    store: &UnleashStore,
+    session: &str,
+    hashes: &[Sha256Digest],
+) -> (InitialContextPlan, Value) {
+    let daemon = store.daemon_state().unwrap();
+    let plan = InitialContextPlan {
+        manifest_id: Uuid::from_u128(0x5010),
+        authority_generation: daemon.authority_generation,
+        daemon_epoch: daemon.daemon_epoch,
+    };
+    let entries: Vec<_> = hashes
+        .iter()
+        .map(|hash| serde_json::json!({"object_hash": hash}))
+        .collect();
+    let document = serde_json::json!({
+        "schema_version": 1,
+        "session_id": session,
+        "base_session_revision": 0,
+        "parent_manifest_id": null,
+        "entries": entries,
+    });
+    (plan, document)
+}
+
+fn assert_unpublished_context(store: &UnleashStore, manifest: Uuid) {
+    store.read_snapshot(|conn, _| {
+        let retained: (i64, i64, i64) = conn.query_row(
+            "SELECT
+                (SELECT COUNT(*) FROM context_manifests WHERE manifest_id=?1),
+                (SELECT COUNT(*) FROM object_references WHERE owner_kind='context_manifest' AND owner_id=?1),
+                (SELECT COUNT(*) FROM object_pins WHERE owner_kind='context_manifest' AND owner_id=?1 AND state='held')",
+            [manifest.to_string()],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )?;
+        assert_eq!(retained, (0, 0, 0));
+        Ok(())
+    }).unwrap();
 }
 
 #[test]
