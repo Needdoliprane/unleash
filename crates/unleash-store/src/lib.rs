@@ -41,6 +41,7 @@ pub mod recovery_ops;
 pub mod restore;
 pub mod store;
 pub mod terminal_allocations;
+mod workflow_activation;
 pub mod writer;
 
 pub use admission::{
@@ -177,3 +178,5 @@ pub use broker_phases::{
     BrokerAuthorizationOutcome, BrokerCause, BrokerEvaluation, BrokerExecutor, BrokerIntent,
     BrokerObservationCause, BrokerPhase, BrokerPhaseCommit, BrokerPhaseRequest, BrokerPhaseStore,
 };
+
+pub use workflow_activation::WorkflowTaskActivationPlan;

@@ -315,6 +315,8 @@ pub enum CommandMutation {
         /// Horodatage de fin si terminal.
         ended_at_ms: Option<TimestampMs>,
     },
+    /// Matérialise une étape et sa tâche depuis la décision du reducer.
+    ActivateWorkflowTask,
     /// Enregistre une nouvelle action durable préparée.
     CreateAction {
         /// Identifiant d'action.
@@ -911,7 +913,11 @@ pub(crate) fn classify_command_replay(
     };
     let lineage_bound = matches!(
         envelope.command_type.as_str(),
-        "SetProviderProfile" | "TestProviderProfile" | "ResizeTerminal" | "ReconcileProcess"
+        "SetProviderProfile"
+            | "TestProviderProfile"
+            | "ResizeTerminal"
+            | "ReconcileProcess"
+            | crate::workflow_activation::COMMAND
     ) || (envelope.command_type == "AcquireTerminal"
         && envelope.payload.contains_key("terminal_id"));
     let historical_command =
@@ -965,6 +971,7 @@ pub(crate) fn tx_commit_command(
     }
     crate::provider_profiles::validate_identity(req)?;
     crate::provider_service_launch::validate_command(req)?;
+    crate::workflow_activation::validate_identity(req)?;
     crate::terminal_allocations::validate_command(tx, req)?;
 
     // Étape 2 : Rechercher `(actor_id, command_id)` dans `command_receipts`
@@ -1930,6 +1937,9 @@ fn apply_command_mutation(
             )
             .map_err(StoreError::from_rusqlite)?;
             Ok(Revision::new(u64::try_from(next_rev).unwrap_or(1)))
+        }
+        CommandMutation::ActivateWorkflowTask => {
+            crate::workflow_activation::activate_tx(tx, daemon, envelope, generated_events)
         }
         CommandMutation::CreateAction {
             action_id,

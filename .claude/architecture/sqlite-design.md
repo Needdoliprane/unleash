@@ -59,6 +59,8 @@ Les liens circulaires utiles, comme tentative ↔ processus, sont remplis en deu
 
 ### Tables R6 workflow et hiérarchie
 
+La définition utilisée pour matérialiser une tâche est conservée sous `object_references(owner_kind=workflow_version, owner_id=workflow_version_id, source_field=content_hash)`. La référence vivante porte exactement le hash de `workflow_versions.content_hash` et protège les octets retenus. Voir [le port d'activation](../features/F005-workflow-engine/interfaces.md#persistance-dune-activation-de-tâche).
+
 Les noms de stockage de F004 et F005 sont des modules logiques projetés sur ces tables : `workflow_run` → `workflow_runs`, `node_activation` → `step_instances`, `run_binding` → `registry_bindings` ([registres versionnés](#registres-versionnés-r7)), `budget_ledger` → `budget_accounts`/`budget_reservations`, `effect_intent`/`effect_observation` → `actions`/`action_dispatches`/`evidence`, `assignment` → `mission_assignments`, `mailbox_item` → `mailbox_items`, `timer` → `workflow_timers` ; `leader_decision` est un événement de décision lié à son receipt et à son bundle de preuves.
 
 | Table | Colonnes minimales | Contraintes |

@@ -15,6 +15,10 @@
 
 Le harness de test doit explorer les entrelacements des commandes incompatibles et produire un journal minimal de reproduction. Les tests de propriété ciblent unicité d'activation, conservation des budgets et immutabilité du run ; ils ne répliquent pas simplement le code d'implémentation. Les tests de sécurité injectent acteur forgé, preuve hors scope et changement de rôle augmentant les capacités. Tous restent planifiés ; la validation documentaire des exemples JSON est un contrôle différent, insuffisant pour déclarer cette feature implémentée.
 
+### Persistance d'une activation de tâche
+
+Le sous-cas Store de T-F005-001/009 matérialise une tâche depuis un run de fixture avec définition épinglée et objet retenu. Il vérifie étape, tâche, reçu et événement, le rejeu, le refus d'une source rattachée à une autre version, les bornes du nœud ainsi que l'annulation atomique avant commit. L'exécution du reducer et l'admission réelle ont leurs propres preuves.
+
 ### Cas R6 pour T-F005-003/006
 
 Le corpus inclut for_each v1.2 aux cardinalités 0,1,100,101,300,10 000 ; contrôle des bornes, portées et curseurs à chaque cutpoint. Un effet unknown en body ne fait pas avancer la ligne ; seule une route diagnostique effectivement atteignable peut agir sous blocage. Le ledger reste bloqué durant un choix et un avis continue non étayé. Les EV doivent montrer l’ordre de commits, les admissions réduites, la résolution puis seulement la continuation normale. Les versions v1/v1.1 conservent leurs fixtures et sémantique.
