@@ -15,18 +15,18 @@ use crate::{
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct ExecutionScope {
-    scope_id: String,
-    scope_revision: Revision,
+pub(crate) struct ExecutionScope {
+    pub scope_id: String,
+    pub scope_revision: Revision,
 }
 
-#[derive(Deserialize)]
+#[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct MissionScopes {
-    schema_version: u32,
-    mission_id: MissionId,
-    mission_revision: Revision,
-    scopes: BTreeMap<String, ExecutionScope>,
+pub(crate) struct MissionScopes {
+    pub schema_version: u32,
+    pub mission_id: MissionId,
+    pub mission_revision: Revision,
+    pub scopes: BTreeMap<String, ExecutionScope>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]

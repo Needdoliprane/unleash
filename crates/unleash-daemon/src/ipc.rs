@@ -1307,7 +1307,17 @@ async fn handle_command_frame(
         let store_ref = Arc::clone(&state.store);
         let req_to_commit = prepared.req;
         let outcome = match tokio::task::spawn_blocking(move || {
-            store_ref.commit_command(req_to_commit)
+            if req_to_commit.envelope.command_type == "AssignMission"
+                && req_to_commit
+                    .envelope
+                    .payload
+                    .get("scopes")
+                    .is_some_and(|value| !value.is_null())
+            {
+                store_ref.commit_scoped_mission(req_to_commit)
+            } else {
+                store_ref.commit_command(req_to_commit)
+            }
         })
         .await
         {
@@ -1731,6 +1741,8 @@ struct AssignMissionPayload {
     _state: Option<String>,
     #[serde(rename = "goal_id")]
     _goal_id: Option<Uuid>,
+    #[serde(rename = "scopes")]
+    _scopes: Option<std::collections::BTreeMap<String, unleash_protocol::MissionScopeSelector>>,
 }
 
 #[derive(Deserialize)]

@@ -24,6 +24,7 @@ mod initial_context;
 mod invocation_projection;
 pub mod leases;
 pub mod migrations;
+mod mission_scope;
 pub mod objects;
 pub mod policies_secrets;
 pub mod projects_settings;
@@ -97,6 +98,7 @@ pub use initial_context::InitialContextPlan;
 pub use invocation_projection::{InvocationAttemptProjection, InvocationProjection};
 pub use leases::{AcquireLeaseRequest, FenceAssertion, LeaseState, ResourceLeaseRecord};
 pub use migrations::{CURRENT_SCHEMA_VERSION, MigrationRecord, MigrationReport, MigrationState};
+pub use mission_scope::PreparedMissionScope;
 pub use objects::{
     DeletionIntent, ObjectReconciliationReport, ObjectRecordView, ObjectState, PinKind, PinState,
     PrepareObjectDeletionRequest, PrepareObjectRequest, PreparedObjectHandle,

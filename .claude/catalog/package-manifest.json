@@ -14,7 +14,7 @@
     "cache/"
   ],
   "hash_algorithm": "sha256",
-  "source_tree_digest": "66fb910be411edd2d1b1e5f5f4b010dfee17e8a151934445e1e6d727fb138741",
+  "source_tree_digest": "2250ec85f72a6d1f18cd41bd694c8ec7101bcc5ad0edcd77dfa55f70d473e608",
   "files": [
     {
       "path": "INDEX.md",
@@ -1206,8 +1206,8 @@
     },
     {
       "path": "features/F004-hierarchical-orchestration/interfaces.md",
-      "sha256": "bff5c69c49ca2f340623200543247595582e2bc80bbaa3fdcb3503d4ae5e7cff",
-      "bytes": 15607,
+      "sha256": "aa860eea041f970cdb71d17418f3412570544e00cba5ea59dfa5cb5d5daa7980",
+      "bytes": 16491,
       "media_type": "text/markdown"
     },
     {
@@ -2070,8 +2070,8 @@
     },
     {
       "path": "schemas/ipc-command.schema.json",
-      "sha256": "67bc41e8f01c7aaaf53c5120741c22d7a3387565a053e0fe74fa3fa0fff8b903",
-      "bytes": 27272,
+      "sha256": "2f8fb6cdb5324aeebf639911ee01bc2cdc37afcb5fc35c83f9d47d5c37254290",
+      "bytes": 28339,
       "media_type": "application/json"
     },
     {
