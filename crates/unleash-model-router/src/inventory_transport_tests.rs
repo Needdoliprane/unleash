@@ -32,6 +32,7 @@ use crate::inventory_transport::{
     OllamaInventory, execute_ollama_inventory, execute_ollama_inventory_with_observation,
 };
 use crate::transport::{BrokerDispatch, ProfileRef};
+use crate::transport_tests::TlsFixture;
 
 type TestResult = Result<(), Box<dyn Error>>;
 
@@ -511,6 +512,7 @@ async fn inventory_durable_observation_waits_for_closed_channel_and_ack() -> Tes
 
 #[tokio::test]
 async fn inventory_v2_ends_a_stalled_tls_handshake_within_the_connection_window() -> TestResult {
+    let tls = TlsFixture::new()?;
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let endpoint = format!("https://{}/api/tags", listener.local_addr()?);
     let request = FrozenOllamaInventoryRequest::new_loopback_with_limits(
@@ -519,7 +521,8 @@ async fn inventory_v2_ends_a_stalled_tls_handshake_within_the_connection_window(
         300,
         3000,
         128,
-    )?;
+    )?
+    .with_fixture_root(&tls.ca_der)?;
     let harness = Harness::new();
     let observer = Arc::new(ObservationProbe::new(false));
     let witness = async {
