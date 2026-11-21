@@ -8,7 +8,7 @@
 mod workflow_task;
 
 use serde_json::{Value, json};
-use unleash_domain::{ActorId, ProjectId, Revision, RunId, Sha256Digest};
+use unleash_domain::{ActorId, AgentLevel, ProjectId, Revision, RunId, Sha256Digest};
 use unleash_protocol::{CommandEnvelope, canonicalize_to_vec};
 use unleash_store::{CallerAuthority, CallerRole, StoreConfig, UnleashStore, WriteCriticality};
 
@@ -20,6 +20,7 @@ pub(crate) const PUBLISHED: &str = "fixture.prepared-workflow:v1";
 pub(crate) fn prepare(
     config: StoreConfig,
     actor: ActorId,
+    role_level: AgentLevel,
     customize: impl FnOnce(&mut Value, &mut Value, ProjectId),
 ) -> (Fixture, CommandEnvelope, CallerAuthority) {
     let store = UnleashStore::open(config).unwrap();
@@ -73,6 +74,7 @@ pub(crate) fn prepare(
         "role-v1",
         &json!({
             "schema_version": "unleash.role.v1", "role_id": "role.fixture", "version": 1,
+            "level": role_level.to_string(),
             "scope": role_scope, "entry_skill": skill_ref, "skills": [skill_ref], "contracts": [contract_ref],
         }),
     );

@@ -225,9 +225,11 @@ pub fn authorize_command(
         | "RequestBackup"
         | "SetProviderProfile"
         | "TestProviderProfile" => Capability::Administer,
-        "AssignMission" | "AssignTask" | "CreateRun" | "StartRun" | "PauseMission"
-        | "ResumeMission" | "CancelMission" | "AcquireTerminal" | "SendTerminalInput"
-        | "ResizeTerminal" | "ReleaseTerminal" | "ReconcileProcess" => Capability::ManageMissions,
+        "AssignMission" | "AssignTask" | "CreateAgent" | "CreateRun" | "StartRun"
+        | "PauseMission" | "ResumeMission" | "CancelMission" | "AcquireTerminal"
+        | "SendTerminalInput" | "ResizeTerminal" | "ReleaseTerminal" | "ReconcileProcess" => {
+            Capability::ManageMissions
+        }
         "StopDaemon" => Capability::StopDaemon,
         "RecordClaim" | "RecordObservation" | "RecordJudgment" => Capability::WorkerReport,
         _ => {

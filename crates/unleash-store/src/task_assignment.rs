@@ -170,6 +170,8 @@ struct Binding {
     role_version: String,
     workflow_version: String,
     profile_version: String,
+    workflow_entry: bool,
+    configured_profile_digest: Option<Sha256Digest>,
     policy_hash: String,
     bundle_schema: i64,
     context: String,
@@ -197,6 +199,8 @@ impl Binding {
             role_version: row.get("role_version_id")?,
             workflow_version: row.get("workflow_version_id")?,
             profile_version: row.get("requested_model_profile_version_id")?,
+            workflow_entry: row.get("workflow_entry")?,
+            configured_profile_digest: None,
             policy_hash: row.get("allowed_model_policy_hash")?,
             bundle_schema: row.get("bundle_schema")?,
             context: row.get("manifest_id")?,
@@ -207,31 +211,13 @@ impl Binding {
     }
 }
 
-fn read_binding(
-    conn: &Connection,
-    daemon: &DaemonStateRow,
-    command: &AssignmentCommand<'_>,
-    assignee: AgentId,
-) -> Result<Binding, StoreError> {
-    let envelope = command.envelope;
-    let prep = command.preparation;
-    if daemon.mode != DaemonMode::Ready {
-        return Err(StoreError::RecoveryInProgress(
-            "task assignment requires a ready daemon".to_owned(),
-        ));
-    }
-    if prep.daemon_epoch != daemon.daemon_epoch {
-        return Err(StoreError::StaleFence {
-            message: "task assignment was resolved in another daemon epoch".to_owned(),
-        });
-    }
-    let row = conn.query_row(
-        "SELECT t.mission_id,t.run_id,t.step_id,t.contract_version_id,t.scope_id,t.scope_revision,
+const READY_BINDING_SQL: &str = "SELECT t.mission_id,t.run_id,t.step_id,t.contract_version_id,t.scope_id,t.scope_revision,
                 t.state AS task_state,t.revision AS task_revision,s.state AS step_state,
                 s.revision AS step_revision,a.assignment_epoch,a.revision AS assignment_revision,
                 sess.session_id,a.role_version_id,r.workflow_version_id,b.requested_model_profile_version_id,
                 b.allowed_model_policy_hash,b.schema_version AS bundle_schema,c.manifest_id,
-                c.content_hash AS context_hash,c.schema_version AS context_schema,c.base_session_revision
+                c.content_hash AS context_hash,c.schema_version AS context_schema,c.base_session_revision,
+                cr.command_type='StartRun' AS workflow_entry
          FROM tasks t
          JOIN workflow_runs r ON r.run_id=t.run_id AND r.mission_id=t.mission_id
          JOIN step_instances s ON s.step_id=t.step_id AND s.run_id=t.run_id
@@ -262,7 +248,21 @@ fn read_binding(
             AND json_extract(e.payload_json,'$.workflow_version_id')=r.workflow_version_id
             AND json_extract(e.payload_json,'$.definition_hash')=w.content_hash
          JOIN command_receipts cr ON cr.receipt_id=e.causation_receipt_id
-            AND cr.command_type='ActivateWorkflowTask' AND cr.authority_generation=:authority
+            AND cr.aggregate_id=r.run_id AND cr.state='completed' AND cr.authority_generation=:authority
+            AND (cr.command_type='ActivateWorkflowTask' OR (
+                cr.command_type='StartRun' AND EXISTS (
+                   SELECT 1 FROM events started
+                   WHERE started.causation_receipt_id=cr.receipt_id
+                     AND started.event_type='RunStarted' AND started.payload_state='full'
+                     AND started.stream_id=e.stream_id AND started.project_id=e.project_id
+                     AND started.aggregate_type='workflow_run' AND started.aggregate_id=r.run_id
+                     AND started.aggregate_revision=e.aggregate_revision AND started.sequence<e.sequence
+                     AND json_extract(started.payload_json,'$.run_id')=r.run_id
+                     AND json_extract(started.payload_json,'$.workflow_version_id')=r.workflow_version_id
+                     AND json_extract(started.payload_json,'$.definition_hash')=w.content_hash
+                     AND json_extract(started.payload_json,'$.effective_bundle_hash')=r.effective_bundle_hash
+                )
+            ))
          WHERE t.task_id=:task AND p.project_id=:project AND p.state='active'
             AND m.owner_kind='user' AND m.state IN ('ready','active') AND r.state='running'
             AND (w.visibility IN ('published','deprecated')
@@ -274,22 +274,49 @@ fn read_binding(
             AND EXISTS (SELECT 1 FROM object_references ref
                 WHERE ref.object_hash=co.object_hash AND ref.owner_kind='context_manifest'
                   AND ref.owner_id=c.manifest_id AND ref.source_field='content_hash'
-                  AND ref.state='live')",
-        named_params! {
-            ":actor": command.caller.actor_id.as_str(),
-            ":assignment": prep.assignment_id.to_string(),
-            ":agent": assignee.to_string(),
-            ":bundle": prep.effective_bundle_hash.as_prefixed_str(),
-            ":trigger": prep.trigger_event_id.to_string(),
-            ":stream": daemon.stream_id.to_string(),
-            ":authority": daemon.authority_generation.to_string(),
-            ":task": envelope.aggregate_id.to_string(),
-            ":project": envelope.project_id.map(|id| id.to_string()),
-        },
-        Binding::read,
-    ).optional()?.ok_or_else(|| StoreError::NotFound(
-        "ready task, mission assignment or pinned bundle unavailable for this caller".to_owned(),
-    ))?;
+                  AND ref.state='live')";
+
+fn read_binding(
+    conn: &Connection,
+    daemon: &DaemonStateRow,
+    command: &AssignmentCommand<'_>,
+    assignee: AgentId,
+) -> Result<Binding, StoreError> {
+    let envelope = command.envelope;
+    let prep = command.preparation;
+    if daemon.mode != DaemonMode::Ready {
+        return Err(StoreError::RecoveryInProgress(
+            "task assignment requires a ready daemon".to_owned(),
+        ));
+    }
+    if prep.daemon_epoch != daemon.daemon_epoch {
+        return Err(StoreError::StaleFence {
+            message: "task assignment was resolved in another daemon epoch".to_owned(),
+        });
+    }
+    let mut row = conn
+        .query_row(
+            READY_BINDING_SQL,
+            named_params! {
+                ":actor": command.caller.actor_id.as_str(),
+                ":assignment": prep.assignment_id.to_string(),
+                ":agent": assignee.to_string(),
+                ":bundle": prep.effective_bundle_hash.as_prefixed_str(),
+                ":trigger": prep.trigger_event_id.to_string(),
+                ":stream": daemon.stream_id.to_string(),
+                ":authority": daemon.authority_generation.to_string(),
+                ":task": envelope.aggregate_id.to_string(),
+                ":project": envelope.project_id.map(|id| id.to_string()),
+            },
+            Binding::read,
+        )
+        .optional()?
+        .ok_or_else(|| {
+            StoreError::NotFound(
+                "ready task, mission assignment or pinned bundle unavailable for this caller"
+                    .to_owned(),
+            )
+        })?;
     let current = revision(row.task_revision)?;
     if current != envelope.expected_revision {
         return Err(StoreError::RevisionConflict {
@@ -308,7 +335,66 @@ fn read_binding(
     if row.task_state != "ready" || row.step_state != "ready" {
         return Err(invalid("task and workflow step must both be ready"));
     }
+    if row.workflow_entry {
+        row.configured_profile_digest = Some(configured_profile_digest(
+            conn,
+            daemon,
+            &row.profile_version,
+            envelope.project_id,
+        )?);
+    }
     Ok(row)
+}
+
+fn configured_profile_digest(
+    conn: &Connection,
+    daemon: &DaemonStateRow,
+    profile_ref: &str,
+    project: Option<unleash_domain::ProjectId>,
+) -> Result<Sha256Digest, StoreError> {
+    let (id, version): (String, i64) = conn
+        .query_row(
+            "SELECT p.profile_id,p.profile_version
+               FROM provider_profiles p
+               JOIN command_receipts c ON c.receipt_id=p.receipt_id AND c.actor_id=p.actor_id
+                 AND c.aggregate_id=p.profile_id AND c.authority_generation=?2
+                 AND c.command_type='SetProviderProfile' AND c.state IN ('accepted','completed')
+               JOIN object_references ref ON ref.owner_kind='provider_profile'
+                 AND ref.owner_id=p.profile_version_ref AND ref.source_field='configuration'
+                 AND ref.object_hash=p.config_digest AND ref.state='live'
+               JOIN object_records o ON o.object_hash=ref.object_hash AND o.state='live'
+              WHERE p.profile_version_ref=?1
+                AND ((p.scope_kind='user' AND p.scope_owner_key='default')
+                  OR (p.scope_kind='project' AND p.scope_owner_key=?3))",
+            params![
+                profile_ref,
+                daemon.authority_generation.to_string(),
+                project.map(|project| project.to_string())
+            ],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?
+        .ok_or_else(|| {
+            StoreError::EvidenceUnavailable(
+                "configured task profile unavailable in this project and authority".to_owned(),
+            )
+        })?;
+    let profile = crate::provider_profiles::resolve(
+        conn,
+        id.parse().map_err(|_| {
+            StoreError::InvariantViolation("invalid configured task profile ID".to_owned())
+        })?,
+        revision(version)?.as_u64(),
+    )?
+    .ok_or_else(|| {
+        StoreError::EvidenceUnavailable("configured task profile version missing".to_owned())
+    })?;
+    if profile.profile_version_ref != profile_ref {
+        return Err(StoreError::EvidenceUnavailable(
+            "configured task profile reference changed".to_owned(),
+        ));
+    }
+    Ok(profile.configuration_digest)
 }
 
 fn revision(value: i64) -> Result<Revision, StoreError> {
@@ -348,6 +434,9 @@ pub(crate) fn verify_published(
         crate::task_bundle::require_selected_bundle(conn, &command, assignee)?;
         let bundle = read_document(conn, store.config(), preparation.effective_bundle_hash)?;
         verify_bundle_document(&command, assignee, &binding, &bundle)?;
+        if let Some(digest) = binding.configured_profile_digest {
+            read_verified_object_bytes_conn(conn, store.config(), digest)?;
+        }
         let context_hash = binding.context_hash.parse().map_err(|_| {
             StoreError::InvariantViolation("invalid context manifest digest".to_owned())
         })?;
@@ -375,6 +464,14 @@ fn verify_bundle_document(
     bundle: &Value,
 ) -> Result<(), StoreError> {
     let preparation = command.preparation;
+    if binding
+        .configured_profile_digest
+        .is_some_and(|digest| bundle.get("requested_model_profile_digest") != Some(&json!(digest)))
+    {
+        return Err(StoreError::EvidenceUnavailable(
+            "configured task profile digest differs from its selected version".to_owned(),
+        ));
+    }
     let bundle_identity = json!({
         "schema_version": binding.bundle_schema,
         "agent_id": assignee,
@@ -500,13 +597,20 @@ pub(crate) fn queue_tx(
         "UPDATE step_instances SET state='queued',revision=?1 WHERE step_id=?2",
         params![step_revision, binding.step],
     )?;
-    for (field, hash) in [
+    let references = [
         (
             "effective_bundle_hash",
             prep.effective_bundle_hash.as_prefixed_str(),
         ),
         ("context_manifest_id", binding.context_hash.clone()),
-    ] {
+    ]
+    .into_iter()
+    .chain(
+        binding
+            .configured_profile_digest
+            .map(|digest| ("requested_model_profile_version_id", digest.to_string())),
+    );
+    for (field, hash) in references {
         tx.execute(
             "INSERT INTO object_references (reference_id,object_hash,owner_kind,owner_id,source_field,state)
              VALUES (?1,?2,'invocation',?3,?4,'live')",

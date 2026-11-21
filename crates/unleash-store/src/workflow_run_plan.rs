@@ -13,7 +13,7 @@ use crate::{
     workflow_activation::push_workflow_children,
 };
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ExecutionScope {
     pub scope_id: String,
@@ -90,6 +90,7 @@ struct Role {
     id: String,
     version: u32,
     scope: RegistryScope,
+    level: Option<WorkflowLevel>,
     entry_skill: VersionRef,
     skills: Vec<VersionRef>,
     contracts: Vec<VersionRef>,
@@ -480,33 +481,67 @@ pub(crate) fn verify_activation(
 ) -> Result<(), StoreError> {
     let plan: RunPlan = read_document(conn, config, activation.effective_bundle_hash)?;
     verify_manifest_coordinates(&plan, mission, version, activation.definition_hash)?;
-    let scope = task
-        .get("scope_key")
-        .and_then(Value::as_str)
-        .and_then(|key| plan.scopes.get(key));
-    let binding = task
-        .get("binding")
-        .and_then(Value::as_str)
-        .and_then(|slot| plan.bindings.get(slot));
-    if !scope.is_some_and(|scope| {
-        scope.scope_id == activation.scope_id && scope.scope_revision == activation.scope_revision
-    }) {
-        return Err(invalid(
-            "task activation does not match the scope pinned to its node",
-        ));
-    }
-    let Some(RunBinding::Bound { contracts, .. }) = binding else {
-        return Err(invalid("the workflow task slot is not bound"));
-    };
-    if !contracts
-        .iter()
-        .any(|version| version.id == activation.contract_version_id)
-    {
-        return Err(invalid(
-            "task activation does not match a contract pinned to its slot",
-        ));
-    }
+    plan.bound_role(
+        task,
+        &activation.scope_id,
+        activation.scope_revision,
+        &activation.contract_version_id,
+    )?;
     Ok(())
+}
+
+impl RunPlan {
+    pub(crate) fn resolve_task_worker_role(
+        &self,
+        (conn, config): (&Connection, &StoreConfig),
+        node_id: &str,
+        attempt: u32,
+        scope: &ExecutionScope,
+        contract: &str,
+    ) -> Result<(String, Sha256Digest), StoreError> {
+        let definition: Value = read_document(conn, config, self.definition_hash)?;
+        let task = crate::workflow_activation::verify_task_node(&definition, node_id, attempt)?;
+        let role = self.bound_role(task, &scope.scope_id, scope.scope_revision, contract)?;
+        let document: Role = read_document(conn, config, role.content_hash)?;
+        if !matches!(document.level, Some(WorkflowLevel::N)) {
+            return Err(invalid("task agent requires a retained role at level N"));
+        }
+        Ok((role.id.clone(), role.content_hash))
+    }
+
+    fn bound_role(
+        &self,
+        task: &Value,
+        scope_id: &str,
+        scope_revision: Revision,
+        contract: &str,
+    ) -> Result<&RegistryVersion, StoreError> {
+        let scope = task
+            .get("scope_key")
+            .and_then(Value::as_str)
+            .and_then(|key| self.scopes.get(key));
+        let binding = task
+            .get("binding")
+            .and_then(Value::as_str)
+            .and_then(|slot| self.bindings.get(slot));
+        if !scope.is_some_and(|scope| {
+            scope.scope_id == scope_id && scope.scope_revision == scope_revision
+        }) {
+            return Err(invalid("task coordinates do not match its retained scope"));
+        }
+        let Some(RunBinding::Bound {
+            role, contracts, ..
+        }) = binding
+        else {
+            return Err(invalid("the workflow task slot is not bound"));
+        };
+        if !contracts.iter().any(|version| version.id == contract) {
+            return Err(invalid(
+                "task coordinates do not match a contract pinned to its slot",
+            ));
+        }
+        Ok(role)
+    }
 }
 
 fn verify_manifest_coordinates(

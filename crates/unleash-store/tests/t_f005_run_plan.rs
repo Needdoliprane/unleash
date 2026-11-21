@@ -14,7 +14,7 @@ use std::sync::{
 };
 
 use serde_json::{Value, json};
-use unleash_domain::{ActorId, Revision};
+use unleash_domain::{ActorId, AgentLevel, Revision};
 use unleash_protocol::CommandEnvelope;
 use unleash_store::{
     CallerAuthority, CommitOutcome, CutpointObserver, StoreConfig, StoreCutpoint, StoreError,
@@ -41,7 +41,12 @@ impl CutpointObserver for InterruptCommit {
 }
 
 fn prepare(config: StoreConfig) -> (Fixture, CommandEnvelope, CallerAuthority) {
-    workflow_run::prepare(config, ActorId::new(OWNER).unwrap(), |_, _, _| {})
+    workflow_run::prepare(
+        config,
+        ActorId::new(OWNER).unwrap(),
+        AgentLevel::N,
+        |_, _, _| {},
+    )
 }
 
 fn effects(store: &UnleashStore) -> (i64, i64, i64, i64) {
@@ -289,6 +294,7 @@ fn t_f005_004_debits_later_tasks_once_and_refuses_exhaustion_after_reopen() {
     let (fixture, create, caller) = workflow_run::prepare(
         StoreConfig::new(directory.path()),
         ActorId::new(OWNER).unwrap(),
+        AgentLevel::N,
         |workflow, scope, project| {
             *scope.pointer_mut("/scopes/implementation").unwrap() = json!({
                 "scope_id": project,
