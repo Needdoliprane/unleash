@@ -15,15 +15,18 @@ use std::os::unix::fs::PermissionsExt;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::io::AsyncReadExt;
+use tokio::sync::{Semaphore, SemaphorePermit};
 use unleash_client::{ClientConfig, ClientError, EventStreamReader, UnleashClient};
 use unleash_daemon::{DaemonConfig, DaemonStartOutcome, StoreOverrides, UnleashDaemon};
-use unleash_domain::{AuthorityGeneration, CommandId, ProjectId, RequestId, Revision};
+use unleash_domain::{
+    AuthorityGeneration, ClockPort, CommandId, ProjectId, RequestId, Revision, TimestampMs,
+};
 use unleash_protocol::{
     ClientKind, CommandEnvelope, CommandReceipt, ErrorCode, ProtocolVersion, QueryEnvelope,
     ReasonCode, ReceiptState, SubscribeEventsRequest,
 };
 use unleash_store::{CutpointObserver, StoreCutpoint, StoreError};
-use unleash_testkit::{Cutpoint, CutpointBarrier, CutpointController, local_test_dir};
+use unleash_testkit::{Cutpoint, CutpointBarrier, CutpointController, ManualClock, local_test_dir};
 use uuid::Uuid;
 
 #[path = "support/provider_probe_connect_observation_scenarios.rs"]
@@ -32,11 +35,16 @@ mod observation_scenarios;
 #[path = "support/provider_probe_connect_trace.rs"]
 mod connect_trace;
 
+// Each fixture opens its own daemon and SQLite writer. Limit contention
+// between independent scenarios while their IPC timing assertions run.
+static CONNECT_FIXTURE_SLOTS: Semaphore = Semaphore::const_new(2);
+
 struct ConnectFixture {
     rendezvous: tempfile::TempDir,
     data: tempfile::TempDir,
     handle: unleash_daemon::DaemonHandle,
     endpoint: TcpListener,
+    _fixture_slot: SemaphorePermit<'static>,
 }
 
 struct DispatchPause {
@@ -100,6 +108,15 @@ impl ConnectFixture {
     async fn start_with_cutpoints(
         cutpoints: Option<Arc<dyn CutpointObserver>>,
     ) -> (Self, UnleashClient) {
+        Self::start_with_store_overrides(StoreOverrides {
+            cutpoints,
+            ..StoreOverrides::default()
+        })
+        .await
+    }
+
+    async fn start_with_store_overrides(store_overrides: StoreOverrides) -> (Self, UnleashClient) {
+        let fixture_slot = CONNECT_FIXTURE_SLOTS.acquire().await.unwrap();
         connect_trace::install();
         let rendezvous = local_test_dir("f012-connect-rdv").unwrap();
         std::fs::set_permissions(rendezvous.path(), std::fs::Permissions::from_mode(0o700))
@@ -110,10 +127,7 @@ impl ConnectFixture {
         let DaemonStartOutcome::Started(handle) = UnleashDaemon::start(DaemonConfig {
             data_root: Some(data.path().to_path_buf()),
             rendezvous_dir: Some(rendezvous.path().to_path_buf()),
-            store_overrides: StoreOverrides {
-                cutpoints,
-                ..StoreOverrides::default()
-            },
+            store_overrides,
             ..DaemonConfig::default()
         })
         .await
@@ -133,6 +147,7 @@ impl ConnectFixture {
                 data,
                 handle,
                 endpoint,
+                _fixture_slot: fixture_slot,
             },
             client,
         )
@@ -373,16 +388,13 @@ where
     }
 }
 
-fn assert_held_dispatch_before_socket(fixture: &ConnectFixture, request: &CommandEnvelope) {
+fn assert_held_dispatch_before_socket(
+    fixture: &ConnectFixture,
+    request: &CommandEnvelope,
+    now: TimestampMs,
+) {
     // C4 blocks after the marker's commit and before its ACK authorizes any I/O.
     assert!(matches!(fixture.endpoint.accept(), Err(error) if error.kind()==ErrorKind::WouldBlock));
-    let now = i64::try_from(
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_millis(),
-    )
-    .unwrap();
     let held: i64 = fixture.db().query_row(r"
 SELECT COUNT(*) FROM provider_probes p
 JOIN command_receipts c ON c.receipt_id=p.command_receipt_id
@@ -433,7 +445,7 @@ WHERE p.probe_id=?1 AND p.phase='connect' AND p.state IN ('admitted','running')
   AND json_extract(admitted.payload_json,'$.reservation_id')=r.reservation_id
   AND json_extract(admitted.payload_json,'$.lease_id')=l.lease_id
   AND json_extract(admitted.payload_json,'$.fence')=p.fence)
-", rusqlite::params![request.aggregate_id.to_string(),now,unleash_protocol::compute_command_digest_v2(request).unwrap().to_string()], |row|row.get(0)).unwrap();
+", rusqlite::params![request.aggregate_id.to_string(),now.as_i64(),unleash_protocol::compute_command_digest_v2(request).unwrap().to_string()], |row|row.get(0)).unwrap();
     assert_eq!(
         held, 1,
         "le dispatch exact exige la place held et la lease vivante du vrai probe"
@@ -633,7 +645,22 @@ WHERE a.state='observed_success'
 #[tokio::test]
 async fn t_f012_013_connect_active_mandate_uses_durable_dispatch_once() {
     let pause = DispatchPause::new();
-    let (fixture, mut admin) = ConnectFixture::start_with_cutpoints(Some(pause.clone())).await;
+    // The injected C4 pause is controlled by the fixture. Use a stable UTC
+    // clock so unrelated test load does not use up the mandate during the pause.
+    let now = i64::try_from(
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis(),
+    )
+    .unwrap();
+    let clock = Arc::new(ManualClock::new(now));
+    let (fixture, mut admin) = ConnectFixture::start_with_store_overrides(StoreOverrides {
+        cutpoints: Some(pause.clone()),
+        clock: Some(clock.clone()),
+        ..StoreOverrides::default()
+    })
+    .await;
     let mut dispatch_guard = DispatchGuard {
         barrier: Arc::clone(&pause.barrier),
         armed: true,
@@ -658,7 +685,7 @@ async fn t_f012_013_connect_active_mandate_uses_durable_dispatch_once() {
     let (capture, receipt) = {
         let mut pending = Box::pin(admin.send_command(&request));
         let early = wait_for_dispatch_or_reply(&fixture, &pause, &mut pending).await;
-        assert_held_dispatch_before_socket(&fixture, &request);
+        assert_held_dispatch_before_socket(&fixture, &request, clock.now_ms());
         let capture = capture_authorized_connect(&fixture);
         dispatch_guard.release();
         let receipt = if let Some(receipt) = early {

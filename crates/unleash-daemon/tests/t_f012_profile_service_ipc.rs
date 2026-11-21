@@ -13,7 +13,9 @@ use std::path::Path;
 use unleash_client::{ClientConfig, ClientError, UnleashClient};
 use unleash_daemon::{DaemonConfig, DaemonStartOutcome, UnleashDaemon};
 use unleash_domain::{CommandId, RequestId, Revision};
-use unleash_protocol::{ClientKind, CommandEnvelope, ErrorCode, ProtocolVersion, ReceiptState};
+use unleash_protocol::{
+    ClientKind, CommandEnvelope, CommandReceipt, ErrorCode, ProtocolVersion, ReceiptState,
+};
 use unleash_testkit::local_test_dir;
 use uuid::Uuid;
 
@@ -86,6 +88,117 @@ async fn running_fixture(label: &str) -> (RunningFixture, UnleashClient) {
         },
         client,
     )
+}
+
+async fn provider_cli(binary: &Path, socket: &Path, arguments: &[&str]) -> Value {
+    let output = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        tokio::process::Command::new(binary)
+            .env_clear()
+            .stdin(std::process::Stdio::null())
+            .kill_on_drop(true)
+            .arg("--socket")
+            .arg(socket)
+            .args(["--json", "--timeout-ms", "3000", "provider"])
+            .args(arguments)
+            .output(),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(
+        output.status.success(),
+        "fixture provider CLI: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    serde_json::from_slice(&output.stdout).unwrap()
+}
+
+async fn set_profile_with_cli(
+    binary: &Path,
+    socket: &Path,
+    file: &Path,
+    request: &CommandEnvelope,
+) -> CommandReceipt {
+    let result = provider_cli(
+        binary,
+        socket,
+        &[
+            "set",
+            "--profile-id",
+            &request.aggregate_id.to_string(),
+            "--file",
+            file.to_str().unwrap(),
+            "--expected-revision",
+            &request.expected_revision.as_u64().to_string(),
+            "--command-id",
+            &request.command_id.to_string(),
+            "--authority-generation",
+            &request.authority_generation.to_string(),
+        ],
+    )
+    .await;
+    assert_eq!(
+        result.get("authority_generation"),
+        Some(&json!(request.authority_generation))
+    );
+    serde_json::from_value(result.get("receipt").unwrap().clone()).unwrap()
+}
+
+#[tokio::test]
+#[ignore = "requires UNLEASH_F012_CLI_BIN built from the same checkout"]
+async fn t_f012_cli_sets_and_revises_a_profile() {
+    let executable = std::env::var_os("UNLEASH_F012_CLI_BIN").unwrap();
+    let binary = Path::new(&executable);
+    assert!(binary.is_absolute() && binary.is_file());
+    let (fixture, client) = running_fixture("f012-cli-set").await;
+    let definitions = local_test_dir("f012-cli-json").unwrap();
+    let profile = Uuid::from_u128(0xf012_1220);
+    let initial = command(&client, profile, 1221, 0, "first-local");
+    let revised = command(&client, profile, 1222, 1, "revised-local");
+    let v1 = definitions.path().join("provider-v1.json");
+    let v2 = definitions.path().join("provider-v2.json");
+    std::fs::write(&v1, serde_json::to_vec(&initial.payload).unwrap()).unwrap();
+    std::fs::write(&v2, serde_json::to_vec(&revised.payload).unwrap()).unwrap();
+
+    let socket = fixture.handle.socket_path();
+    let first = set_profile_with_cli(binary, socket, &v1, &initial).await;
+    assert_eq!(first.aggregate_id, profile);
+    assert_eq!(first.command_id, initial.command_id);
+    assert_eq!(first.new_revision, Revision::new(1));
+    let replay = set_profile_with_cli(binary, socket, &v1, &initial).await;
+    assert_eq!(replay, first);
+    let second = set_profile_with_cli(binary, socket, &v2, &revised).await;
+    assert_eq!(second.aggregate_id, profile);
+    assert_eq!(second.command_id, revised.command_id);
+    assert_ne!(second.receipt_id, first.receipt_id);
+    assert_eq!(second.new_revision, Revision::new(2));
+
+    let detail = provider_cli(
+        binary,
+        socket,
+        &[
+            "show",
+            "--profile-id",
+            &profile.to_string(),
+            "--profile-version",
+            "2",
+        ],
+    )
+    .await;
+    assert_eq!(detail.pointer("/result/profile_id"), Some(&json!(profile)));
+    assert_eq!(detail.pointer("/result/profile_version"), Some(&json!(2)));
+    assert_eq!(
+        detail.pointer("/result/configuration_receipt_id"),
+        Some(&json!(second.receipt_id))
+    );
+    assert_eq!(detail.pointer("/result/observations"), Some(&json!([])));
+    drop(client);
+    fixture
+        .handle
+        .shutdown_graceful("profile-set-cli-test")
+        .await
+        .unwrap();
 }
 
 #[tokio::test]

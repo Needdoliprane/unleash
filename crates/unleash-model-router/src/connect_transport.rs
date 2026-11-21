@@ -426,6 +426,17 @@ fn tls_validation(
     })
 }
 
+#[cfg(test)]
+pub(crate) fn fixture_tls_validation(
+    certificate_der: &[u8],
+) -> Result<TlsValidation, ConnectError> {
+    let mut roots = rustls::RootCertStore::empty();
+    roots
+        .add(rustls::pki_types::CertificateDer::from(certificate_der))
+        .map_err(|_| ConnectError::TrustUnavailable)?;
+    tls_validation(roots, CertificateValidation::FixtureRoot)
+}
+
 pub(crate) fn system_tls_validation() -> Result<TlsValidation, ConnectError> {
     // The loader otherwise honors these overrides. An environment-provided root
     // file must not be described as the operating system's configured trust.
@@ -521,11 +532,7 @@ impl ConnectExecutor {
     async fn tls(&self) -> Result<TlsValidation, ConnectError> {
         #[cfg(test)]
         if let Some(certificate) = &self.ca_der {
-            let mut roots = rustls::RootCertStore::empty();
-            roots
-                .add(rustls::pki_types::CertificateDer::from(certificate.clone()))
-                .map_err(|_| ConnectError::TrustUnavailable)?;
-            return tls_validation(roots, CertificateValidation::FixtureRoot);
+            return fixture_tls_validation(certificate);
         }
         // Root enumeration can block on the local keychain/filesystem. It cannot
         // contact a peer, and a timed-out waiter never proceeds to DNS or connect.

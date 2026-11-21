@@ -92,6 +92,8 @@ pub struct FrozenOllamaInventoryRequest {
     digest: Sha256Digest,
     max_response_bytes: usize,
     connect_timeout_ms: Option<u64>,
+    #[cfg(test)]
+    fixture_tls: Option<TlsValidation>,
 }
 
 impl fmt::Debug for FrozenOllamaInventoryRequest {
@@ -180,7 +182,20 @@ impl FrozenOllamaInventoryRequest {
             digest,
             max_response_bytes,
             connect_timeout_ms,
+            #[cfg(test)]
+            fixture_tls: None,
         })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_fixture_root(
+        mut self,
+        certificate_der: &[u8],
+    ) -> Result<Self, ConnectError> {
+        self.fixture_tls = Some(crate::connect_transport::fixture_tls_validation(
+            certificate_der,
+        )?);
+        Ok(self)
     }
 
     /// Require a pinned native peer for a bounded inventory with an observation port.
@@ -345,6 +360,20 @@ impl InventoryExecutor {
             .ok_or(InventoryError::DeadlineExpired)
     }
 
+    async fn tls(&self) -> Result<TlsValidation, InventoryError> {
+        #[cfg(test)]
+        if let Some(fixture) = &self.request.fixture_tls {
+            return Ok(TlsValidation {
+                config: Arc::clone(&fixture.config),
+                source: fixture.source,
+            });
+        }
+        tokio::task::spawn_blocking(system_tls_validation)
+            .await
+            .map_err(|_| InventoryError::Unavailable)?
+            .map_err(|_| InventoryError::Unavailable)
+    }
+
     async fn channel(
         &self,
         intent: &ActionIntent,
@@ -352,12 +381,7 @@ impl InventoryExecutor {
         total_deadline: Instant,
     ) -> Result<(Box<dyn Channel>, SocketAddr, CertificateValidation), InventoryError> {
         let tls = if self.request.target.endpoint().scheme() == "https" {
-            Some(
-                tokio::task::spawn_blocking(system_tls_validation)
-                    .await
-                    .map_err(|_| InventoryError::Unavailable)?
-                    .map_err(|_| InventoryError::Unavailable)?,
-            )
+            Some(self.tls().await?)
         } else {
             None
         };

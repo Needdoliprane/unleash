@@ -320,7 +320,7 @@ fn inspect_process_identity_os(pid: u32) -> Result<OsProcessIdentity, PlatformEr
         Err(e) => return Err(PlatformError::Io(e)),
     };
 
-    let (pgid, starttime) = parse_linux_proc_stat(&stat_content, pid)?;
+    let (process_group_id, start_ticks) = parse_linux_proc_stat(&stat_content, pid)?;
     let proc_meta = match std::fs::metadata(&proc_dir) {
         Ok(meta) => meta,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -330,11 +330,11 @@ fn inspect_process_identity_os(pid: u32) -> Result<OsProcessIdentity, PlatformEr
     };
 
     let boot_identity = current_boot_identity_os()?;
-    let start_identity = StartIdentity::new(format!("linux-proc:{pid}:{starttime}"))?;
+    let start_identity = StartIdentity::new(format!("linux-proc:{pid}:{start_ticks}"))?;
 
     Ok(OsProcessIdentity {
         pid,
-        pgid,
+        pgid: process_group_id,
         owner_uid: proc_meta.uid(),
         boot_identity,
         start_identity,

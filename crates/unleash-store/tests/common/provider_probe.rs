@@ -1,8 +1,5 @@
 //! Internal synthetic `SQLite` bench; no network and no claimed runtime qualification.
-#![expect(
-    clippy::unwrap_used,
-    reason = "Synthetic closed fixture and contract assertions"
-)]
+
 use serde_json::{Value, json};
 use unleash_domain::{
     ActionOrigin, ActorId, AuthorizationEvaluationId, DataLocality, Fence, LineageFence,
