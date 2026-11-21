@@ -46,6 +46,8 @@ mod task_assignment;
 mod task_bundle;
 pub mod terminal_allocations;
 mod workflow_activation;
+mod workflow_run_creation;
+mod workflow_run_plan;
 pub mod writer;
 
 pub use admission::{
@@ -186,5 +188,6 @@ pub use broker_phases::{
 };
 
 pub use workflow_activation::WorkflowTaskActivationPlan;
+pub use workflow_run_creation::PreparedRunPublication;
 
 pub use task_assignment::PreparedTaskAssignment;
