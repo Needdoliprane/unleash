@@ -17,7 +17,7 @@ use crate::{
     policies_secrets::{SubjectKind, ensure_subject_not_blocked_tx, require_human_decider},
 };
 
-const CREATE_AGENT: &str = "CreateAgent";
+pub(crate) const COMMAND: &str = "CreateAgent";
 
 /// Internal preparation for a worker identity in a human-owned mission.
 ///
@@ -109,13 +109,13 @@ fn invalid(message: &str) -> StoreError {
     }
 }
 
-fn result_ref(assignment: Uuid) -> String {
+pub(crate) fn result_ref(assignment: Uuid) -> String {
     format!("mission-assignment:{assignment}")
 }
 
 pub(crate) fn validate_identity(request: &CommitCommandRequest) -> Result<(), StoreError> {
     let CommandMutation::CreateAssignedAgent { caller } = &request.mutation else {
-        if request.envelope.command_type == CREATE_AGENT
+        if request.envelope.command_type == COMMAND
             && request.envelope.payload.contains_key("assignment_id")
         {
             return Err(invalid(
@@ -125,9 +125,9 @@ pub(crate) fn validate_identity(request: &CommitCommandRequest) -> Result<(), St
         return Ok(());
     };
     let envelope = &request.envelope;
-    require_human_decider(caller, CREATE_AGENT)?;
+    require_human_decider(caller, COMMAND)?;
     let plan = decode_plan(envelope)?;
-    if envelope.command_type != CREATE_AGENT
+    if envelope.command_type != COMMAND
         || envelope.aggregate_id.is_nil()
         || envelope.project_id.is_none()
         || envelope.actor_ref.as_deref() != Some(caller.actor_id.as_str())
@@ -149,9 +149,21 @@ pub(crate) fn validate_identity(request: &CommitCommandRequest) -> Result<(), St
 
 pub(crate) fn commit_tx(
     tx: &Transaction<'_>,
-    (config, daemon, now): (&StoreConfig, &DaemonStateRow, TimestampMs),
+    context: (&StoreConfig, &DaemonStateRow, TimestampMs),
     envelope: &CommandEnvelope,
     caller: &CallerAuthority,
+    events: &mut Vec<EventAppendSpec>,
+) -> Result<Revision, StoreError> {
+    let plan = decode_plan(envelope)?;
+    commit_agent_plan(tx, context, envelope, (caller, &plan), false, events)
+}
+
+pub(crate) fn commit_agent_plan(
+    tx: &Transaction<'_>,
+    (config, daemon, now): (&StoreConfig, &DaemonStateRow, TimestampMs),
+    envelope: &CommandEnvelope,
+    (caller, plan): (&CallerAuthority, &PreparedAgentCreation),
+    allow_deprecated: bool,
     events: &mut Vec<EventAppendSpec>,
 ) -> Result<Revision, StoreError> {
     if daemon.mode != DaemonMode::Ready {
@@ -159,7 +171,6 @@ pub(crate) fn commit_tx(
             "assigned agent creation requires a ready daemon".to_owned(),
         ));
     }
-    let plan = decode_plan(envelope)?;
     if plan.daemon_epoch != daemon.daemon_epoch {
         return Err(StoreError::StaleFence {
             message: "agent creation was prepared in another daemon epoch".to_owned(),
@@ -170,7 +181,7 @@ pub(crate) fn commit_tx(
         .ok_or_else(|| invalid("assigned agent creation requires a project"))?;
     let agent = AgentId::from_uuid(envelope.aggregate_id);
     ensure_new_agent(tx, envelope, agent)?;
-    let run = resolve_task(tx, project, caller, &plan)?;
+    let run = resolve_task(tx, project, caller, plan)?;
     ensure_scope_not_frozen_tx(tx, Some(project), Some(&plan.scope_id), Some(run))?;
     for (kind, id) in [
         (SubjectKind::Actor, caller.actor_id.as_str()),
@@ -178,7 +189,7 @@ pub(crate) fn commit_tx(
     ] {
         ensure_subject_not_blocked_tx(tx, kind, id, Some(project))?;
     }
-    validate_role(tx, project, &plan)?;
+    validate_role(tx, project, plan, allow_deprecated)?;
 
     let session = insert_agent_and_session(
         tx,
@@ -317,6 +328,7 @@ fn validate_role(
     tx: &Transaction<'_>,
     project: ProjectId,
     plan: &PreparedAgentCreation,
+    allow_deprecated: bool,
 ) -> Result<(), StoreError> {
     let found = tx.query_row(
         "SELECT EXISTS(
@@ -326,7 +338,7 @@ fn validate_role(
                 AND rr.owner_kind='registry_version' AND rr.owner_id=v.registry_version_id
                 AND rr.source_field='content_hash'
             WHERE v.registry_version_id=?1 AND v.content_hash=?2 AND v.entry_kind='role'
-                AND v.publication_state='published'
+                AND (v.publication_state='published' OR (?4 AND v.publication_state='deprecated'))
                 AND (v.scope_kind='global'
                      OR (v.scope_kind='project' AND v.scope_owner_key=?3))
         )",
@@ -334,6 +346,7 @@ fn validate_role(
             plan.role_version_id,
             plan.role_content_hash.as_prefixed_str(),
             project.to_string(),
+            allow_deprecated,
         ],
         |row| row.get::<_, bool>(0),
     )?;

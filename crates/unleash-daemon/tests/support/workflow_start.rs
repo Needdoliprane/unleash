@@ -11,7 +11,10 @@ use unleash_store::{StoreConfig, UnleashStore};
 
 use super::{RUN, local_store_config, publish_mandate, scoped_run_query, start, wire_command};
 
-async fn fixture(data: &Path, rendezvous: &Path) -> (StoreConfig, DaemonConfig, CommandEnvelope) {
+pub(super) async fn fixture(
+    data: &Path,
+    rendezvous: &Path,
+) -> (StoreConfig, DaemonConfig, CommandEnvelope) {
     std::fs::set_permissions(rendezvous, PermissionsExt::from_mode(0o700)).unwrap();
     let store = local_store_config(data);
     let seed = store.clone();
@@ -26,7 +29,7 @@ async fn fixture(data: &Path, rendezvous: &Path) -> (StoreConfig, DaemonConfig, 
     (store, config, create)
 }
 
-fn start_command(create: &CommandEnvelope) -> CommandEnvelope {
+pub(super) fn start_command(create: &CommandEnvelope) -> CommandEnvelope {
     CommandEnvelope {
         request_id: RequestId::from_u128(0x5920),
         command_id: CommandId::from_u128(0x5920),

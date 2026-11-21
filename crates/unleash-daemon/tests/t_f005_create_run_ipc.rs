@@ -12,6 +12,9 @@ mod workflow_run;
 #[path = "support/workflow_start.rs"]
 mod start_run;
 
+#[path = "support/workflow_agent.rs"]
+mod create_agent;
+
 use serde_json::{Map, Value, json};
 use std::{os::unix::fs::PermissionsExt, path::Path};
 use unleash_client::{ClientConfig, UnleashClient};
