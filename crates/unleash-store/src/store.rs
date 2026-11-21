@@ -821,7 +821,8 @@ impl UnleashStore {
         let validation = crate::provider_profile_validation::validate_identity(request)?;
         let connect = crate::provider_probe_connect::validate_identity(request)?;
         let activation = crate::workflow_activation::validate_identity(request)?;
-        if !configuration && !validation && !connect && !activation {
+        let assignment = crate::task_assignment::validate_identity(request)?;
+        if !configuration && !validation && !connect && !activation && !assignment {
             return Ok(None);
         }
         let lookup = || {
@@ -839,7 +840,9 @@ impl UnleashStore {
         if let Some(receipt) = lookup()? {
             return Ok(Some(CommitOutcome::IdempotentReplay(receipt)));
         }
-        let verified = if activation {
+        let verified = if assignment {
+            crate::task_assignment::verify_published(self, request)
+        } else if activation {
             crate::workflow_activation::verify_definition(self, request)
         } else if connect {
             crate::provider_probe_connect::verify_published(self, request)

@@ -40,6 +40,7 @@ pub mod qualification;
 pub mod recovery_ops;
 pub mod restore;
 pub mod store;
+mod task_assignment;
 pub mod terminal_allocations;
 mod workflow_activation;
 pub mod writer;
@@ -180,3 +181,5 @@ pub use broker_phases::{
 };
 
 pub use workflow_activation::WorkflowTaskActivationPlan;
+
+pub use task_assignment::PreparedTaskAssignment;

@@ -11,14 +11,15 @@ use std::sync::{
 
 use serde_json::Value;
 use unleash_domain::{
-    ActorId, CommandId, CompletionPolicy, MissionId, MissionState, ProjectId, RequestId, Revision,
-    RunId, RunState, Sha256Digest, StepId, TaskId,
+    ActorId, AgentId, AgentLevel, AgentState, CommandId, CompletionPolicy, InvocationId, MissionId,
+    MissionState, ProjectId, RequestId, Revision, RunId, RunState, Sha256Digest, StepId, TaskId,
 };
 use unleash_protocol::{CommandEnvelope, ProtocolVersion, ReceiptState, canonicalize_to_vec};
 use unleash_store::{
-    AggregateKind, CommandMutation, CommitCommandRequest, CommitOutcome, CutpointObserver,
-    PrepareObjectRequest, PublishObjectReferenceRequest, StoreConfig, StoreCutpoint, StoreError,
-    UnleashStore, WorkflowTaskActivationPlan,
+    AdmissionUnit, AggregateKind, CallerAuthority, CallerRole, CommandMutation,
+    CommitCommandRequest, CommitOutcome, CutpointObserver, ExecutionPoolParams,
+    PrepareObjectRequest, PreparedTaskAssignment, PublishObjectReferenceRequest, StoreConfig,
+    StoreCutpoint, StoreError, UnleashStore, WorkflowTaskActivationPlan, WriteCriticality,
 };
 use unleash_testkit::local_test_dir;
 use uuid::Uuid;
@@ -92,19 +93,19 @@ impl Fixture {
         } else {
             "another-workflow:v1"
         };
-        fixture.retain_definition(&bytes, owner);
+        fixture.retain_object(&bytes, "workflow_version", owner, "content_hash");
         fixture.start_run();
         (directory, fixture)
     }
 
-    fn retain_definition(&self, bytes: &[u8], owner: &str) {
+    fn retain_object(&self, bytes: &[u8], kind: &str, owner: &str, field: &str) {
         let source = self
             .store
             .prepare_object(PrepareObjectRequest {
-                object_hash: self.plan.definition_hash,
+                object_hash: Sha256Digest::from_bytes(bytes),
                 byte_length: u64::try_from(bytes.len()).unwrap(),
                 media_type: "application/json".to_owned(),
-                owner_kind: "workflow_version".to_owned(),
+                owner_kind: kind.to_owned(),
                 owner_id: owner.to_owned(),
             })
             .unwrap();
@@ -116,11 +117,163 @@ impl Fixture {
                 pin_id: source.pin_id,
                 object_hash: source.object_hash,
                 object_generation: source.object_generation,
-                owner_kind: "workflow_version".to_owned(),
+                owner_kind: kind.to_owned(),
                 owner_id: owner.to_owned(),
-                source_field: "content_hash".to_owned(),
+                source_field: field.to_owned(),
             })
             .unwrap();
+    }
+
+    fn activate_with_assignee(&self) -> (AgentId, String, String) {
+        self.store
+            .activate_workflow_task(self.activation(5, 2, &self.plan))
+            .unwrap();
+        let agent = AgentId::from_u128(0x5008);
+        self.commit_setup(
+            7,
+            (AggregateKind::Agent, agent.as_uuid(), Revision::INITIAL),
+            "CreateAgent",
+            CommandMutation::CreateAgent {
+                agent_id: agent,
+                level: AgentLevel::N,
+                organization_parent_id: None,
+                created_by_agent_id: None,
+                project_id: Some(self.project),
+                state: AgentState::Eligible,
+            },
+        );
+        let (session_id, trigger_event_id): (String, String) = self
+            .store
+            .read_snapshot(|conn, _| {
+                let session = conn.query_row(
+                    "SELECT session_id FROM sessions WHERE agent_id=?1",
+                    [agent.to_string()],
+                    |row| row.get(0),
+                )?;
+                let trigger = conn.query_row(
+                "SELECT event_id FROM events WHERE event_type='NodeActivated' AND aggregate_id=?1",
+                [self.run.to_string()],
+                |row| row.get(0),
+            )?;
+                Ok((session, trigger))
+            })
+            .unwrap();
+        (agent, session_id, trigger_event_id)
+    }
+
+    fn prepared_assignment(&self) -> (CommandEnvelope, CallerAuthority, PreparedTaskAssignment) {
+        let (agent, session_id, trigger_event_id) = self.activate_with_assignee();
+        let assignment_id = Uuid::from_u128(0x500a);
+        let manifest = Uuid::from_u128(0x500b).to_string();
+        let policy_hash = Sha256Digest::from_bytes(b"policy defined for the assignment fixture");
+        let context = canonicalize_to_vec(&serde_json::json!({
+            "schema_version": 1,
+            "session_id": session_id,
+            "base_session_revision": 0,
+            "entries": [],
+        }))
+        .unwrap();
+        let context_hash = Sha256Digest::from_bytes(&context);
+        self.retain_object(&context, "context_manifest", &manifest, "content_hash");
+        let bundle = canonicalize_to_vec(&serde_json::json!({
+            "schema_version": 1,
+            "agent_id": agent,
+            "session_id": session_id,
+            "trigger_event_id": trigger_event_id,
+            "mission_id": self.mission,
+            "run_id": self.run,
+            "step_id": self.plan.step_id,
+            "task_id": self.plan.task_id,
+            "role_version_id": "fixture-role:v1",
+            "workflow_version_id": VERSION,
+            "contract_version_ids": [&self.plan.contract_version_id],
+            "requested_model_profile_version_id": "fixture-profile:v1",
+            "allowed_model_policy_hash": policy_hash,
+            "scope_id": self.plan.scope_id,
+            "scope_revision": self.plan.scope_revision,
+            "initial_context_manifest_id": manifest,
+        }))
+        .unwrap();
+        let bundle_hash = Sha256Digest::from_bytes(&bundle);
+        self.retain_object(
+            &bundle,
+            "effective_bundle",
+            &bundle_hash.to_string(),
+            "content_object_hash",
+        );
+        // The real activation and session start are above. Seed only the already
+        // resolved mission binding, context and bundle expected from the harness.
+        let mission = self.mission;
+        let scope = self.plan.scope_id.clone();
+        self.store.execute_in_writer_tx(WriteCriticality::Normal, move |tx, now| {
+            tx.execute(
+                "INSERT INTO mission_assignments
+                 (assignment_id, mission_id, agent_id, role_version_id, scope_id,
+                  scope_revision, assignment_epoch, state, revision)
+                 VALUES (?1, ?2, ?3, 'fixture-role:v1', ?4, 1, 1, 'active', 1)",
+                rusqlite::params![assignment_id.to_string(), mission.to_string(), agent.to_string(), scope],
+            )?;
+            tx.execute(
+                "INSERT INTO context_manifests
+                 (manifest_id, session_id, base_session_revision, content_hash, schema_version, created_at_ms)
+                 VALUES (?1, ?2, 0, ?3, 1, ?4)",
+                rusqlite::params![manifest, session_id, context_hash.to_string(), now.as_i64()],
+            )?;
+            tx.execute(
+                "INSERT INTO effective_bundles
+                 (bundle_hash, schema_version, role_version_id, workflow_version_id,
+                  requested_model_profile_version_id, allowed_model_policy_hash,
+                  initial_context_manifest_id, scope_id, scope_revision, content_object_hash)
+                 VALUES (?1, 1, 'fixture-role:v1', ?2, 'fixture-profile:v1', ?3, ?4, ?5, 1, ?1)",
+                rusqlite::params![bundle_hash.to_string(), VERSION, policy_hash.to_string(), manifest, scope],
+            )?;
+            Ok(())
+        }).unwrap();
+        let mut envelope = self.envelope(
+            8,
+            self.plan.task_id.as_uuid(),
+            Revision::new(1),
+            "AssignTask",
+        );
+        envelope
+            .payload
+            .insert("agent_id".to_owned(), serde_json::to_value(agent).unwrap());
+        let caller = CallerAuthority {
+            actor_id: ActorId::new("user:fixture-owner").unwrap(),
+            role: CallerRole::HumanOperator,
+        };
+        let preparation = PreparedTaskAssignment {
+            daemon_epoch: self.plan.daemon_epoch,
+            assignment_id,
+            assignment_epoch: 1,
+            assignment_revision: Revision::new(1),
+            trigger_event_id: trigger_event_id.parse().unwrap(),
+            effective_bundle_hash: bundle_hash,
+            invocation_id: InvocationId::from_u128(0x500c),
+        };
+        (envelope, caller, preparation)
+    }
+
+    fn assert_assignment_pending(&self) {
+        self.store.read_snapshot(|conn, _| {
+            let revisions: (i64, i64) = conn.query_row(
+                "SELECT t.revision,s.revision FROM tasks t JOIN step_instances s ON s.step_id=t.step_id
+                 WHERE t.task_id=?1 AND t.state='ready' AND s.state='ready'",
+                [self.plan.task_id.to_string()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )?;
+            assert_eq!(revisions, (1, 1));
+            let effects: (i64, i64, i64, i64) = conn.query_row(
+                "SELECT (SELECT COUNT(*) FROM invocations),
+                        (SELECT COUNT(*) FROM events WHERE event_type IN ('TaskAssigned','InvocationQueued')),
+                        (SELECT COUNT(*) FROM object_references WHERE owner_kind='invocation'),
+                        (SELECT COUNT(*) FROM command_receipts WHERE command_type='AssignTask')",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )?;
+            assert_eq!(effects, (0, 0, 0, 0));
+            Ok(())
+        }).unwrap();
     }
 
     fn start_run(&self) {
@@ -417,4 +570,105 @@ fn rolls_back_activation_and_retries_the_same_command() {
         fixture.store.activate_workflow_task(request).unwrap(),
         CommitOutcome::Committed(_)
     ));
+}
+
+#[test]
+fn refuses_a_stale_assignment_revision_before_queueing() {
+    let (_directory, fixture) = Fixture::new(true);
+    let (envelope, caller, preparation) = fixture.prepared_assignment();
+    let mut stale = preparation.clone();
+    stale.assignment_revision = Revision::new(2);
+    assert!(matches!(
+        fixture
+            .store
+            .assign_task(envelope.clone(), caller.clone(), stale),
+        Err(StoreError::StaleFence { .. })
+    ));
+    fixture.assert_assignment_pending();
+    fixture
+        .store
+        .assign_task(envelope, caller, preparation)
+        .unwrap();
+}
+
+#[test]
+fn rolls_back_assignment_and_retries_the_same_command() {
+    let (_directory, fixture) = Fixture::new(true);
+    let (envelope, caller, preparation) = fixture.prepared_assignment();
+    fixture.cutpoint.0.store(true, Ordering::SeqCst);
+    assert!(matches!(
+        fixture
+            .store
+            .assign_task(envelope.clone(), caller.clone(), preparation.clone()),
+        Err(StoreError::CutpointInjected { .. })
+    ));
+    fixture.assert_assignment_pending();
+    assert!(matches!(
+        fixture
+            .store
+            .assign_task(envelope, caller, preparation)
+            .unwrap(),
+        CommitOutcome::Committed(_)
+    ));
+}
+
+#[test]
+fn commits_assignment_and_queues_the_exact_invocation() {
+    let (_directory, fixture) = Fixture::new(true);
+    let (mut envelope, caller, preparation) = fixture.prepared_assignment();
+    let outcome = fixture
+        .store
+        .assign_task(envelope.clone(), caller.clone(), preparation.clone())
+        .unwrap();
+    assert!(matches!(outcome, CommitOutcome::Committed(_)));
+    assert_eq!(outcome.receipt().new_revision, Revision::new(2));
+    assert_eq!(
+        outcome.receipt().result_ref.as_deref(),
+        Some(format!("invocation:{}", preparation.invocation_id).as_str())
+    );
+    envelope.request_id = RequestId::from_u128(0xDEF);
+    let replay = fixture
+        .store
+        .assign_task(envelope, caller, preparation.clone())
+        .unwrap();
+    assert!(matches!(replay, CommitOutcome::IdempotentReplay(_)));
+    assert_eq!(outcome.receipt(), replay.receipt());
+
+    fixture
+        .store
+        .configure_execution_pool(ExecutionPoolParams::default())
+        .unwrap();
+    let pool_id = fixture.store.global_execution_pool_id().unwrap();
+    let snapshot = fixture.store.execution_admission_snapshot(pool_id).unwrap();
+    assert_eq!(snapshot.queued.len(), 1);
+    assert_eq!(
+        snapshot.queued.first().unwrap().unit,
+        AdmissionUnit::Invocation(preparation.invocation_id)
+    );
+    assert!(snapshot.active.is_empty());
+    fixture.store.read_snapshot(|conn, _| {
+        let lineage: (String, String, String, String, String, String) = conn.query_row(
+            "SELECT i.task_id, i.run_id, i.step_id, i.effective_bundle_hash, t.state, s.state
+             FROM invocations i JOIN tasks t ON t.task_id=i.task_id
+             JOIN step_instances s ON s.step_id=i.step_id
+             WHERE i.invocation_id=?1 AND i.state='queued'",
+            [preparation.invocation_id.to_string()],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?)),
+        )?;
+        assert_eq!(lineage, (
+            fixture.plan.task_id.to_string(), fixture.run.to_string(), fixture.plan.step_id.to_string(),
+            preparation.effective_bundle_hash.to_string(), "queued".to_owned(), "queued".to_owned(),
+        ));
+        let committed: (i64, i64, i64) = conn.query_row(
+            "SELECT
+                (SELECT COUNT(*) FROM invocations WHERE task_id=?1),
+                (SELECT COUNT(*) FROM events WHERE causation_receipt_id=?2
+                    AND event_type IN ('TaskAssigned', 'InvocationQueued')),
+                (SELECT COUNT(*) FROM object_references WHERE owner_kind='invocation' AND owner_id=?3 AND state='live')",
+            [fixture.plan.task_id.to_string(), outcome.receipt().receipt_id.to_string(), preparation.invocation_id.to_string()],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )?;
+        assert_eq!(committed, (1, 2, 2));
+        Ok(())
+    }).unwrap();
 }

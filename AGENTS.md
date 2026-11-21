@@ -80,6 +80,6 @@ push sur `main`, push forcé, tag, publication ou release ; appel payant à un m
 
 ## 10. Environnement de ce poste
 
-- Le dépôt est sur un **partage réseau SMB** : placer `CARGO_TARGET_DIR` sur disque local (par exemple `$HOME/Library/Caches/unleash/target`), créer bases SQLite, sockets, PTY et dépôts Git de test sous `$TMPDIR`, jamais dans le dépôt ; `git config core.fileMode false`.
-- Rust est installé par rustup dans `~/.cargo/bin` (rustc 1.94.1) : si `cargo` est introuvable, ajouter ce répertoire au `PATH` de la commande.
+- **Rust local** exclusivement dans Docker selon les [règles Rust](.claude/rules/rust.md#exécution-locale-dans-docker). Les contrôles natifs macOS passent par un runner dédié.
+- Le dépôt est sur un **partage réseau SMB**. Conserver `git config core.fileMode false`.
 - Respecter les consignes shell globales de l'utilisateur lorsqu'elles existent (préfixe de commande imposé).
