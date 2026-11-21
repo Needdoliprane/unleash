@@ -2314,6 +2314,27 @@ impl UnleashStore {
         })
     }
 
+    /// Lit un run de la mission et son watermark dans une même transaction.
+    ///
+    /// # Errors
+    /// Refuse une portée invisible ou un manifeste attendu indisponible.
+    pub fn get_run_snapshot(
+        &self,
+        run: unleash_domain::RunId,
+        project: ProjectId,
+        allowed_projects: Option<&HashSet<ProjectId>>,
+    ) -> Result<SnapshotProjection<crate::WorkflowRunProjection>, StoreError> {
+        self.project_snapshot(|conn| {
+            crate::workflow_run_projection::get_run_conn(
+                conn,
+                self.config(),
+                run,
+                project,
+                allowed_projects,
+            )
+        })
+    }
+
     /// Lit une invocation, une fenêtre de ses tentatives et leur watermark transactionnel.
     ///
     /// # Errors

@@ -1,14 +1,14 @@
 //! Commit a prepared workflow run and its effective plan together.
 
-use rusqlite::{Connection, Transaction, params};
+use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use unleash_domain::{
     DaemonEpoch, DaemonMode, MissionId, ProjectId, Revision, RunId, Sha256Digest, TimestampMs,
 };
 use unleash_protocol::{
-    CommandEnvelope, CommandReceipt, EventCausationKind, ReceiptState, Sensitivity,
-    canonicalize_to_vec, compute_command_digest_v2,
+    CommandEnvelope, CommandReceipt, CreateRunPayload, CreateRunSource, EventCausationKind,
+    ReceiptState, Sensitivity, canonicalize_to_vec, compute_command_digest_v2,
 };
 
 use crate::{
@@ -31,7 +31,7 @@ const COMMAND: &str = "CreateRun";
 const OWNER_KIND: &str = "workflow_run";
 const PLAN_FIELD: &str = "effective_bundle_hash";
 
-#[derive(Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Inputs {
     mission_id: MissionId,
@@ -42,11 +42,75 @@ struct Inputs {
     selection_reason: String,
 }
 
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum Request {
+    Operational(CreateRunPayload),
+    Prepared(Inputs),
+}
+
+impl Request {
+    fn mission_id(&self) -> MissionId {
+        match self {
+            Self::Operational(request) => request.mission_id,
+            Self::Prepared(request) => request.mission_id,
+        }
+    }
+
+    fn expected_mission_revision(&self) -> Option<Revision> {
+        match self {
+            Self::Operational(_) => None,
+            Self::Prepared(request) => Some(request.mission_revision),
+        }
+    }
+
+    fn normalize(
+        &self,
+        conn: &Connection,
+        config: &StoreConfig,
+        mission_revision: Revision,
+    ) -> Result<Inputs, StoreError> {
+        match self {
+            Self::Prepared(request) => Ok(request.clone()),
+            Self::Operational(request) => {
+                let CreateRunSource::WorkflowVersion {
+                    id,
+                    version,
+                    digest,
+                } = &request.source;
+                let workflow_version_id = workflow_run_plan::resolve_workflow_version(
+                    conn, config, id, *version, *digest,
+                )?;
+                Ok(Inputs {
+                    mission_id: request.mission_id,
+                    mission_revision,
+                    workflow_version_id,
+                    scope_manifest_hash: request.scope_ref,
+                    predecessor_run_id: request.predecessor_run_id,
+                    selection_reason: request.selection_reason.clone(),
+                })
+            }
+        }
+    }
+
+    fn has_selection(&self) -> bool {
+        match self {
+            Self::Operational(payload) => !payload.selection_reason.trim().is_empty(),
+            Self::Prepared(payload) => {
+                !payload.workflow_version_id.trim().is_empty()
+                    && !payload.selection_reason.trim().is_empty()
+            }
+        }
+    }
+}
+
 /// Verified publication captured by the Store before entering its writer.
 #[derive(Debug, Clone)]
 pub struct PreparedRunPublication {
     caller: CallerAuthority,
     daemon_epoch: DaemonEpoch,
+    inputs: Inputs,
+    command_digest: Sha256Digest,
     plan: RunPlan,
     reference: PublishObjectReferenceRequest,
 }
@@ -69,13 +133,13 @@ impl UnleashStore {
         envelope
             .actor_ref
             .get_or_insert_with(|| caller.actor_id.to_string());
-        let inputs = decode_inputs(&envelope, &caller)?;
+        let request = decode_request(&envelope, &caller)?;
         let digest = compute_command_digest_v2(&envelope)?;
         let replay = || self.read_snapshot(|conn, _| replay(conn, &envelope, &caller, digest));
-        let (plan, epoch) = if let Some(receipt) = replay()? {
+        let (inputs, plan, epoch) = if let Some(receipt) = replay()? {
             return Ok(CommitOutcome::IdempotentReplay(receipt));
         } else {
-            match self.resolve_run_plan(&envelope, &caller, &inputs) {
+            match self.resolve_run_plan(&envelope, &caller, &request) {
                 Ok(prepared) => prepared,
                 Err(error) => {
                     return replay()?.map_or(Err(error), |receipt| {
@@ -118,6 +182,8 @@ impl UnleashStore {
                     PreparedRunPublication {
                         caller,
                         daemon_epoch: epoch,
+                        inputs,
+                        command_digest: digest,
                         plan,
                         reference: PublishObjectReferenceRequest {
                             pin_id: handle.pin_id,
@@ -183,11 +249,19 @@ impl UnleashStore {
         &self,
         envelope: &CommandEnvelope,
         caller: &CallerAuthority,
-        inputs: &Inputs,
-    ) -> Result<(RunPlan, DaemonEpoch), StoreError> {
+        request: &Request,
+    ) -> Result<(Inputs, RunPlan, DaemonEpoch), StoreError> {
         self.read_snapshot(|conn, _| {
             let daemon = read_daemon_state_conn(conn)?;
-            let project = verify_target(conn, &daemon, envelope, caller, inputs)?;
+            let (project, mission_revision) = verify_target(
+                conn,
+                &daemon,
+                envelope,
+                caller,
+                request.mission_id(),
+                request.expected_mission_revision(),
+            )?;
+            let inputs = request.normalize(conn, self.config(), mission_revision)?;
             let plan = workflow_run_plan::resolve(
                 conn,
                 self.config(),
@@ -199,7 +273,7 @@ impl UnleashStore {
                     scope_manifest_hash: inputs.scope_manifest_hash,
                 },
             )?;
-            Ok((plan, daemon.daemon_epoch))
+            Ok((inputs, plan, daemon.daemon_epoch))
         })
     }
 }
@@ -214,24 +288,23 @@ fn replay(
     classify_command_replay(conn, &daemon, &caller.actor_id, envelope, digest)
 }
 
-fn decode_inputs(
+fn decode_request(
     envelope: &CommandEnvelope,
     caller: &CallerAuthority,
-) -> Result<Inputs, StoreError> {
+) -> Result<Request, StoreError> {
     require_human_decider(caller, COMMAND)?;
-    let inputs: Inputs = serde_json::from_value(Value::Object(envelope.payload.clone()))
+    let request: Request = serde_json::from_value(Value::Object(envelope.payload.clone()))
         .map_err(|_| invalid("invalid workflow run preparation payload"))?;
     if envelope.command_type != COMMAND
         || envelope.actor_ref.as_deref() != Some(caller.actor_id.as_str())
         || envelope.aggregate_id.is_nil()
         || envelope.project_id.is_none()
-        || inputs.mission_id.as_uuid().is_nil()
-        || inputs.workflow_version_id.trim().is_empty()
-        || inputs.selection_reason.trim().is_empty()
+        || request.mission_id().as_uuid().is_nil()
+        || !request.has_selection()
     {
         return Err(invalid("inconsistent workflow run preparation"));
     }
-    Ok(inputs)
+    Ok(request)
 }
 
 pub(crate) fn validate_identity(req: &CommitCommandRequest) -> Result<(), StoreError> {
@@ -242,9 +315,12 @@ pub(crate) fn validate_identity(req: &CommitCommandRequest) -> Result<(), StoreE
             Ok(())
         };
     };
-    let inputs = decode_inputs(&req.envelope, &publication.caller)?;
+    let inputs = &publication.inputs;
     let plan = &publication.plan;
     if req.actor_id != publication.caller.actor_id
+        || req.envelope.actor_ref.as_deref() != Some(publication.caller.actor_id.as_str())
+        || req.envelope.command_type != COMMAND
+        || compute_command_digest_v2(&req.envelope)? != publication.command_digest
         || req.target_aggregate != AggregateKind::WorkflowRun
         || req.receipt_state != ReceiptState::Completed
         || req.operation_id.is_some()
@@ -273,8 +349,9 @@ fn verify_target(
     daemon: &DaemonStateRow,
     envelope: &CommandEnvelope,
     caller: &CallerAuthority,
-    inputs: &Inputs,
-) -> Result<ProjectId, StoreError> {
+    mission: MissionId,
+    expected_revision: Option<Revision>,
+) -> Result<(ProjectId, Revision), StoreError> {
     if daemon.authority_generation != envelope.authority_generation {
         return Err(StoreError::StaleAuthorityGeneration {
             expected: daemon.authority_generation,
@@ -290,27 +367,30 @@ fn verify_target(
     let project = envelope
         .project_id
         .ok_or_else(|| invalid("run preparation requires a project"))?;
-    let revision = i64::try_from(inputs.mission_revision.as_u64())
-        .map_err(|_| invalid("mission revision out of range"))?;
-    let current: bool = conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM missions m
+    let stored_revision: i64 = conn
+        .query_row(
+            "SELECT m.revision FROM missions m
          JOIN projects p ON p.project_id=m.project_id
          JOIN principals u ON u.principal_id=m.owner_user_id
-         WHERE m.mission_id=?1 AND m.revision=?2 AND m.project_id=?3
+         WHERE m.mission_id=?1 AND m.project_id=?2
             AND m.state IN ('ready','active') AND m.owner_kind='user' AND p.state='active'
-            AND u.actor_id=?4 AND u.principal_kind='user' AND u.state='active')",
-        params![
-            inputs.mission_id.to_string(),
-            revision,
-            project.to_string(),
-            caller.actor_id.as_str()
-        ],
-        |row| row.get(0),
-    )?;
-    if !current {
-        return Err(invalid("mission or mandate unavailable at that revision"));
+            AND u.actor_id=?3 AND u.principal_kind='user' AND u.state='active'",
+            params![
+                mission.to_string(),
+                project.to_string(),
+                caller.actor_id.as_str()
+            ],
+            |row| row.get(0),
+        )
+        .optional()?
+        .ok_or_else(|| invalid("mission unavailable to this project and owner"))?;
+    let current = Revision::new(u64::try_from(stored_revision).map_err(|_| {
+        StoreError::InvariantViolation("invalid persisted mission revision".to_owned())
+    })?);
+    if expected_revision.is_some_and(|expected| expected != current) {
+        return Err(invalid("mission mandate revision changed"));
     }
-    Ok(project)
+    Ok((project, current))
 }
 
 pub(crate) fn commit_tx(
@@ -320,8 +400,15 @@ pub(crate) fn commit_tx(
     publication: &PreparedRunPublication,
     events: &mut Vec<EventAppendSpec>,
 ) -> Result<Revision, StoreError> {
-    let inputs = decode_inputs(envelope, &publication.caller)?;
-    let project = verify_target(tx, daemon, envelope, &publication.caller, &inputs)?;
+    let inputs = &publication.inputs;
+    let (project, _) = verify_target(
+        tx,
+        daemon,
+        envelope,
+        &publication.caller,
+        inputs.mission_id,
+        Some(inputs.mission_revision),
+    )?;
     if publication.daemon_epoch != daemon.daemon_epoch {
         return Err(StoreError::StaleFence {
             message: "prepared run crosses daemon epochs".to_owned(),
@@ -335,6 +422,18 @@ pub(crate) fn commit_tx(
         Some(project),
     )?;
     publication.plan.revalidate(tx)?;
+    if let Some(predecessor) = inputs.predecessor_run_id {
+        let same_mission: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM workflow_runs WHERE run_id=?1 AND mission_id=?2)",
+            params![predecessor.to_string(), inputs.mission_id.to_string()],
+            |row| row.get(0),
+        )?;
+        if !same_mission {
+            return Err(StoreError::NotFound(
+                "Run prédécesseur absent de la mission".to_owned(),
+            ));
+        }
+    }
     let run = RunId::from_uuid(envelope.aggregate_id);
     let revision = insert_workflow_run(
         tx,

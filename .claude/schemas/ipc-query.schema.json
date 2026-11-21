@@ -45,6 +45,36 @@
   },
   "allOf": [
     {
+      "if": {
+        "properties": {
+          "query_type": {
+            "const": "GetRun"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "project_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "payload": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "run_id"
+            ],
+            "properties": {
+              "run_id": {
+                "type": "string",
+                "format": "uuid"
+              }
+            }
+          }
+        }
+      }
+    },
+    {
       "if": { "properties": { "query_type": { "const": "GetAgent" } } },
       "then": {
         "properties": {

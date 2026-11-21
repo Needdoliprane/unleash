@@ -17,6 +17,73 @@
     "payload"
   ],
   "$defs": {
+    "create_operational_run": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "mission_id",
+        "source",
+        "purpose",
+        "selection_reason",
+        "scope_ref"
+      ],
+      "properties": {
+        "mission_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "source": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "id",
+            "version",
+            "digest"
+          ],
+          "properties": {
+            "kind": {
+              "const": "workflow_version"
+            },
+            "id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "version": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 4294967295
+            },
+            "digest": {
+              "type": "string",
+              "pattern": "^sha256:[0-9a-f]{64}$"
+            }
+          }
+        },
+        "purpose": {
+          "const": "operational"
+        },
+        "predecessor_run_id": {
+          "anyOf": [
+            {
+              "type": "string",
+              "format": "uuid"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "selection_reason": {
+          "type": "string",
+          "minLength": 1
+        },
+        "scope_ref": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        }
+      }
+    },
     "assign_task": {
       "type": "object",
       "additionalProperties": false,
@@ -502,6 +569,26 @@
     }
   },
   "allOf": [
+    {
+      "if": {
+        "properties": {
+          "command_type": {
+            "const": "CreateRun"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "project_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "payload": {
+            "$ref": "#/$defs/create_operational_run"
+          }
+        }
+      }
+    },
     {
       "if": { "properties": { "command_type": { "const": "AssignTask" } } },
       "then": { "properties": { "payload": { "$ref": "#/$defs/assign_task" } } }

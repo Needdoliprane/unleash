@@ -147,13 +147,8 @@ fn verify_run(
     plan: &WorkflowTaskActivationPlan,
 ) -> Result<RunBinding, StoreError> {
     let project = envelope.project_id.map(|project| project.to_string());
-    let (run, definition_hash, bundle_hash): (RunBinding, String, String) = conn.query_row(
-        "SELECT r.mission_id,r.workflow_version_id,r.revision,v.content_hash,r.effective_bundle_hash,
-                (EXISTS (SELECT 1 FROM object_references rr
-                 WHERE rr.owner_kind='workflow_run' AND rr.owner_id=r.run_id
-                   AND rr.source_field='effective_bundle_hash')
-                 OR EXISTS (SELECT 1 FROM command_receipts c
-                 WHERE c.aggregate_id=r.run_id AND c.command_type='CreateRun'))
+    let (mut run, definition_hash, bundle_hash): (RunBinding, String, String) = conn.query_row(
+        "SELECT r.mission_id,r.workflow_version_id,r.revision,v.content_hash,r.effective_bundle_hash
            FROM workflow_runs r
            JOIN missions m ON m.mission_id=r.mission_id
            JOIN projects p ON p.project_id=m.project_id
@@ -164,7 +159,7 @@ fn verify_run(
                  OR (r.purpose='evaluation' AND v.visibility='qualification_only'))",
         params![envelope.aggregate_id.to_string(), project],
         |row| Ok((
-            RunBinding { mission_id: row.get(0)?, version_id: row.get(1)?, revision: row.get(2)?, has_manifest: row.get(5)? },
+            RunBinding { mission_id: row.get(0)?, version_id: row.get(1)?, revision: row.get(2)?, has_manifest: false },
             row.get(3)?,
             row.get(4)?,
         )),
@@ -199,6 +194,8 @@ fn verify_run(
             "run definition is not retained by the pinned workflow version".to_owned(),
         ));
     }
+    run.has_manifest =
+        crate::workflow_run_plan::has_committed_plan(conn, &envelope.aggregate_id.to_string())?;
     if run.has_manifest {
         crate::workflow_run_plan::require_run_manifest(
             conn,
