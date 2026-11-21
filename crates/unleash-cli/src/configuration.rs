@@ -24,17 +24,45 @@ pub struct ConfigurationArgs {
     /// Révision de la configuration que cette définition remplace.
     #[arg(long)]
     expected_revision: u64,
+    #[command(flatten)]
+    identity: ConfigurationCommandIdentity,
+}
+
+#[derive(Debug, Args)]
+pub(super) struct ConfigurationCommandIdentity {
     /// Identifiant stable pour l'inspection ou le rejeu d'une commande.
     #[arg(long, requires = "authority_generation")]
     command_id: Option<Uuid>,
-    /// Lignée d'origine pour rejouer le même fichier et la même révision.
+    /// Lignée de la commande d'origine, à conserver pour le rejeu.
     #[arg(long, requires = "command_id")]
     authority_generation: Option<Uuid>,
+}
+
+impl ConfigurationCommandIdentity {
+    pub(super) fn resolve(
+        &self,
+        current_generation: AuthorityGeneration,
+    ) -> Result<(CommandId, AuthorityGeneration), CliError> {
+        match (self.command_id, self.authority_generation) {
+            (None, None) => Ok((CommandId::from_uuid(next_uuid()), current_generation)),
+            (Some(command_id), Some(generation)) => Ok((
+                CommandId::from_uuid(command_id),
+                AuthorityGeneration::from_uuid(generation),
+            )),
+            _ => Err(CliError::InvalidArgument(
+                "Associer --command-id à --authority-generation pour fixer l'identité".to_owned(),
+            )),
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
 pub(super) enum ConfigurationTarget {
     Project(Uuid),
+    Provider {
+        profile_id: Uuid,
+        project_id: Option<ProjectId>,
+    },
     TerminalRuntime,
 }
 
@@ -62,18 +90,7 @@ impl ConfigurationArgs {
         mut definition: Map<String, Value>,
         current_generation: AuthorityGeneration,
     ) -> Result<CommandEnvelope, CliError> {
-        let (command_id, generation) = match (self.command_id, self.authority_generation) {
-            (None, None) => (next_uuid(), current_generation),
-            (Some(command), Some(generation)) => {
-                (command, AuthorityGeneration::from_uuid(generation))
-            }
-            _ => {
-                return Err(CliError::InvalidArgument(
-                    "Associer --command-id à --authority-generation pour fixer l'identité"
-                        .to_owned(),
-                ));
-            }
-        };
+        let (command_id, generation) = self.identity.resolve(current_generation)?;
         let (operation, aggregate_id, project_id) = match target {
             ConfigurationTarget::Project(id) => {
                 if !definition.contains_key("primary_root_path") {
@@ -97,6 +114,10 @@ impl ConfigurationArgs {
                 }
                 ("ReviseProject", id, Some(ProjectId::from_uuid(id)))
             }
+            ConfigurationTarget::Provider {
+                profile_id,
+                project_id,
+            } => ("SetProviderProfile", profile_id, project_id),
             ConfigurationTarget::TerminalRuntime => {
                 definition = Map::from_iter([
                     ("scope_kind".to_owned(), json!("user")),
@@ -109,7 +130,7 @@ impl ConfigurationArgs {
         Ok(CommandEnvelope {
             protocol_version: ProtocolVersion,
             request_id: RequestId::from_uuid(next_uuid()),
-            command_id: CommandId::from_uuid(command_id),
+            command_id,
             authority_generation: generation,
             actor_ref: None,
             project_id,
@@ -132,20 +153,28 @@ impl ConfigurationArgs {
                 CliError::InvalidArgument(format!("Lecture de configuration interrompue ({error})"))
             })??;
         let command = self.command(target, definition, client.hello().authority_generation)?;
-        let receipt = client.send_command(&command).await.map_err(|source| {
-            if matches!(&source, ClientError::Remote(error) if error.code != ErrorCode::OutcomeUnknown) {
-                CliError::Client(source)
-            } else {
-                CliError::ConfigurationReceiptMissing {
-                    aggregate_id: command.aggregate_id,
-                    command_id: command.command_id,
-                    authority_generation: command.authority_generation,
-                    source: Box::new(source),
-                }
-            }
-        })?;
-        Ok(json!({"authority_generation": command.authority_generation, "receipt": receipt}))
+        submit_configuration_command(client, &command).await
     }
+}
+
+pub(super) async fn submit_configuration_command(
+    client: &mut UnleashClient,
+    command: &CommandEnvelope,
+) -> Result<Value, CliError> {
+    let receipt = client.send_command(command).await.map_err(|source| {
+        if matches!(&source, ClientError::Remote(error) if error.code != ErrorCode::OutcomeUnknown)
+        {
+            CliError::Client(source)
+        } else {
+            CliError::ConfigurationReceiptMissing {
+                aggregate_id: command.aggregate_id,
+                command_id: command.command_id,
+                authority_generation: command.authority_generation,
+                source: Box::new(source),
+            }
+        }
+    })?;
+    Ok(json!({"authority_generation": command.authority_generation, "receipt": receipt}))
 }
 
 pub(super) async fn read_terminal_settings(client: &mut UnleashClient) -> Result<Value, CliError> {

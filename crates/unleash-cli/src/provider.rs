@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-//! Consultation d'une version exacte de profil fournisseur.
+//! Configuration et consultation des profils fournisseurs.
 
 use clap::{Args, Subcommand};
 use serde_json::{Map, Value, json};
@@ -8,13 +8,29 @@ use unleash_domain::{ProjectId, RequestId};
 use unleash_protocol::{ProtocolVersion, QueryEnvelope};
 use uuid::Uuid;
 
+use crate::configuration::{ConfigurationArgs, ConfigurationTarget};
 use crate::{CliError, next_uuid};
 
 /// Sous-commandes de `unleash provider`.
 #[derive(Debug, Subcommand)]
 pub enum ProviderCommand {
+    /// Enregistre une version du profil à partir d'un fichier JSON.
+    Set(ProviderSetArgs),
     /// Affiche le profil versionné et les observations enregistrées par le daemon.
     Show(ProviderProfileArgs),
+}
+
+/// Identité et définition complète du profil à enregistrer.
+#[derive(Debug, Args)]
+pub struct ProviderSetArgs {
+    /// UUID stable du profil à créer ou à réviser.
+    #[arg(long, value_parser = parse_profile_id)]
+    profile_id: Uuid,
+    /// Projet du profil. Omettre pour un profil utilisateur.
+    #[arg(long)]
+    project_id: Option<Uuid>,
+    #[command(flatten)]
+    configuration: ConfigurationArgs,
 }
 
 /// Version du profil à consulter et portée de sa configuration.
@@ -61,6 +77,18 @@ pub(super) async fn run_provider_command(
     action: &ProviderCommand,
 ) -> Result<Value, CliError> {
     match action {
+        ProviderCommand::Set(profile) => {
+            profile
+                .configuration
+                .apply(
+                    client,
+                    ConfigurationTarget::Provider {
+                        profile_id: profile.profile_id,
+                        project_id: profile.project_id.map(ProjectId::from_uuid),
+                    },
+                )
+                .await
+        }
         ProviderCommand::Show(profile) => {
             let response = client.query(&profile.query()).await?;
             Ok(json!({"watermark": response.watermark, "result": response.result}))
