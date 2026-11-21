@@ -314,6 +314,8 @@ pub enum CommandMutation {
         /// Hash du bundle effectif.
         effective_bundle_hash: Sha256Digest,
     },
+    /// Prépare le run et publie son plan effectif dans la transaction du reçu.
+    CreatePreparedWorkflowRun(Box<crate::PreparedRunPublication>),
     /// Fait transiter un `WorkflowRun` (`StartRun`, `PauseRun`, `ResumeRun`, `CancelRun`, etc.).
     TransitionWorkflowRun {
         /// Identifiant du run.
@@ -990,6 +992,7 @@ pub(crate) fn tx_commit_command(
     crate::workflow_activation::validate_identity(req)?;
     crate::task_assignment::validate_identity(req)?;
     crate::agent_creation::validate_identity(req)?;
+    crate::workflow_run_creation::validate_identity(req)?;
     crate::terminal_allocations::validate_command(tx, req)?;
 
     // Étape 2 : Rechercher `(actor_id, command_id)` dans `command_receipts`
@@ -1493,6 +1496,87 @@ pub(crate) fn ensure_scope_not_frozen_tx(
     Ok(())
 }
 
+#[derive(Clone, Copy)]
+pub(crate) struct NewWorkflowRun<'a> {
+    pub run_id: RunId,
+    pub mission_id: MissionId,
+    pub workflow_version_id: &'a str,
+    pub purpose: &'a str,
+    pub candidate_ref: Option<&'a str>,
+    pub predecessor_run_id: Option<RunId>,
+    pub selection_reason: &'a str,
+    pub effective_bundle_hash: Sha256Digest,
+    pub expected_revision: Revision,
+    pub command_id: CommandId,
+    pub now: TimestampMs,
+}
+
+pub(crate) fn insert_workflow_run(
+    tx: &Transaction<'_>,
+    input: NewWorkflowRun<'_>,
+) -> Result<Revision, StoreError> {
+    let NewWorkflowRun {
+        run_id,
+        mission_id,
+        workflow_version_id,
+        purpose,
+        candidate_ref,
+        predecessor_run_id,
+        selection_reason,
+        effective_bundle_hash,
+        expected_revision: expected_rev,
+        command_id: cmd_id,
+        now: now_ms,
+    } = input;
+    ensure_creation_rev(expected_rev, cmd_id)?;
+    if let Some(pred) = predecessor_run_id {
+        let pred_state_str: Option<String> = tx
+            .query_row(
+                "SELECT state FROM workflow_runs WHERE run_id = ?1",
+                [pred.to_string()],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(StoreError::from_rusqlite)?;
+        let Some(ps) = pred_state_str else {
+            return Err(StoreError::NotFound(format!("run prédécesseur {pred}")));
+        };
+        let pred_state = parse_run_state(&ps)?;
+        if !pred_state.is_terminal() {
+            return Err(StoreError::PredecessorNotTerminal { state: ps });
+        }
+        let succ_cnt: i64 = tx
+            .query_row(
+                "SELECT COUNT(*) FROM workflow_runs WHERE predecessor_run_id = ?1",
+                [pred.to_string()],
+                |r| r.get(0),
+            )
+            .map_err(StoreError::from_rusqlite)?;
+        if succ_cnt > 0 {
+            return Err(StoreError::SuccessorExists);
+        }
+    }
+    tx.execute(
+        "INSERT INTO workflow_runs
+         (run_id, mission_id, workflow_version_id, purpose, candidate_ref, predecessor_run_id,
+          selection_reason, selected_via_alias, effective_bundle_hash, state, revision, started_at_ms, ended_at_ms)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL, ?8, 'prepared', 1, ?9, NULL)",
+        rusqlite::params![
+            run_id.to_string(),
+            mission_id.to_string(),
+            workflow_version_id,
+            purpose,
+            candidate_ref,
+            predecessor_run_id.map(|r| r.to_string()),
+            selection_reason,
+            effective_bundle_hash.as_prefixed_str(),
+            now_ms.as_i64()
+        ],
+    )
+    .map_err(StoreError::from_rusqlite)?;
+    Ok(Revision::new(1))
+}
+
 #[expect(
     clippy::too_many_lines,
     clippy::too_many_arguments,
@@ -1904,54 +1988,30 @@ fn apply_command_mutation(
             predecessor_run_id,
             selection_reason,
             effective_bundle_hash,
-        } => {
-            ensure_creation_rev(expected_rev, cmd_id)?;
-            if let Some(pred) = predecessor_run_id {
-                let pred_state_str: Option<String> = tx
-                    .query_row(
-                        "SELECT state FROM workflow_runs WHERE run_id = ?1",
-                        [pred.to_string()],
-                        |r| r.get(0),
-                    )
-                    .optional()
-                    .map_err(StoreError::from_rusqlite)?;
-                let Some(ps) = pred_state_str else {
-                    return Err(StoreError::NotFound(format!("run prédécesseur {pred}")));
-                };
-                let pred_state = parse_run_state(&ps)?;
-                if !pred_state.is_terminal() {
-                    return Err(StoreError::PredecessorNotTerminal { state: ps });
-                }
-                let succ_cnt: i64 = tx
-                    .query_row(
-                        "SELECT COUNT(*) FROM workflow_runs WHERE predecessor_run_id = ?1",
-                        [pred.to_string()],
-                        |r| r.get(0),
-                    )
-                    .map_err(StoreError::from_rusqlite)?;
-                if succ_cnt > 0 {
-                    return Err(StoreError::SuccessorExists);
-                }
-            }
-            tx.execute(
-                "INSERT INTO workflow_runs
-                 (run_id, mission_id, workflow_version_id, purpose, candidate_ref, predecessor_run_id,
-                  selection_reason, selected_via_alias, effective_bundle_hash, state, revision, started_at_ms, ended_at_ms)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL, ?8, 'prepared', 1, ?9, NULL)",
-                rusqlite::params![
-                    run_id.to_string(),
-                    mission_id.to_string(),
-                    workflow_version_id,
-                    purpose,
-                    candidate_ref,
-                    predecessor_run_id.map(|r| r.to_string()),
-                    selection_reason,
-                    effective_bundle_hash.as_prefixed_str(),
-                    now_ms.as_i64()
-                ],
+        } => insert_workflow_run(
+            tx,
+            NewWorkflowRun {
+                run_id: *run_id,
+                mission_id: *mission_id,
+                workflow_version_id,
+                purpose,
+                candidate_ref: candidate_ref.as_deref(),
+                predecessor_run_id: *predecessor_run_id,
+                selection_reason,
+                effective_bundle_hash: *effective_bundle_hash,
+                expected_revision: expected_rev,
+                command_id: cmd_id,
+                now: now_ms,
+            },
+        ),
+        CommandMutation::CreatePreparedWorkflowRun(publication) => {
+            crate::workflow_run_creation::commit_tx(
+                tx,
+                (config, daemon, now_ms),
+                envelope,
+                publication,
+                generated_events,
             )
-            .map_err(StoreError::from_rusqlite)?;
-            Ok(Revision::new(1))
         }
         CommandMutation::TransitionWorkflowRun {
             run_id,

@@ -138,6 +138,7 @@ struct RunBinding {
     mission_id: String,
     version_id: String,
     revision: i64,
+    has_manifest: bool,
 }
 
 fn verify_run(
@@ -147,7 +148,12 @@ fn verify_run(
 ) -> Result<RunBinding, StoreError> {
     let project = envelope.project_id.map(|project| project.to_string());
     let (run, definition_hash, bundle_hash): (RunBinding, String, String) = conn.query_row(
-        "SELECT r.mission_id,r.workflow_version_id,r.revision,v.content_hash,r.effective_bundle_hash
+        "SELECT r.mission_id,r.workflow_version_id,r.revision,v.content_hash,r.effective_bundle_hash,
+                (EXISTS (SELECT 1 FROM object_references rr
+                 WHERE rr.owner_kind='workflow_run' AND rr.owner_id=r.run_id
+                   AND rr.source_field='effective_bundle_hash')
+                 OR EXISTS (SELECT 1 FROM command_receipts c
+                 WHERE c.aggregate_id=r.run_id AND c.command_type='CreateRun'))
            FROM workflow_runs r
            JOIN missions m ON m.mission_id=r.mission_id
            JOIN projects p ON p.project_id=m.project_id
@@ -158,7 +164,7 @@ fn verify_run(
                  OR (r.purpose='evaluation' AND v.visibility='qualification_only'))",
         params![envelope.aggregate_id.to_string(), project],
         |row| Ok((
-            RunBinding { mission_id: row.get(0)?, version_id: row.get(1)?, revision: row.get(2)? },
+            RunBinding { mission_id: row.get(0)?, version_id: row.get(1)?, revision: row.get(2)?, has_manifest: row.get(5)? },
             row.get(3)?,
             row.get(4)?,
         )),
@@ -193,6 +199,13 @@ fn verify_run(
             "run definition is not retained by the pinned workflow version".to_owned(),
         ));
     }
+    if run.has_manifest {
+        crate::workflow_run_plan::require_run_manifest(
+            conn,
+            &envelope.aggregate_id.to_string(),
+            plan.effective_bundle_hash,
+        )?;
+    }
     Ok(run)
 }
 
@@ -204,7 +217,7 @@ pub(crate) fn verify_definition(
 ) -> Result<(), StoreError> {
     let plan = decode_plan(&req.envelope)?;
     store.read_snapshot(|conn, _| {
-        verify_run(conn, &req.envelope, &plan)?;
+        let run = verify_run(conn, &req.envelope, &plan)?;
         let bytes = crate::objects::read_verified_object_bytes_conn(
             conn,
             store.config(),
@@ -213,14 +226,25 @@ pub(crate) fn verify_definition(
         let json = std::str::from_utf8(&bytes)
             .map_err(|_| invalid("workflow definition must be UTF-8"))?;
         let definition: Value = from_json_str_strict(json)?;
-        verify_task_node(&definition, &plan)
+        let node = verify_task_node(&definition, &plan)?;
+        if run.has_manifest {
+            crate::workflow_run_plan::verify_activation(
+                conn,
+                store.config(),
+                &run.mission_id,
+                &run.version_id,
+                &plan,
+                node,
+            )?;
+        }
+        Ok(())
     })
 }
 
-fn verify_task_node(
-    definition: &Value,
+fn verify_task_node<'definition>(
+    definition: &'definition Value,
     plan: &WorkflowTaskActivationPlan,
-) -> Result<(), StoreError> {
+) -> Result<&'definition Value, StoreError> {
     if !matches!(
         definition.get("schema_version").and_then(Value::as_str),
         Some("unleash.workflow.v1" | "unleash.workflow.v1.1" | "unleash.workflow.v1.2")
@@ -232,61 +256,64 @@ fn verify_task_node(
             .get("body")
             .ok_or_else(|| invalid("missing workflow body"))?,
     ];
-    let mut maximum = None;
+    let mut matching = None;
     while let Some(node) = pending.pop() {
         let kind = node.get("kind").and_then(Value::as_str);
         if node.get("id").and_then(Value::as_str) == Some(plan.definition_node_id.as_str()) {
-            if maximum.is_some() || kind != Some("task") {
+            if matching.is_some() || kind != Some("task") {
                 return Err(invalid(
                     "workflow activation must reference one exact task node",
                 ));
             }
-            maximum = Some(
-                node.get("max_attempts")
-                    .and_then(Value::as_u64)
-                    .ok_or_else(|| invalid("invalid task attempt limit"))?,
+            let maximum = node
+                .get("max_attempts")
+                .and_then(Value::as_u64)
+                .ok_or_else(|| invalid("invalid task attempt limit"))?;
+            if u64::from(plan.step_attempt) > maximum {
+                return Err(invalid("step attempt above the pinned definition limit"));
+            }
+            matching = Some(node);
+        }
+        push_workflow_children(&mut pending, node);
+    }
+    matching.ok_or_else(|| invalid("task missing from pinned definition"))
+}
+
+pub(crate) fn push_workflow_children<'a>(pending: &mut Vec<&'a Value>, node: &'a Value) {
+    // Traverse DSL child slots only. Task inputs may themselves be JSON
+    // objects but cannot be interpreted as nested execution nodes.
+    let kind = node.get("kind").and_then(Value::as_str);
+    match kind {
+        Some("sequence") => pending.extend(
+            node.get("steps")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten(),
+        ),
+        Some("parallel") => pending.extend(
+            node.get("branches")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten(),
+        ),
+        Some("choice") => {
+            pending.extend(
+                node.get("cases")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|case| case.get("then")),
             );
+            pending.extend(node.get("otherwise"));
         }
-        // Traverse DSL child slots only. Task inputs may themselves be JSON
-        // objects but cannot be interpreted as nested execution nodes.
-        match kind {
-            Some("sequence") => pending.extend(
-                node.get("steps")
-                    .and_then(Value::as_array)
-                    .into_iter()
-                    .flatten(),
-            ),
-            Some("parallel") => pending.extend(
-                node.get("branches")
-                    .and_then(Value::as_array)
-                    .into_iter()
-                    .flatten(),
-            ),
-            Some("choice") => {
-                pending.extend(
-                    node.get("cases")
-                        .and_then(Value::as_array)
-                        .into_iter()
-                        .flatten()
-                        .filter_map(|case| case.get("then")),
-                );
-                pending.extend(node.get("otherwise"));
+        Some("repeat" | "for_each") => {
+            pending.extend(node.get("body"));
+            if kind == Some("for_each") {
+                pending.extend(node.get("after_batch"));
             }
-            Some("repeat" | "for_each") => {
-                pending.extend(node.get("body"));
-                if kind == Some("for_each") {
-                    pending.extend(node.get("after_batch"));
-                }
-            }
-            _ => {}
         }
+        _ => {}
     }
-    if maximum.is_none_or(|maximum| u64::from(plan.step_attempt) > maximum) {
-        return Err(invalid(
-            "task missing from pinned definition or step attempt above its limit",
-        ));
-    }
-    Ok(())
 }
 
 fn resolve_iteration(
