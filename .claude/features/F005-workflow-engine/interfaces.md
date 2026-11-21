@@ -1,24 +1,31 @@
 # F005 — Interfaces proposées
 
 Les libellés d’erreur métier de cette feature sont des `reason_code` dans l’enveloppe canonique [IPC](../../architecture/ipc-and-apis.md), sous une classe commune telle que InvalidArgument, ContractViolation, CapabilityDenied, RevisionConflict ou OutcomeUnknown ; ils ne définissent pas un transport concurrent.
-Toutes les mutations utilisent l'enveloppe commune avec `command_id`, `expected_revision` et acteur résolu serveur. Le payload de création de run est illustratif :
+Toutes les mutations utilisent l'enveloppe commune avec `command_id`, `expected_revision` et acteur résolu serveur. Exemple du payload opérationnel avec des empreintes illustratives.
 
 ```json
 {
-  "mission_id": "mission-feature-12",
-  "source": {"kind": "workflow_version", "id": "workflow.feature", "version": 1, "digest": "sha256:<hex>"},
+  "mission_id": "00000000-0000-4000-8000-000000000120",
+  "source": {
+    "kind": "workflow_version",
+    "id": "workflow.feature",
+    "version": 1,
+    "digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+  },
   "purpose": "operational",
   "predecessor_run_id": null,
   "selection_reason": "Version publiée sélectionnée par le plan de mission",
-  "input_ref": "artifact-input-12",
-  "scope_ref": "scope-feature-12",
-  "budget_ref": "budget-mission-12"
+  "scope_ref": "sha256:2222222222222222222222222222222222222222222222222222222222222222"
 }
 ```
 
 Pour `kind=automation_version`, `source` porte la référence exacte `id`/`version`/`digest` de la version d'automatisation, `data_revision_ref` et `automation_mode` ; paramètres et limites restent dans le payload ([IPC](../../architecture/ipc-and-apis.md)).
 
 `CreateRun` accepte source.kind workflow_version ou automation_version, avec référence exacte et données lorsque applicables, puis retourne run, digest de définition, révision initiale, bindings résolus et slots non liés. Un `predecessor_run_id` désigne un successeur unique (Q-03) : CreateRun est refusé `ResourceBusy/PREDECESSOR_NOT_TERMINAL` (retry_class=after_refresh) tant que le prédécesseur n'est pas terminal, et `InvalidArgument/SUCCESSOR_EXISTS` si ce prédécesseur a déjà un successeur direct. `StartRun` vérifie préconditions et réserve les premiers budgets. Pour un Run `automation_version`, `StartRun` porte le digest de l'`EffectPreview` lu par `GetRun` sur le Run `prepared`, ou le `preview_digest` de `GetSetupPreview` pour une préparation guidée ; un changement de version, de données, de mandat ou de fait référencé invalide ce digest et `StartRun` est refusé `ContractViolation/STALE_EVIDENCE` ([aperçu](../../specs/reusable-automations.md#aperçu-autorisation-et-effets)). `PauseRun`, `ResumeRun` et `CancelRun` produisent un reçu avec état, intention et actions encore en réconciliation. `BindRole` exige slot vierge, référence exacte, discovery receipt et justification ; le retour inclut digests et événements RoleBound/SkillBound.
+
+Le parcours IPC de `CreateRun` pour une source `workflow_version` opérationnelle reçoit dans l’enveloppe le projet, l’ID du run et la révision de création zéro. Il reçoit le triplet exact `id`, `version` et `digest` de la source, la mission, le motif de sélection et le digest `scope_ref` du manifeste retenu à la révision courante de la mission. Le serveur résout la clé persistante à partir de la publication unique pour ce digest et vérifie l’ID logique et la version dans les octets de la définition. Un prédécesseur éventuel relève de la même mission. Le reçu commun référence `workflow-run:<run_id>` et couvre `RunCreated`. Le rejeu utilise le digest de l’enveloppe publique.
+
+`GetRun` lit `run_id` dans le projet de l’enveloppe. Il restitue l’état, la révision, la version et le digest de définition, le digest du plan et les slots fixes ou non liés dans `plan`, avec un watermark transactionnel. Les coordonnées d’un ancien run restent lisibles avec `plan: null` lorsqu’aucun plan de ce format n’a été engagé. La source automation, les références séparées d’entrées et de budget, le démarrage et les détails de progression conservent leurs critères de livraison.
 
 Le port interne de préparation d’un run opérationnel utilise une version de workflow publiée et un manifeste de scopes retenu par la mission à sa révision exacte. Le document de scopes V1 porte `schema_version`, `mission_id`, `mission_revision` et `scopes`. Chaque clé de `scopes` donne `scope_id` et `scope_revision`. La référence d’objet de la mission porte le champ `scope_manifest:<mission_revision>`. Le writer revalide cette révision et la référence avant le commit.
 

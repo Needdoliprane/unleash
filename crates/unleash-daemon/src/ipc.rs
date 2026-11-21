@@ -497,6 +497,7 @@ async fn dispatch_query(
         "GetCommandReceipt" => query_command_receipt(state, session, query).await,
         "GetAgent" => query_agent(state, session, query).await,
         "GetInvocation" => query_invocation(state, session, query).await,
+        "GetRun" => query_workflow_run(state, session, query).await,
         "GetBackupManifest" => query_backup_manifest(state, session, query).await,
         "ReadTerminalLog" => crate::terminal_service::read_log(state, session, query).await,
         "GetProviderProfile" => {
@@ -539,6 +540,30 @@ async fn query_agent(
     })
     .await
     .map_err(|_| internal_ipc_error("Lecture de l’agent interrompue", None))?
+    .map_err(|error| store_error_to_ipc_error(&error, None))?;
+    let (result, cursor) = projection_response(projection)?;
+    Ok(QueryResponse {
+        request_id: query.request_id,
+        watermark: Some(cursor),
+        result,
+    })
+}
+
+async fn query_workflow_run(
+    state: &Arc<DaemonRuntimeState>,
+    session: &AuthenticatedSession,
+    query: QueryEnvelope,
+) -> Result<QueryResponse, IpcError> {
+    let project = query.project_id.ok_or_else(invalid_projection)?;
+    let payload: unleash_protocol::GetRunPayload =
+        serde_json::from_value(Value::Object(query.payload)).map_err(|_| invalid_projection())?;
+    let store = Arc::clone(&state.store);
+    let allowed = session.allowed_projects.clone();
+    let projection = tokio::task::spawn_blocking(move || {
+        store.get_run_snapshot(payload.run_id, project, allowed.as_ref())
+    })
+    .await
+    .map_err(|_| internal_ipc_error("Lecture du run interrompue", None))?
     .map_err(|error| store_error_to_ipc_error(&error, None))?;
     let (result, cursor) = projection_response(projection)?;
     Ok(QueryResponse {
@@ -1213,6 +1238,14 @@ async fn handle_command_frame(
                 return false;
             }
         }
+    } else if cmd.command_type == "CreateRun" {
+        match commit_create_run(Arc::clone(&state.store), session, cmd.clone()).await {
+            Ok(outcome) => (outcome, 1, None, None),
+            Err(ipc) => {
+                let _ = write_json_frame_timeout(stream, &ipc, RESPONSE_WRITE_TIMEOUT).await;
+                return false;
+            }
+        }
     } else if is_provider_profile_command(&cmd) {
         let committed = if cmd.command_type == "SetProviderProfile" {
             crate::provider_profile_service::commit(
@@ -1404,6 +1437,34 @@ async fn commit_task_assignment(
     tokio::task::spawn_blocking(move || store.assign_published_task(command, authority))
         .await
         .map_err(|error| internal_ipc_error(&format!("Join error AssignTask: {error}"), Some(id)))?
+        .map_err(|error| store_error_to_ipc_error(&error, Some(id)))
+}
+
+async fn commit_create_run(
+    store: Arc<UnleashStore>,
+    session: &AuthenticatedSession,
+    command: CommandEnvelope,
+) -> Result<CommitOutcome, IpcError> {
+    let id = command.command_id;
+    serde_json::from_value::<unleash_protocol::CreateRunPayload>(Value::Object(
+        command.payload.clone(),
+    ))
+    .map_err(|_| {
+        IpcError::new(
+            ErrorCode::InvalidArgument,
+            None,
+            "Payload de préparation de run invalide",
+            RetryClass::Never,
+        )
+        .with_command_id(id)
+    })?;
+    let caller = CallerAuthority {
+        actor_id: session.actor_id.clone(),
+        role: CallerRole::HumanOperator,
+    };
+    tokio::task::spawn_blocking(move || store.create_prepared_workflow_run(command, caller))
+        .await
+        .map_err(|error| internal_ipc_error(&format!("Join error CreateRun: {error}"), Some(id)))?
         .map_err(|error| store_error_to_ipc_error(&error, Some(id)))
 }
 

@@ -340,6 +340,49 @@ fn registry_version(
     })
 }
 
+pub(crate) fn resolve_workflow_version(
+    conn: &Connection,
+    config: &StoreConfig,
+    id: &str,
+    version: u32,
+    digest: Sha256Digest,
+) -> Result<String, StoreError> {
+    #[derive(Deserialize)]
+    struct DefinitionIdentity {
+        workflow_id: String,
+        version: u32,
+    }
+    if id.trim().is_empty() || version == 0 {
+        return Err(invalid(
+            "workflow source requires an exact identity and version",
+        ));
+    }
+    let mut statement = conn.prepare(
+        "SELECT v.workflow_version_id FROM workflow_versions v
+         JOIN object_references r ON r.owner_kind='workflow_version'
+            AND r.owner_id=v.workflow_version_id AND r.source_field='content_hash'
+            AND r.object_hash=v.content_hash AND r.state='live'
+         JOIN object_records o ON o.object_hash=r.object_hash AND o.state='live'
+         WHERE v.content_hash=?1 AND v.visibility='published'
+         LIMIT 2",
+    )?;
+    let candidates = statement
+        .query_map([digest.to_string()], |row| row.get::<_, String>(0))?
+        .collect::<Result<Vec<_>, _>>()?;
+    let [key] = candidates.as_slice() else {
+        return Err(StoreError::EvidenceUnavailable(
+            "exact published workflow unavailable or ambiguous".to_owned(),
+        ));
+    };
+    let identity: DefinitionIdentity = read_document(conn, config, digest)?;
+    if identity.workflow_id != id || identity.version != version {
+        return Err(StoreError::EvidenceUnavailable(
+            "workflow source identity and digest differ".to_owned(),
+        ));
+    }
+    Ok(key.clone())
+}
+
 fn workflow_hash(conn: &Connection, version: &str) -> Result<Sha256Digest, StoreError> {
     let hash: String = conn.query_row(
         "SELECT content_hash FROM workflow_versions WHERE workflow_version_id=?1 AND visibility='published'",
@@ -361,6 +404,43 @@ fn read_document<T: DeserializeOwned>(
     Ok(from_json_str_strict(json)?)
 }
 
+pub(crate) fn has_committed_plan(conn: &Connection, run: &str) -> Result<bool, StoreError> {
+    Ok(conn.query_row(
+        "SELECT EXISTS (SELECT 1 FROM object_references
+           WHERE owner_kind='workflow_run' AND owner_id=?1 AND source_field='effective_bundle_hash')
+           OR EXISTS (SELECT 1 FROM command_receipts WHERE aggregate_id=?1 AND command_type='CreateRun')",
+        [run], |row| row.get(0),
+    )?)
+}
+
+pub(crate) struct RunManifestTarget<'a> {
+    pub run: unleash_domain::RunId,
+    pub mission: &'a str,
+    pub version: &'a str,
+    pub definition_hash: Sha256Digest,
+    pub bundle_hash: Sha256Digest,
+}
+
+pub(crate) fn read_run_manifest(
+    conn: &Connection,
+    config: &StoreConfig,
+    target: &RunManifestTarget<'_>,
+) -> Result<Option<Value>, StoreError> {
+    let run = target.run.to_string();
+    if !has_committed_plan(conn, &run)? {
+        return Ok(None);
+    }
+    require_run_manifest(conn, &run, target.bundle_hash)?;
+    let plan: RunPlan = read_document(conn, config, target.bundle_hash)?;
+    verify_manifest_coordinates(
+        &plan,
+        target.mission,
+        target.version,
+        target.definition_hash,
+    )?;
+    Ok(Some(serde_json::to_value(plan)?))
+}
+
 pub(crate) fn require_run_manifest(
     conn: &Connection,
     run: &str,
@@ -378,15 +458,7 @@ pub(crate) fn verify_activation(
     task: &Value,
 ) -> Result<(), StoreError> {
     let plan: RunPlan = read_document(conn, config, activation.effective_bundle_hash)?;
-    if plan.schema_version != 1
-        || plan.mission_id.to_string() != mission
-        || plan.workflow_version_id != version
-        || plan.definition_hash != activation.definition_hash
-    {
-        return Err(StoreError::EvidenceUnavailable(
-            "run manifest coordinates do not match".to_owned(),
-        ));
-    }
+    verify_manifest_coordinates(&plan, mission, version, activation.definition_hash)?;
     let scope = task
         .get("scope_key")
         .and_then(Value::as_str)
@@ -416,7 +488,25 @@ pub(crate) fn verify_activation(
     Ok(())
 }
 
-fn parse_hash(value: &str) -> Result<Sha256Digest, StoreError> {
+fn verify_manifest_coordinates(
+    plan: &RunPlan,
+    mission: &str,
+    version: &str,
+    definition: Sha256Digest,
+) -> Result<(), StoreError> {
+    if plan.schema_version != 1
+        || plan.mission_id.to_string() != mission
+        || plan.workflow_version_id != version
+        || plan.definition_hash != definition
+    {
+        return Err(StoreError::EvidenceUnavailable(
+            "run manifest coordinates do not match".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+pub(crate) fn parse_hash(value: &str) -> Result<Sha256Digest, StoreError> {
     value
         .parse()
         .map_err(|_| StoreError::InvariantViolation("invalid published content hash".to_owned()))
