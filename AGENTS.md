@@ -53,6 +53,7 @@ tools/design-package/    sync.py, regen.py, validate.py (outillage du dossier)
 - **Goal autonome** : un objectif donné par `/goal …` (Claude Code, Antigravity), `$unleash-goal …` (Codex) ou un message commençant par `GOAL:` est conduit selon le [protocole de goal](.claude/dev/goal-protocol.md) : cadrage, plan, délégation, vérification indépendante, intégration, journal dans `.claude/state/goals/<goal-id>/`.
 - **Choix du modèle** : l'agent root choisit pour chaque délégation le niveau `frontier`, `strong`, `standard` ou `fast` selon [le routage](.claude/dev/model-routing.md) et le consigne dans le journal.
 - **Worktrees** : uniquement sous `.claude/worktrees/<goal-id>-<task-id>`, nulle part ailleurs ([règle](.claude/rules/worktrees.md)). Un worktree = une tâche = un seul agent écrivain.
+- **Suivi** — après chaque transition, mettre à jour les fiches et régénérer `.claude/state/current-state.md` selon le [protocole de goal](.claude/dev/goal-protocol.md#suivi-des-travaux-journal-et-reprise). Retirer branches intégrées, worktrees et caches arrivés en fin d’usage selon leur [cycle de vie](.claude/dev/worktrees.md).
 - **Tests d'abord** pour chaque exigence `REQ-…` : écrire le test `T-…` du dossier, le voir échouer, implémenter ([règles de test](.claude/rules/testing.md)).
 - **Règles de code** : [Rust](.claude/rules/rust.md), [renderer GUI](.claude/rules/gui-renderer.md). Commits au format Conventional Commits citant les `REQ-…`.
 - **Interfaces**. Lire et appliquer le [design system OVPT d’Unleash](.claude/design/visual-design-system.md) avant tout changement GUI ou TUI. Inventorier le rendu et les composants existants, puis vérifier l’accessibilité et les dimensions applicables.
@@ -80,6 +81,6 @@ push sur `main`, push forcé, tag, publication ou release ; appel payant à un m
 
 ## 10. Environnement de ce poste
 
-- Le dépôt est sur un **partage réseau SMB** : placer `CARGO_TARGET_DIR` sur disque local (par exemple `$HOME/Library/Caches/unleash/target`), créer bases SQLite, sockets, PTY et dépôts Git de test sous `$TMPDIR`, jamais dans le dépôt ; `git config core.fileMode false`.
-- Rust est installé par rustup dans `~/.cargo/bin` (rustc 1.94.1) : si `cargo` est introuvable, ajouter ce répertoire au `PATH` de la commande.
+- **Rust local** exclusivement dans Docker selon les [règles Rust](.claude/rules/rust.md#exécution-locale-dans-docker). Les contrôles natifs macOS passent par un runner dédié.
+- Le dépôt est sur un **partage réseau SMB**. Conserver `git config core.fileMode false`.
 - Respecter les consignes shell globales de l'utilisateur lorsqu'elles existent (préfixe de commande imposé).

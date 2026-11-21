@@ -37,6 +37,8 @@ Lire d'abord `AGENTS.md` à la racine, puis lancer `/goal` (Claude Code ou Antig
 
 Les [protocoles d'experts](agents/README.md) indiquent qui mobiliser selon changement. Ils servent à la revue de conception et de code ; ils ne remplacent pas le modèle N+2/N+1/N propre au produit.
 
+Dans le checkout de développement, consulter `.claude/state/current-state.md` pour les travaux en cours et à venir. Le [protocole de suivi](dev/goal-protocol.md#suivi-des-travaux-journal-et-reprise) donne les sources de cette vue, sa régénération et le retrait des ressources après intégration.
+
 ## Ce qui est vérifié et ce qui reste à qualifier
 
 Les sources officielles et les artefacts documentaires ont été contrôlés selon leurs rapports. Restent des preuves à produire, et non des décisions : EXT-GUARD, EXT-MODEL (avec des modèles intelligents, sur décision de Louis), EXT-MODEL-LOCAL, EXT-BROWSER, EXT-DOC, EXT-OS, EXT-OSS et EXT-DIST. Aucun binaire Unleash, test de crash réel, benchmark, accès API facturé ou intégration AI-Guard existante n'a été exécuté dans cette mission. Les EV des features sont des preuves **attendues**, à produire pendant le développement.

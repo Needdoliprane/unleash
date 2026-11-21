@@ -26,7 +26,7 @@ Un goal n'autorise jamais : push sur `main`, push forcé, tag, release ou public
 
 1. Lire `AGENTS.md`, ce protocole, [le routage des modèles](model-routing.md), [la définition de terminé](definition-of-done.md) et [les worktrees](worktrees.md).
 2. Dépôt Git : si le dossier n'en est pas un, `git init -b main` et `git config core.fileMode false` (le dépôt est sur un partage SMB qui marque tous les fichiers exécutables), vérifier `.gitignore` et `.gitattributes`, puis commit initial `chore: baseline du dossier de conception` après `python3 tools/design-package/validate.py .` sans erreur. Si la branche `dev` n'existe pas : la créer depuis `main`, y committer la base encore non suivie (dossier `.claude/`, outillage, configuration ; jamais `.env`), puis `git push -u origin dev`. Hors de ce cas, l'arbre de travail doit être propre ; sinon, consigner l'état et demander à l'utilisateur avant d'écraser quoi que ce soit.
-3. Toolchain : `cargo --version` (rustup installe la version de `rust-toolchain.toml`). Sur ce poste, Cargo est dans `~/.cargo/bin` et le dépôt est sur un partage SMB : voir la section Environnement d'`AGENTS.md`.
+3. Vérifier la toolchain de `rust-toolchain.toml` dans Docker suivant les [règles Rust](../rules/rust.md#exécution-locale-dans-docker).
 4. Reprise : si `.claude/state/goals/` contient un goal `in_progress` correspondant, le reprendre depuis son journal au lieu d'en créer un nouveau.
 
 ### 1. Cadrage
@@ -50,7 +50,7 @@ Pour chaque lot en cours, le plan nomme l'opération qui permet de l'accepter, s
 
 ### 3. Exécution déléguée
 
-Pour chaque tâche prête, l'agent root choisit le rôle et le modèle selon le [routage](model-routing.md), puis lance un sous-agent dans **son propre worktree** `.claude/worktrees/<goal-id>-<task-id>` (branche `task/<goal-id>/<task-id>` ou branche native de l'outil). Le prompt de délégation est autonome : objectif, fichiers autorisés en écriture, documents à lire (feature, exigences, tests, contrats), critère de terminé, commandes de vérification, interdits, format du compte rendu.
+Pour chaque tâche prête, l'agent root choisit le rôle et le modèle selon le [routage](model-routing.md). Un agent écrivain travaille dans le worktree attribué selon la [règle des worktrees](../rules/worktrees.md). Un agent en lecture seule utilise le checkout qui porte le candidat figé. Le prompt de délégation est autonome : objectif, fichiers autorisés en écriture, documents à lire (feature, exigences, tests, contrats), critère de terminé, commandes de vérification, interdits, format du compte rendu.
 
 Le mandat tient dans un message utilisable à la reprise. Il précise :
 
@@ -106,11 +106,13 @@ ni transférée à un autre agent ou outil. Les autres lots autorisés continuen
 
 ### 4. Vérification indépendante
 
-Une tâche n'est intégrée qu'après vérification par un **autre** agent (rôle `verifier`, contexte neuf) qui relance les commandes autorisées, lit le diff contre les exigences et la [définition de terminé](definition-of-done.md), et cherche les tests complaisants. Un contrôle masqué suit la [règle d’arrêt ci-dessus](#travaux-de-sécurité-informatique). Échec → la tâche retourne à son implémenteur avec les constats précis.
+Une tâche n'est intégrée qu'après vérification par un **autre** agent (rôle `verifier`, contexte neuf). Il lit le diff contre les exigences et la [définition de terminé](definition-of-done.md), examine les assertions des tests et vérifie les sorties réelles des contrôles ciblés.
 
-Le vérificateur relance les contrôles ciblés du lot. Une exécution des gates complètes peut couvrir plusieurs lots revus indépendamment, sur la même composition. L'intégrateur identifie les entrées vérifiées et réutilise une preuve lorsque les sources, la configuration, la commande et l'environnement pertinents sont identiques. Un conflit ou une modification invalide les preuves qu'il affecte. Les gates complètes restent requises sur la composition finale du goal et après fusion sur `dev`.
+Une sortie est réutilisable si le vérificateur peut examiner le résultat, l'oracle et le rattachement aux mêmes entrées (sources, dépendances, configuration, commande et environnement pertinents). Si une de ces conditions manque, il exécute le contrôle ciblé autorisé ou rend le critère non vérifié. Il consigne la preuve acceptée ou la commande réellement relancée. Un contrôle masqué suit la [règle d’arrêt ci-dessus](#travaux-de-sécurité-informatique).
 
-Un résultat rouge retourne au responsable avec le défaut observé. Une revue indisponible laisse le candidat et son lot ouverts, avec la cause, le contrôle manquant et la condition de reprise dans le journal. Un refus ou un masquage suit la règle d'arrêt de la section précédente. L'agent root réaffecte la capacité aux lots réellement indépendants, dans le même jalon ou dans un jalon ultérieur dont les contrats nécessaires sont figés.
+Une exécution des gates complètes peut couvrir plusieurs lots revus indépendamment sur la même composition. Un conflit ou une modification invalide les preuves qu'il affecte. Les gates complètes restent requises sur la composition finale du goal et après fusion sur `dev`.
+
+Un résultat rouge retourne au responsable avec le défaut observé. Si la revue attendue est indisponible, ROOT fige le candidat et consigne le critère ouvert, sa cause, le responsable et la condition de reprise dans le suivi du lot. Il intègre en priorité les candidats déjà acceptés dont les dépendances sont satisfaites. Les contrôles de composition et les travaux indépendants continuent en parallèle si leurs entrées sont distinctes.
 
 Escalade pour un désaccord de fond sur un contrôle autorisé : deux échecs au même niveau de modèle → faire arbitrer au niveau supérieur. Après trois échecs au niveau `frontier`, marquer la tâche `blocked` et consigner le diagnostic.
 
@@ -131,6 +133,14 @@ Répéter planification → exécution → vérification → intégration jusqu'
 
 Un blocage partiel n'arrête pas le goal : continuer les tâches indépendantes.
 
+Quand une livraison stagne après un cycle, ROOT rapproche les candidats
+testables, les lots acceptés, le dernier SHA intégré et le dernier SHA publié.
+Il traite la première étape en attente sur le chemin de la livraison. Si une
+gate échoue, il isole le contrôle rouge et son responsable. Si elle est externe,
+il suit séparément la qualification locale acquise et la preuve distante
+attendue. Le prochain point de situation donne l'effet observé de la correction
+ou l'étape qui reste ouverte. Le plan et le journal du goal suffisent au suivi.
+
 ### 7. Clôture et rapport
 
 1. Rejouer toutes les gates sur `goal/<goal-id>` ; consigner les sorties dans le journal.
@@ -150,9 +160,20 @@ Un goal peut viser la V1 complète (`/goal V1 …`). L'agent root le conduit alo
 5. À chaque sortie de jalon : rejouer toutes les gates sur `dev`, mettre à jour `goal.md` du programme, lancer une revue d'expert adaptée au jalon (au moins `expert-12-qa` et l'expert du domaine), corriger, puis continuer sans attendre de confirmation.
 6. Fin du programme : V1 construite, gates internes vertes, rapport final listant les preuves réelles acquises, les gates externes restantes avec la pièce attendue et son propriétaire, et la procédure de release prête à exécuter dès que ces pièces sont fournies.
 
-## Journal et reprise
+## Suivi des travaux, journal et reprise
 
 Le journal est la mémoire du goal entre sessions et entre outils. Chaque délégation, vérification, intégration, escalade et décision y est ajoutée (jamais réécrite). Un autre outil peut reprendre un goal en lisant `goal.md` puis `journal.md`. `.claude/state/` est versionné dans Git mais exclu du manifest du dossier de conception.
+
+ROOT tient à jour `.claude/state/current-state.md`, la vue générée des travaux en cours et à venir. Les fiches `goal.md` portent l’état et les prochaines actions. Le journal conserve les événements, SHA et preuves, y compris après retrait d’une branche. Pour chaque chantier ouvert, la section « Actions de clôture ouvertes » donne le prochain résultat observable, la dépendance ou le blocage et son propriétaire.
+
+Après une affectation, une reprise, un changement de statut ou de dépendance, une validation, une intégration ou un retrait, mettre à jour les fiches et le journal concernés dans le même tour. Synchroniser aussi le plan V1 si le statut d’un jalon change, puis régénérer la vue.
+
+```sh
+python3 -B tools/design-package/current_state.py .
+python3 -B tools/design-package/current_state.py . --check
+```
+
+Le responsable de l’intégration vérifie la vue et applique le [cycle de vie des branches, worktrees et caches](worktrees.md) après chaque lot. Une branche ou un worktree intégré sans consommateur est à retirer dès que les preuves et contenus uniques sont préservés. Documenter tout retrait restant ouvert avec le responsable et la condition de reprise.
 
 ## Rôles
 

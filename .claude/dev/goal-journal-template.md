@@ -29,6 +29,12 @@ Jalon : M? — Features : F??? — Exigences : REQ-… — Tests : T-… — Gat
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | t01 | … | crates/… | — | implementer | standard / sonnet | cargo test -p … | pending |
 
+### Actions de clôture ouvertes
+
+| Périmètre | Prochain résultat observable | Dépendance immédiate et responsable |
+| --- | --- | --- |
+| t01 | … | … |
+
 ## Résultat
 <rempli à la clôture : commits, sorties, exigences couvertes, reste à faire, risques, prochain goal>
 ```

@@ -104,6 +104,7 @@ ROOT, canon `goal/g0003-m2`, base `241d03b` et candidats précédents. Figer la 
 - ROOT remplace les campagnes workspace répétées par tâche par une campagne sur chaque composition de lots revus. Le vérificateur conserve le rejeu des contrôles ciblés. Les gates sont exigées sur la composition du goal puis sur `dev`. Le plan M2 expose l'action de clôture de chaque périmètre. Une revue indisponible laisse son candidat figé et le contrôle non vérifié. Les contrôles signalés restent clos. Les ressources sont affectées aux étapes indépendantes.
 - Première application : contrôler isolément le changement documentaire sur `241d03b` puis sur la composition qui conserve aussi le candidat documentaire F012. Fichiers de gouvernance : `.claude/dev/goal-protocol.md` et `.claude/dev/definition-of-done.md`. Preuves dans `.claude/evidence/g0003-m2/workflow-composition/`. Sur chaque extraction du paquet suivi, exécuter `python3 -B tools/design-package/regen.py .`, puis `uv run --offline --no-project --with jsonschema python -B tools/design-package/validate.py .`. Attendu : deux paquets cohérents et zéro erreur. Le temps gagné sur les futures compositions Rust reste à mesurer.
 - Résultat ROOT : les deux validations terminent code 0, zéro erreur et zéro avertissement. Chaque paquet vérifie 396 fichiers et 414 empreintes. La gouvernance seule a pour digest `22fcdebf9ed427880e85355a1bbea65a1b967951a18d90900f8231e417adc793` et vérifie 3 743 liens. La composition avec le candidat F012 vérifie 3 742 liens et porte le digest `db4e8dbbc74784dec09ae2b50b93278fde975dd1d6964332fe7bad77c1e9095f`. Seule la gouvernance et son suivi sont intégrés. Les candidats Rust et les trois sources documentaires F012 restent hors intégration. Une fois leurs fichiers générés remis au checkout, conserver les deux reçus `combined-*.log` pour F012 et retirer les deux extractions et les reçus de la gouvernance approuvée. Aucun nouveau worktree.
+- Clôture sur `6fb6489` : les fichiers générés du candidat F012 correspondent octet pour octet au paquet validé. Les deux extractions et les reçus de gouvernance ont été retirés, 860 fichiers et 9 386 630 octets logiques. Les deux reçus F012 sont les seules entrées restantes dans le pack.
 
 ### F012 / Q-19 — Construire le transport depuis le corps publié
 
@@ -113,6 +114,91 @@ ROOT, canon `goal/g0003-m2`, base `241d03b` et candidats F012. Ajouter une entr�
 - **Commandes** — RTK, Rust 1.94.1, `CARGO_TARGET_DIR=/Users/louis/Library/Caches/unleash/target/g0002-m1-acceptance`, `CARGO_INCREMENTAL=0`, `UNLEASH_LIVE_TESTS` absent. Rouge puis vert : `cargo +1.94.1 test --locked --offline -p unleash-model-router --lib t_f012_ollama_chat_`. Raccord : `cargo +1.94.1 test --locked --offline -p unleash-daemon --test t_f012_probe_mandates_ipc t_f012_ollama_generation_authorizing_binds_configured_endpoint -- --exact`. Rustfmt ciblé et `cargo +1.94.1 clippy --locked --offline -p unleash-daemon -p unleash-model-router --lib --test t_f012_probe_mandates_ipc --all-features -- -D warnings`. Clippy tests du routeur avec `cargo +1.94.1 clippy --locked --offline -p unleash-model-router --lib --tests --all-features -- -D warnings`. Preuves dans `.claude/evidence/g0003-m2/f012-ollama-published-transport/`. Les contrôles signalés restent clos.
 - **Résultats locaux ROOT** — quatre échecs attendus `Unavailable` avec l’entrée provisoire, puis quatre cas routeur et un cas daemon réussis, sans échec ni test ignoré dans ces sélections. Les deux Clippy stricts, rustfmt ciblé et le contrôle des espaces du diff passent. Les trois essais avec listener comparent le corps de la requête octet pour octet. Le scénario daemon compare les ressources du transport à celles de l’intention et s’arrête à Authorizing, listener témoin silencieux.
 - **Révision testée** — sur base `241d03b`, blobs `ollama_transport.rs` `efd50cf2c975e79e39e28789dae9991dcf68f98f`, `inventory_transport_tests.rs` `7fc7a09c1dd0f407fff3416ea0cf5dc1bb0f01f4`, `t_f012_probe_mandates_ipc.rs` `8a949cd4c0da43b309d5c0e4260a853fc4a51fd4`. Le candidat reste à intégrer après revue. Garder les preuves jusqu’à leur examen. La liaison durable au pair admis, le dispatch produit et l’adoption du résultat restent ouverts. M2 conserve 13 lots intégrés sur 16.
+
+### F012 / T-F012-015 et T-F012-016 — Relire le bail exact du placement admis
+
+- **Finalité** : la préparation Ollama doit être relue avec le bail exact qui borne la décision du transport. Confirmer que la lecture accepte le bail émis et refuse un propriétaire, une clé, un état ou une échéance divergents. Restituer la borne issue de la préparation, du placement et du bail.
+- **Périmètre** : ROOT, canon `goal/g0003-m2@6fb6489`, candidats F012 inchangés hors `crates/unleash-store/src/provider_probe_generation/placement.rs` et `crates/unleash-store/tests/support/provider_probe_generation_placement.rs`. Réutiliser le Store SQLite temporaire et l'horloge manuelle du banc. Identités, documents et horodatages synthétiques. Aucun listener, processus produit, appel réseau ni accès au coffre. Les contrôles signalés restent clos.
+- **Commandes** : RTK, Rust 1.94.1, cache `/Users/louis/Library/Caches/unleash/target/g0002-m1-acceptance`, incrémental désactivé, `UNLEASH_LIVE_TESTS` absent. Rouge puis vert : `cargo +1.94.1 test --locked --offline -p unleash-store --test t_f012_profile_versions generation_placement::t_f012_admitted_ollama_reads_original_body_and_placement -- --exact`. Régression : même cible filtrée par `generation_placement::`, formatage ciblé et `cargo +1.94.1 clippy --locked --offline -p unleash-store --lib --test t_f012_profile_versions --all-features -- -D warnings`. Preuves sous `.claude/evidence/g0003-m2/f012-ollama-exact-lease/`.
+- **Preuve attendue** : conservation octet pour octet des artefacts relus, borne de validité au minimum des trois échéances, zéro dispatch, place retenue par l'admission originale. La lecture ne délivre pas de permis.
+- **Résultat ROOT** : après correction de l'import du banc, le test exact échoue sur l'échéance divergente avant modification du Store. La suite ciblée passe ensuite à 5/5, zéro échec ni ignoré, sur les blobs `ac914744db286092572ba55eddc083148acd162e` et `c773caa073eb659320d2ddd7e1d1a9d08eb558b3`. Rustfmt, Clippy strict et `git diff --check` sortent à 0. Le banc observe le refus des divergences, la borne issue de la preuve et zéro dispatch. Candidat hors intégration, preuves à garder pour revue. Aucun nouveau worktree. M2 reste à 13/16.
+
+### F012 / T-F012-015 et T-F012-016 — Lier le transport à la preuve d'admission
+
+- **Finalité** : exposer depuis le writer la destination, les coordonnées du processus, les empreintes de placement et d'admission et l'échéance déjà vérifiées. Le constructeur de transport doit reconnaître le même processus et lier les empreintes à sa propre identité. En cas d'échéance atteinte, la tentative ne doit produire aucun dispatch.
+- **Périmètre** : ROOT, `goal/g0003-m2@6fb6489`. `provider_probe.rs` dans Protocol, `provider_probe_generation/placement.rs` et son banc dans Store, `connect_transport.rs`, `ollama_transport.rs` et `inventory_transport_tests.rs` dans le routeur. Cas exacts en mémoire, propre PID du test, broker et horloge de fixture et aucun socket dans ces nouveaux cas. Les régressions routeur utilisent seulement leur listener loopback jetable, les réponses NDJSON synthétiques existantes et le propre PID. Régressions Store sur SQLite temporaire et preuve synthétique. Aucun démarrage de moteur, accès coffre ou permission produit. Les contrôles signalés restent clos.
+- **Commandes** : RTK, `CARGO_INCREMENTAL=0`, `UNLEASH_LIVE_TESTS` absent, cache `/Users/louis/Library/Caches/unleash/target/g0002-m1-acceptance`. Rouge puis vert : `cargo +1.94.1 test --locked --offline -p unleash-model-router --lib t_f012_ollama_chat_admitted_`. Régressions : même commande filtrée par `t_f012_ollama_chat_` puis `cargo +1.94.1 test --locked --offline -p unleash-store --test t_f012_profile_versions generation_placement::`. Rustfmt ciblé et `cargo +1.94.1 clippy --locked --offline -p unleash-model-router -p unleash-store -p unleash-protocol --lib --tests --all-features -- -D warnings`. Preuves sous `.claude/evidence/g0003-m2/f012-ollama-placement-binding/`.
+- **Oracles** : pair exact accepté, divergences PID, boot, démarrage ou adresse refusées, preuve et admission distinctes donnent des empreintes distinctes, zéro dispatch et zéro observation pour un placement expiré. Les octets et les bornes du Store restent vérifiés. Aucun changement de l'autorisation du daemon à cette étape.
+- **Résultat ROOT** : deux rouges sur le constructeur provisoire, puis six tests routeur et cinq Store réussis, zéro échec ni ignoré dans ces sélections. Les trois cas loopback consomment le constructeur lié à l'admission de fixture et capturent chacun les octets exacts. L'expiration à la borne vérifie zéro dispatch et zéro observation. SQLite restitue les coordonnées et les empreintes des entrées effectivement retenues. Après extraction des assertions du banc, Clippy strict, rustfmt et `git diff --check` terminent à 0. Le lancement géré et l'autorisation durable du daemon restent ouverts. Candidat hors intégration, preuves conservées. Aucun nouveau worktree.
+- **Blobs** : `provider_probe.rs=97c5b926d6f7`, `placement.rs=fb41eeeab47d`, `provider_probe_generation_placement.rs=1a1f83ec486d`, `connect_transport.rs=2bf2e1ead263`, `ollama_transport.rs=52e5b92130f8`, `inventory_transport_tests.rs=077b90ab6812`.
+
+### F012 / T-F012-015 — Relire une préparation de service avant autorisation
+
+- **Finalité** : avant de construire l'intention du service géré, obtenir du writer le contexte de la commande originale si l'autorité, le reçu, le profil et la politique sont encore applicables. La consultation historique reste disponible séparément. Aucun permis ne découle de la lecture.
+- **Périmètre** : ROOT, `goal/g0003-m2@6fb6489`. Uniquement `crates/unleash-store/src/provider_service_launch.rs` et `crates/unleash-store/tests/support/provider_service_launch_scenarios.rs`. SQLite temporaire de la fixture existante, plans et acteur synthétiques. Le chemin d'exécutable est une valeur de fixture jamais ouverte ni lancée. Aucun processus natif, listener, coffre ni effet extérieur. Les contrôles déjà signalés restent clos.
+- **Commandes** : RTK, Rust 1.94.1 hors ligne, `CARGO_INCREMENTAL=0`, `UNLEASH_LIVE_TESTS` absent, cache `/Users/louis/Library/Caches/unleash/target/g0002-m1-acceptance`. Rouge puis vert : `cargo +1.94.1 test --locked --offline -p unleash-store --test t_f012_connect_store service_launch_scenarios::read_for_authorization_`. Rustfmt ciblé et `cargo +1.94.1 clippy --locked --offline -p unleash-store --lib --test t_f012_connect_store --all-features -- -D warnings`. Preuves sous `.claude/evidence/g0003-m2/f012-service-live-preparation/`.
+- **Oracle** : la commande ayant créé le reçu Accepted restitue le même contexte. Une modification du plan, un acteur sans ce reçu, un rôle inadmissible, une horloge incertaine ou une politique changée empêchent la lecture pour autorisation. Les compteurs d'effets restent inchangés par la lecture.
+- **Régressions ciblées** : la préparation initiale et la relecture partagent désormais les contrôles de disponibilité du writer et de principal. Rejouer seulement `cargo +1.94.1 test --locked --offline -p unleash-store --test t_f012_connect_store service_launch_scenarios::durable_preparation_rolls_back_and_replays_without_an_effect -- --exact` puis la même commande avec `service_launch_scenarios::preparation_rejects_unmanaged_profiles_expired_plans_and_non_admins`. Même fixture et absence d'effet externe. Attendu : contexte identique après rejeu, annulation à la coupure, refus des entrées inadmissibles.
+- **Résultat ROOT** : les deux tests échouent avec la lecture historique utilisée comme implémentation provisoire. Après raccord du writer : 2/2 nouveaux tests et 2/2 régressions réussis, zéro échec ni ignoré. Clippy strict, rustfmt et `git diff --check` à 0. Blobs `provider_service_launch.rs=9cff2a047969e8e7923815b2f13b971c502a1bde`, `provider_service_launch_scenarios.rs=17d112f969b3bf0c1374e50116e1df3e6221956a`. La relecture vérifie dans la même transaction le reçu, le contexte, le principal, le profil, le scope et la politique. Candidat hors intégration, preuves conservées. L'intention durable et le lancement natif restent ouverts. Aucun nouveau worktree.
+
+### F012 / T-F012-015 — Engager la première phase du lancement Service
+
+- **Finalité** : engager une seule intention Strict liée au contexte V019 revalidé dans la transaction du writer. Vérifier l'annulation à C1, le rejeu exact de l'engagement et la conservation du refus par le writer générique. Le résultat est une action `authorizing` sans décision ni dispatch.
+- **Périmètre** : ROOT, `goal/g0003-m2@6fb6489`, `provider_service_launch.rs`, `broker_writer.rs` et `provider_service_launch_scenarios.rs` du Store. SQLite temporaire de fixture, plan inerte, acteur synthétique, le chemin d'exécutable reste une valeur de base. Aucun processus, listener, accès coffre ou effet extérieur. Les contrôles déjà signalés restent clos.
+- **Commandes** : RTK, Rust 1.94.1 hors ligne, `CARGO_INCREMENTAL=0`, `UNLEASH_LIVE_TESTS` absent, cache `/Users/louis/Library/Caches/unleash/target/g0002-m1-acceptance`. Rouge puis vert : `cargo +1.94.1 test --locked --offline -p unleash-store --test t_f012_connect_store service_launch_scenarios::authorizing_`. Rustfmt ciblé et `cargo +1.94.1 clippy --locked --offline -p unleash-store --lib --test t_f012_connect_store --all-features -- -D warnings`. Preuves sous `.claude/evidence/g0003-m2/f012-service-authorizing/`.
+- **Oracle** : zéro action et outbox inchangé après C1, une seule phase et le même curseur après rejeu. Le manifeste engage le digest du contexte, le reçu et l'exigence Strict. Le writer générique refuse la phase de service, y compris après son engagement dédié. Zéro marqueur de dispatch et zéro processus.
+- **Dossier** : actualiser `architecture/sqlite-design.md` et `features/F012-model-api-router/technical-design.md`. Dans une extraction du paquet suivi sous le dossier de preuves, reprendre les trois sources documentaires F012 déjà en cours. Exécuter `python3 -B tools/design-package/regen.py .` puis `uv run --offline --no-project --with jsonschema python -B tools/design-package/validate.py .`. Copier les fichiers générés après comparaison aux sources actuelles et retirer l'extraction.
+- **Régressions du writer partagé** : sur les mêmes données de fixture et le même cache, `cargo +1.94.1 test --locked --offline -p unleash-store --test t_f012_connect_store service_launch_scenarios::read_for_authorization_`, puis `cargo +1.94.1 test --locked --offline -p unleash-store --test t_f012_connect_store t_f012_013_connect_without_claim_cannot_enter_generic_broker -- --exact` et `cargo +1.94.1 test --locked --offline -p unleash-store --test t_f018_012_broker_phases source_receipt_must_exist_before_any_intention_row -- --exact`. Ces cas s'arrêtent à la relecture ou à la demande d'intention. Attendu : le contexte historique est préservé et les demandes de phase sans cause applicable demeurent refusées, sans nouveau signal natif.
+- **Résultat Rust ROOT** : deux rouges de comportement sur le port provisoire, puis 2/2 nouveaux cas et 4/4 régressions ciblées, zéro échec et zéro ignoré. Clippy strict, rustfmt et `git diff --check` à 0. Blobs `provider_service_launch.rs=6af0dee6160a`, `broker_writer.rs=646d33d275d0`, `provider_service_launch_scenarios.rs=74dfcfcadba3`. Le writer remet le même curseur après rejeu. Le banc compte une phase, zéro dispatch et zéro processus. Pas de décision de lancement engagée.
+- **Résultat dossier ROOT** : zéro erreur et zéro avertissement, 396 fichiers et 414 empreintes, digest `a36e1c255162fa104dd1642b46e11efd92df84e355402d224a06283b59e96326`. Les cinq sources de l'extraction correspondent aux entrées du checkout, puis le manifeste et les checksums ont été copiés et comparés octet pour octet. L'extraction a été retirée, 429 fichiers et 4 739 656 octets logiques, avec absence du dossier vérifiée. Les reçus et preuves restent disponibles pour la revue du candidat. Aucun nouveau worktree.
+
+### F012 / T-F012-015 — Conserver la décision d'évaluation du service
+
+- **Finalité** : le journal du service peut engager son évaluation initiale et son résultat dans SQLite sur le contexte Strict revalidé. Vérifier la corrélation au reçu, à l'intention, à l'évaluation et à la politique, l'annulation à C1 et le rejeu exact. Le port est fermé aux demandes de dispatch.
+- **Périmètre** : ROOT, `goal/g0003-m2@6fb6489`, `provider_service_launch.rs`, `broker_writer.rs` et `provider_service_launch_scenarios.rs` du Store. Le banc fournit une décision synthétique, sans Guard ni processus natif. SQLite et temporaires de fixture, pas de listener ni coffre. Les contrôles signalés restent clos.
+- **Commandes** : RTK, Rust 1.94.1 hors ligne, `CARGO_INCREMENTAL=0`, `UNLEASH_LIVE_TESTS` absent, cache `/Users/louis/Library/Caches/unleash/target/g0002-m1-acceptance`. Rouge puis vert : `cargo +1.94.1 test --locked --offline -p unleash-store --test t_f012_connect_store service_launch_scenarios::decision_`. Régression : même commande filtrée par `service_launch_scenarios::authorizing_`. Rustfmt ciblé et `cargo +1.94.1 clippy --locked --offline -p unleash-store --lib --test t_f012_connect_store --all-features -- -D warnings`. Preuves sous `.claude/evidence/g0003-m2/f012-service-decision/`.
+- **Oracle** : un seul résultat correspondant à l'évaluation, après annulation puis rejeu exact, refus d'une décision divergente ou d'une politique changée, refus du port générique en replay, zéro dispatch ou processus même après engagement d'une décision Allow dans la fixture.
+- **Dossier** : actualiser les deux fiches SQLite et F012 sur le rattachement de la décision. Dans une extraction du paquet suivi, appliquer aussi les trois sources documentaires F012 déjà en cours. Exécuter `python3 -B tools/design-package/regen.py .` puis `uv run --offline --no-project --with jsonschema python -B tools/design-package/validate.py .`. Copier les fichiers générés après comparaison, puis retirer l'extraction.
+- **Régression du writer partagé** : `cargo +1.94.1 test --locked --offline -p unleash-store --test t_f018_012_broker_phases exact_intention_authorization_dispatch_observation_and_replay_refusal -- --exact`. Le scénario vérifie le rejeu de l'autorisation générique et ses transitions SQLite existantes. L'effet est un compteur en mémoire, avec un incrément attendu. Aucun processus, réseau ou coffre.
+- **Résultat Rust ROOT** : deux rouges sur le port provisoire, puis 2/2 cas nouveaux, 2/2 régressions de première phase et 1/1 régression du writer partagé. Aucun échec ni test ignoré. Rustfmt, Clippy strict et `git diff --check` à 0. Blobs `provider_service_launch.rs=a8495da51eb0`, `broker_writer.rs=b3d5b323c77c`, `provider_service_launch_scenarios.rs=1145ca9e9d8f`. La décision et son rejeu passent par le port dédié. Le port générique reste fermé et les deux ports refusent un dispatch de service. Zéro marqueur et zéro processus dans la fixture. L'évaluateur du daemon reste à raccorder au port. Candidat hors intégration.
+- **Résultat dossier ROOT** : zéro erreur et zéro avertissement, digest `fa353ded9e3e8fb4b4c1c4aa3a78f0513e05fb8a5c05123ff53cb395ab50815f`. Fichiers générés comparés puis installés. L'extraction temporaire est absente, 429 fichiers et 4 739 964 octets logiques retirés. Aucun nouveau worktree. Les preuves utiles sont conservées pour la revue.
+
+### F012 / T-F012-015 — Raccorder le broker réel au journal du service
+
+- **Finalité** : évaluer une préparation V019 via `ActionBroker`, en conservant l'identité d'évaluation choisie par le broker jusqu'au writer. Une préparation possédant déjà une phase n'est pas réévaluée automatiquement. Une politique Guard non disponible reste fermée.
+- **Périmètre** : ROOT, `goal/g0003-m2@6fb6489`. Ajout du composant `crates/unleash-daemon/src/provider_service_evaluation.rs`, de son fichier de tests et du routage dans `lib.rs`, plus la lecture du contexte et de la politique dans `crates/unleash-store/src/provider_service_launch.rs`. Tests avec le vrai broker Rust, deux sondes de confinement de fixture, SQLite temporaire et fichier d'exécutable inerte utilisé comme référence de chemin. Aucun daemon IPC, moteur, sous-processus, listener, Guard distant ou coffre. Les contrôles déjà signalés restent clos.
+- **Commandes** : RTK, Rust 1.94.1, locked/offline, `CARGO_INCREMENTAL=0`, `UNLEASH_LIVE_TESTS` absent, cache `/Users/louis/Library/Caches/unleash/target/g0002-m1-acceptance`. Rouge puis vert : `cargo +1.94.1 test --locked --offline -p unleash-daemon --lib provider_service_evaluation::tests::`. Rustfmt ciblé et `cargo +1.94.1 clippy --locked --offline -p unleash-daemon -p unleash-store --lib --all-features -- -D warnings`, puis Clippy de la bibliothèque du daemon avec `--tests` pour le banc. Preuves sous `.claude/evidence/g0003-m2/f012-service-broker/`.
+- **Oracles** : disponibilité de fixture donne une décision durable corrélée au même ID, absence de capacité donne un résultat durable sans autorisation. Une seconde invocation n'ajoute aucune phase. Les compteurs processus et dispatch restent nuls.
+- **Banc ROOT** : le premier essai a avorté lorsque l'initialisation synchrone du Store s'est exécutée dans le runtime Tokio. La fixture, ses lectures et sa destruction restent désormais hors du runtime, l'évaluation seule passe dans Tokio et les écritures du journal utilisent `spawn_blocking`. Les deux temporaires appartenant au premier essai ont été retirés après sa sortie, soit quatre fichiers et 3 349 360 octets logiques. Après cette correction, les deux cas échouent sur la fonction provisoire puis passent sur le raccord complet.
+- **Résultat ROOT** : 2/2 tests ciblés, zéro échec et zéro ignoré, sur les blobs `provider_service_launch.rs=51f12b641025`, `lib.rs=c113ce6fe64c`, `provider_service_evaluation.rs=81c77568927f` et `provider_service_evaluation/tests.rs=f6ce34edbef3`. Rustfmt, Clippy strict des bibliothèques Store/daemon et `git diff --check` passent. Clippy `--tests --all-features` reste rouge sur deux fichiers non modifiés, `worker_shutdown_tests.rs:1` (documentation) et `unleash-store/tests/common/provider_probe.rs:3` (attente de lint inutilisée). Aucun dispatch ni processus dans le banc. La sonde de confinement de production et le permis ne sont pas qualifiés. Candidat hors intégration, preuves conservées, aucun nouveau worktree.
+
+### F012 / T-F012-015 — Vérifier le bootstrap retenu avant évaluation
+
+- **Finalité** : utiliser la validation du process-host pour dériver en lecture seule les empreintes du véritable bootstrap Strict. Avant la première phase du broker, comparer l'exécutable, la commande, l'environnement et le profil de confinement au plan V019 et rattacher les identités réservées au contexte.
+- **Périmètre** : ROOT, `goal/g0003-m2@6fb6489`, `host_strict_service.rs`, `host.rs`, `lib.rs` du process-host et `provider_service_evaluation.rs` avec son banc dans le daemon. Fixtures macOS, répertoires privés éphémères et fichier inerte. La validation lit le fichier et rend le profil en mémoire. Aucun processus, sonde d'exécution, listener, coffre ou accès extérieur. L'évaluation ne crée aucun permis. Les contrôles signalés restent clos.
+- **Commandes** : RTK, Rust 1.94.1 locked/offline, `CARGO_INCREMENTAL=0`, `UNLEASH_LIVE_TESTS` absent, cache `/Users/louis/Library/Caches/unleash/target/g0002-m1-acceptance`. Rouge puis vert : `cargo +1.94.1 test --locked --offline -p unleash-daemon --lib provider_service_evaluation::tests::`. Rustfmt ciblé et `cargo +1.94.1 clippy --locked --offline -p unleash-daemon -p unleash-process-host --lib --all-features -- -D warnings`. Preuves sous `.claude/evidence/g0003-m2/f012-service-bootstrap/`.
+- **Oracles** : bootstrap exact admissible au broker sur fixture, commande, valeurs d'environnement, octets de binaire, profil ou identité divergents tous refusés avant journalisation. La qualification native de la mise en oeuvre et le permis restent distincts.
+- **Résultat ROOT** : trois rouges sur l'inspection provisoire. Une locale de fixture a ensuite été remplacée par une valeur différente admise par l'environnement explicite, afin de tester la divergence d'empreinte. La sélection finale passe à 3/3, zéro échec ni ignoré. Rustfmt, Clippy strict des bibliothèques process-host/daemon et `git diff --check` passent. Blobs `host_strict_service.rs=bfcdd441ab7c`, `host.rs=cb0f19b4b75c`, `lib.rs` du host `=87030826b967`, `provider_service_evaluation.rs=87a38fa570a3`, `provider_service_evaluation/tests.rs=ac023b2aa4f3`. Les cinq variations du bootstrap laissent zéro phase, zéro dispatch et zéro processus. L'inspection en lecture seule ne qualifie pas l'application du profil par l'OS. Candidat hors intégration, preuves conservées, aucun nouveau worktree.
+
+### F012 / T-F012-015 — Charger le profil Seatbelt exact avant la décision
+
+- **Finalité** : vérifier que le profil Strict déjà comparé au plan V019 est chargeable sur macOS. Le broker utilise le résultat de cette sonde bornée au profil et au lancement contrôlés. Le permis et l'attestation d'un processus de service restent distincts.
+- **Périmètre** : ROOT, `goal/g0003-m2@6fb6489`, `host_strict_service.rs`, `host.rs`, `lib.rs` du process-host et `provider_service_evaluation.rs` avec son banc dans le daemon. La fixture écrit un profil temporaire privé dans son propre répertoire et lance uniquement `/usr/bin/sandbox-exec -f <profil-fixture> -- /usr/bin/true` via la sonde existante, avec environnement vide. Aucun binaire Ollama, daemon IPC, PTY, listener, accès distant ou coffre. Supprimer le profil dès le retour de la sonde et libérer le dossier par la fixture. Les contrôles déjà signalés restent clos.
+- **Commandes** : RTK, Rust 1.94.1 locked/offline, `CARGO_INCREMENTAL=0`, `UNLEASH_LIVE_TESTS` absent, cache `/Users/louis/Library/Caches/unleash/target/g0002-m1-acceptance`. Vérifier l'exécutabilité de `/usr/bin/sandbox-exec` et `/usr/bin/true`. Rouge puis vert : `cargo +1.94.1 test --locked --offline -p unleash-daemon --lib provider_service_evaluation::tests::native_profile_loads_and_records_a_decision -- --exact --ignored`. Régressions : `cargo +1.94.1 test --locked --offline -p unleash-daemon --lib provider_service_evaluation::tests::` sans scénario opt-in. Rustfmt ciblé et `cargo +1.94.1 clippy --locked --offline -p unleash-daemon -p unleash-process-host --lib --all-features -- -D warnings`. Preuves sous `.claude/evidence/g0003-m2/f012-seatbelt-profile-probe/`.
+- **Oracles** : le profil rendu correspond à l'empreinte durable avant la sonde. Si le programme inerte sort à zéro, le broker conserve sa décision sans créer de dispatch ni processus de service dans SQLite. Le profil temporaire ne subsiste pas. Un refus de sonde ferme l'évaluation. Aucun lancement métier ni attestation du processus Ollama.
+- **Résultat ROOT** : les deux exécutables système attendus sont présents et exécutables. Rouge 0/1 avec la sonde générique qui refuse le profil Strict. Après raccord, le profil de fixture charge via Seatbelt et le programme inerte sort à zéro. Le writer conserve l'ID du broker, deux phases, zéro dispatch et zéro processus de service. Le répertoire privé est vide au retour. Le rejeu final passe 1/1 natif et 3/3 régressions non natives, zéro échec. Clippy strict des bibliothèques, rustfmt et `git diff --check` à 0. Blobs `host_strict_service.rs=18d2f838b448`, `host.rs=39f6d0d535d0`, `lib.rs` du host `=e66a5d8727fe`, `provider_service_evaluation.rs=239bfe5aa2fe`, banc `=3ee3a61dc7cc`. La sonde prouve le chargement du profil dans cette fixture. Le permis, le lancement et l'attestation du processus restent ouverts. Candidat hors intégration, aucun nouveau worktree.
+
+### F012 / T-F012-015 — Permis durable de lancement à usage unique
+
+- **Finalité** : délivrer le permis de lancement après engagement d'un seul marqueur du broker, avec les empreintes observées du bootstrap et la décision exacte. C1 annule le marqueur, C4 avant remise conserve un marqueur dont aucun rejeu ne crée un permis.
+- **Périmètre** : ROOT, `goal/g0003-m2@6fb6489`, `provider_service_launch.rs`, `broker_writer.rs`, `lib.rs`, `t_f012_connect_store.rs` et `provider_service_launch_scenarios.rs` du Store. SQLite temporaire, observation et décision de fixture, aucun démarrage de service, listener, sonde native ou coffre. Le port d'évaluation et le writer générique restent fermés au dispatch du service. Les contrôles signalés restent clos.
+- **Commandes** : RTK, Rust 1.94.1 locked/offline, `CARGO_INCREMENTAL=0`, `UNLEASH_LIVE_TESTS` absent, cache `/Users/louis/Library/Caches/unleash/target/g0002-m1-acceptance`. Rouge puis vert : `cargo +1.94.1 test --locked --offline -p unleash-store --test t_f012_connect_store service_launch_scenarios::permit_`. Régression : même cible filtrée par `service_launch_scenarios::decision_`. Rustfmt ciblé, `cargo +1.94.1 clippy --locked --offline -p unleash-store --lib --test t_f012_connect_store --all-features -- -D warnings`. Preuves sous `.claude/evidence/g0003-m2/f012-service-launch-permit/`.
+- **Oracles** : empreinte ou décision divergente est refusée sans marqueur. Une transaction réussie engage ensemble le marqueur, la phase et son événement, puis remet un seul permis. Perte de remise simulée après commit et rejeu convergent vers un seul marqueur, aucun second permis. Aucun processus ni réussite native.
+- **Dossier** : actualiser les fiches SQLite et F012 sur la remise du permis. Dans l'extraction du paquet suivi, reprendre aussi les trois sources documentaires F012 en cours. Exécuter `python3 -B tools/design-package/regen.py .` puis `uv run --offline --no-project --with jsonschema python -B tools/design-package/validate.py .`. Comparer et copier les fichiers générés, puis retirer l'extraction.
+- **Raccord daemon** : élargir à `provider_service_evaluation.rs`, son banc et la projection de décision de `broker_journal.rs`. Depuis le même checkout et cache, rouge puis vert sur `cargo +1.94.1 test --locked --offline -p unleash-daemon --lib provider_service_evaluation::tests::broker_decision_yields_one_durable_launch_permit -- --exact`, puis le filtre `provider_service_evaluation::tests::` sans scénario opt-in. Fixture de confinement simulée, fichier inerte et décision produite par le vrai broker. Le port relit le bootstrap et engage un seul marqueur. Zéro processus de service et aucun appel natif, listener ou coffre dans ces tests. Rustfmt ciblé et `cargo +1.94.1 clippy --locked --offline -p unleash-daemon --lib --all-features -- -D warnings`.
+- **Résultat Rust ROOT** : deux rouges Store et un rouge daemon sur les ports provisoires. Puis 4/4 Store (permis et décisions), 1/1 exact daemon, et 4/4 dans le filtre daemon avec l'essai Seatbelt opt-in ignoré sur cette sélection. Aucun échec. Clippy strict Store et daemon sur les cibles indiquées, rustfmt et `git diff --check` à 0. C1 laisse zéro marqueur. C4 conserve un seul marqueur, un seul événement de dispatch et zéro ligne de processus. Le rejeu et le writer générique ne remettent aucun permis. Le vrai broker de fixture fournit la décision utilisée par le daemon pour demander le permis. Aucun lancement natif.
+- **Blobs** : `provider_service_launch.rs=bd5862196bbe`, `broker_writer.rs=463980113d70`, `lib.rs` Store `=688c6cbc4d33`, `t_f012_connect_store.rs=a2fe638cb2c1`, banc Store `=c7f275e19064`, `provider_service_evaluation.rs=6015a2906a6a`, banc daemon `=8adf5b2a4dc8`, `broker_journal.rs=b415d33674fd`. Candidat hors intégration.
+- **Résultat dossier ROOT** : 396 fichiers, 414 empreintes, zéro erreur et zéro avertissement, digest `ba0abf6b25a49413e8acafac8f6befbc690274589226516df0ba1b2bec42dad0`. Les cinq sources ont été comparées. Le manifeste et les checksums validés sont installés. L'extraction est absente, 429 fichiers et 4 740 565 octets logiques retirés. Aucun nouveau worktree. Les preuves restent conservées pour revue.
 
 - 2026-11-18T17:49:02Z | préparation acceptée | `5a16c4a` réunit l’annexe Codex2 F003 et le lot F012 sur `goal/g0003-m2`. 11 et 26 tests ciblés, 249 tests workspace sans échec sur cette base. Déficit partagé entre classes, arbitrage anti-famine et demande urgente de checkpoint retenus. Voir le journal du programme pour les SHA, commandes, limites et clôtures des deux remises.
 - 2026-11-18T18:33:00Z | découpage des raccords | Le point Store de `/root/m1_store` propose la projection SQLite et un engagement transactionnel qui revalide l’éligibilité. La révision du pool seule ne couvre pas les changements d’occupation. Le plan conserve la file dans les tables des unités et exige une preuve de checkpoint et de neutralisation avant libération. `/root/m2_stream` a identifié `TestProviderProfile` comme parcours modèle initial. Le passage de `/root/m1_ipc` (`01a1eeef-1933-7643-93c9-0e1c6bc9a00d`, parent ROOT Codex2) retrouve le test du vrai process-host avec daemon simulé et aucun handler produit terminal à `8598866`. Le parcours retenu pour F011 est le rattachement après crash du vrai daemon. Ces lectures ne valent pas qualification des raccords.
@@ -860,3 +946,1290 @@ ROOT, canon `goal/g0003-m2`, base `241d03b` et candidats F012. Ajouter une entr�
 - 2026-11-20T18:53Z | Preuves CLI | RED du test d’aide exact 47023 terminal101, commande provider absente, SHA256 5ceaa23a4056b9b0620f718b9195554ff6e7cb972140ad08e93ea112b73d9da6. 96742 terminal0 sur Rust 1.94.1 locked/offline : aide 1/1, deux tests d’enveloppe et bornes CLI, zéro échec/ignoré. SHA256 aide 46e2065ba0de91d57afa5477c16aaa0493c46cc646a73edb173d97a42c9de2c4 et unitaires 6b12397215a62c41dc18076d3cac73db4205fc9f54c4d9de69cf3880f0cf1a62. Rustfmt ciblé et Clippy strict all-features lib/bin/test CLI verts.
 - 2026-11-20T18:53Z | Portée | Aide du binaire et test de la requête produite. Le parcours réel CLI → daemon et la découverte des profils restent ouverts. Les WIP déjà signalés non vérifiés F003 et F011 restent hors intégration, aucun worktree créé. Les cinq logs CLI, 2191 octets, sont acceptés pour retrait après enregistrement.
 - 2026-11-20 | Clôture des preuves CLI F012 | Sur 32af810, cinq logs acceptés et 2191 octets retirés, pack absent. Aucun worktree créé.
+
+- 2026-11-20T21:46Z | Vérification de la prochaine composition M2 | ROOT, checkout canonique `/Volumes/personal_folder/Unleash`, `goal/g0003-m2@6fb6489` avec candidats conservés. Finalité : isoler deux diagnostics de lint qui empêchent la compilation des cibles de test. Lecture de `worker_shutdown_tests.rs:1` et de `unleash-store/tests/common/provider_probe.rs:2–5` avec leurs consommateurs. Commande exacte avant/après : `/Users/louis/.cargo/bin/cargo +1.94.1 clippy --locked --offline -p unleash-daemon -p unleash-store --lib --test t_f003_scheduler_sqlite --test t_f003_admission --test t_f012_probe_preparation --all-features -- -D warnings`, préfixe RTK, cache local M1 existant, incrémental désactivé, `UNLEASH_LIVE_TESTS` absent. Analyse de compilation uniquement, aucun test, daemon, PTY, worker ou fournisseur lancé. Sorties `.claude/evidence/g0003-m2/workflow-integration/clippy-before.log` et `clippy-after.log`. Critère : constater les diagnostics ciblés, puis leur disparition, en consignant tout autre diagnostic séparément. Les contrôles signalés restent fermés.
+
+- 2026-11-20T21:47Z | Cible de compilation manquante | Première commande verte en 28,68 s sur les cibles nommées. Elle omet la compilation du banc unitaire de la bibliothèque du daemon où les diagnostics historiques apparaissent. Ajouter la cible `/Users/louis/.cargo/bin/cargo +1.94.1 clippy --locked --offline -p unleash-daemon --lib --tests --all-features -- -D warnings` avant/après, mêmes entrées Rust et cache, journal `.claude/evidence/g0003-m2/workflow-integration/clippy-daemon-before.log` puis `clippy-daemon-after.log`. Clippy compile le code de test sans exécuter ses scénarios. Aucune des vérifications signalées n'est reprise.
+
+- 2026-11-20 | Déblocage des contrôles de composition | Sur le candidat ROOT `goal/g0003-m2@6fb6489`, Clippy strict du daemon avec `--lib --tests --all-features` reproduit deux diagnostics (sortie 101, preuve `.claude/evidence/g0003-m2/workflow-integration/clippy-daemon-before.log`). Corriger le format du nom de commande dans `worker_shutdown_tests.rs` et retirer l'attente de lint redondante du helper de fixture partagé. Mêmes commandes après correction : daemon exit 0 en 38,73 s et sélection des trois tests d'intégration en compilation exit 0 en 26,87 s. Blobs `5dc353fafcc7` et `5ed95decd8d8`. Rustfmt des deux fichiers et `git diff --check` exit 0. Aucun scénario de test lancé. Candidat à inclure dans la prochaine composition vérifiée.
+- 2026-11-20 | Correction du flux de revue | ROOT remplace le rejeu ciblé systématique par l'examen indépendant des sorties et de leurs entrées lorsqu'elles correspondent. Le vérificateur contrôle les assertions et rejoue seulement les contrôles autorisés dont la preuve manque ou a changé. Les revues en lecture seule réutilisent le checkout du candidat figé. Au prochain cycle, comparer le dernier lot accepté, le SHA intégré et le SHA publié. Base du relevé : M2 13/16, `6fb6489`; `origin/dev` connu `8598866`. Les revues Codex1 de liste et validation n'ont pas démarré et restent non vérifiées. Les vérifications signalées gardent leur état et leur condition d'arrêt. Aucun temps de revue gagné n'a encore été mesuré.
+- 2026-11-20 | Gouvernance vérifiée | Paquet Git avec les huit sources modifiées de gouvernance et du dossier F012, validator exit 0, 396 fichiers, 414 empreintes, 27 schémas, 32 documents, 3 744 liens, zéro erreur et zéro avertissement. Digest `0a024955430cb951a935c364a159ffe32934eae50df045f873618bb2cf2c230a`. Les huit sources et les deux fichiers générés correspondent aux octets validés. Archive et 429 fichiers extraits retirés après dernier usage, 9 830 553 octets logiques. Journaux minimaux conservés pour la revue. Aucune intégration produit, publication ou nouvelle qualification de scénario.
+
+### F012 / T-F012-015 — Raccord du permis à l'hôte de service détenu
+
+ROOT, checkout canonique `goal/g0003-m2@6fb6489`, seul écrivain. Finalité : transmettre un permis déjà engagé au lanceur packaged, puis authentifier la preuve de lancement depuis le processus enfant détenu. Périmètre : `crates/unleash-daemon/src/provider_service_evaluation.rs` et son banc `tests.rs`, port Store dédié dans `crates/unleash-store/src/provider_service_launch.rs`. Les autres candidats F003, F011 et F012 restent conservés.
+
+- Cas négatifs avec le broker Rust et SQLite sur une fixture privée temporaire. Plan synthétique sans exécutable démarré. Attendus : un permis dont l'horloge ou le bootstrap a divergé est refusé, aucun fichier de bootstrap créé et un seul marqueur durable. `/Users/louis/.cargo/bin/cargo +1.94.1 test --locked --offline -p unleash-daemon --lib provider_service_evaluation::tests::launch_permit_` (banc natif opt-in ignoré par défaut).
+- Cas natif séparé sur macOS : `unleash-process-host --bootstrap <fixture>/host/bootstrap.json`, binaire construit par `/Users/louis/.cargo/bin/cargo +1.94.1 build --locked --offline -p unleash-process-host --bin unleash-process-host`. Le seul service est `/bin/sleep 4` sous le profil exact. Pas de listener TCP, moteur modèle, PTY, accès externe ou donnée réelle. La preuve utilise uniquement le socket Unix privé de cet hôte, son enfant direct et le SQLite de la fixture. Attendu : un marqueur avant spawn, même dispatch, identité native attestée, un seul démarrage. Attente de disponibilité bornée à trois secondes. Le programme finit seul en quatre secondes et le banc termine et récolte son propre hôte. Aucun autre processus visé. Commande : `/Users/louis/.cargo/bin/cargo +1.94.1 test --locked --offline -p unleash-daemon --lib provider_service_evaluation::tests::launch_permit_starts_packaged_host -- --exact --include-ignored`, chemin du binaire `/Users/louis/Library/Caches/unleash/target/g0002-m1-acceptance/debug/unleash-process-host` dans `UNLEASH_TEST_PROCESS_HOST_BIN`.
+- RTK, cache `/Users/louis/Library/Caches/unleash/target/g0002-m1-acceptance`, incrémental désactivé et `UNLEASH_LIVE_TESTS` absent. Logs dans `.claude/evidence/g0003-m2/f012-owned-service-launch/`. Rustfmt des fichiers modifiés, Clippy strict offline des bibliothèques et des cibles de test concernées. Aucune reprise d'un contrôle signalé.
+- Régressions et format : `/Users/louis/.cargo/bin/cargo +1.94.1 test --locked --offline -p unleash-daemon --lib provider_service_evaluation::tests::`, modules du vrai broker et de la préparation SQLite, sondes et lancement natifs ignorés hors essai opt-in. `/Users/louis/.cargo/bin/cargo +1.94.1 clippy --locked --offline -p unleash-daemon -p unleash-store --lib --tests --all-features -- -D warnings` analyse les sources sans lancer les scénarios. Journaux `regression.log` et `clippy.log`. Le banc natif contrôle la sortie de son programme fini, attend et récolte le process-host qu'il a créé, y compris en cas d'échec d'assertion. Les vérifications signalées restent closes.
+
+- **Résultat ROOT** — rouge de compilation sur le port de lancement absent, sortie 101, SHA-256 `ac6f78a41910079092f60bbdff9706d50213770ed40826faaef4ae2c2f96ea4b`. Sur la version finale, le lanceur revérifie le plan, l'horloge et le dispatch courant, consomme le permis puis conserve le handle même si l'observation échoue. Les fichiers privés sont réservés dans un rendez-vous neuf. SQLite conserve une seule phase de dispatch. La preuve lue sur son socket privé correspond à l'enfant direct attendu. Le banc vérifie la sortie du programme inerte et récolte l'hôte qu'il a créé.
+- **Contrôles finaux** — `regression-final.log` 6 réussis, zéro échec, 2 cas natifs ignorés par cette sélection, SHA-256 `0c57f4a18e5dd24b05a4337798c1f2ed4fa88cdbf801763ad1d03346b904a89b`. `native-final.log` 1 réussi, zéro échec ou ignoré, essai explicite en 4,42 s, SHA-256 `bf7e712a9d1d996fcc9ddd8b126d898aac856cc54c463f5c51afb01a9fef158b`. Clippy strict sur bibliothèques et cibles de test Store/daemon, rustfmt ciblé et `git diff --check` exit 0. Blobs `provider_service_evaluation.rs=1a0d6a244dfb`, `tests.rs=481c0a8c2b13`, `provider_service_launch.rs=ded130d2b241` sur le canon `6fb6489`. Les notes du mécanisme et les preuves du candidat restent disponibles pour la revue. Aucun worktree ajouté.
+- **Portée** — aucun fournisseur réel ni génération, aucune décision de disposition du dispatch enregistrée par ce raccord. ROOT doit conserver l'hôte dans le contrôleur du daemon et projeter l'observation authentifiée, ou l'issue inconnue, avant de relier admission et transport. Le candidat reste hors intégration et M2 à 13 lots sur 16.
+
+### F012 / T-F012-015 — Issue durable du dispatch du service
+
+ROOT, canon `goal/g0003-m2@6fb6489`, candidat du lanceur détenu conservé. Finalité : lier l'observation du lancement au dispatch durable exact et conserver le process-host dans le contrôleur avant observation. Source : `provider_service_evaluation.rs`, son banc `tests.rs`, le writer `broker_writer.rs`, le port `provider_service_launch` et les champs du contrôleur daemon. Contrat `ActionObserved`, annexer le fait natif uniquement quand le lancement est attesté. Une issue inconnue garde le marqueur. Aucun envoi de génération, aucun rejeu d'effet.
+
+- SQLite temporaire et broker Rust sur la fixture inerte existante ; `/Users/louis/.cargo/bin/cargo +1.94.1 test --locked --offline -p unleash-daemon --lib provider_service_evaluation::tests::launch_outcome_`. Oracle : refus du port générique, acceptation de l'issue inconnue dans le port dédié, rejeu exact sans deuxième événement. Une empreinte d'attestation divergente ne crée aucune disposition. Aucun programme, socket ou moteur démarré par ces vérifications.
+- Banc natif distinct : `/Users/louis/.cargo/bin/cargo +1.94.1 test --locked --offline -p unleash-daemon --lib provider_service_evaluation::tests::launch_permit_starts_packaged_host -- --exact --include-ignored`, binaire packaged du même dépôt dans `/Users/louis/Library/Caches/unleash/target/g0002-m1-acceptance/debug/unleash-process-host`. Démarre uniquement `unleash-process-host --bootstrap <fixture>/host/bootstrap.json`, puis `/bin/sleep 4` sous le plan macOS existant, une fois. Socket Unix privé de la fixture, seuls processus et SQLite du banc. Oracle : une attestation authentifiée et liée au dispatch devient durable, une seule disposition, puis sortie du service et récolte de l'hôte. Aucun PTY, réseau TCP, fournisseur ni donnée réelle.
+- Préfixe RTK, `CARGO_TARGET_DIR=/Users/louis/Library/Caches/unleash/target/g0002-m1-acceptance`, `CARGO_INCREMENTAL=0`, `UNLEASH_LIVE_TESTS` absent, sortie sous `.claude/evidence/g0003-m2/f012-service-launch-outcome/`. Le scénario signalé F011 et les autres contrôles signalés restent clos.
+- Vérifications finales : `/Users/louis/.cargo/bin/cargo +1.94.1 test --locked --offline -p unleash-daemon --lib provider_service_evaluation::tests::` sur les fixtures SQLite et broker avec les bancs natifs ignorés par défaut. Puis `/Users/louis/.cargo/bin/cargo +1.94.1 test --locked --offline -p unleash-daemon --lib provider_service_evaluation::tests::launch_permit_starts_packaged_host -- --exact --include-ignored` sur le seul programme inerte prévu. `/Users/louis/.cargo/bin/cargo +1.94.1 clippy --locked --offline -p unleash-daemon -p unleash-store --lib --tests --all-features -- -D warnings` compile et analyse les cibles de test sans lancer leurs scénarios. Dossier de conception : extraction des fichiers Git suivis, surcouche des sources modifiées, `python3 -B tools/design-package/regen.py` et `uv run --offline --no-project --with jsonschema python -B tools/design-package/validate.py` sur ce paquet.
+- Registre du contrôleur : le démarrage du daemon et StopDaemon consultent déjà `hosts.json`. Réserver l'entrée avant le spawn et rattacher le PID/identité dès que disponible. Sérialiser l'écriture avec les enregistrements terminaux concurrents dans `executors.rs`. Le banc natif garde le manifeste sous son rendez-vous temporaire privé, constate que l'hôte appartient à la racine de fixture pendant l'essai et constate sa neutralisation après récolte. Même binaire, même durée, aucun autre hôte ou racine réelle inspectés ou modifiés.
+- Régressions du registre privé : `/Users/louis/.cargo/bin/cargo +1.94.1 test --locked --offline -p unleash-daemon --lib executors::tests::` sur les fixtures préexistantes qui lisent/écrivent un manifeste temporaire. La vérification de présence utilise uniquement l'identité du processus de test lui-même ou des identités synthétiques. Aucun autre exécuteur démarré, arrêté ou modifié.
+- Premier essai natif de la projection : l'attestation a été obtenue et l'hôte récolté, mais le writer a refusé l'identité de boot. La base ouverte seule portait son identité de bootstrap, distincte du boot enregistré par le daemon au démarrage. Réutiliser `enter_recovering_and_emit_event` et `classify_and_finish_recovery` sur ce SQLite temporaire vide avant la préparation. Aucun nouveau processus ni écoute ajoutés. Rejouer les mêmes contrôles et l'essai natif de cette fixture après correction.
+
+- **Résultat ROOT** — le contrôleur du daemon conserve le handle avant l'attestation, réserve son entrée dans le registre du rendez-vous et y rattache son identité native. Une observation affirmative passe par le port dédié. Le writer vérifie l'action, le dispatch et l'évaluation, la lignée, le boot, l'UID et les empreintes. Il inscrit la phase, le résultat, le document natif et l'outbox dans la même transaction. Une issue inconnue garde le marqueur. Un rejeu exact retrouve le même curseur et le port broker générique refuse cette observation.
+- **Preuves de qualification** — `.claude/evidence/g0003-m2/f012-service-launch-outcome/native-verified.log` : 1 réussi, aucun échec ni ignoré, 4,51 s. Le vrai process-host a attesté /bin/sleep, le test a relu le fait et son outbox, comparé l'empreinte et l'identité, rejoué la remise sans autre dispatch et récolté son hôte. Le registre retient l'hôte vivant pour l'arrêt et le changement de racine, puis le reconnaît comme terminé dans la fixture. SHA-256 `eb034b824eed1ce46817d65d9f33d1aa42bda2026e93cdc070941183a88aca7a`. `regression-verified.log` : 9 réussis, 0 échec, 2 opt-in ignorés dans cette sélection (SHA-256 `8a734fbb0a54e058cbe4ad2965af96d50d2f73d9bc066181f089c15deaf94cab`). `registry-verified.log` : 3 réussis, 0 échec, 0 ignoré. Clippy strict Store/daemon, formatage ciblé et diff exit 0. Blobs `daemon.rs=259fda2da535`, `controller.rs=b2cc0ad929e6`, `tests.rs=a3c05e0db084`, `observation.rs=15ae768d08f1`.
+- **Contrat** — paquet du dépôt validé, 396 fichiers et 414 empreintes, zéro erreur ni avertissement, digest `c6221d29734e25955ad110783fae070d4617be175976c7f9d27f0d46c4a79655`. Neuf sources et deux fichiers générés comparés aux octets validés. Archive et 429 fichiers extraits retirés, 9 833 477 octets logiques. Preuves fonctionnelles conservées pour la revue.
+- **Portée** — API Rust interne du daemon et contrôleur exécuté sur fixture, aucun parcours IPC ou Ollama réel. Le lien du fait durable à l'admission, la qualification du pair réseau, le raccord générateur et la reprise après redémarrage restent ouverts. Candidat hors intégration, aucun nouveau worktree, M2 à 13 lots intégrés sur 16.
+
+### F012 / T-F012-015 — Lier le placement au lancement attesté
+
+ROOT, canon `goal/g0003-m2@6fb6489`, candidat contrôleur/observation conservé. Finalité : réutiliser la preuve durable de lancement uniquement pour le même profil et le même enfant qu'un contrôleur détient et observe à l'écoute. Fichiers : lecture F012 du Store, placement de génération et son banc, contrôleur `provider_service_evaluation` et son banc, API Rust du daemon. Aucun transport HTTP exécuté par ce raccord.
+
+- SQLite temporaire et broker Rust sur la fixture synthétique existante. `/Users/louis/.cargo/bin/cargo +1.94.1 test --locked --offline -p unleash-daemon --lib provider_service_evaluation::tests::launch_placement_` : un marqueur seul et une issue inconnue ne donnent aucune attestation lisible. Une preuve engagée se relit pour le dispatch exact, avec son empreinte. `/Users/louis/.cargo/bin/cargo +1.94.1 test --locked --offline -p unleash-store --test t_f012_profile_versions generation_placement::` : vérifier la compatibilité des preuves de fixture et le refus d'un placement qui référence un lancement inexistant. Aucun processus ni socket ouvert par ces sélections.
+- Juste pour le test du refus natif d'écoute : `/Users/louis/.cargo/bin/cargo +1.94.1 test --locked --offline -p unleash-daemon --lib provider_service_evaluation::tests::launch_permit_starts_packaged_host -- --exact --include-ignored` avec le même binaire `/Users/louis/Library/Caches/unleash/target/g0002-m1-acceptance/debug/unleash-process-host` et la même fixture autorisée `/bin/sleep 4`. Revalider le fait du même enfant et observer son écoute locale sans connecter de socket TCP. Aucune écoute attendue, donc aucun placement. Le seul socket de la fixture est le contrôle Unix privé. Vérifier la sortie de sleep et récolter l'hôte détenu.
+- RTK, cache `/Users/louis/Library/Caches/unleash/target/g0002-m1-acceptance`, `CARGO_INCREMENTAL=0`, `UNLEASH_LIVE_TESTS` absent. Journaux sous `.claude/evidence/g0003-m2/f012-launch-placement/`. Les contrôles signalés précédemment restent clos.
+- Précision du banc SQLite de placement : le cas positif utilise aussi les trois phases du port de lancement et une attestation explicitement synthétique. Il ne lance aucun programme. Il injecte d'abord un autre port et une autre incarnation, puis reprend l'observation correspondant au profil et à l'enfant attendus. Attendu : seuls les octets et la preuve de cette observation sont associés à l'admission. Même filtre de test qu'indiqué ci-dessus.
+- Régressions : `/Users/louis/.cargo/bin/cargo +1.94.1 test --locked --offline -p unleash-daemon --lib provider_service_evaluation::tests::` (le vrai banc natif reste ignoré dans ce filtre), `/Users/louis/.cargo/bin/cargo +1.94.1 clippy --locked --offline -p unleash-daemon -p unleash-store --lib --tests --all-features -- -D warnings` (analyse de compilation), rustfmt ciblé et `git diff --check`. Paquet Git suivi de conception sous `.claude/evidence/g0003-m2/f012-launch-placement/design-package`. Régénérer le manifest par `python3 -B tools/design-package/regen.py` puis valider par `uv run --offline --no-project --with jsonschema python -B tools/design-package/validate.py`. Les logs et les limites restent dans le suivi existant.
+
+- **Effet vérifié** — le writer relit la préparation historique, la phase d'observation du dispatch, son événement et les empreintes, dans l'incarnation en cours. Le contrôleur rapproche l'hôte détenu, son enfant attesté et l'adresse numérique du profil avant inspection de son écoute. Le nouveau port dépose une preuve qui lie le dispatch à l'identité du processus et aux entrées de génération. La lecture dédiée au transport géré exige une preuve liée. Le banc SQLite adopte son listener synthétique exact, rejette autre port, autre incarnation et dispatch absent, et relit les entrées admises. Le banc macOS refuse l'absence d'écoute de son vrai enfant inerte et récolte l'hôte.
+- **Contrôles finaux** — 7 tests SQLite de placement réussis, 11 tests daemon réussis (2 opt-in ignorés par cette sélection) et 1 essai natif réussi en 4,50 s. Aucun échec. `.claude/evidence/g0003-m2/f012-launch-placement/placement-final.log` SHA-256 `149edbdf467fedd1dca19fa94089691342598c0784acb21a2fbb13ae10220b0e`, `regression-final.log` `bc3417947e375932d583a3c8a6b9f7de813aaf7b2387733618073542ccdea7c9`, `native-final.log` `7c5c885ae0fc6b2c8414b70ca83b1503fa5909100ec5bdc80a2035a48bf377e9`. Clippy strict daemon/Store, rustfmt et `git diff --check` réussis. Blobs `managed.rs=126ce7c19c7f`, `attested.rs=140e921b9dae`, `controller.rs=5d2c57b3fddb`, `provider_probe_generation_placement.rs=256844f98b4c`.
+- **Contrat et nettoyage** — paquet Git 396 fichiers, 414 empreintes, zéro erreur ni avertissement, digest `8f2a80a6c3306c5efc9bc499971b8a467968169b57d7796b0631c58e96e0bd33`. Neuf sources et deux fichiers générés comparés aux entrées validées. Archive et 429 fichiers extraits retirés, 9 834 099 octets logiques. Preuves de test gardées pour la revue.
+- **Portée** — l'appel Rust explicite lie le lancement au placement et à la relecture de l'admission. Le positif SQLite emploie un listener synthétique. Le refus natif ne connecte aucun socket TCP. Aucun envoi HTTP, parcours IPC complet, moteur réel ou effet de reprise qualifié. La sélection du service et l'exécution de l'admission et du transport restent à raccorder au parcours nominal. Candidat hors intégration, M2 13/16, aucun nouveau worktree ni push.
+
+### F012 / T-F012-015 — Sélection du service sur le parcours nominal
+
+ROOT, canon `goal/g0003-m2@6fb6489`. Finalité : le chemin IPC TestProviderProfile génération cherche un lancement attesté et détenu du profil exact après la phase Authorizing, puis dépose sa preuve d'écoute pour l'ordonnanceur. Le probe éligible reste en file avant la décision et la prise en charge par son exécuteur. Avant cette prise en charge aucun slot, dispatch de génération ou octet HTTP ne doit être engagé. Périmètre : phase et préparation F012 du Store, contrôleur des services et raccord génération du daemon, tests ciblés existants.
+
+- `/Users/louis/.cargo/bin/cargo +1.94.1 test --locked --offline -p unleash-daemon --lib provider_service_evaluation::tests::nominal_generation_adopts_owned_listener -- --exact --include-ignored` sur macOS, binaire packaged `/Users/louis/Library/Caches/unleash/target/g0002-m1-acceptance/debug/unleash-process-host`. Le service enfant est le binaire de banc Rust exécutant uniquement la fonction de fixture `nominal_generation_listener_fixture`. Un port loopback éphémère est alloué dans le banc. L'enfant ouvre une seule écoute sur ce port, écrit son témoin de disponibilité sous son répertoire temporaire, attend 8 s puis termine. Il ne lit aucune requête, ne connecte aucun socket et n'utilise ni modèle, ni réseau externe, ni PTY. Une socket Unix de contrôle de fixture, un SQLite temporaire, un hôte détenu. Oracle : profil attendu, preuve liée au dispatch rendu admissible une fois, rejeu stable, et zéro réservation ou dispatch de génération. Le banc récolte le host et son enfant fini.
+- `/Users/louis/.cargo/bin/cargo +1.94.1 test --locked --offline -p unleash-daemon --test t_f012_probe_mandates_ipc t_f012_ollama_generation_authorizing_binds_configured_endpoint -- --exact` sur le daemon et son IPC Unix privé de fixture, cas sans host. La commande authentifiée engage la phase Authorizing et laisse le probe en attente de placement. Aucune connexion au profil. `/Users/louis/.cargo/bin/cargo +1.94.1 test --locked --offline -p unleash-daemon --lib provider_service_evaluation::tests::` couvre le broker et SQLite, sans les essais natifs opt-in.
+- RTK, Rust 1.94.1, cache `/Users/louis/Library/Caches/unleash/target/g0002-m1-acceptance`, incrémental désactivé, `UNLEASH_LIVE_TESTS` absent. Preuves sous `.claude/evidence/g0003-m2/f012-nominal-placement/`. Les contrôles signalés restent clos.
+- Rouge de compilation du nouveau contrat : `/Users/louis/.cargo/bin/cargo +1.94.1 test --locked --offline -p unleash-daemon --lib --no-run`, même cache, aucun banc exécuté. Attendu : le point d'adoption du parcours manque.
+- Contrôles : `/Users/louis/.cargo/bin/cargo +1.94.1 clippy --locked --offline -p unleash-daemon -p unleash-store --lib --tests --all-features -- -D warnings` compile sans démarrer les bancs. Rustfmt ciblé, `git diff --check`. Paquet Git suivi du dossier avec surcouche des neuf sources modifiées ; `python3 -B tools/design-package/regen.py` puis `uv run --offline --no-project --with jsonschema python -B tools/design-package/validate.py` dans le paquet.
+- Premier essai natif : le writer a refusé la préparation de génération après le démarrage de la fixture. Le banc déposait le probe avant d'attendre le host. Comme dans le parcours visé, garder le mandat en amont et préparer le probe une fois l'écoute prête. Les délais produit et le périmètre d'exécution restent ceux du mandat. Rejouer uniquement l'essai défini.
+- Deuxième essai : la préparation et la phase initiale ont passé. La lecture d'attente a révélé une jointure incorrecte sur SQLite. Elle suit maintenant l'action via `provider_probe_contexts`, comme le banc IPC de référence. Même scénario natif, sans élargissement du périmètre.
+- Correction après lecture de l'ordonnanceur : le plan Connect ne fournit un budget que pour son probe. Un probe de génération déclaré éligible sans propriétaire d'exécution peut donc être choisi en tête et bloquer les autres tours. Le parcours IPC conserve l'objet de preuve lié dans SQLite et laisse l'attente active jusqu'au relais du transport. Oracle ajusté : une preuve durable du listener exact, un même reçu au rejeu et aucune unité présentée au planificateur ni réservation. Même fixture native et mêmes commandes de qualification. Le port explicite d'adoption continue de servir les consommateurs disposant d'un plan.
+- Compatibilité du port d'adoption existant : `/Users/louis/.cargo/bin/cargo +1.94.1 test --locked --offline -p unleash-store --test t_f012_profile_versions generation_placement::` (SQLite et identité synthétique uniquement). Les prêts programmables de ces fixtures doivent rester observables après le découpage ; le banc natif vérifie au contraire la conservation sans visibilité dans la file commune pour le chemin IPC.
+
+- **Résultat ROOT** — le traitement asynchrone après Authorizing cherche uniquement les services détenus du profil, de la portée, de la politique et de l'incarnation du probe. Une écoute confirmée unique produit une preuve locale liée au dispatch. En cas d'absence ou d'ambiguïté, le probe attend. Le rejeu peut chercher la preuve avant son adoption, et rend sans nouvelle observation lorsque le fait existe. L'adoption du chemin IPC conserve la preuve dans SQLite. Le planificateur partagé garde ses entrées et aucune réservation ni aucun envoi de génération n'intervient à cette étape. Le port explicite de placement ordonnançable garde son comportement.
+- **Qualification locale** — `.claude/evidence/g0003-m2/f012-nominal-placement/final-store.log` : 7 réussis. `final-regression.log` : 11 réussis, 4 opt-in ignorés par ce filtre. `final-ipc.log` : 1 réussi, vrai daemon sur socket Unix avec profil sans service détenu. `final-native.log` : 1 réussi, zéro échec ni ignoré, 16,92 s. Vrai host, vraie écoute sur le port loopback éphémère de l'enfant inerte, preuve relue par son owner et contenant le dispatch de lancement, même état au rejeu, pool vide et seul marqueur de lancement. Hôte récolté. SHA-256 natif `cbd531d1d3d99baa2aac033e51a6bee90eb4657dc9110efe060265c98ad83f26`, IPC `838702a185746a82459ca7bd21e7c0e487639faa4f359ffbdfed74f51b540fb9`, Store `03a7060b18f3ae49f43e25d72b0753e6a3bbf96e2ed0c3b30b5d53e0a59cd08f`. Clippy strict Store/daemon, rustfmt ciblé et diff exit 0. Blobs `provider_probe_generation_service.rs=0ac701a02c33`, `controller.rs=f355a464724a`, `tests.rs=32257d662185`, `placement.rs=7d155d0f79f2`, `managed.rs=e27a63c9922b`.
+- **Portée** — le positif natif exerce le même helper que le parcours IPC. L'IPC sans hôte est vérifié séparément. L'exécuteur de génération devra reprendre la preuve courante, activer l'admission et lier le digest natif au permis de transport. L'intention courante lie déjà le corps publié et le manifeste. La requête native lie en plus l'admission et le placement. La reprise de l'hôte, le chemin complet vers le transport et Q-19 sur un moteur restent ouverts. Candidat hors intégration, M2 13/16, aucun nouveau worktree ni push.
+- **Contrat et nettoyage** — paquet Git validé, 396 fichiers et 414 empreintes, zéro erreur et zéro avertissement, digest `e1a8bb207a7201c3db4ddb65902949e3529d42b4052eee9e2bf54a44261fc8a8`. Les neuf sources et les deux fichiers générés correspondent aux octets validés. Archive et 429 fichiers extraits retirés, 9 834 548 octets logiques. Garder les journaux utiles à la revue.
+
+### F012 / T-F012-015 — Relais atomique du placement vers le propriétaire d'admission
+
+ROOT, canon `goal/g0003-m2@6fb6489`. Finalité : présenter le probe exact à l'ordonnanceur à la demande de son exécuteur, engager le bail et rendre le corps et le placement revalidés au même appel. Réutiliser la transaction d'admission, les preuves liées et la politique pure. Toute attente, sélection d'une autre unité ou preuve invalide laisse la preuve acquise, sans nouvel état d'éligibilité, d'admission ni effet. Le parcours IPC continue de conserver son fait sans planifier tant que l'exécuteur de transport n'est pas raccordé.
+
+- `/Users/louis/.cargo/bin/cargo +1.94.1 test --locked --offline -p unleash-store --test t_f012_profile_versions --no-run` pour le rouge de compilation. `/Users/louis/.cargo/bin/cargo +1.94.1 test --locked --offline -p unleash-store --test t_f012_profile_versions generation_placement::` sur SQLite temporaire et faits synthétiques. Vérifier attente atomique, refus de la sélection étrangère, bail unique, corps publié, issue périmée et refus d'un second relais. Aucun processus enfant ou socket par ces bancs.
+- `/Users/louis/.cargo/bin/cargo +1.94.1 test --locked --offline -p unleash-daemon --lib provider_service_evaluation::tests::nominal_generation_adopts_owned_listener -- --exact --include-ignored`, binaire packaged `/Users/louis/Library/Caches/unleash/target/g0002-m1-acceptance/debug/unleash-process-host`. Réutilise la fixture `nominal_generation_listener_fixture` avec une écoute loopback éphémère de 8 s et témoin prêt. Un host, son enfant direct, le socket Unix de contrôle et le SQLite appartenant à la fixture. Après preuve, la simulation de la prise en charge par le propriétaire appelle le vrai ordonnanceur pour le probe exact. Oracle : file vide avant l'appel, un seul événement d'admission courant et corps/placement exacts après, zéro marqueur de génération ni connexion HTTP, enfant fini et hôte récolté. Aucune génération ni modèle réel.
+- RTK et cache `/Users/louis/Library/Caches/unleash/target/g0002-m1-acceptance`, `CARGO_INCREMENTAL=0`, `UNLEASH_LIVE_TESTS` absent. Journaux sous `.claude/evidence/g0003-m2/f012-owned-admission`. Contrôles précédemment signalés clos.
+- Régressions : `/Users/louis/.cargo/bin/cargo +1.94.1 test --locked --offline -p unleash-daemon --test t_f012_probe_mandates_ipc t_f012_ollama_generation_authorizing_binds_configured_endpoint -- --exact` couvre le chemin sans service via le vrai daemon et son socket Unix de fixture. `/Users/louis/.cargo/bin/cargo +1.94.1 test --locked --offline -p unleash-daemon --lib provider_service_evaluation::tests::` couvre le broker et SQLite avec les bancs natifs ignorés. `/Users/louis/.cargo/bin/cargo +1.94.1 clippy --locked --offline -p unleash-daemon -p unleash-store --lib --tests --all-features -- -D warnings` compile et analyse les cibles sans lancer leurs scénarios. Formatage ciblé et `git diff --check`. Le test d'expiration avance l'horloge manuelle pendant la décision et vérifie les révisions intactes et le refus du placement devenu périmé.
+
+- **Résultat ROOT** — le relais prend le fait de placement par son identifiant et revérifie la commande, le mandat, l'incarnation, l'artefact et la preuve de lancement. L'ordonnanceur voit le probe exact dans une transaction avec point de restauration interne. Une attente restitue la décision pure et annule l'éligibilité provisoire. Toute erreur annule le relais. La décision favorable lie exactement une admission au fait et rend réservation, bail, octets du corps et placement revalidés dans la même transaction. Le parcours IPC continue de conserver la preuve jusqu'à la prise en charge explicite.
+- **Qualification** — `.claude/evidence/g0003-m2/f012-owned-admission/final-store.log` : 9 réussis, zéro échec ou ignoré. L'attente revient au même token, une unité étrangère est refusée, l'expiration pendant la décision laisse les révisions stables et la seconde demande ne crée aucun bail. `final-daemon.log` : 11 réussis, zéro échec, 4 opt-in ignorés dans ce filtre. `final-ipc.log` : 1 réussi, socket Unix réel sans service détenu. `final-native.log` : 1 réussi, zéro échec ni ignoré, 16,94 s. La fixture détenue produit la preuve, le vrai ordonnanceur réserve une seule place et les octets sont relus, aucun marqueur de génération, hôte récolté. SHA-256 natif `d2d26280b0d88902d966cc94c2eb715354eb87f9030927c1c06d18eb25cf879c`, Store `9955a9b9250f688dddff2b6cdaa533acc4c65bec34cb4ef17c34bfcbcf580d64`, IPC `82afbed3d09d938e0a6adf0d0be63add5fac79ec9fbffa4999487d2be7935bff`. Clippy Store/daemon strict, rustfmt ciblé et diff exit 0.
+- **Remise** — blobs `admission_handoff.rs=1d4d727b8b3a`, `execution_scheduler.rs=5676c71924f5`, `provider_probe_generation_placement.rs=e950b5fef305`, `tests.rs=091c56502b30`. Les preuves sont conservées pour revue. Candidat hors intégration, aucun nouveau worktree ni push, M2 13/16. Prochain raccord : le transport prend explicitement le résultat admis et le writer lie l'admission et le digest natif à son autorisation durable. L'envoi, les issues du transport et Q-19 réel restent à qualifier.
+
+### F012 / T-F012-015 — Permis du transport de génération Ollama
+
+ROOT, canon `goal/g0003-m2@6fb6489`. Finalité : le writer recalcule l'empreinte de la requête native admise depuis les octets publiés, le profil, le bail, le placement et l'identité déjà attestée. Il conserve l'intention existante et écrit le lien natif avec le marqueur et l'événement du dispatch. L'observation générique reste fermée pour ce marqueur. Périmètre : protocole interne, empreinte du router, port génération du Store et journal broker.
+
+- `/Users/louis/.cargo/bin/cargo +1.94.1 test --locked --offline -p unleash-store --test t_f012_profile_versions --no-run` pour le rouge. `/Users/louis/.cargo/bin/cargo +1.94.1 test --locked --offline -p unleash-store --test t_f012_profile_versions generation_placement::` sur SQLite temporaire et observations synthétiques : faux digest, bail divergent et appel générique refusés. Le marqueur positif lie les faits exacts ; le rejeu du même dispatch ne restitue aucun permis. Le scénario C4, si ajouté, simule uniquement la perte d'acquittement après le commit SQLite.
+- `/Users/louis/.cargo/bin/cargo +1.94.1 test --locked --offline -p unleash-daemon --lib provider_service_evaluation::tests::nominal_generation_adopts_owned_listener -- --exact --include-ignored` réutilise le vrai binaire `/Users/louis/Library/Caches/unleash/target/g0002-m1-acceptance/debug/unleash-process-host` et la fixture de la dernière étape. Son enfant Rust ouvre une écoute loopback éphémère de 8 s, ne lit aucune requête et s'arrête. Un host détenu, son enfant, le socket Unix privé et le SQLite de fixture. Construire la requête immuable du router hors réseau et comparer son empreinte à celle du writer. Aucune connexion TCP, requête HTTP ou génération.
+- Rust 1.94.1, RTK, cache `/Users/louis/Library/Caches/unleash/target/g0002-m1-acceptance`, `CARGO_INCREMENTAL=0`, `UNLEASH_LIVE_TESTS` absent ; journaux sous `.claude/evidence/g0003-m2/f012-generation-permit/`. Les contrôles précédemment signalés restent clos.
+
+### Reprise du Goal sur Codex2
+
+La consigne du 21 novembre affecte le Goal existant à Codex2. La branche
+canonique reste `goal/g0003-m2@6fb6489`. La revue Codex1 de `provider set`
+`01a1fb46-845b-72f2-a6ed-587ffc9edc68` s'est terminée sur le quota avec
+une remise vide. Le mandat était en lecture seule. La nouvelle revue porte
+sur `provider set`, avec les fichiers et preuves du
+[relevé de reprise](../../../evidence/g0003-m2/f012-provider-set/review-20261121/remise.md).
+Blocages précédemment signalés sur les autres opérations hors périmètre.
+
+- **Revue `provider set`.** Vérifier le périmètre minimal du CLI, le
+  comportement des arguments et du reçu, ainsi que l'oracle du test binaire.
+  Commandes en lecture seule dans le checkout canonique avec RTK.
+  `git rev-parse HEAD`, `git hash-object Cargo.lock` et les quatre chemins
+  du relevé, `sed` sur les définitions CLI et le test de `set`, et
+  `rg -n 'test result:'` sur les sorties `help-green.log`,
+  `e2e-green.log` et `set-regression.log`. Remettre verdict et limites
+  à ROOT. Les tests et les modifications du checkout sont hors mandat.
+- **Qualification locale du permis F012.** Exécuter la fixture native exacte
+  déjà décrite ci-dessus. Exécuter ensuite
+  `/Users/louis/.cargo/bin/cargo +1.94.1 clippy --locked --offline -p unleash-protocol -p unleash-model-router -p unleash-store -p unleash-daemon --lib --tests --all-features -- -D warnings`.
+  Clippy compile les cibles et n'exécute pas les tests. Vérifier le formatage
+  des seuls fichiers de ce raccord et `git diff --check`. Remise attendue
+  par résultat et journal sous `.claude/evidence/g0003-m2/f012-generation-permit/`.
+- **Paquet de conception.** Extraire du Git suivi les seules sources du
+  dossier sous le pack F012, y copier les sources documentaires modifiées,
+  puis `python3 -B tools/design-package/regen.py <paquet>` et
+  `uv run --offline --no-project --with jsonschema python -B tools/design-package/validate.py <paquet>`.
+  Attendu 0 erreur et 0 avertissement. Copier les deux fichiers générés
+  après comparaison des sources avec le checkout. Le build Rust et les
+  scénarios produit sont hors de ce contrôle.
+
+- **Rouge natif et correction bornée.** La fixture native a exécuté une
+  fois et échoué sur `destination native Ollama non qualifiée`. Le profil
+  nominal configurerait correctement l'origine avec le chemin racine.
+  Dériver `/api/chat` seulement pour cette racine ou un chemin `/api/chat`
+  explicite, sur le même littéral loopback HTTP. Garder l'URL d'origine dans
+  le fait de placement et l'URL native dans les entrées du transport.
+  Exécuter `/Users/louis/.cargo/bin/cargo +1.94.1 test --locked --offline -p unleash-protocol --test t_f012_endpoint_destination`
+  sur les DTO synthétiques, puis les deux cibles Store et daemon déjà
+  cadrées. Oracles de la dérivation : vérifier le port par défaut, un
+  littéral IPv6, le chemin explicite et le refus d'un suffixe ambigu.
+  Aucun envoi HTTP ou appel à un moteur.
+
+- **Remise indépendante `provider set`.** Codex2
+  `/root/provider_set_review`, UUID `01a1fd5e-e282-7900-8639-cb188621d3bd`,
+  parent ROOT `01a1eeb2-a996-7291-9f6d-1e99f6534683`. Sol 6.1 Ultra pour
+  examiner les dépendances entre candidats dans les fichiers CLI partagés.
+  Revue en lecture seule terminée sur le HEAD et les cinq empreintes du
+  relevé. Arguments, enveloppe et reçu cohérents à l'inspection. Trois
+  exécutions historiques lues, chacune 1 réussi, 0 échec, 0 ignoré. Le
+  parcours binaire prouve création, rejeu et révision en portée utilisateur.
+  La portée projet et la valeur métier révisée ne sont pas vérifiées par
+  cet oracle. Dépendances minimales : adaptation du helper de configuration,
+  arguments et branche `Set`, test d'aide, `provider_cli`,
+  `set_profile_with_cli` et scénario Set. La composition isolée et le
+  rattachement du binaire à sa compilation restent à qualifier.
+
+- **Contre-revue de la dérivation de route F012.** Après les verts
+  `route-green.log`, `store-final.log` et `native-final.log`,
+  demander une vérification en lecture seule de la distinction entre
+  l'URL du profil, le fait d'écoute et la route interne figée. Lire
+  `provider_profile.rs`, `provider_probe_generation/dispatch.rs`,
+  `provider_probe_generation/placement.rs` et les deux oracles ciblés.
+  Limiter les commandes à `sed`, `rg` et `git hash-object` sur ces
+  plages et logs du pack. Aucun test, réseau ou écrit. Attendu : impact
+  sur les faits existants, domaine exact accepté, portée du vert et
+  défauts source éventuels, sans qualification de l'exécution future.
+
+- **Identité des binaires de test.** Pour vérifier la fixture avec le même
+  arbre que le daemon, construire hors ligne seulement le binaire
+  `/Users/louis/.cargo/bin/cargo +1.94.1 build --locked --offline -p unleash-process-host --bin unleash-process-host`
+  dans le cache ci-dessus. Rejouer ensuite le test natif exact déjà cadré
+  avec ce binaire et la même fixture locale d'écoute. Le premier vert et
+  son binaire précédent restent des preuves distinctes. Clippy strict a
+  signalé une terminaison d'instruction dans le test Store de coupure.
+  Corriger le test puis rejouer le même filtre Store et Clippy.
+
+- **Régression de l'intention existante.** Exécuter
+  `/Users/louis/.cargo/bin/cargo +1.94.1 test --locked --offline -p unleash-daemon --test t_f012_probe_mandates_ipc t_f012_ollama_generation_authorizing_binds_configured_endpoint -- --exact`.
+  Ce scénario utilise SQLite temporaire et le socket Unix de la fixture.
+  L'intention d'autorisation doit toujours porter la destination configurée
+  avec son corps publié. Ce test n'admet pas le probe et ne démarre ni
+  service détenu, ni transport, ni moteur.
+
+- **Résultat du permis.** Le writer recalcule la route et l'empreinte de
+  la requête admise. L'intention d'autorisation et le fait de placement
+  conservent la destination configurée. Le permis est émis une fois.
+  Les essais SQLite refusent une empreinte ou un bail divergents. Après
+  perte simulée de l'acquittement de l'écriture, le marqueur existe et un
+  second permis est refusé. Le port générique d'observation refuse ce
+  marqueur. La consommation du permis et l'observation dédiée du
+  transport restent à raccorder.
+- **Qualification locale.** Dans `.claude/evidence/g0003-m2/f012-generation-permit/`,
+  `route-green.log` donne 5 réussis et `store-qualified.log` 11 réussis.
+  `native-qualified.log` donne 1 réussi en 19,37 s avec le
+  `unleash-process-host` reconstruit, SHA-256
+  `b3b884967bd5125cc55770e51066aee7e0314a315dd292b696af8c17a60e3644`.
+  L'empreinte de la requête figée correspond à celle du writer, sans
+  échange HTTP. `ipc-final.log` donne 1 réussi et confirme la destination
+  configurée dans l'intention. Zéro échec ni ignoré sur ces sélections
+  finales. Clippy strict et le formatage des fichiers concernés passent.
+  SHA-256 du log natif
+  `567186dde4d5fa433ad58eee60b946f06a11579e1e1a92743ca81903d2816041`
+  et du log Store
+  `bcd1b0b7233985ef633686a417117e3ef3d3482d67a4e61cf5401ecebd68bc6e`.
+- **Vérification indépendante de la route.** Codex2
+  `/root/ollama_route_review`, UUID `01a1fd64-a359-7cd0-a15b-74105c8a397a`,
+  Sol 6.1 Ultra. Verdict conforme sur la dérivation, la stabilité du fait
+  et l'oracle d'empreinte. Empreintes Git contrôlées à la remise
+  `provider_profile.rs=c62ede0e9b4d`, `dispatch.rs=f3d0f15f908c`
+  et `placement.rs=18c1e6e991c9`. L'agent a examiné les premiers verts
+  de la correction et ROOT a rejoué le natif avec le binaire reconstruit.
+- **Dossier de conception.** Pack vérifié à 0 erreur et 0 avertissement,
+  396 fichiers, 27 schémas et 3 744 liens. Neuf sources comparées et
+  deux sorties générées recopiées à l'identique. SHA-256 du manifeste
+  `b1cf963e6055b7151b3d230bffa27eedb9101e165cfabd8b9f9fd8861736d32a`.
+  Les 429 fichiers temporaires extraits et l'archive ont été retirés.
+  Candidat hors intégration, M2 13/16.
+
+### Composition de `provider set` et dépendance F003
+
+ROOT, Codex2, canon `goal/g0003-m2@6fb6489`. Reprendre les cinq empreintes
+du candidat `provider set` examiné indépendamment. Composer seulement
+l'adaptation du helper de configuration, la CLI Set et ses deux tests.
+Les autres commandes de profils conservent leurs propres critères.
+Le candidat doit s'appliquer à la base via `git apply --check --cached`
+sur un index temporaire du pack du chantier. La composition exécutable
+reste soumise à la mesure de stockage et à la règle de worktrees.
+
+Appui F003 en lecture seule par `/root/m1_auth`, Codex2, UUID
+`01a1eef5-0936-70e1-a206-03a8e4f4e108`, parent ROOT
+`01a1eeb2-a996-7291-9f6d-1e99f6534683`.
+Vérifier dans les contrats des opérations si `AssignTask` ou `StartRun`
+définit le premier fait métier suffisant pour remettre une invocation
+à F003. Identifier le premier contrat consommable sur M2 et la dépendance
+éventuelle de workflow. Commandes RTK, `rg` et `sed` sur les seuls
+contrats F003 et IPC et `.claude/catalog/operations.json`.
+Remise attendue en références de contrat et écart précis. Aucun
+changement de source ni exécution fonctionnelle.
+
+- **Exécution Rust dans Docker.** À la demande de Louis, les compilations
+  et tests Rust de cette mission passent par Docker Desktop. L'image
+  locale `rust:1.94.1-bookworm` fournit Rust et Cargo 1.94.1 sur Linux
+  arm64. Les essais propres à macOS attendent un runner macOS.
+  Premier contrôle produit : `cargo +1.94.1 test --locked --offline -p unleash-protocol --test t_f012_endpoint_destination`
+  dans un conteneur éphémère, sans réseau, avec `crates/`,
+  `Cargo.toml` et `Cargo.lock` montés en lecture seule. Le cache
+  de téléchargement Cargo est consulté en lecture seule. Les écritures
+  de compilation restent dans le conteneur. Les cinq cas sont
+  syntaxiques et n'ouvrent aucun socket. Preuve dans
+  `.claude/evidence/g0003-m2/f012-generation-permit/docker-protocol.log`.
+
+- **Adaptation au partage SMB.** Docker Desktop n'expose pas
+  `/host_mnt/Volumes/personal_folder/Unleash` au conteneur. Le premier
+  montage a donc échoué avant Cargo. Transmettre par stdin uniquement
+  les fichiers suivis des deux crates effectivement compilées, le verrou
+  et les manifestes et points d'entrée nécessaires au chargement du
+  workspace. Extraire le flux dans le conteneur éphémère. Le cache
+  `~/.cargo/registry` reste monté en lecture seule. Garder le même filtre,
+  sans réseau, et consigner dans `docker-protocol-stream.log`.
+
+- **Premier résultat Docker.** Rust et Cargo 1.94.1 confirmés sous
+  Linux arm64. 79 fichiers Rust et manifestes transmis au conteneur.
+  `t_f012_endpoint_destination` donne 5 réussis, 0 échec et 0 ignoré.
+  Le conteneur éphémère a été retiré. L'image de base ne fournit pas
+  les bibliothèques GTK 3 et WebKitGTK 4.1 requises par les cibles GUI.
+- **Candidat Set isolé.** Les quatre fichiers s'appliquent à
+  `6fb6489` dans un index temporaire avec `git apply --check --cached
+  --whitespace=error`. Diff
+  `.claude/evidence/g0003-m2/f012-provider-set/review-20261121/provider-set.patch`,
+  SHA-256 `30cac98c817bdf707f8e3d4b858c576ad50748192971ffcf3bdd17f929c46cca`.
+  Pour le premier vert isolé, transmettre la base Git suivie
+  `Cargo.toml Cargo.lock crates` et ce diff au conteneur éphémère.
+  Vérifier son empreinte, appliquer avec `git apply --whitespace=error`,
+  puis exécuter `cargo +1.94.1 test --locked --offline -p unleash-cli --test cli_binary cli_binary_exposes_provider_set -- --exact`.
+  Aucun volume projet monté en écriture, réseau désactivé, registre
+  d'artefacts Cargo en lecture seule. L'unique sous-processus testé
+  exécute `unleash provider set --help`, stdin fermé. Attendu :
+  six options visibles, aucun daemon ni profil configuré.
+
+- **Résultat Set sous Linux.** Empreinte du diff contrôlée dans Docker,
+  patch appliqué à la base isolée, Cargo 1.94.1 hors ligne. Le test d'aide
+  du vrai binaire réussit, 1 réussi, 0 échec et 0 ignoré. Preuve
+  `docker-set-help.log` dans le pack du candidat. Les bibliothèques de
+  développement GTK 3 et WebKitGTK 4.1 manquent dans l'image de base
+  pour les dépendances de test du daemon. L'essai CLI vers daemon reste
+  à qualifier sur cette composition. Conteneur retiré.
+- **Remise F003.** `AssignTask` couvre F003/F004 et peut fournir la
+  frontière cliente vers `CreateInvocation`, port interne qui matérialise
+  le bundle et l'intention. Le contrat du payload fermé et le lien causal
+  restent à préciser. `StartRun` dépend de `CreateRun` et des références
+  épinglées de F005/F019. Cette dépendance n'empêche pas le raccord
+  indépendant d'`AssignTask`. Résultat de lecture documentaire.
+- **Capacité de checkout.** Cinq entrées connues au registre Git. La
+  mesure du 21 novembre par `du -sk -x` couvre le dépôt, tout
+  `~/Library/Caches/unleash` et les deux anciens dossiers de worktree
+  Antigravity présents. Total connu de 37 933 298 688 octets alloués,
+  dont 37 573 926 912 pour le cache. Le plafond de 25 Go reste dépassé.
+  Le test Docker reçoit ses entrées de compilation par flux et ne crée
+  aucun worktree Git. Le candidat reste hors intégration.
+
+### Qualification Docker de bout en bout pour `provider set`
+
+ROOT, Codex2, base `6fb64894feed99b84e1148b5e110ef36a70048e8`,
+diff isolé `30cac98c817bdf707f8e3d4b858c576ad50748192971ffcf3bdd17f929c46cca`.
+Preuves dans le pack existant
+`.claude/evidence/g0003-m2/f012-provider-set/review-20261121/`.
+Écrivain unique pour le candidat. Le checkout canonique garde le WIP.
+
+- **Revue indépendante.** Reprendre `/root/provider_set_review`, Codex2,
+  UUID `01a1fd5e-e282-7900-8639-cb188621d3bd`. Lire le diff de quatre
+  fichiers, son SHA-256 via `shasum -a 256`, et la seule sortie
+  `docker-set-help.log`. Vérifier que Set reprend les comportements
+  relus, que Show reste identique et que les changements liste et
+  validation sont exclus. Aucun test, Docker, réseau ou écrit par l'agent.
+- **Préparation Linux.** Conteneur éphémère
+  `unleash-g0003-m2-set-e2e-20261121`, image locale
+  `rust:1.94.1-bookworm`. Exécuter à l'intérieur `apt-get update` puis
+  `apt-get install -y --no-install-recommends libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev patchelf pkg-config libssl-dev`,
+  la liste déjà utilisée par la CI. Accès réseau aux dépôts Debian pour
+  les dépendances de construction seulement. Aucun port publié.
+  Retirer le réseau de ce seul conteneur avant Cargo, puis vérifier
+  l'absence de réseau attaché. Registre Cargo hôte en lecture seule.
+- **Assets embarqués.** Transmettre `git archive 6fb6489 apps/gui-renderer`
+  à un conteneur Node 22 officiel. Utiliser
+  `npm install --global --ignore-scripts pnpm@10.34.9`,
+  `pnpm install --frozen-lockfile` puis `pnpm run build`.
+  Réseau de préparation limité à l'acquisition des dépendances de
+  construction depuis les registres du verrou, aucun secret monté.
+  Le résultat est le `dist` de la base exacte, conservé temporairement
+  dans le pack. Aucun serveur frontend lancé.
+- **Scénario.** Dans le conteneur Rust préparé et isolé du réseau externe,
+  appliquer le diff vérifié à l'archive Git des sources et placer le
+  `dist` du même SHA dans le chemin déclaré par Tauri. Construire
+  `cargo +1.94.1 build --locked --offline -p unleash-cli --bin unleash`.
+  Exécuter
+  `UNLEASH_F012_CLI_BIN=/tmp/unleash-target/debug/unleash cargo +1.94.1 test --locked --offline -p unleash-daemon --test t_f012_profile_service_ipc t_f012_cli_sets_and_revises_a_profile -- --exact --ignored`.
+  Seules écritures de runtime : SQLite, JSON et socket Unix temporaires
+  de la fixture. Le test crée un profil utilisateur synthétique, rejoue
+  le premier reçu, engage une seconde version et lit son reçu avec
+  `show`. Aucun fournisseur ni processus de génération. Attendu :
+  1 réussi, 0 échec, conteneur retiré et preuve liée au binaire construit.
+
+- **Préparation observée.** GTK 3.24.38 et WebKitGTK 2.50.6 installés
+  dans le conteneur Rust. Docker n'a pas pu chercher l'image Node 22 :
+  le helper de credentials Desktop est introuvable dans le PATH
+  autorisé. Réutiliser l'image officielle déjà en cache
+  `node:24-alpine`, avec `--pull=never`, pour le seul build du renderer.
+  Le verrou et pnpm restent identiques. La compilation Rust reste en
+  1.94.1. Le build du renderer avec le Node 22 de la CI reste à vérifier.
+  Preuves séparées dans `docker-renderer-node24.log` et
+  `docker-renderer-dist-node24.tar` pour l'archive temporaire.
+
+- **Résultat E2E ciblé.** Le renderer est issu de la base exacte,
+  avec Node 24 et le verrou pnpm. Son build avertit d'un chunk supérieur
+  à 500 kB. Rust a construit le CLI et réutilisé son binaire dans le
+  conteneur Linux isolé. Le scénario exact donne 1 réussi, 0 échec,
+  0 ignoré et 7 filtrés. Portée utilisateur. La compilation Linux a
+  relevé des imports inutilisés dans `unleash-process-host`, fichier
+  hérité de la base et hors du diff Set. Cette observation ne valide
+  pas la gate des avertissements du workspace.
+- **Contrôle de la remise.** Le vérificateur lit uniquement les sorties
+  `docker-set-build.log` et `docker-set-e2e.log`, avec `rg` sur
+  l'empreinte du binaire, son contrôle et le résultat du test exact.
+  Le verdict attend une preuve rattachée au diff déjà relu et au même
+  binaire compilé. Étape suivante : sceller exactement les quatre
+  fichiers sur une branche de tâche locale, via un index temporaire
+  de ce pack. Vérifier la base avant `git apply --cached
+  --whitespace=error`, puis le périmètre et `git diff --check --cached`.
+  Ne déplacer aucune branche déjà présente. Le checkout canonique
+  reste disponible pour les autres travaux. La composition du jalon
+  et ses gates restent à qualifier avant intégration.
+
+- **Contrôles ciblés d'outillage.** La première invocation de rustfmt
+  dans l'image minimale a signalé l'absence du composant. Après la fin
+  de l'E2E, reconnecter le réseau du seul conteneur de test pour
+  `rustup component add --toolchain 1.94.1 rustfmt clippy`. Déconnecter
+  ensuite ce réseau et vérifier l'isolation avant les deux contrôles.
+  Commandes : `rustfmt +1.94.1 --edition 2024 --config skip_children=true
+  --check` sur les quatre fichiers Set, puis
+  `cargo +1.94.1 clippy --locked --offline -p unleash-cli -p unleash-daemon
+  --bin unleash --test cli_binary --test t_f012_profile_service_ipc -- -D warnings`.
+  Clippy analyse les cibles sans exécuter leurs scénarios.
+
+- **Scellement Set.** Après revue indépendante du diff et des deux
+  contrôles d'empreinte du binaire, commit `e7893f09a7cbf381de33b4a9ca49892efd862328`, arbre
+  `c3bcf8a872876340e9e9b5f3b1a864323c5c78b1`, sur `task/g0003-m2/t04-profile-set`.
+  Quatre fichiers et parent `6fb6489` vérifiés. Rustfmt ciblé vert
+  après installation du composant dans Docker. L'index canonique est
+  inchangé. La composition du jalon reste ouverte.
+- **Défauts Linux hérités.** Clippy strict a échoué sur `similar_names`
+  dans la lecture de l'identité de processus Linux. Le build E2E a
+  relevé des imports Seatbelt inutilisés en hors test Linux. Corriger
+  séparément les deux noms de liaison dans `process_identity.rs` et
+  aligner la condition de l'import dans `isolation.rs` sur
+  `cfg(any(target_os = "macos", test))`, déjà utilisée par son seul
+  consommateur. Vérifier le diff des deux fichiers sur `6fb6489`,
+  l'appliquer au conteneur Set isolé par `git apply --whitespace=error -`
+  et rejouer rustfmt ciblé et la commande Clippy précédente. L'identité,
+  les valeurs projetées et le chemin de test restent les mêmes.
+
+- **Contre-revue Linux.** `/root/m1_integration` sur Codex2,
+  UUID `01a1ef06-1fb2-7e11-accd-3629f7e8db56`, confirme le
+  renommage sans changement de valeur et la même condition de compilation
+  pour imports et consommateur. Les deux fichiers passent rustfmt.
+  Le nouveau Clippy atteint ensuite 11 diagnostics `type_complexity`
+  hérités sur `unleash-process-host` et `unleash-store`. La gate
+  reste rouge. Les correctifs Linux restent distincts du commit Set.
+  Rejouer le seul E2E Set déjà cadré dans le même conteneur isolé
+  avec les deux changements, pour confirmer la composition avec le
+  correctif. Contrôler l'empreinte de l'exécutable avant et après.
+
+- **Preuves Docker finales.** Candidat Set `e7893f0`, binaire
+  SHA-256 `53ffad07bf2ba87120e191d7d53c000547845fd9e1ecaa23f55cad076d78a8ba`.
+  `docker-set-e2e.log` SHA-256
+  `ce6f43682ff7ccce1bf6f5d699dcbe56299715cae23127f5db3054825c37c419`.
+  Même E2E vert avec le correctif Linux et le même binaire vérifié avant
+  et après. `docker-set-e2e-linux-fix.log` SHA-256
+  `620aaaa937fdd5c9227a60f258aad4a564f61869b5fdd8beac64f759db2b100b`.
+  Le renderer est compilé sur les sources de `6fb6489`, avec l'image
+  Node 24 de digest `9ca3f7b76099c042f1e655ca8936e0a1ccda68b3c74a8a36375428ef76476d4e`.
+  SHA-256 de l'archive renderer utilisée
+  `691a75158da23f4118ab06c4a49a6aa4cb7a01cc20ba57170a37e9160e14c40f`.
+  Le conteneur et les deux archives temporaires sont absents après
+  dernier usage. Les journaux restent disponibles pour l'intégration.
+- **Suites.** Répartir les lints Linux hérités en périmètres Store et
+  process-host, et rejouer la gate sur la composition. Les preuves
+  d'aide et d'E2E du candidat Set sont réutilisables sur leurs entrées.
+  Traiter à part les exigences de stabilité du parcours complet,
+  les autres commandes de profils et la matrice macOS. Le jalon reste
+  à 13/16 et le HEAD du goal à `6fb6489`.
+
+### Reprise de la qualification avec la configuration Rust versionnée
+
+ROOT Codex2. Le flux Docker précédent avait omis `clippy.toml` et
+`rustfmt.toml`. La configuration suivie à `6fb6489` fixe notamment
+`type-complexity-threshold = 300`. Les 11 diagnostics rapportés
+précédemment ont été obtenus sous la configuration par défaut et ne
+suffisent pas à établir des défauts sur les sites concernés.
+
+- **Composition.** Archive Git de `e7893f0` avec sources et fichiers
+  Rust racine `Cargo.toml Cargo.lock clippy.toml rustfmt.toml
+  rust-toolchain.toml deny.toml`. Embarquer le renderer de la même
+  base que Set. Appliquer uniquement les deux corrections Linux
+  relues de `linux-gate.patch`, SHA-256
+  `9ebc2d8da1f6976a19395b3553c6b8149115daab370587c6ce1cdf49bd202e44`.
+  Aucun worktree Git supplémentaire. Vérifier les empreintes de
+  configuration et l'absence de réseau du conteneur avant Cargo.
+- **Préparation Docker.** Reprendre les dépendances Debian de la CI
+  et l'image locale `rust:1.94.1-bookworm`. Installer les trois
+  composants Rust déclarés `rustfmt clippy rust-src` pendant la
+  préparation. Puis déconnecter le réseau du conteneur.
+  Régénérer le renderer de `e7893f0` dans `node:24-alpine` avec
+  `pnpm@10.34.9` et le verrou. Aucun dossier du produit monté en
+  écriture, registre Cargo en lecture seule.
+- **Contrôles ciblés.** Depuis `/workspace` dans Docker, exécuter
+  `cargo +1.94.1 fmt --all -- --check`, puis
+  `cargo +1.94.1 clippy --locked --offline -p unleash-cli -p unleash-daemon --bin unleash --test cli_binary --test t_f012_profile_service_ipc -- -D warnings`.
+  Réexécuter l'E2E exact Set seulement si les entrées pertinentes
+  changent. Attendu : verdict avec la configuration suivie, suivi
+  des défauts réels et des gates de composition restantes.
+- **Appui indépendant.** `/root/m1_integration` vérifie en lecture
+  seule ce que prouvent la liste historique des entrées, l'archive
+  corrigée et le `clippy.toml` Git. Commandes RTK limitées à
+  `git show 6fb6489:clippy.toml`, `git ls-tree` des fichiers de
+  configuration racine et `rg` des lignes de diagnostic consignées.
+  Aucun test ni écrit.
+
+- **Appui F003 indépendant de la composition.** `/root/m1_auth`,
+  UUID `01a1eef5-0936-70e1-a206-03a8e4f4e108`, examine les seules
+  autorités F003, F004 et le modèle de session. Identifier les
+  entrées de `AssignTask` déjà définies et les faits nécessaires
+  à `CreateInvocation`. Remettre les références et les seuls champs
+  dont l'autorité reste à définir. Lecture `rg`/`sed` avec RTK.
+  Aucun écrit, runtime ou vérification précédemment refusée.
+
+- **Résultats configurés.** Le conteneur confirme les six empreintes
+  des fichiers de configuration et celle du correctif Linux. `fmt
+  --all -- --check` et Clippy strict ciblé terminent code 0. Les 11
+  diagnostics ne se reproduisent pas avec le seuil suivi. Revue
+  indépendante de la cause par `/root/m1_integration`.
+- **Contrôles du workspace sur la même composition.** Rejouer
+  `cargo +1.94.1 clippy --locked --offline --workspace --all-targets --all-features -- -D warnings`,
+  `cargo +1.94.1 test --locked --offline --workspace --all-features --no-fail-fast`
+  et `RUSTDOCFLAGS="-D warnings" cargo +1.94.1 doc --locked --offline --workspace --no-deps`
+  sur l'archive de `e7893f0` avec le seul correctif Linux vérifié
+  et la configuration versionnée. Le WIP F003 signalé et le scénario
+  CLI/PTY signalé sont hors de cette composition Git. Les essais
+  opt-in restent ignorés. Aucune variable de test live, de clé ou
+  de binaire natif injectée. Seuls les temporaires et fixtures
+  locaux du workspace peuvent être créés dans le conteneur isolé.
+  Aucun réseau externe. Lire les sorties et codes séparément.
+
+- **Écart Linux confirmé sur tous les targets.** Clippy workspace
+  signale trois diagnostics de compilation dans le seul banc
+  `crates/unleash-process-host/tests/process_host_runtime.rs`.
+  Aligner la condition macOS des imports et du double de fixture sur
+  celle de leur test consommateur. Les cas, appels et assertions ne
+  changent pas. Rejouer ensuite le Clippy workspace et rustfmt dans
+  le même conteneur lors du prochain contrôle de cette composition.
+  Le cas macOS reste hors exécution locale Docker.
+
+- **Exécution du workspace interrompue.** Deux scénarios F012 locaux
+  ont expiré. Le test de fin de groupe du process-host est resté en
+  cours au-delà de 60 s et son binaire était encore actif. La lecture
+  de `ps` dans le conteneur a trouvé 41 zombies, dont 39 enfants du
+  PID 1 `sleep`. Arrêter le seul conteneur de ce contrôle, conserver
+  les deux échecs observés et marquer le reste de la campagne
+  incomplet. Recréer le même environnement avec `docker run --init`
+  avant le contrôle de composition. Utiliser le même renderer compilé
+  depuis `e7893f0` et appliquer aussi la correction de compilation
+  du banc macOS. Aucun changement d'assertion ni des délais de fixture.
+
+- **Diagnostic indépendant des délais F012.** Lecture sur
+  `e7893f0` des seules fixtures des deux tests en échec.
+  Vérifier la phase à laquelle la fixture attend, les éventuelles
+  branches Linux ou dépendances de l'environnement et ce qui manque
+  pour distinguer ces hypothèses. Commandes `git show` et `sed`
+  sous RTK. Aucun test, service ou appel déclenché par le lecteur.
+
+- **Rejeu avec init Docker.** Vérifier `Init=true`, PID 1
+  `docker-init` et absence de réseau attaché. Archive du même commit,
+  fichiers de configuration vérifiés, correctif Linux déjà qualifié et
+  ajout de la seule correction de compilation du banc macOS. Rejouer
+  rustfmt, Clippy workspace et rustdoc strict tels que cadrés ci-dessus.
+  Rejouer aussi la campagne workspace hors ligne, avec une limite
+  opérateur de 180 s pour détecter un blocage du runner. Cette limite
+  ne change aucun délai, oracle ou résultat attendu des tests.
+
+- **Deux corrections déjà présentes dans le WIP.** Le Clippy complet
+  atteint le test de bibliothèque daemon et relève un terme sans
+  backticks dans un commentaire et une attente de lint non émise dans
+  un helper de fixture. Réutiliser uniquement le commentaire déjà
+  corrigé de `worker_shutdown_tests.rs` et la suppression de l'attribut
+  superflu déjà présente dans `tests/common/provider_probe.rs`.
+  Extraire ces deux hunks de la base de composition, vérifier avec
+  `git apply --check --cached` dans un index temporaire, puis rejouer
+  rustfmt et Clippy workspace après sortie de la campagne active.
+  Aucun changement du corps ni des bornes des tests.
+
+- **Sceller les entrées de vérification.** Après rustfmt et Clippy
+  workspace à zéro, composer les trois patches de contrôle sur
+  `e7893f0` dans un index temporaire. Comparer les blobs Rust et les
+  fichiers de configuration archivés avec ceux du conteneur final.
+  Conserver la composition sur une nouvelle branche de tâche locale
+  `task/g0003-m2/t04-profile-set-linux`. La campagne runtime arrêtée
+  reste distincte et ne permet pas d'intégrer le jalon.
+
+- **Clôture de la passe.** Après restauration de la configuration
+  versionnée et reprise des correctifs de compilation, rustfmt
+  workspace et Clippy workspace strict terminent code 0. Rustdoc
+  strict termine aussi code 0 avant les deux ajustements limités à
+  compilation des tests. La composition `4af33bdf01b39569412f353fe4943bf5d2ebe123`
+  a pour parent `e7893f0` et pour arbre
+  `9daa6c2142ba107a1effd0d5ac5e626c47e254f3`. Les 435 blobs
+  des crates et configs ont été comparés au conteneur qui a exécuté
+  le Clippy vert. Les cinq fichiers modifiés et l'index canonique
+  intact ont été vérifiés.
+- **Campagne runtime.** Avec `docker-init`, le test de fin de groupe
+  du process-host précédemment bloqué réussit. La limite opérateur
+  arrête ensuite la campagne avant sa fin (code 124). Les 110 sorties
+  de suites terminées totalisent 650 réussis, 4 échecs et 26 ignorés.
+  Deux fixtures F012 expirent encore à l'écoute ou pendant l'échange.
+  Deux fixtures F011 signalent une divergence d'identité à l'ancrage
+  et un état de processus attendu non observé. Examiner ces quatre
+  écarts séparément. Le code 124 ne permet pas de conclure sur la
+  fin de la campagne. Aucun affaiblissement de test appliqué.
+  `docker-init-test.log` SHA-256
+  `0e1a4f2542b6e4892839959b5617af75d7af4b27b7fa821a2b48e6e2b3a8f047`.
+- **Ressources.** Conteneurs de la passe absents. Archive renderer
+  temporaire retirée après usage et contrôle de son empreinte,
+  884 736 octets logiques. Aucun worktree créé. Le HEAD M2 reste
+  `6fb6489`, 13/16 intégrés.
+- **Appui F003.** Le bundle immuable exige notamment les références
+  run/step/task, un workflow versionné, la portée et le contexte
+  initial. `AssignTask` décrit l'affectation et l'état de file.
+  Le plus petit manque est le contrat d'entrée fermé et la provenance
+  des références pour une tâche locale. Le modèle de session ne
+  définit aucun workflow implicite. Appui documentaire terminé.
+
+### Diagnostic ciblé des quatre écarts Linux sur `4af33bd`
+
+ROOT Codex2, conteneurs à init Docker et sans réseau externe. Les
+quatre écarts viennent de la campagne précédente avec code 124.
+Conserver les oracles, scénarios et critères F011/F012. Les contrôles
+antérieurement signalés restent hors périmètre.
+
+- **Appuis en lecture seule.** `/root/m1_integration` relit le cas
+  `anchor.rs:1069` et le passage à l'ancrage. `/root/m1_ipc` relit
+  la projection d'état Linux et le cas intégration à
+  `process_host_runtime.rs:1833`. `/root/ollama_route_review` trace
+  les deux délais F012 dans le code de la composition. `git show`,
+  `git grep`, `sed` sur des fichiers bornés, avec RTK. Chaque appui
+  rend l'étape exacte, l'hypothèse justifiée et ses limites. Aucun
+  appui ne lance de test ou de conteneur et ne modifie le checkout.
+- **Boucle F011.** Base Git `4af33bd`, source et configuration Rust
+  versionnées chargées dans un conteneur éphémère
+  `rust:1.94.1-bookworm` Linux arm64. Registre Cargo en lecture
+  seule, écriture seulement dans le système temporaire du
+  conteneur. Exécuter `cargo +1.94.1 test --locked --offline -p unleash-process-host --lib anchor::tests::t_f011_002_refuses_unanchored_signal_and_pid_reuse_keeping_witness_alive -- --exact`
+  et `cargo +1.94.1 test --locked --offline -p unleash-process-host --test process_host_runtime t_f011_010_external_sigkill_on_child_observed_by_reconcile_and_shutdown -- --exact`.
+  Les composants sont les fixtures existantes de cycle de vie,
+  les enfants propres à ces fixtures et leurs temporaires. Aucun
+  terminal utilisateur, fournisseur ou cible externe. Attendu :
+  confirmer en isolation la phase de préparation ou d'observation
+  qui échoue. Les deux tests restent indépendants.
+- **Boucle F012 inventory.** Même conteneur isolé et même base.
+  Exécuter `cargo +1.94.1 test --locked --offline -p unleash-model-router --lib inventory_transport_tests::inventory_v2_ends_a_stalled_tls_handshake_within_the_connection_window -- --exact`.
+  Uniquement l'écoute loopback TLS de la fixture, sans moteur,
+  donnée réelle ni port publié. Attendu : localiser le résultat de
+  la fenêtre de connexion sans changer le délai.
+- **Hypothèses initiales.** Désaccord de fixture simulé plus tôt que
+  prévu lors de l'ancrage. Projection Linux d'une identité morte ou
+  course après remise du signal lors de l'observation. Prérequis
+  de transport non satisfait avant l'acceptation dans F012.
+  Les preuves décideront de la correction requise.
+
+- **Rouges ciblés obtenus.** Les trois commandes exactes ont exécuté
+  leur cas et reproduit un échec. L'ancrage Linux protège correctement
+  la construction et rejette la simulation d'identité armée trop tôt.
+  Armer le double après capture. Le second test a déjà une sortie
+  observée mais le rapport se limite à l'identité encore visible.
+  Ajouter d'abord au banc `poll_exit_non_reaping_reports_sigkill_without_releasing_anchor`
+  l'oracle de projection vivant, sorti non récolté, puis récolté.
+  Exécuter `cargo +1.94.1 test --locked --offline -p unleash-process-host --lib anchor::tests::poll_exit_non_reaping_reports_sigkill_without_releasing_anchor -- --exact`
+  sous le même Docker. Réutiliser ensuite l'observation de sortie
+  sans récolte dans le rapport, sous le même verrou et seulement
+  quand l'identité correspond encore. Rejouer ce cas et les deux
+  cas F011 initiaux. Aucune modification de signalisation ou du
+  contrat wire.
+- **Précondition F012 à mesurer.** Le cas inventory reproduit
+  `Elapsed(())` isolément. `SSL_CERT_FILE` et `SSL_CERT_DIR` sont
+  absentes et le bundle Debian existe. Le témoin est actuellement
+  évalué avant le résultat de transport. Dans la seule extraction
+  Docker, capturer ce résultat de fixture lorsqu'un témoin expire,
+  puis rejouer le cas inventory déjà cadré. Garder les oracles et
+  délais identiques. Aucun secret, appel externe ou scénario élargi.
+
+- **Précondition F012 confirmée dans sa portée.** Le banc inventory
+  rend `Failed(Unavailable)` avant l'oracle d'écoute. Le banc Connect
+  configure une URL HTTP, donc un diagnostic TLS commun aux deux
+  n'est pas établi. Mesurer dans la seule extraction Docker les
+  nombres de certificats acceptés et rejetés et d'erreurs du chargeur
+  natif avant le cas inventory exact. Aucun certificat ni valeur
+  d'environnement imprimé, aucune modification de la validation.
+
+- **Observation de l'attente F011.** Le cas d'ancrage passe après
+  correction. Le cas intégré dépasse 60 s après modification de la
+  projection. Attendre la sortie effective du contrôle en cours.
+  Si la limite est atteinte, instrumenter seulement la fixture
+  d'intégration Docker avec des jalons de phase autour du Reconcile,
+  de Stop et de la fin du host. Un rejeu du cas exact avec
+  `--nocapture` et limite opérateur de 35 s localisera l'attente.
+  Aucun changement de délai de fixture, d'assertion ou des appels
+  produit. Les traces ne sont pas destinées à la branche.
+
+- **Formatage ciblé.** Conteneur outil éphémère séparé avec l'image Rust
+  locale. `rustup component add --toolchain 1.94.1 rustfmt` accède
+  au dépôt officiel des composants. Extraire seulement
+  `rustfmt.toml` et `anchor.rs` et exécuter
+  `rustfmt +1.94.1 --edition 2024 --config skip_children=true --check crates/unleash-process-host/src/anchor.rs`.
+  Aucune compilation ou fixture exécutée dans ce conteneur d'outillage.
+
+- **Seconde phase F011 identifiée.** Les jalons confirment Reconcile,
+  Stop et Shutdown du cas A. Le cas B bloque avant Shutdown parce
+  qu'il attend un statut d'identité différent de `Match` malgré la
+  présence de l'enfant Linux sorti mais non récolté. Dans la fixture
+  Linux, attendre `Z` dans le statut OS du seul enfant direct déjà
+  identifié du cas B, après l'EOF et avant Shutdown. Donner une erreur
+  explicite si cette attente dépasse cinq secondes. Conserver
+  la fixture macOS et les assertions de sortie/récolte. Rejouer le cas
+  d'intégration exact avec la projection corrigée, sans les traces.
+  Aucun changement du contrôle de l'identité ou de la signalisation.
+- **Résultat chargeur natif.** Le diagnostic isolé inventory observe
+  142 racines acceptées, 0 rejet et 0 erreur du chargeur, malgré
+  `Failed(Unavailable)`. Le simple chargement du magasin ne suffit
+  donc pas à expliquer l'échec. Le résultat d'ouverture et la phase
+  exacte d'échec restent à instrumenter. La fixture Connect est
+  HTTP et conserve un diagnostic distinct.
+
+- **Qualification du paquet F011.** Après retour de la trace à
+  l'état initial et application du correctif de synchronisation,
+  le cas d'intégration exact doit passer. S'il passe, exécuter
+  `cargo +1.94.1 test --locked --offline -p unleash-process-host --lib --test process_host_runtime`
+  dans le même Docker avec init. Les opt-in restent ignorés, les
+  commandes simulées et enfants de test restent dans le conteneur.
+  rustfmt relit ensuite les deux fichiers changés avec le fichier
+  de configuration de `4af33bd`. Vérifier aussi séparément le
+  résultat booléen de la préparation TLS native dans le banc
+  inventory de diagnostic. Aucun changement de la production TLS.
+
+- **Périmètre final du diagnostic TLS.** L'appel explicite à la
+  préparation TLS native retourne faux dans le test. Mesurer seulement
+  la présence des deux variables de confiance dans le processus de
+  test lui-même et le verdict du constructeur des versions TLS.
+  Rejouer le même cas inventory isolé. Le code de validation, les
+  délais et les valeurs d'environnement restent intacts.
+- **Scellement F011.** Après rustfmt et sortie verte de la campagne
+  process-host, comparer les deux blobs compilés avec la composition
+  d'un index temporaire sur `4af33bd`. Sceller uniquement
+  `anchor.rs` et `tests/process_host_runtime.rs` sur une branche de
+  tâche locale. Les fichiers de diagnostic restent hors de ce commit.
+
+- **Cause TLS isolée.** Sous `cargo test`, les deux variables de
+  confiance sont présentes dans le processus de test malgré leur
+  absence dans le conteneur. Racines et constructeur de versions
+  passent. Le refus du chemin de confiance natif est donc attendu.
+  Remettre le fichier de test inventory à l'identique de `4af33bd`
+  dans l'extraction. Construire son binaire sans l'exécuter via
+  `cargo +1.94.1 test --locked --offline -p unleash-model-router --lib --no-run --message-format=json`.
+  Dans le même Docker isolé, vérifier l'absence des deux variables
+  et lancer directement le seul test inventory bloqué du binaire
+  déclaré par Cargo. Le binaire, les assertions, les délais et la
+  validation du produit restent identiques. Le cas Connect HTTP
+  conserve sa propre cause à rechercher.
+
+- **Résultat F011.** Ancrage 1/1 et projection unitaires 1/1
+  après un rouge qui conservait `Match` après la sortie. Le rapport
+  utilise la preuve existante d'une sortie sans récolte après une
+  identité concordante. La fixture intégrée a ensuite passé 1/1
+  sans trace après correction de l'attente Linux du cas B.
+  Les deux cibles process-host donnent 35 + 9 réussis, 0 échec
+  et 0 ignoré. Rustfmt ciblé code 0. Revue `/root/m1_integration`
+  favorable sur la projection, l'armement du double et la
+  synchronisation de fixture. Preuve process-host SHA-256
+  `354d87c90eae84390fa340f7f5d38f237f8226f3618a9e7c6cbf43cf101e0a48`.
+  Commit `568c7b2e766e0f0ac8fb383b7c3f07210c8a3c98`, arbre `2b9300731e351fee222fe56d94688554b574868e`, parent
+  `4af33bd` sur `task/g0003-m2/f011-linux-reconcile`. Deux blobs
+  identiques aux fichiers compilés. Aucune trace dans le commit.
+- **Résultat F012 TLS.** Le binaire compilé `/tmp/unleash-target/debug/deps/unleash_model_router-508f65abcafed378`
+  rend 1 réussi, 0 échec, 0 ignoré quand il est lancé directement
+  dans le conteneur dont les deux variables sont absentes. Sous
+  `cargo test`, leur présence déclenche le refus attendu.
+  Aucune modification de validation, de délai ou de code de test
+  dans cette preuve. SHA-256 du log
+  `751dd47ddba3cc3fa7ce29ef297822899df6e28d5a1398082c3d62ba6f3e5895`.
+  La campagne complète doit préserver ce contexte de fixture ou
+  donner à ce cas son entrée de confiance de test déterministe.
+- **Clôture de la passe.** Le conteneur et les outils temporaires sont
+  absents. La preuve Connect HTTP reste rouge et à instrumenter à
+  la première observation de résultat. Le HEAD M2 est `6fb6489`,
+  13/16 intégrés. Les correctifs de cette passe restent dans la
+  branche de tâche et le WIP correspondant.
+
+### Diagnostic du Connect HTTP et fiabilisation du banc TLS
+
+ROOT Codex2. Base `568c7b2`. Deux périmètres séparés, avec contrôles
+antérieurement refusés hors de cette passe.
+
+- **Appuis en lecture seule.** `/root/ollama_route_review` suit
+  le résultat Connect depuis l'admission jusqu'à l'observation.
+  `/root/m1_ipc` vérifie la couture interne de test pour
+  l'entrée de confiance du banc inventory, et la conservation du
+  comportement TLS standard. Git exact et lectures ciblées sous RTK.
+  Aucun écrit ou exécution dans les deux mandats.
+- **Connect HTTP.** Conteneur éphémère avec init Docker, Rust 1.94.1
+  et dépendances GUI Debian déjà utilisées par la CI. Compiler le
+  renderer de `568c7b2` par `node:24-alpine` avec pnpm 10.34.9
+  et le verrou. Entrées Git sous contrôle d'empreinte, sans secret,
+  puis déconnecter le réseau après les seules acquisitions de build.
+  Rejouer uniquement `cargo +1.94.1 test --locked --offline -p unleash-daemon --test t_f012_connect_ipc t_f012_013_connect_active_mandate_uses_durable_dispatch_once -- --exact`.
+  La fixture ouvre un socket Unix local et une écoute HTTP loopback
+  inerte. Attendu : un dispatch durable puis acceptation par le témoin
+  sans octet HTTP. Si elle expire, observer d'abord le résultat typé
+  de la phase et le délai effectif. Ne modifier ni les délais ni
+  l'autorisation pour obtenir le vert. Aucun provider, PTY ou accès
+  à une ressource externe.
+- **Résultat intermédiaire.** L'image Node 24 n'était plus en cache.
+  Le téléchargement public a réussi avec le client Docker sans
+  configuration utilisateur, vers le socket Desktop de référence.
+  Le renderer issu du même commit a été compilé avec le verrou.
+  Le scénario Connect isolé passe en 0,40 s avec un diagnostic
+  limité aux états de la fixture en cas d'échec. Il n'a pas reproduit
+  le délai et sa cause reste ouverte. Fichier de test restauré depuis Git.
+- **Inventory TLS.** Rouge sur le test d'origine sous Cargo dans le
+  conteneur sans réseau externe. La CA synthétique de la suite Connect
+  est réutilisée par ce seul test via une entrée disponible avec
+  `#[cfg(test)]`. Les oracles ClientHello, EOF, délais, dispatch
+  unique et absence d'observation restent identiques. Le magasin
+  système garde exactement son refus des overrides en production.
+  `cargo +1.94.1 test --locked --offline -p unleash-model-router --lib`
+  passe avec 80 réussis, 0 échec et 0 ignoré.
+- **Contrôles de composition.** Dans le même Docker Linux arm64,
+  init activé et réseau déconnecté, vérifier la suite
+  `cargo +1.94.1 test --locked --offline -p unleash-daemon --test t_f012_connect_ipc`
+  avec le fichier Git d'origine et la fixture locale. Sur le candidat
+  TLS, exécuter `cargo +1.94.1 fmt --all -- --check`,
+  `cargo +1.94.1 clippy --locked --offline --workspace --all-targets --all-features -- -D warnings`,
+  `cargo +1.94.1 test --locked --offline --workspace --all-features --no-fail-fast`
+  puis `RUSTDOCFLAGS="-D warnings" cargo +1.94.1 doc --locked --offline --workspace --no-deps`.
+  Les essais ignorés restent exclus. Le fichier F003 et le scénario
+  CLI/PTY F011 signalés sont absents de cette composition.
+- **Revue et discrimination.** `/root/m1_ipc` a relu les trois
+  fichiers de `296a2a5` et confirmé la portée test seule, la confiance
+  système et les oracles conservés. Le scénario Connect passe seul et
+  échoue à l'acceptation TCP dans la suite parallèle (9 réussis,
+  1 échec). `/root/ollama_route_review` constate des répertoires,
+  ports et barrières propres à chaque scénario, et un subscriber
+  global. La contention et son impact sur la borne de 1 000 ms restent
+  à confirmer. Contrôle autorisé de la même suite avec
+  `cargo +1.94.1 test --locked --offline -p unleash-daemon --test t_f012_connect_ipc -- --test-threads=1`
+  puis exécution parallèle avec diagnostic temporaire du temps restant
+  à la libération C4, du résultat typé et des états de la fixture
+  seulement. Pas de modification de délais, d'effet ou d'oracle.
+- **Résultat de la campagne et de la discrimination.** Les trois
+  gates formatage, Clippy strict et rustdoc passent. Le workspace
+  exécute 151 suites et doctests : 806 réussis, 2 échecs, 26 ignorés,
+  code 101, sans interruption. Le deuxième échec concerne le test
+  SQLite F012 de deux demandeurs concurrents, avec `StaleFence`
+  dans les préconditions de sa fixture.
+  Connect donne 10/10 en série. En parallèle, la mesure de l'essai
+  positif indique −138 ms avant libération C4, puis −191 ms au retour,
+  avec marqueur durable et place retenue, sans socket observé.
+  Le délai réel du mandat est donc dépassé dans ce banc. Les ajouts de
+  mesure ont été retirés de l'extraction Docker. Injecter une horloge
+  uniquement dans ce scénario IPC via `StoreOverrides.clock`, en
+  conservant la borne de 1 000 ms et les témoins réels. Vérifier par
+  `cargo +1.94.1 test --locked --offline -p unleash-daemon --test t_f012_connect_ipc`
+  avec sa concurrence par défaut, puis Clippy strict ciblé.
+  La revue du cas Store est en lecture seule par `/root/m1_ipc`.
+- **Cas Store.** La revue confirme que `StaleFence` recouvre
+  l'échéance et plusieurs préconditions immuables pendant ce scénario.
+  L'expiration est plausible. La cause historique exacte n'est pas
+  mesurée. Utiliser l'horloge manuelle existante dans le seul banc des
+  claims, conserver les deux threads et l'oracle un propriétaire,
+  une inspection et une seule écriture SQLite. Exécuter
+  `cargo +1.94.1 test --locked --offline -p unleash-store --test t_f012_connect_store`,
+  puis les gates de composition avec les deux modifications de fixture.
+  Le runtime IPC de diagnostic est restauré avec horodatage frais dans
+  Docker et son blob est comparé à Git avant recompilation.
+- **Candidat Connect `cfe50a9`.** Les horloges injectées sont
+  limitées au scénario positif IPC et au banc Store des claims.
+  La revue indépendante de `/root/m1_ipc` confirme les délais et
+  oracles conservés, y compris les deux demandeurs réellement
+  concurrents. Les suites ciblées avec parallélisme par défaut sont
+  vertes, 10/10 et 38/38, après restauration effective du runtime
+  d'origine et recompilation. Rustfmt et Clippy workspace passent.
+  Au rejeu workspace, trois échecs en amont de l'observation IPC
+  reparaissent dans trois scénarios distincts de la suite du daemon.
+  Le scénario positif attend C4 alors que le probe reste en file.
+  Comparer la campagne entière à deux cas de test par binaire avec
+  `cargo +1.94.1 test --locked --offline --workspace --all-features --no-fail-fast -- --test-threads=2`.
+  Cette comparaison conserve tous les scénarios non ignorés et
+  leur concurrence interne. La campagne au parallélisme par défaut
+  conserve séparément son résultat réel.
+- **Qualification bornée.** Sur `cfe50a9`, les 15 blobs modifiés
+  correspondent au contenu du conteneur. En Linux arm64, au
+  parallélisme par défaut : 805 réussis, 3 échecs IPC Connect, 26
+  ignorés, code 101. Avec deux tests simultanés par binaire :
+  808 réussis, 0 échec, 26 ignorés, code 0, sur 151 suites et doctests.
+  Formatage et Clippy strict verts. Rustdoc vert sur `296a2a5`,
+  toujours applicable aux mêmes sources de bibliothèque et
+  configuration après les deux changements de fixtures d'intégration.
+  Les preuves de campagne sont `docker-workspace-final-tests.log`
+  (SHA-256 `dbf4261c50e7b9965a584ac2396a97c5682ac2cbc6acf06ec847474a2a448050`)
+  et `docker-workspace-two-threads.log`
+  (SHA-256 `9317fc2fe5f7988bffd97711700f7fd12f6a6b5080521413a851187e63c0a4a6`).
+- **Intégration et ressources.** `/root/m1_integration` a identifié
+  les six fichiers avec WIP au-delà du candidat et une procédure de
+  conservation bornée. La fusion attend la résolution du défaut de
+  concurrence des fixtures IPC au parallélisme par défaut. Le produit
+  reste sur `6fb6489`. Conteneur de cette passe arrêté, archives
+  temporaires et deux index de composition retirés. Aucun nouveau
+  worktree. La règle Docker figure dans le programme V1 et le jalon M2.
+
+### Limiter la concurrence du banc IPC Connect
+
+ROOT reprend `cfe50a9`, avec un seul fichier de banc attribué en écriture.
+Le passage de 805 à 808 tests lors du changement de concurrence motive
+un plafond de deux daemons de fixture dans cette suite seule. Le permis
+est acquis avant de créer les ressources et gardé jusqu'à la fermeture
+de la fixture. Les scénarios conservent leurs délais et leurs tâches
+concurrentes. Toutes les sources produit restent identiques au candidat.
+
+- **Périmètre et commandes.** Archive Git de `cfe50a9`, assets compilés
+  avec Node 24 et le verrou pnpm. Docker Rust 1.94.1 Linux arm64 avec init,
+  registre Cargo lecture seule et réseau détaché après préparation des
+  dépendances. Depuis `/workspace`, `cargo +1.94.1 test --locked --offline -p unleash-daemon --test t_f012_connect_ipc`
+  puis `cargo +1.94.1 fmt --all -- --check`,
+  `cargo +1.94.1 clippy --locked --offline --workspace --all-targets --all-features -- -D warnings`
+  et `cargo +1.94.1 test --locked --offline --workspace --all-features --no-fail-fast`,
+  sans modifier la concurrence de libtest. Dix scénarios IPC et tous les
+  tests non ignorés attendus, rapports réels sous
+  `f012-provider-set/fixture-concurrency-20261121/`. Les limites
+  de plateformes et les scénarios F003/F011 non vérifiés restent distincts.
+- **Appuis en lecture seule.** `/root/m1_ipc` vérifie le cycle de vie
+  du permis de fixture et la conservation de la concurrence interne.
+  En parallèle `/root/m1_integration` tranche les limites documentées
+  d'AssignTask pour le prochain raccord F003, sans exécution ni écrit.
+  Pas de nouvelle affectation produit ou de worktree. L'inventaire du
+  dépôt ne contient pas de skill ni de registre feature-inbox.
+- **SHA et preuve ciblée.** `b84116e1c2e5bf356112fb39171a3f3ec4924bcb`,
+  arbre `3f5d39adfd393098b163341787c2cae0e58f0c29`. Le seul diff depuis
+  `cfe50a9` se trouve dans `t_f012_connect_ipc.rs`. Le test ciblé rend
+  10 réussis, 0 échec ni ignoré, 3,37 s. `/root/m1_ipc` a relu le
+  diff et la sortie et confirmé les oracles inchangés, l'absence
+  d'acquisition imbriquée et la conservation du permis en cas de
+  remplacement du handle. Le plafond couvre le binaire de fixture.
+- **Parcours `provider set`.** Sur la composition et le conteneur
+  identiques, après la campagne standard, construire
+  `cargo +1.94.1 build --locked --offline -p unleash-cli --bin unleash`.
+  Exécuter ensuite
+  `UNLEASH_F012_CLI_BIN=/tmp/unleash-target/debug/unleash cargo +1.94.1 test --locked --offline -p unleash-daemon --test t_f012_profile_service_ipc t_f012_cli_sets_and_revises_a_profile -- --exact --ignored`.
+  Seul ce test opt-in est sélectionné. Il configure et relit deux
+  versions d'un profil de fixture par socket Unix et SQLite éphémères.
+  Le reçu est rejouable et la révision visible. Aucun fournisseur ou
+  compte externe, aucun appel modèle. Capturer séparément le résultat.
+- **Prochaine liaison F003.** `/root/m1_integration` confirme
+  `AssignTask` public, `CreateInvocation` interne, et absence de
+  liaison du trio run/step/task dans le plan de file actuel. Les
+  tables `workflow_runs`, `step_instances` et `tasks` existent.
+  Le writer sait créer un run, mais l'inventaire des sources produit
+  n'a pas retrouvé de producteur de step et task. La résolution d'une
+  tâche existante par le serveur est la première tranche cohérente.
+  Elle devra inclure la production de la tâche pour être essayable.
+  Ne pas traiter la commande `StartRun` comme alias ni déduire les
+  identités depuis un texte ou un hash. Aucun test F003 rejoué.
+- **Acceptation Linux sur `b84116e`.** Cargo standard, sans
+  `RUST_TEST_THREADS`, rend 808 réussis, 0 échec, 26 ignorés et
+  code 0 sur 151 suites et doctests. Rustfmt, Clippy strict et rustdoc
+  strict passent sur la même composition. Le test opt-in `provider set`
+  passe avec le binaire du même conteneur, 1 réussi et 7 filtrés.
+  SHA-256 campagne
+  `606a96e27b8f77ecb66c850e2e9d7b2f1942df5aacbf0264c07c401e32524817`.
+  SHA-256 CLI
+  `e3c930ff58d4535c08d88ca000bb21aa62f1b71cc9b9757bf871f7f7705acbb4`.
+  Les cinq adaptations Linux de `4af33bd` ont aussi été relues par
+  `/root/m1_integration`, qui confirme les gardes et oracles conservés.
+- **Intégration.** Le candidat descend de `6fb6489` et change
+  15 fichiers suivis. Index initial sans changements, aucun merge
+  en cours et aucun filtre qui change les octets de ces chemins.
+  ROOT sérialise leur sauvegarde Git et la fusion. Vérifier les blobs
+  sauvegardés avant la fusion, restaurer les octets du WIP, puis
+  vérifier leur identité ainsi que l'arbre de l'index avant commit.
+  Garder la sauvegarde jusqu'au constat des deux vérifications.
+- **Fusion effectuée.** `244e4a448a0e59c510b7b65631884201189f6e0a`
+  a pour parents `6fb6489` et `b84116e`, et son arbre
+  `3f5d39adfd393098b163341787c2cae0e58f0c29` est exactement celui
+  testé dans Docker. Les quinze fichiers concernés sont restaurés
+  à l'octet avec le WIP initial. Les preuves sont applicables au
+  commit intégré. Le workspace local contient d'autres changements
+  hors de la campagne. Le jalon reste à 13 lots sur 16.
+- **Ressources de validation.** Le conteneur de cette passe est
+  absent du registre Docker. L'archive de renderer et l'index
+  temporaire ont été retirés. Après acceptation et mise à jour
+  du suivi, les neuf logs bruts de cette passe ont été retirés
+  (252 724 octets logiques). Le résumé, les commandes et les
+  empreintes acceptées ci-dessus constituent la remise durable.
+  Aucun worktree n'a été créé pour la composition.
+- **Clôture Git.** Les six branches de tâche de cette composition
+  ont été retirées après contrôle de leur ascendance dans `244e4a4`
+  et du registre des worktrees. La sauvegarde temporaire
+  `06a6314` a été retirée après contrôle des quinze fichiers
+  restaurés. La sauvegarde antérieure est toujours au sommet du
+  registre. Le nettoyage des anciens worktrees relève encore de
+  leurs conditions de clôture.
+
+### Préparer l'affectation d'une tâche durable
+
+Base intégrée `244e4a4`. ROOT prépare le contrat fermé d'AssignTask.
+Le DTO doit identifier une tâche existante et l'agent choisi. Le
+serveur résout la session, le run, l'étape et les références du
+bundle avant mise en file. Le DTO seul ne produit aucun reçu métier.
+Les travaux en cours dans le daemon et le Store sont conservés.
+
+Appuis en lecture seule, dans le checkout canonique et sans test
+ni preuve brute séparée. `/root/m1_integration` repère la lecture
+produit qui exposerait au client la disposition d'un terminal après
+réconciliation. `/root/ollama_route_review` repère le point de
+projection d'une observation de génération déjà persistée vers le
+profil exact. Aucun des deux mandats ne porte sur une vérification
+antérieurement masquée ou sur une exécution réseau.
+
+- **Critère de la première tranche.** Dans l'enveloppe publique
+  `AssignTask`, `aggregate_id` cible la tâche durable,
+  `expected_revision` sa révision, et le payload ne porte que
+  `agent_id`. La tâche, sa révision et l'agent restent à vérifier
+  côté serveur dans le futur raccord. L'absence d'identifiant,
+  un UUID mal formé et un champ de provenance supplémentaire
+  sont rejetés par le schéma et par le DTO.
+- **Commandes.** Docker Rust 1.94.1 sans réseau, registre Cargo en
+  lecture seule. Sur `244e4a4` et le seul test de contrat ajouté,
+  `cargo +1.94.1 test --locked --offline -p unleash-protocol --test test_schema_validation test_validate_assign_task_payload_schema -- --exact`.
+  Attendu rouge sur l'acceptation d'un champ supplémentaire, puis vert
+  après fermeture. Relancer `cargo +1.94.1 test --locked --offline -p unleash-protocol --all-features`
+  et Clippy strict du seul crate. Aucun lancement de daemon, de worker,
+  de modèle ou de processus applicatif. Les fichiers de preuve restent
+  sous `f003-assign-task/assign-wire-20261121/`.
+- **Rouge constaté.** Le code 101 correspond à l'acceptation de
+  `run_id` dans le payload. Le cas valide précédait cet oracle et
+  était accepté. Le conteneur minimal compile la suite sans réseau.
+  Préparer rustfmt, Clippy et le validateur JSON Schema Python
+  dans un conteneur d'outillage distinct, depuis Rust 1.94.1 et les
+  paquets Debian. Détacher ce réseau après l'acquisition.
+  Le conteneur Rust des tests reste sans réseau.
+- **Validation du dossier.** Le paquet Debian fournit JSON Schema
+  4.10, tandis que le validateur du projet importe `referencing`.
+  Préparer dans le seul conteneur d'outillage un venv avec
+  `jsonschema==4.25.1` et ses wheels binaires, puis détacher le
+  réseau. Avec l'archive Git et les seuls fichiers de ce lot,
+  exécuter `python3 -B tools/design-package/regen.py .` puis
+  `/tmp/unleash-design-qa/bin/python -B tools/design-package/validate.py .`.
+  Le manifest et les checksums du checkout sont déjà modifiés
+  par d'autres travaux. Les sorties de la régénération partent
+  dans le seul candidat Git du lot.
+- **Lectures parallèles.** F011 affiche l'état courant dans
+  `GetStateSnapshot.terminals`. Le rapprochement conserve un reçu
+  distinct et ne suffit pas à déterminer la disposition. F012
+  assemble validation, Connect et Inventory par version dans
+  `provider_profile_validation::read_projection`. La projection du
+  résultat de génération a besoin d'une observation durable liée
+  à cette version. Aucun de ces critères n'est validé par lecture.
+- **Contrat vérifié.** Le scénario de schéma a échoué avant
+  modification sur l'acceptation de `run_id`, puis passe avec
+  les mêmes contre-exemples et le DTO Rust. Cargo teste
+  `unleash-protocol` sous Docker Linux arm64 avec 62 réussis,
+  0 échec et 0 ignoré. Rustfmt ciblé, Clippy strict et rustdoc
+  strict du crate sont verts. Le dossier isolé redonne
+  396 fichiers de manifest, 414 checksums, 27 schémas,
+  32 documents valides, 0 erreur et 0 avertissement.
+  SHA-256 tests
+  `f7627c41a4c8a1bb3a7fe405608e2fe2561778b8f1d2dbf044e7c00d854343ed`
+  et validateur
+  `38aa6648d0a599c3ebc0e3cf684adc949efbc76c9e69bc676915454fe895ef35`.
+- **Candidat et revue.** `e14049aee08919fba39065b334ea9c397cb1a4ff`,
+  parent `244e4a4`, arbre `69f9a9ecd9ae089a9574709ddfae7214fedfdb7e`.
+  Neuf fichiers, dont les deux fichiers générés. `/root/m1_ipc`
+  confirme l'accord du schéma, du DTO et du catalogue, et relit les
+  résultats. Les deux fichiers générés du checkout sont conservés
+  avec le WIP antérieur. Le candidat attend la composition. Aucun
+  parcours daemon, engagement d'activation ou test d'admission n'a
+  été exécuté sur ce lot. Le producteur de tâche et son raccord
+  au writer sont la prochaine étape de F003.
+- **Ressources.** Les deux conteneurs sont absents du registre
+  Docker. L'index temporaire a été retiré. Les journaux nécessaires
+  à la composition suivante restent disponibles dans le pack.
+  Aucun nouveau worktree.
+
+### Matérialiser une tâche de workflow
+
+ROOT reprend le candidat `e14049a` sur la branche du jalon
+`244e4a4`. L'objectif est un premier engagement durable de
+l'étape et de la tâche, en conservant le lien à la définition
+épinglée par le run. L'inventaire ne retrouve pas de registre
+feature-inbox dans ce dépôt. Les chemins déjà modifiés et
+l'ancien banc de mise en file restent réservés.
+
+- **Appui définition.** `/root/m1_integration` relève à partir
+  du Git exact comment charger les octets correspondant au digest
+  d'une définition épinglée. Lecture de métadonnées et d'exemples
+  de workflow uniquement.
+- **Appui activation.** `/root/m1_ipc` relève le contrat des
+  événements d'activation et les états durables de la tâche, afin
+  de conserver l'oracle métier dans le test. Lecture des schémas,
+  contrats et tables uniquement.
+- Les deux appuis travaillent depuis le checkout canonique en
+  lecture seule. Aucune exécution d'un workflow, modification,
+  fixture de mise en file ou reprise d'un contrôle masqué.
+
+- **Contrat et oracle de persistance.** La méthode interne du
+  Store reçoit la décision du reducer pour un nœud `task`. Elle
+  s'appuie sur la génération et l'époque courantes, le run
+  `running` à la révision attendue, son digest de définition
+  et le digest de son plan effectif. Elle vérifie les octets
+  retenus et le nœud de la définition hors du writer. Le writer
+  revalide les références et inscrit ensemble l'étape `ready`,
+  la tâche `ready`, un `NodeActivated` et le reçu. Aucun
+  appel, worker, slot ou invocation. L'activation logique est
+  unique malgré rejeu ou concurrence. La décision de disponibilité,
+  de binding et de budget relève du reducer et de ses contrats.
+- **Périmètre de test.** Archive de `e14049a`, Docker Rust 1.94.1
+  Linux arm64 avec init et sans réseau après préparation des outils.
+  SQLite temporaire local et définition documentaire lue comme
+  donnée JSON, sans exécution. La nouvelle cible est
+  `cargo +1.94.1 test --locked --offline -p unleash-store --test t_f005_task_activation`.
+  Le rouge précède le raccord au writer. Observer étape et tâche
+  liées au run, reçu et événement uniques au rejeu. Les cas de
+  divergence ou de rupture atomique ont leurs propres assertions.
+  Vérifier ensuite formatage, Clippy strict et rustdoc de la crate.
+  Preuves sous `f003-task-activation/run-20261121/`.
+- **Résultats intermédiaires.** Rouge observé sur l'absence d'écriture
+  de l'activation après compilation du banc. Quatre cas passent
+  après raccord, dont le rollback injecté avant commit. Une erreur
+  Clippy locale a signalé la copie de la map dans le banc. Vérifier
+  également le contenu de `NodeActivated` et, sur la même composition,
+  `cargo +1.94.1 test --locked --offline -p unleash-store --test t_f002_004_idempotency_lineage`
+  pour les rejouabilités du writer canonique. Vérification SQLite
+  locale, à partir des sources intégrées, sans l'ancien banc F003.
+- **Candidat `5187df0`.** Commit complet
+  `5187df0360889ad9875efcba48904d78092460a5`, parent `e14049a`,
+  arbre `fe76dec0cc4f87c460e36ffd1d7ab16dc71903c0`. Le Store
+  matérialise le nœud et sa tâche liés au run épinglé avec le
+  reçu et `NodeActivated`. La preuve s'appuie sur une référence
+  vivante de la bonne version et sur des octets relus par hash.
+  Le test utilise les ports existants de publication d'objet et
+  de transition de run pour installer sa fixture. Le reducer et
+  le producteur des bindings restent à raccorder.
+- **Contrôles.** Docker Linux arm64, Rust 1.94.1. Quatre cas de
+  `t_f005_task_activation` et un cas de
+  `t_f002_004_idempotency_lineage` réussis, aucun échec ni
+  ignoré. Rustfmt ciblé, Clippy strict Store tous targets et
+  rustdoc strict Store passent. Dossier régénéré sur l'arbre
+  isolé, 396 fichiers, 414 hashes, 27 schémas et 32 documents,
+  0 erreur et 0 avertissement. SHA-256 de la sortie tests
+  `d0c51d1354955d70e30aae9d0c735f96a7d99f9374672c125517cb3765ab39e8`
+  et du validateur
+  `07ff420e89697f175053c4c477e02f8abd2ae69bdc77b565cfa38d1e9d35272f`.
+  `/root/m1_integration` a vérifié le port, ses oracles et la
+  revalidation entre lecture et writer. GO limité à ce port.
+- **Suite de l'affectation.** `/root/m1_ipc` confirme les
+  comparaisons possibles dans une transaction entre tâche, run,
+  étape, affectation active et bundle. La tâche ne référence
+  encore aucun agent ou bundle. Le raccord devra produire et
+  contrôler le bundle exact et l'engager avec la file. Un reçu
+  d'activation d'étape ne prouve aucune admission.
+- **Périmètre Git.** Le candidat rassemble la forme d'AssignTask
+  et la matérialisation. La branche M2 reste à `244e4a4` et
+  13 lots intégrés sur 16. Les fichiers modifiés par les autres
+  lots, notamment commands.rs, lib.rs et le dossier de conception,
+  se trouvent toujours dans le checkout d'origine. L'index et
+  les sorties intermédiaires ont été retirés. Le conteneur est
+  absent du registre Docker. Aucun nouveau worktree.
+
+### Engager l'affectation d'une tâche et sa mise en file
+
+ROOT reprend `5187df0` depuis la branche du jalon `244e4a4`.
+Le prochain résultat est une invocation réellement en file,
+causée par une tâche existante et liée à sa mission, à son run
+et à son étape. Le contrat `AssignTask` conserve le payload
+fermé d'`e14049a`. L'agent seul vient du payload. La session,
+l'affectation active et le bundle exact relèvent du Store et
+du plan résolu par le harness.
+
+Appuis en lecture seule sur `5187df0`. `/root/m1_ipc` identifie
+la frontière de l'appelant et du projet dans les commandes
+existantes. `/root/m1_integration` identifie les preuves
+disponibles pour la session et le bundle initial. Les deux
+mandats se limitent aux fichiers source cités et au contrat.
+Aucun test d'admission antérieurement signalé, aucune exécution
+de worker, d'outil ou de workflow externe. L'ancien WIP de file
+est préservé. L'inventaire ne trouve pas de registre feature-inbox.
+
+- **Tranche Store.** Appelant humain déjà authentifié et
+  propriétaire de la mission. Le harness présente un plan interne
+  désignant exactement l'affectation active, son epoch et sa révision,
+  l'activation durable et le bundle résolu. Les versions, la preuve
+  d'origine de la tâche et le contexte initial sont contrôlés sur
+  la session choisie. Les octets sont vérifiés hors du writer et
+  les références sont revalidées dans la transaction. Le Store
+  engage tâche et étape `queued`, invocation `queued/work`,
+  références conservées, événements et reçu. Il ne consomme pas
+  de place. Le chemin agent et le raccord IPC attendent leurs
+  autorités et leur producteur réels.
+- **Oracle Docker.** À partir de `5187df0`, compiler
+  `cargo +1.94.1 test --locked --offline -p unleash-store --test t_f005_task_activation commits_assignment_and_queues_the_exact_invocation -- --exact`.
+  Le banc neuf réutilise l'activation réelle, un Store SQLite
+  temporaire et des affectations et bundles de fixture. Aucun
+  lancement de worker, connecteur ou modèle. Attendu d'abord
+  rouge sur l'absence du port, puis une invocation visible du
+  snapshot d'admission, avec reçu exact au rejeu et zéro slot
+  occupé. Vérifier ensuite le même binaire de tests, Clippy,
+  rustfmt, rustdoc et le dossier régénéré. Registre Cargo en
+  lecture seule. Réseau déconnecté après préparation des outils.
+  Preuves sous `f003-task-assignment/run-20261121/`.
+  Bilan attendu par commande, y compris délais, échecs et tests ignorés.
+
+#### Résultat de la mise en file et règle Docker
+
+- Candidat `879c5bf9c90c14048efa8f1ba19b30abad19319b`, arbre `85147e2aec31545366769f0ea8225567c99bca74`, sur `task/g0003-m2/f003-assign-queue`.
+  Les 994 fichiers versionnés correspondent aux sources utilisées dans Docker.
+  Le writer associe tâche, mission, affectation active, bundle et session.
+  Il engage les deux révisions, les références retenues, deux événements
+  causaux et le reçu dans la même transaction. L'invocation est visible dans
+  `execution_admission_snapshot` avec zéro slot actif.
+- Déroulé du banc. Un test rouge sur le port vide. Le premier passage du
+  port a atteint la projection et révélé l'absence de pool dans la fixture.
+  La fixture initialise désormais le pool par le port normal du Store.
+  `cargo test --locked --offline -p unleash-store --test t_f005_task_activation --test t_f002_004_idempotency_lineage`
+  passe sur 7 + 1 cas, 0 échec et 0 ignoré. Les cas ajoutés couvrent
+  l'affectation et le rejeu, le refus d'une révision d'affectation périmée
+  et l'interruption avant commit sans effet résiduel.
+- `cargo fmt --all -- --check`,
+  `cargo clippy --locked --offline -p unleash-store --all-targets --all-features -- -D warnings`
+  et `RUSTDOCFLAGS="-D warnings" cargo doc --locked --offline -p unleash-store --no-deps`
+  passent dans Docker Linux arm64, Rust 1.94.1, init actif, registre Cargo
+  en lecture seule et réseau détaché. L'outillage utilise
+  `RUSTUP_TOOLCHAIN=1.94.1` et `CARGO_TARGET_DIR=/tmp/unleash-target`
+  dans le conteneur. La sélection explicite évite une recherche de channel
+  par rustup en environnement déconnecté.
+- Dossier candidat régénéré et validé dans Docker. 396 fichiers, 414 sommes
+  de contrôle, 27 schémas, 32 documents, zéro erreur et zéro avertissement.
+  La règle Docker est aussi dans `AGENTS.md` et `.claude/rules/rust.md`
+  du checkout courant. Les deux fichiers correspondent au candidat.
+  La régénération du checkout SMB échoue sur le lien local non suivi
+  `.claude/skills/ask-matt` avec `IsADirectoryError`. Les liens de skills
+  installés et les manifestes de WIP sont préservés.
+- Preuves `assignment-tests.log` SHA-256
+  `8b92e29cb651a3c383731579b6cbe940add9e3ce0f396c847631a2890ebfc5df`,
+  `dossier.log` SHA-256
+  `59343e329aa4229c563080caffa26f71da32af33a165dac466e80a0c45c78956`
+  et `source-match.log` SHA-256
+  `132d3e289d5b28ea2e0a150659ce7a6c7535dc6942eb354a26801068dc79ff1b`
+  dans le pack `f003-task-assignment/run-20261121/`.
+  `/root/m1_integration` a relu ce commit, la transaction et les résultats.
+  Avis favorable au périmètre Store, avec affectation, bundle et manifeste de fixture.
+- Le candidat attend l'intégration. Aucun nouveau worktree. L'index temporaire
+  a été retiré et le conteneur est absent du registre Docker. Les preuves
+  nécessaires à la composition restent disponibles.
+  M2 demeure à 13 lots intégrés sur 16. Prochaine preuve produit attendue
+  sur le même chemin. Une affectation et un bundle résolus en service,
+  une commande IPC authentifiée et une unique admission dans le tour existant.
+
+### F003 — Publication du contexte initial de la tâche
+
+21 novembre 2026. ROOT, candidat de base `879c5bf`, checkout canonique
+`/Volumes/personal_folder/Unleash`. Le manifeste doit provenir d'une
+publication Store de production. Le harness lui transmet le document choisi,
+les références publiées dans l'ordre et les coordonnées de lignée.
+Le writer compare la session ouverte, sa révision et son parent. Il conserve
+les entrées et engage le manifeste et ses références dans une transaction,
+sans déplacer la tête de session. Une identité déjà publiée doit rendre le
+même digest ou signaler le conflit. La politique de sélection des entrées et
+le bundle complet restent du ressort du producteur.
+
+Données de test synthétiques, SQLite et objets temporaires dans Docker
+Linux arm64 `unleash-g0003-m2-f003-binding-20261121`. Aucun modèle, worker,
+outil externe ni connexion fournisseur. Réseau Docker détaché.
+Depuis `/workspace`, avec Rust 1.94.1 et la cible sous /tmp du conteneur,
+`cargo test --locked --offline -p unleash-store --test t_f005_task_activation publishes_initial_context_once_with_its_ordered_input -- --exact`.
+Attendu rouge sur le port absent puis vert sur publication réelle, référence
+retenue, rejeu exact et révision/tête de session intactes. Vérifier ensuite
+le banc d'activation et d'affectation avec ce port, les conflits de
+publication, l'idempotence de lignée, rustfmt et Clippy du Store. Preuves
+dans `f003-binding/run-20261121`. Les revues List et Validate précédemment
+interrompues restent non vérifiées. Leurs résultats locaux sont conservés.
+
+### Retraits Git intégrés du 21 novembre 2026
+
+ROOT vérifie l’ascendance dans la référence locale publiée `origin/dev@85988665786b1b14d1ca5d74a4fbaba9e5cee2b0` et l’absence de checkout associé. SHA conservés avant retrait.
+
+- `goal/g0001-m0` à `61452af8af8420fea280e88546c6640f636117d1`.
+- `task/g0002-m1/backup-cli` à `f3bcd3e1039bea1785e0a7952b6be1f8707ac997`.
+- `task/g0002-m1/t01a` à `08e62c0da10b72008aa48713717125c6ff985af1`.
+
+Résultat observé. Les trois refs locales ont été retirées par `git branch -d`. Leur absence est vérifiée par `git show-ref --verify --quiet`.
+
+#### Résultat du contexte initial
+
+- Candidat `25d74309c18065be62a2538431c1f57b23d14877` sur `task/g0003-m2/f003-initial-context`, parent `879c5bf`.
+  Le Store publie le document RFC 8785 fourni par le harness et les références
+  d’entrées dans la même transaction. Il compare la lignée, l’époque, la
+  session, sa révision et sa tête. La tête de session ne bouge pas.
+  Le test d’`AssignTask` appelle ce port pour son manifeste initial.
+- Premier test rouge sur la publication absente. Après raccord,
+  `cargo test --locked --offline -p unleash-store --test t_f005_task_activation --test t_f002_004_idempotency_lineage`
+  donne 10 + 1 tests réussis, 0 échec et 0 ignoré. Un ID déjà publié rend
+  le même digest. Un nouveau document sur une session révisée est refusé.
+  Le retrait d’une entrée avant publication fait annuler les références de
+  contexte et libérer le pin sans enregistrer de manifeste.
+- `cargo fmt --all -- --check`, `cargo clippy --locked --offline -p unleash-store --all-targets --all-features -- -D warnings`
+  et `RUSTDOCFLAGS="-D warnings" cargo doc --locked --offline -p unleash-store --no-deps`
+  passent dans Docker Linux arm64, Rust 1.94.1, avec cible interne, registre
+  Cargo en lecture seule et réseau détaché.
+  `context-tests.log` SHA-256
+  `241fa3dc9127cdd29ef067493d1539dd4b689af0ef6b43ccb6e6c3bfcb52a56b`.
+- La sélection des entrées et de leur politique reste déléguée au
+  producteur. Le banc d’affectation utilise encore une affectation et un
+  bundle de fixture. La route IPC, le producteur complet et l’admission
+  restent à raccorder. M2 reste à 13 lots intégrés sur 16.
+
+### Suivi des travaux et ressources de développement
+
+- Demande de Louis du 21 novembre 2026. Produire la vue des travaux en cours
+  et à venir, tenir la trace pendant les évolutions et clôturer branches,
+  worktrees et caches intégrés. ROOT maintient les fiches et régénère
+  `.claude/state/current-state.md` avec `tools/design-package/current_state.py`
+  après chaque transition. Les décisions et preuves restent dans les journaux.
+- Cinq entrées Git observées, dont le checkout canonique. Les trois branches
+  Antigravity auxiliaires pointent sur `7a9e735`, ancêtre de `8598866`.
+  Dans le répertoire Antigravity
+  `/Users/louis/.gemini/antigravity-cli/worktrees/8a7e3601-61eb-4201-be4f-39dae50c9e14/`,
+  `swarm-m1-worker-1-004b2259` pointe vers un chemin absent. Sa ref reste
+  à réconcilier. `swarm-m1-worker-2-12b3259c` est propre sur le suivi et
+  le non-suivi visibles. ROOT doit établir la fin de ses consommateurs et
+  le statut des fichiers ignorés avant retrait. `swarm-m1-worker-3-c6dad37d`
+  contient un worktree imbriqué
+  `.claude/worktrees/g0002-m1-t01b-freeze-fix` à `270738e`.
+  Ce dernier est intégré mais porte encore un fichier modifié et un test
+  non suivi. ROOT doit réconcilier ces travaux avant de libérer les deux copies.
+- La branche M1 et le résidu du checkout t02 restent suivis dans la fiche M1.
+  Consigner les retraits effectifs et les conditions de reprise, avec les preuves
+  conservées dans Git. Les caches Rust privés de test suivent la vie du conteneur.

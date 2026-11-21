@@ -2,7 +2,7 @@
 
 - Statut : done
 - Demandé : 2026-11-17T00:32:48+01:00 par programme `g0000-v1` ; outil : Antigravity
-- Branche : goal/g0001-m0 ; base : dev@HEAD
+- Branche intégrée puis retirée. Le SHA `61452af` de `goal/g0001-m0` reste accessible dans l’historique de `dev`.
 - Options : merge=oui, dry-run=non
 
 ## Objectif reformulé

@@ -29,6 +29,11 @@ def walk(base: Path, excluded_prefixes: tuple[str, ...] = ()):
         for f in fn:
             if f in IGNORED_NAMES or f.endswith(".pyc"):
                 continue
+            # SMB can classify a directory symlink as a filename. Match os.walk's
+            # default policy of leaving directory aliases outside the package.
+            candidate = Path(dp) / f
+            if candidate.is_symlink() and candidate.is_dir():
+                continue
             relative_file = (relative_dir / f).as_posix()
             if not relative_file.startswith(excluded_prefixes):
                 out.append(relative_file)

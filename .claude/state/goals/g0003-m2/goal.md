@@ -9,6 +9,8 @@
 
 Raccorder l’admission durable, les adaptateurs de modèles et le process-host à l’autorité du daemon. Démontrer les parcours avec SQLite et des processus ou serveurs locaux réels avant la qualification externe.
 
+Sur ce poste, exécuter les compilations, tests, formatages, analyses Clippy et générations rustdoc de ce jalon exclusivement dans Docker. Utiliser le conteneur Linux avec init Docker et des sources transmises depuis Git. Les validations spécifiques à Darwin relèvent d’un runner macOS dédié.
+
 ## Critères de terminé
 
 - [ ] F003. À la limite de cinq unités globales, vingt managers logiques et une charge mixte agents, replay et probes restent sous le plafond. Une admission concurrente ne réserve jamais deux fois la dernière place. Les attentes durables rendent la place après checkpoint sûr et neutralisation. Les anciennes tentatives et lignée sont rejetées.
@@ -42,13 +44,16 @@ Le Store a un seul écrivain par phase. Les connexions F011 et F012 au daemon se
 
 ### Actions de clôture ouvertes
 
+Au 21 novembre, 13 lots sur 16 sont intégrés sur `goal/g0003-m2`. La fusion `244e4a4` ajoute `provider set`, les corrections Linux et la stabilisation des fixtures, avec 808 tests réussis sur l'arbre intégré. La dernière publication connue reste M1 sur `origin/dev@8598866`. Les preuves examinables sur les mêmes entrées servent à la revue des candidats éligibles.
+
 | Périmètre | Prochain résultat observable | Dépendance immédiate |
 | --- | --- | --- |
-| F003 | Le chemin `AssignTask` / `StartRun` produit une unité que le tour déjà intégré peut admettre, avec une seule tentative et la preuve durable attendue | Mise en file Store compilée, qualification fonctionnelle non vérifiée. ROOT conserve ce candidat et les contrôles signalés clos. |
-| F011 | L'autorité confirme la disposition du contrôle et la conservation ou libération des ressources prévues après réconciliation | ROOT part des preuves intégrées `64ea50c` et `abb030e`. Le scénario CLI/PTY signalé reste non vérifié dans son propre périmètre. |
-| F012, profils | Les parcours CLI de fiche de profil ont chacun un verdict de revue et des preuves attachées au candidat | Tests locaux disponibles. Les revues liste et validation se sont arrêtées avant leur premier tour. Leurs remises restent non vérifiées. |
-| F012, génération | Le transport consomme le corps publié et la décision durable lie l'instance admise à ce transport, avant tout envoi | Corps et destination testés localement. ROOT traite la liaison dans ce périmètre indépendant des revues CLI. L'essai moteur réel relève de Q-19. |
+| F003 | `AssignTask` produit une unité durable que le tour déjà intégré admet une seule fois | `e14049a` ferme l'entrée du protocole. `5187df0` matérialise l'étape et la tâche sur une définition épinglée. `879c5bf` engage l'affectation et rend l'invocation visible dans la file du Store avec le bundle exact. `25d7430` publie le manifeste initial en conservant les entrées et la tête de session, vérifié sur onze tests Docker. ROOT poursuit le bundle et la résolution des affectations, puis l’IPC, la composition et l’admission effective. `StartRun` garde son critère propre. |
+| F011 | L'autorité confirme la disposition du contrôle et la conservation ou libération des ressources prévues après réconciliation | Corrections Linux de `568c7b2` intégrées en `244e4a4`, avec revue et campagne Docker verte. La disposition complète reste ouverte. Le scénario CLI/PTY signalé reste non vérifié dans son périmètre. |
+| F012, profils | Qualifier les remises CLI de liste et de validation sur l'arbre intégré | `provider set` intégré en `244e4a4`. La campagne Docker Linux au parallélisme par défaut donne 808 réussis, 0 échec et 26 ignorés. Le parcours CLI → daemon de configuration et révision passe séparément. |
+| F012, génération | L'exécuteur consomme une seule fois le permis durable et inscrit le résultat ou l'issue inconnue | Le propriétaire d'admission reçoit le bail, le corps publié et le placement revalidés. Le writer lie ces faits à l'empreinte de la requête native. La route `/api/chat` de l'origine attestée est qualifiée par la fixture locale, sans envoi. ROOT doit raccorder le permis au transport, traiter l'observation et l'issue inconnue, puis qualifier la reprise et Q-19 sur le moteur réel. |
 | Sortie M2 | Une campagne de composition couvre les lots revus, puis un rapport regroupe les résultats et les limites de F003, F011, F012 et Q-19 | L'acceptation et la publication du jalon exigent leurs gates et le contrôle de CI. L'accès à la CI distante a échoué avec HTTP 404. |
+| Clôture des ressources héritées | Les quatre entrées Git auxiliaires sont réconciliées, puis les ressources intégrées éligibles sont retirées | ROOT. Une entrée pointe vers un chemin absent. La copie imbriquée contient un fichier modifié et un test non suivi. Vérifier les consommateurs et travaux uniques avant retrait. Trois branches intégrées sans checkout ont été retirées et vérifiées. |
 
 ## Résultat acquis
 

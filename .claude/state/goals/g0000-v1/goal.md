@@ -11,6 +11,10 @@ Réaliser et qualifier la V1 complète distribuable et open source (Apache-2.0) 
 ## Rattachement
 Jalons : M0 → M7 — Features : F001–F019 — Exigences : 239 REQ — Invariants : INV-001..INV-065 — Gates : GATE-ARCH, GATE-RUST, GATE-UI, GATE-AUTH, GATE-AUTOMATION, GATE-LOCAL, GATE-GUIDED, EXT-*
 
+### Exécution Rust sur le poste
+
+Exécuter Cargo, rustc, rustfmt, Clippy, rustdoc et les binaires Rust de test exclusivement dans Docker pour les travaux locaux du programme. Confier les validations natives Darwin à un runner macOS dédié. Chaque résultat indique la plateforme réellement utilisée.
+
 ## Critères de terminé
 - [ ] Jalons M0 à M7 sortis avec rapports `qualification/m0/exit.md` .. `qualification/m7/exit.md`
 - [ ] 19 features (F001–F019) implémentées (tests `T-F…` écrits avant implémentation) et acceptées sur preuves réelles dans `qualification/evidence/`
@@ -48,3 +52,7 @@ Jalons : M0 → M7 — Features : F001–F019 — Exigences : 239 REQ — Invari
 M0 est clos. M1 est publié sur `origin/dev@8598866` avec 369 tests Rust, 7 tests renderer et les contrôles locaux verts. La CI distante et le résidu physique d’un checkout restent ouverts. M2 compte 13 lots intégrés sur 16 sur `goal/g0003-m2`. V014 prépare l’entrée durable et `5f251ad` intègre son exécution IPC. Le vrai PTY est repris après perte de l’ACK lors du test C5, et le daemon nominal expose la séquence confirmée depuis le reçu natif. `a6a3968` ajoute l’envoi binaire par la CLI, vérifié sur les vrais binaires et après reprise. La campagne locale passe 637 tests Rust et trois essais CLI distincts sans échec. Les autres opérations du terminal, les sondes fournisseur, la preuve runtime de charge mixte et la matrice Q-19 restent ouvertes.
 
 Le 20 novembre, la branche M2 a intégré le passage de l'admission au worker Rust (`23b71c0`), le rattachement de la preuve historique de retrait (`64ea50c`), la commande CLI `process release` (`11956c7`) et la lecture versionnée `provider show` (`de49a2b`). La campagne de 53 tests vérifie notamment le raccord ordonnanceur → worker. La préparation de la génération Ollama et son corps exact sont testés localement et attendent la liaison durable d'autorisation et la revue. Les [actions de clôture de M2](../g0003-m2/goal.md#actions-de-clôture-ouvertes) donnent les dépendances qui maintiennent les lots ouverts.
+
+État de livraison le 20 novembre : 1 jalon sur 8 formellement clos. La qualification locale de M1 est disponible dans [son rapport](../../../../qualification/m1/exit.md) et le SHA publié connu est `8598866`. La vérification de la CI de ce SHA reste ouverte après HTTP 404. Sur M2, les changements locaux précités sont intégrés dans la branche du jalon, toujours à 13 lots sur 16. Les travaux F003, F011 et F012 suivent chacun leur prochaine preuve d'acceptation.
+
+Le 21 novembre, `244e4a4` intègre `provider set` et les corrections Linux sur la branche M2. Le chemin CLI → daemon configure et révise un profil local de fixture. Sur le même arbre, 808 tests Rust passent sous Docker au parallélisme par défaut et 26 restent ignorés. M2 compte 13 lots intégrés sur 16. Les validations natives macOS restent à qualifier sur un runner dédié.

@@ -77,6 +77,12 @@ Voir aussi [les règles de test](testing.md).
 - Doc de crate (`//!`) qui énonce responsabilité exclusive et dépendances admises ; doc (`///`) de chaque élément public avec erreurs et sûreté d'annulation. `cargo doc --no-deps` sans avertissement.
 - Fonctions courtes, modules par responsabilité, pas de code mort ni de code commenté. Les commentaires expliquent le pourquoi et citent l'ID de l'exigence (`REQ-…`, `INV-…`) quand le code réalise un contrat.
 
+## Exécution locale dans Docker
+
+Exécuter les compilations, tests, commandes `cargo`, `rustc`, `rustfmt`, Clippy, rustdoc et binaires Rust de vérification exclusivement dans Docker sur ce poste. Cette règle s’applique aux agents et sous-agents. Utiliser la version de `rust-toolchain.toml` dans l’image et un `CARGO_TARGET_DIR` interne au conteneur.
+
+Le dépôt est sur SMB. Placer aussi les bases SQLite, sockets, PTY et dépôts Git de test dans l’espace temporaire du conteneur. Pour les validations propres à Darwin, utiliser un runner macOS dédié. Si l’environnement nécessaire est indisponible, consigner le contrôle comme non exécuté et poursuivre les contrôles indépendants.
+
 ## Commandes de vérification obligatoires
 
 Avant de déclarer une tâche Rust terminée, exécuter et lire la sortie de :

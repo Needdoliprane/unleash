@@ -14,7 +14,7 @@
     "cache/"
   ],
   "hash_algorithm": "sha256",
-  "source_tree_digest": "22fcdebf9ed427880e85355a1bbea65a1b967951a18d90900f8231e417adc793",
+  "source_tree_digest": "9e353e4424fd7f1b59b3ba5e782414efc2722d96bd93cb6a9ad7782cf3a89791",
   "files": [
     {
       "path": "INDEX.md",
@@ -24,8 +24,8 @@
     },
     {
       "path": "README.md",
-      "sha256": "fc8e97fdeb38bf4bff5140021dfaefc11d6be40f79ec34a04b8181db999567c6",
-      "bytes": 11530,
+      "sha256": "d65c26f83d8a12c7271017a5b4d4b43dd4cf2dc7aeee7714b3ecb6e03979bbb8",
+      "bytes": 11833,
       "media_type": "text/markdown"
     },
     {
@@ -846,20 +846,20 @@
     },
     {
       "path": "dev/definition-of-done.md",
-      "sha256": "599defcfb9654f23c797da315b35d50a440fc51ad068c0bdae087b09bf3e774e",
-      "bytes": 2647,
+      "sha256": "6a18a9905e2bb4342a31059f25cd4c03c22a18606f74703622693c997bd83d20",
+      "bytes": 3031,
       "media_type": "text/markdown"
     },
     {
       "path": "dev/goal-journal-template.md",
-      "sha256": "b08b6572aa0f56f5ea0d84ed678edbe3f091362c17fbd29a8c81a8196de679bb",
-      "bytes": 2175,
+      "sha256": "91c64602f4c93cd27af24fd2406e58b2c0dc974161d991f7d2496aa1a8de26a6",
+      "bytes": 2338,
       "media_type": "text/markdown"
     },
     {
       "path": "dev/goal-protocol.md",
-      "sha256": "151eb2fbe89cf3748a8ca6a27b4874d9809ba67882d01abb7f22819ce8a42a40",
-      "bytes": 18001,
+      "sha256": "678ff599e3ce08d9c3562f42870e3227f6e7b03c47de2fbe626ccf19a1af0dd3",
+      "bytes": 19829,
       "media_type": "text/markdown"
     },
     {
@@ -876,8 +876,8 @@
     },
     {
       "path": "dev/worktrees.md",
-      "sha256": "b88ba98be92f1b27128b24873df746edff88d95558899758022573b2c2257631",
-      "bytes": 2783,
+      "sha256": "3d52ccea2b870dc2b62e460c3c9f452b51fda5006be1bb32073a437f3a9cbae1",
+      "bytes": 4793,
       "media_type": "text/markdown"
     },
     {
@@ -1968,8 +1968,8 @@
     },
     {
       "path": "rules/rust.md",
-      "sha256": "980e5e7e8219b03660fe52fa443b1291ef85a57f1d394fd8955a7d8062596bd5",
-      "bytes": 8943,
+      "sha256": "d66f3db6bf1d634a00ad2aa2dbcbff504c31406864364c6c7f47fb21835726bf",
+      "bytes": 9648,
       "media_type": "text/markdown"
     },
     {
@@ -1980,8 +1980,8 @@
     },
     {
       "path": "rules/worktrees.md",
-      "sha256": "6909bf12429d55a96564a1a83870e2d0562f1fb6c8da417e4cfa21d0eaef0a0a",
-      "bytes": 1683,
+      "sha256": "180f6943942495bbb72dac0128157c401752fd80bb064d78926a5ee9db66422d",
+      "bytes": 1787,
       "media_type": "text/markdown"
     },
     {

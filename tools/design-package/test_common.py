@@ -31,6 +31,20 @@ class PackageScopeTests(TestCase):
                 ["README.md", "catalog/operations.json", "worktrees-old/reference.md"],
             )
 
+    def test_skips_directory_alias_listed_as_file_on_smb(self):
+        base = self.ROOT / ".claude"
+        alias = base / "local-skill"
+
+        def is_alias(path):
+            return path == alias
+
+        with (
+            patch.object(common.os, "walk", return_value=[(base, [], ["README.md", alias.name])]),
+            patch.object(Path, "is_symlink", is_alias),
+            patch.object(Path, "is_dir", is_alias),
+        ):
+            self.assertEqual(common.walk(base), ["README.md"])
+
     def test_checksum_keeps_manifest_but_skips_excluded_directories(self):
         with (
             patch.object(common.os, "walk", self.files),

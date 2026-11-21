@@ -5,7 +5,7 @@ Tout worktree Git du dépôt Unleash est créé sous `.claude/worktrees/<nom>/`,
 - Nom : `<goal-id>-<task-id>` en minuscules ASCII (ex. `g0003-t02`). Branche : `task/<goal-id>/<task-id>`, ou `worktree-<nom>` quand l'outil la crée lui-même.
 - Création manuelle : `git worktree add .claude/worktrees/<nom> -b task/<goal-id>/<task-id> <branche-de-base>`.
 - Un worktree appartient à une seule tâche et à un seul agent écrivain. Aucun autre agent n'y écrit.
-- Fin de tâche : après intégration, `git worktree remove .claude/worktrees/<nom>` puis suppression de la branche fusionnée. `git worktree prune` en fin de goal.
+- Après l’intégration et les validations, retirer le worktree exact puis la branche fusionnée. Vérifier les absences sur disque et dans Git. Pour les preuves, caches et retraits bloqués, suivre le [cycle de vie](../dev/worktrees.md#retrait-après-intégration).
 - `.claude/worktrees/` est ignoré par Git et exclu du manifest du dossier. Il ne contient jamais de documentation de référence.
 - Un hook Claude Code (`.claude/hooks/git_guard.py`) refuse `git worktree add|move` vers un autre emplacement ; il autorise `git push origin dev` et demande confirmation pour tout autre push.
 
