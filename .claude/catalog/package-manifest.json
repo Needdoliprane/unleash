@@ -14,7 +14,7 @@
     "cache/"
   ],
   "hash_algorithm": "sha256",
-  "source_tree_digest": "c283b3f408f936f2230ce510712ae8e7e5f6125e236a9f346fc097e8640234c2",
+  "source_tree_digest": "b210d79aa87b8a2e8edb3950238eb5ccbab271e1146345d0cadd63981ec0af4f",
   "files": [
     {
       "path": "INDEX.md",
@@ -1164,8 +1164,8 @@
     },
     {
       "path": "features/F003-agent-runtime/interfaces.md",
-      "sha256": "e2e37a37f7d192db700eef9751c62eed0b4778433430d99f94298e4c51cb7032",
-      "bytes": 7225,
+      "sha256": "efea0dc94b0b0df1bbe6104eec9bda96545c10c2a9c073974b21951e5dd0b3b7",
+      "bytes": 7492,
       "media_type": "text/markdown"
     },
     {
@@ -1182,8 +1182,8 @@
     },
     {
       "path": "features/F003-agent-runtime/tests.md",
-      "sha256": "7aa7b41dc5fbf7ee3190da8e19e09ed82aa3e3d646f10c238575516fcdba33ca",
-      "bytes": 5691,
+      "sha256": "d4c9d9c80edff3d41a6651cdcd7395b56bc56f49a7ded38f7f994ac6d31ebbfe",
+      "bytes": 6227,
       "media_type": "text/markdown"
     },
     {

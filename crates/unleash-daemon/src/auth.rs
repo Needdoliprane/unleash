@@ -23,7 +23,7 @@ pub enum Capability {
     QueryState,
     /// Création et gestion de projets (`CreateProject`).
     ManageProjects,
-    /// Création et pilotage de missions (`AssignMission`, `PauseMission`, `ResumeMission`, `CancelMission`).
+    /// Création et pilotage de missions et affectation de tâches.
     ManageMissions,
     /// Arrêt contrôlé du daemon (`StopDaemon`).
     StopDaemon,
@@ -225,7 +225,7 @@ pub fn authorize_command(
         | "RequestBackup"
         | "SetProviderProfile"
         | "TestProviderProfile" => Capability::Administer,
-        "AssignMission" | "PauseMission" | "ResumeMission" | "CancelMission"
+        "AssignMission" | "AssignTask" | "PauseMission" | "ResumeMission" | "CancelMission"
         | "AcquireTerminal" | "SendTerminalInput" | "ResizeTerminal" | "ReleaseTerminal"
         | "ReconcileProcess" => Capability::ManageMissions,
         "StopDaemon" => Capability::StopDaemon,

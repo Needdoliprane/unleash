@@ -9,23 +9,19 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
 };
 
+#[path = "support/workflow_task.rs"]
+mod workflow_task;
+
 use serde_json::Value;
-use unleash_domain::{
-    ActorId, AgentId, AgentLevel, AgentState, CommandId, CompletionPolicy, InvocationId, MissionId,
-    MissionState, ProjectId, RequestId, Revision, RunId, RunState, Sha256Digest, StepId, TaskId,
-};
-use unleash_protocol::{CommandEnvelope, ProtocolVersion, ReceiptState, canonicalize_to_vec};
+use unleash_domain::{ActorId, RequestId, Revision, Sha256Digest, StepId, TaskId};
+use unleash_protocol::canonicalize_to_vec;
 use unleash_store::{
-    AdmissionUnit, AggregateKind, CallerAuthority, CallerRole, CommandMutation,
-    CommitCommandRequest, CommitOutcome, CutpointObserver, ExecutionPoolParams, InitialContextPlan,
-    PrepareObjectRequest, PreparedTaskAssignment, PublishObjectReferenceRequest, StoreConfig,
-    StoreCutpoint, StoreError, UnleashStore, WorkflowTaskActivationPlan, WriteCriticality,
-    objects::PublishedObjectReference,
+    AdmissionUnit, CommitOutcome, CutpointObserver, ExecutionPoolParams, InitialContextPlan,
+    PreparedTaskAssignment, StoreConfig, StoreCutpoint, StoreError, UnleashStore, WriteCriticality,
 };
 use unleash_testkit::local_test_dir;
 use uuid::Uuid;
-
-const VERSION: &str = "workflow.fixture.m2-task:v1";
+use workflow_task::{Fixture, VERSION, initial_context_fixture};
 
 #[derive(Default)]
 struct ActivationCommitCutpoint(AtomicBool);
@@ -42,211 +38,19 @@ impl CutpointObserver for ActivationCommitCutpoint {
     }
 }
 
-struct Fixture {
-    cutpoint: Arc<ActivationCommitCutpoint>,
-    store: UnleashStore,
-    project: ProjectId,
-    mission: MissionId,
-    run: RunId,
-    plan: WorkflowTaskActivationPlan,
-}
-
 impl Fixture {
-    fn new(retain_definition: bool) -> (impl Drop, Self) {
+    fn new(retain_definition: bool) -> (impl Drop, Self, Arc<ActivationCommitCutpoint>) {
         let directory = local_test_dir("f005-task-activation").unwrap();
         let cutpoint = Arc::new(ActivationCommitCutpoint::default());
         let mut config = StoreConfig::new(directory.path());
         config.cutpoints = cutpoint.clone();
         let store = UnleashStore::open(config).unwrap();
-        store
-            .register_principal("fixture-owner", "user", "user:fixture-owner")
-            .unwrap();
-        let definition: Value = serde_json::from_str(include_str!(
-            "../../../.claude/examples/merge-only-workflow.json"
-        ))
-        .unwrap();
-        let bytes = canonicalize_to_vec(&definition).unwrap();
-        let definition_hash = Sha256Digest::from_bytes(&bytes);
-        let bundle = Sha256Digest::from_bytes(b"effective run plan for the fixture");
-        let plan = WorkflowTaskActivationPlan {
-            daemon_epoch: store.daemon_state().unwrap().daemon_epoch,
-            definition_hash,
-            effective_bundle_hash: bundle,
-            definition_node_id: "develop".to_owned(),
-            iteration_id: None,
-            step_attempt: 1,
-            step_id: StepId::from_u128(0x5004),
-            task_id: TaskId::from_u128(0x5005),
-            contract_version_id: "fixture-contract:v1".to_owned(),
-            scope_id: "fixture-project-scope".to_owned(),
-            scope_revision: Revision::new(1),
-        };
-        let fixture = Self {
+        let actor = ActorId::new("user:fixture-owner").unwrap();
+        (
+            directory,
+            Self::on_store(store, "fixture-owner", actor, retain_definition),
             cutpoint,
-            store,
-            project: ProjectId::from_u128(0x5001),
-            mission: MissionId::from_u128(0x5002),
-            run: RunId::from_u128(0x5003),
-            plan,
-        };
-        let owner = if retain_definition {
-            VERSION
-        } else {
-            "another-workflow:v1"
-        };
-        fixture.retain_object(&bytes, "workflow_version", owner, "content_hash");
-        fixture.start_run();
-        (directory, fixture)
-    }
-
-    fn retain_object(
-        &self,
-        bytes: &[u8],
-        kind: &str,
-        owner: &str,
-        field: &str,
-    ) -> PublishedObjectReference {
-        let source = self
-            .store
-            .prepare_object(PrepareObjectRequest {
-                object_hash: Sha256Digest::from_bytes(bytes),
-                byte_length: u64::try_from(bytes.len()).unwrap(),
-                media_type: "application/json".to_owned(),
-                owner_kind: kind.to_owned(),
-                owner_id: owner.to_owned(),
-            })
-            .unwrap();
-        self.store
-            .write_prepared_object_bytes(&source, bytes)
-            .unwrap();
-        self.store
-            .publish_owned_object_reference(PublishObjectReferenceRequest {
-                pin_id: source.pin_id,
-                object_hash: source.object_hash,
-                object_generation: source.object_generation,
-                owner_kind: kind.to_owned(),
-                owner_id: owner.to_owned(),
-                source_field: field.to_owned(),
-            })
-            .unwrap()
-    }
-
-    fn activate_with_assignee(&self) -> (AgentId, String, String) {
-        self.store
-            .activate_workflow_task(self.activation(5, 2, &self.plan))
-            .unwrap();
-        let agent = AgentId::from_u128(0x5008);
-        self.commit_setup(
-            7,
-            (AggregateKind::Agent, agent.as_uuid(), Revision::INITIAL),
-            "CreateAgent",
-            CommandMutation::CreateAgent {
-                agent_id: agent,
-                level: AgentLevel::N,
-                organization_parent_id: None,
-                created_by_agent_id: None,
-                project_id: Some(self.project),
-                state: AgentState::Eligible,
-            },
-        );
-        let (session_id, trigger_event_id): (String, String) = self
-            .store
-            .read_snapshot(|conn, _| {
-                let session = conn.query_row(
-                    "SELECT session_id FROM sessions WHERE agent_id=?1",
-                    [agent.to_string()],
-                    |row| row.get(0),
-                )?;
-                let trigger = conn.query_row(
-                "SELECT event_id FROM events WHERE event_type='NodeActivated' AND aggregate_id=?1",
-                [self.run.to_string()],
-                |row| row.get(0),
-            )?;
-                Ok((session, trigger))
-            })
-            .unwrap();
-        (agent, session_id, trigger_event_id)
-    }
-
-    fn prepared_assignment(&self) -> (CommandEnvelope, CallerAuthority, PreparedTaskAssignment) {
-        let (agent, session_id, trigger_event_id) = self.activate_with_assignee();
-        let assignment_id = Uuid::from_u128(0x500a);
-        let (context_plan, context) = initial_context_fixture(&self.store, &session_id, &[]);
-        let manifest = context_plan.manifest_id.to_string();
-        let policy_hash = Sha256Digest::from_bytes(b"policy defined for the assignment fixture");
-        self.store
-            .publish_initial_context(context_plan, &context, vec![])
-            .unwrap();
-        let bundle = serde_json::json!({
-            "schema_version": 1,
-            "agent_id": agent,
-            "session_id": session_id,
-            "trigger_event_id": trigger_event_id,
-            "mission_id": self.mission,
-            "run_id": self.run,
-            "step_id": self.plan.step_id,
-            "task_id": self.plan.task_id,
-            "role_version_id": "fixture-role:v1",
-            "workflow_version_id": VERSION,
-            "contract_version_ids": [&self.plan.contract_version_id],
-            "requested_model_profile_version_id": "fixture-profile:v1",
-            "allowed_model_policy_hash": policy_hash,
-            "scope_id": self.plan.scope_id,
-            "scope_revision": self.plan.scope_revision,
-            "initial_context_manifest_id": manifest,
-        });
-        let bundle_hash = Sha256Digest::from_bytes(&canonicalize_to_vec(&bundle).unwrap());
-        // Seed only the assigned mission binding, which the harness still supplies.
-        let mission = self.mission;
-        let scope = self.plan.scope_id.clone();
-        self.store
-            .execute_in_writer_tx(WriteCriticality::Normal, move |tx, _| {
-                tx.execute(
-                    "INSERT INTO mission_assignments
-                 (assignment_id, mission_id, agent_id, role_version_id, scope_id,
-                  scope_revision, assignment_epoch, state, revision)
-                 VALUES (?1, ?2, ?3, 'fixture-role:v1', ?4, 1, 1, 'active', 1)",
-                    rusqlite::params![
-                        assignment_id.to_string(),
-                        mission.to_string(),
-                        agent.to_string(),
-                        scope
-                    ],
-                )?;
-                Ok(())
-            })
-            .unwrap();
-        let mut envelope = self.envelope(
-            8,
-            self.plan.task_id.as_uuid(),
-            Revision::new(1),
-            "AssignTask",
-        );
-        envelope
-            .payload
-            .insert("agent_id".to_owned(), serde_json::to_value(agent).unwrap());
-        let caller = CallerAuthority {
-            actor_id: ActorId::new("user:fixture-owner").unwrap(),
-            role: CallerRole::HumanOperator,
-        };
-        let preparation = PreparedTaskAssignment {
-            daemon_epoch: self.plan.daemon_epoch,
-            assignment_id,
-            assignment_epoch: 1,
-            assignment_revision: Revision::new(1),
-            trigger_event_id: trigger_event_id.parse().unwrap(),
-            effective_bundle_hash: bundle_hash,
-            invocation_id: InvocationId::from_u128(0x500c),
-        };
-        self.store
-            .publish_effective_task_bundle(
-                envelope.clone(),
-                caller.clone(),
-                preparation.clone(),
-                &bundle,
-            )
-            .unwrap();
-        (envelope, caller, preparation)
+        )
     }
 
     fn bundle_document(&self, hash: Sha256Digest) -> Value {
@@ -275,107 +79,6 @@ impl Fixture {
         }).unwrap();
     }
 
-    fn start_run(&self) {
-        self.commit_setup(
-            1,
-            (
-                AggregateKind::Project,
-                self.project.as_uuid(),
-                Revision::INITIAL,
-            ),
-            "CreateProject",
-            CommandMutation::CreateProject {
-                project_id: self.project,
-                name: "task activation fixture".to_owned(),
-                weight: 1,
-            },
-        );
-        self.commit_setup(
-            2,
-            (
-                AggregateKind::Mission,
-                self.mission.as_uuid(),
-                Revision::INITIAL,
-            ),
-            "CreateMission",
-            CommandMutation::CreateMission {
-                mission_id: self.mission,
-                goal_id: None,
-                project_id: self.project,
-                owner_principal_id: Some("fixture-owner".to_owned()),
-                owner_agent_id: None,
-                completion_policy: CompletionPolicy::Mechanical,
-                state: MissionState::Ready,
-            },
-        );
-        self.store
-            .register_workflow_version(VERSION, "published", self.plan.definition_hash)
-            .unwrap();
-        self.commit_setup(
-            3,
-            (
-                AggregateKind::WorkflowRun,
-                self.run.as_uuid(),
-                Revision::INITIAL,
-            ),
-            "CreateWorkflowRun",
-            CommandMutation::CreateWorkflowRun {
-                run_id: self.run,
-                mission_id: self.mission,
-                workflow_version_id: VERSION.to_owned(),
-                purpose: "operational".to_owned(),
-                candidate_ref: None,
-                predecessor_run_id: None,
-                selection_reason: "fixture version".to_owned(),
-                effective_bundle_hash: self.plan.effective_bundle_hash,
-            },
-        );
-        self.commit_setup(
-            4,
-            (
-                AggregateKind::WorkflowRun,
-                self.run.as_uuid(),
-                Revision::new(1),
-            ),
-            "StartRun",
-            CommandMutation::TransitionWorkflowRun {
-                run_id: self.run,
-                target_state: RunState::Running,
-                ended_at_ms: None,
-            },
-        );
-    }
-
-    fn commit_setup(
-        &self,
-        command: u128,
-        (kind, target, revision): (AggregateKind, Uuid, Revision),
-        name: &str,
-        mutation: CommandMutation,
-    ) {
-        let actor = ActorId::new("user:fixture-owner").unwrap();
-        let mut envelope = self.envelope(command, target, revision, name);
-        envelope.actor_ref = Some(actor.to_string());
-        let outcome = self
-            .store
-            .commit_command(CommitCommandRequest {
-                actor_id: actor,
-                envelope,
-                target_aggregate: kind,
-                operation_id: None,
-                receipt_state: ReceiptState::Completed,
-                result_ref: None,
-                retention_days_override: None,
-                fence_assertion: None,
-                mutation,
-                events: vec![],
-                capacity_reservations: vec![],
-                budget_reservations: vec![],
-            })
-            .unwrap();
-        assert!(matches!(outcome, CommitOutcome::Committed(_)));
-    }
-
     fn assert_unmaterialized(&self) {
         self.store.read_snapshot(|conn, _| {
             let state: (i64, i64, i64, i64, i64) = conn.query_row(
@@ -392,48 +95,11 @@ impl Fixture {
             Ok(())
         }).unwrap();
     }
-
-    fn envelope(
-        &self,
-        command: u128,
-        target: Uuid,
-        revision: Revision,
-        name: &str,
-    ) -> CommandEnvelope {
-        CommandEnvelope {
-            protocol_version: ProtocolVersion,
-            request_id: RequestId::from_u128(command + 10),
-            command_id: CommandId::from_u128(command),
-            authority_generation: self.store.active_authority_generation().unwrap(),
-            actor_ref: None,
-            project_id: Some(self.project),
-            aggregate_id: target,
-            expected_revision: revision,
-            command_type: name.to_owned(),
-            payload: serde_json::Map::new(),
-        }
-    }
-
-    fn activation(
-        &self,
-        command: u128,
-        revision: u64,
-        plan: &WorkflowTaskActivationPlan,
-    ) -> CommandEnvelope {
-        let mut envelope = self.envelope(
-            command,
-            self.run.as_uuid(),
-            Revision::new(revision),
-            "ActivateWorkflowTask",
-        );
-        envelope.payload = serde_json::from_value(serde_json::to_value(plan).unwrap()).unwrap();
-        envelope
-    }
 }
 
 #[test]
 fn commits_ready_task_and_reuses_receipt_on_replay() {
-    let (_directory, fixture) = Fixture::new(true);
+    let (_directory, fixture, _cutpoint) = Fixture::new(true);
     let mut request = fixture.activation(5, 2, &fixture.plan);
     let committed = fixture
         .store
@@ -513,7 +179,7 @@ fn commits_ready_task_and_reuses_receipt_on_replay() {
 
 #[test]
 fn refuses_a_definition_retained_by_another_version() {
-    let (_directory, fixture) = Fixture::new(false);
+    let (_directory, fixture, _cutpoint) = Fixture::new(false);
     assert!(
         fixture
             .store
@@ -531,7 +197,7 @@ fn refuses_a_definition_retained_by_another_version() {
 
 #[test]
 fn requires_an_exact_task_node_and_bounded_attempt() {
-    let (_directory, fixture) = Fixture::new(true);
+    let (_directory, fixture, _cutpoint) = Fixture::new(true);
     for (node, attempt) in [("delivery", 1), ("not-in-definition", 1), ("develop", 3)] {
         let mut plan = fixture.plan.clone();
         plan.definition_node_id = node.to_owned();
@@ -557,9 +223,9 @@ fn requires_an_exact_task_node_and_bounded_attempt() {
 
 #[test]
 fn rolls_back_activation_and_retries_the_same_command() {
-    let (_directory, fixture) = Fixture::new(true);
+    let (_directory, fixture, cutpoint) = Fixture::new(true);
     let request = fixture.activation(5, 2, &fixture.plan);
-    fixture.cutpoint.0.store(true, Ordering::SeqCst);
+    cutpoint.0.store(true, Ordering::SeqCst);
     assert!(matches!(
         fixture.store.activate_workflow_task(request.clone()),
         Err(StoreError::CutpointInjected { .. })
@@ -573,7 +239,7 @@ fn rolls_back_activation_and_retries_the_same_command() {
 
 #[test]
 fn publishes_initial_context_once_with_its_ordered_input() {
-    let (_directory, fixture) = Fixture::new(true);
+    let (_directory, fixture, _cutpoint) = Fixture::new(true);
     let (_, session, _) = fixture.activate_with_assignee();
     let data = b"operator input retained in the session fixture";
     let input = fixture.retain_object(data, "session", &session, "fixture_input");
@@ -628,7 +294,7 @@ fn publishes_initial_context_once_with_its_ordered_input() {
 
 #[test]
 fn preserves_the_published_context_when_the_session_moves() {
-    let (_directory, fixture) = Fixture::new(true);
+    let (_directory, fixture, _cutpoint) = Fixture::new(true);
     let (_, session, _) = fixture.activate_with_assignee();
     let (plan, document) = initial_context_fixture(&fixture.store, &session, &[]);
     let digest = fixture
@@ -680,7 +346,7 @@ fn preserves_the_published_context_when_the_session_moves() {
 
 #[test]
 fn releases_the_context_pin_if_an_input_is_retired() {
-    let (_directory, fixture) = Fixture::new(true);
+    let (_directory, fixture, _cutpoint) = Fixture::new(true);
     let (_, session, _) = fixture.activate_with_assignee();
     let first = b"first authorized fixture entry";
     let last = b"last authorized fixture entry";
@@ -708,31 +374,6 @@ fn releases_the_context_pin_if_an_input_is_retired() {
     assert_unpublished_context(&fixture.store, plan.manifest_id);
 }
 
-fn initial_context_fixture(
-    store: &UnleashStore,
-    session: &str,
-    hashes: &[Sha256Digest],
-) -> (InitialContextPlan, Value) {
-    let daemon = store.daemon_state().unwrap();
-    let plan = InitialContextPlan {
-        manifest_id: Uuid::from_u128(0x5010),
-        authority_generation: daemon.authority_generation,
-        daemon_epoch: daemon.daemon_epoch,
-    };
-    let entries: Vec<_> = hashes
-        .iter()
-        .map(|hash| serde_json::json!({"object_hash": hash}))
-        .collect();
-    let document = serde_json::json!({
-        "schema_version": 1,
-        "session_id": session,
-        "base_session_revision": 0,
-        "parent_manifest_id": null,
-        "entries": entries,
-    });
-    (plan, document)
-}
-
 fn assert_unpublished_context(store: &UnleashStore, manifest: Uuid) {
     store.read_snapshot(|conn, _| {
         let retained: (i64, i64, i64) = conn.query_row(
@@ -750,7 +391,7 @@ fn assert_unpublished_context(store: &UnleashStore, manifest: Uuid) {
 
 #[test]
 fn refuses_a_stale_assignment_revision_before_queueing() {
-    let (_directory, fixture) = Fixture::new(true);
+    let (_directory, fixture, _cutpoint) = Fixture::new(true);
     let (envelope, caller, preparation) = fixture.prepared_assignment();
     let mut stale = preparation.clone();
     stale.assignment_revision = Revision::new(2);
@@ -769,9 +410,9 @@ fn refuses_a_stale_assignment_revision_before_queueing() {
 
 #[test]
 fn rolls_back_assignment_and_retries_the_same_command() {
-    let (_directory, fixture) = Fixture::new(true);
+    let (_directory, fixture, cutpoint) = Fixture::new(true);
     let (envelope, caller, preparation) = fixture.prepared_assignment();
-    fixture.cutpoint.0.store(true, Ordering::SeqCst);
+    cutpoint.0.store(true, Ordering::SeqCst);
     assert!(matches!(
         fixture
             .store
@@ -790,7 +431,7 @@ fn rolls_back_assignment_and_retries_the_same_command() {
 
 #[test]
 fn commits_assignment_and_queues_the_exact_invocation() {
-    let (_directory, fixture) = Fixture::new(true);
+    let (_directory, fixture, _cutpoint) = Fixture::new(true);
     let (mut envelope, caller, preparation) = fixture.prepared_assignment();
     let outcome = fixture
         .store
@@ -851,7 +492,7 @@ fn commits_assignment_and_queues_the_exact_invocation() {
 
 #[test]
 fn queues_with_the_published_bundle_without_a_client_selector() {
-    let (_directory, fixture) = Fixture::new(true);
+    let (_directory, fixture, _cutpoint) = Fixture::new(true);
     let (mut envelope, caller, preparation) = fixture.prepared_assignment();
     assert_eq!(envelope.payload.len(), 1);
     let published = fixture
@@ -891,7 +532,7 @@ fn queues_with_the_published_bundle_without_a_client_selector() {
 
 #[test]
 fn keeps_one_bundle_for_the_same_durable_selection() {
-    let (_directory, fixture) = Fixture::new(true);
+    let (_directory, fixture, _cutpoint) = Fixture::new(true);
     let (envelope, caller, preparation) = fixture.prepared_assignment();
     let mut alternate = fixture.bundle_document(preparation.effective_bundle_hash);
     assert_eq!(
@@ -940,7 +581,7 @@ fn keeps_one_bundle_for_the_same_durable_selection() {
 
 #[test]
 fn resolves_a_new_bundle_after_the_session_revision_changes() {
-    let (_directory, fixture) = Fixture::new(true);
+    let (_directory, fixture, _cutpoint) = Fixture::new(true);
     let (envelope, caller, first) = fixture.prepared_assignment();
     let mut document = fixture.bundle_document(first.effective_bundle_hash);
     let session = document

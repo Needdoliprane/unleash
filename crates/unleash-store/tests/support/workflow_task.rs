@@ -1,0 +1,392 @@
+//! Shared preparation of one workflow task for the Store and local daemon tests.
+
+use serde_json::Value;
+use unleash_domain::{
+    ActorId, AgentId, AgentLevel, AgentState, CommandId, CompletionPolicy, InvocationId, MissionId,
+    MissionState, ProjectId, RequestId, Revision, RunId, RunState, Sha256Digest, StepId, TaskId,
+};
+use unleash_protocol::{CommandEnvelope, ProtocolVersion, ReceiptState, canonicalize_to_vec};
+use unleash_store::{
+    AggregateKind, CallerAuthority, CallerRole, CommandMutation, CommitCommandRequest,
+    CommitOutcome, InitialContextPlan, PrepareObjectRequest, PreparedTaskAssignment,
+    PublishObjectReferenceRequest, UnleashStore, WorkflowTaskActivationPlan, WriteCriticality,
+    objects::PublishedObjectReference,
+};
+use uuid::Uuid;
+
+pub(crate) const VERSION: &str = "workflow.fixture.m2-task:v1";
+
+pub(crate) struct Fixture {
+    pub(crate) store: UnleashStore,
+    actor: ActorId,
+    principal: String,
+    project: ProjectId,
+    pub(crate) mission: MissionId,
+    pub(crate) run: RunId,
+    pub(crate) plan: WorkflowTaskActivationPlan,
+}
+
+impl Fixture {
+    pub(crate) fn on_store(
+        store: UnleashStore,
+        principal: &str,
+        actor: ActorId,
+        retain_definition: bool,
+    ) -> Self {
+        store
+            .register_principal(principal, "user", actor.as_str())
+            .unwrap();
+        let definition: Value = serde_json::from_str(include_str!(
+            "../../../../.claude/examples/merge-only-workflow.json"
+        ))
+        .unwrap();
+        let bytes = canonicalize_to_vec(&definition).unwrap();
+        let definition_hash = Sha256Digest::from_bytes(&bytes);
+        let bundle = Sha256Digest::from_bytes(b"effective run plan for the fixture");
+        let plan = WorkflowTaskActivationPlan {
+            daemon_epoch: store.daemon_state().unwrap().daemon_epoch,
+            definition_hash,
+            effective_bundle_hash: bundle,
+            definition_node_id: "develop".to_owned(),
+            iteration_id: None,
+            step_attempt: 1,
+            step_id: StepId::from_u128(0x5004),
+            task_id: TaskId::from_u128(0x5005),
+            contract_version_id: "fixture-contract:v1".to_owned(),
+            scope_id: "fixture-project-scope".to_owned(),
+            scope_revision: Revision::new(1),
+        };
+        let fixture = Self {
+            actor,
+            principal: principal.to_owned(),
+            store,
+            project: ProjectId::from_u128(0x5001),
+            mission: MissionId::from_u128(0x5002),
+            run: RunId::from_u128(0x5003),
+            plan,
+        };
+        let owner = if retain_definition {
+            VERSION
+        } else {
+            "another-workflow:v1"
+        };
+        fixture.retain_object(&bytes, "workflow_version", owner, "content_hash");
+        fixture.start_run();
+        fixture
+    }
+
+    pub(crate) fn retain_object(
+        &self,
+        bytes: &[u8],
+        kind: &str,
+        owner: &str,
+        field: &str,
+    ) -> PublishedObjectReference {
+        let source = self
+            .store
+            .prepare_object(PrepareObjectRequest {
+                object_hash: Sha256Digest::from_bytes(bytes),
+                byte_length: u64::try_from(bytes.len()).unwrap(),
+                media_type: "application/json".to_owned(),
+                owner_kind: kind.to_owned(),
+                owner_id: owner.to_owned(),
+            })
+            .unwrap();
+        self.store
+            .write_prepared_object_bytes(&source, bytes)
+            .unwrap();
+        self.store
+            .publish_owned_object_reference(PublishObjectReferenceRequest {
+                pin_id: source.pin_id,
+                object_hash: source.object_hash,
+                object_generation: source.object_generation,
+                owner_kind: kind.to_owned(),
+                owner_id: owner.to_owned(),
+                source_field: field.to_owned(),
+            })
+            .unwrap()
+    }
+
+    pub(crate) fn activate_with_assignee(&self) -> (AgentId, String, String) {
+        self.store
+            .activate_workflow_task(self.activation(5, 2, &self.plan))
+            .unwrap();
+        let agent = AgentId::from_u128(0x5008);
+        self.commit_setup(
+            7,
+            (AggregateKind::Agent, agent.as_uuid(), Revision::INITIAL),
+            "CreateAgent",
+            CommandMutation::CreateAgent {
+                agent_id: agent,
+                level: AgentLevel::N,
+                organization_parent_id: None,
+                created_by_agent_id: None,
+                project_id: Some(self.project),
+                state: AgentState::Eligible,
+            },
+        );
+        let (session_id, trigger_event_id): (String, String) = self
+            .store
+            .read_snapshot(|conn, _| {
+                let session = conn.query_row(
+                    "SELECT session_id FROM sessions WHERE agent_id=?1",
+                    [agent.to_string()],
+                    |row| row.get(0),
+                )?;
+                let trigger = conn.query_row(
+                "SELECT event_id FROM events WHERE event_type='NodeActivated' AND aggregate_id=?1",
+                [self.run.to_string()],
+                |row| row.get(0),
+            )?;
+                Ok((session, trigger))
+            })
+            .unwrap();
+        (agent, session_id, trigger_event_id)
+    }
+
+    pub(crate) fn prepared_assignment(
+        &self,
+    ) -> (CommandEnvelope, CallerAuthority, PreparedTaskAssignment) {
+        let (agent, session_id, trigger_event_id) = self.activate_with_assignee();
+        let assignment_id = Uuid::from_u128(0x500a);
+        let (context_plan, context) = initial_context_fixture(&self.store, &session_id, &[]);
+        let manifest = context_plan.manifest_id.to_string();
+        let policy_hash = Sha256Digest::from_bytes(b"policy defined for the assignment fixture");
+        self.store
+            .publish_initial_context(context_plan, &context, vec![])
+            .unwrap();
+        let bundle = serde_json::json!({
+            "schema_version": 1,
+            "agent_id": agent,
+            "session_id": session_id,
+            "trigger_event_id": trigger_event_id,
+            "mission_id": self.mission,
+            "run_id": self.run,
+            "step_id": self.plan.step_id,
+            "task_id": self.plan.task_id,
+            "role_version_id": "fixture-role:v1",
+            "workflow_version_id": VERSION,
+            "contract_version_ids": [&self.plan.contract_version_id],
+            "requested_model_profile_version_id": "fixture-profile:v1",
+            "allowed_model_policy_hash": policy_hash,
+            "scope_id": self.plan.scope_id,
+            "scope_revision": self.plan.scope_revision,
+            "initial_context_manifest_id": manifest,
+        });
+        let bundle_hash = Sha256Digest::from_bytes(&canonicalize_to_vec(&bundle).unwrap());
+        // Seed only the assigned mission binding, which the harness still supplies.
+        let mission = self.mission;
+        let scope = self.plan.scope_id.clone();
+        self.store
+            .execute_in_writer_tx(WriteCriticality::Normal, move |tx, _| {
+                tx.execute(
+                    "INSERT INTO mission_assignments
+                 (assignment_id, mission_id, agent_id, role_version_id, scope_id,
+                  scope_revision, assignment_epoch, state, revision)
+                 VALUES (?1, ?2, ?3, 'fixture-role:v1', ?4, 1, 1, 'active', 1)",
+                    rusqlite::params![
+                        assignment_id.to_string(),
+                        mission.to_string(),
+                        agent.to_string(),
+                        scope
+                    ],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        let mut envelope = self.envelope(
+            8,
+            self.plan.task_id.as_uuid(),
+            Revision::new(1),
+            "AssignTask",
+        );
+        envelope
+            .payload
+            .insert("agent_id".to_owned(), serde_json::to_value(agent).unwrap());
+        let caller = CallerAuthority {
+            actor_id: self.actor.clone(),
+            role: CallerRole::HumanOperator,
+        };
+        let preparation = PreparedTaskAssignment {
+            daemon_epoch: self.plan.daemon_epoch,
+            assignment_id,
+            assignment_epoch: 1,
+            assignment_revision: Revision::new(1),
+            trigger_event_id: trigger_event_id.parse().unwrap(),
+            effective_bundle_hash: bundle_hash,
+            invocation_id: InvocationId::from_u128(0x500c),
+        };
+        self.store
+            .publish_effective_task_bundle(
+                envelope.clone(),
+                caller.clone(),
+                preparation.clone(),
+                &bundle,
+            )
+            .unwrap();
+        (envelope, caller, preparation)
+    }
+
+    fn start_run(&self) {
+        self.commit_setup(
+            1,
+            (
+                AggregateKind::Project,
+                self.project.as_uuid(),
+                Revision::INITIAL,
+            ),
+            "CreateProject",
+            CommandMutation::CreateProject {
+                project_id: self.project,
+                name: "task activation fixture".to_owned(),
+                weight: 1,
+            },
+        );
+        self.commit_setup(
+            2,
+            (
+                AggregateKind::Mission,
+                self.mission.as_uuid(),
+                Revision::INITIAL,
+            ),
+            "CreateMission",
+            CommandMutation::CreateMission {
+                mission_id: self.mission,
+                goal_id: None,
+                project_id: self.project,
+                owner_principal_id: Some(self.principal.clone()),
+                owner_agent_id: None,
+                completion_policy: CompletionPolicy::Mechanical,
+                state: MissionState::Ready,
+            },
+        );
+        self.store
+            .register_workflow_version(VERSION, "published", self.plan.definition_hash)
+            .unwrap();
+        self.commit_setup(
+            3,
+            (
+                AggregateKind::WorkflowRun,
+                self.run.as_uuid(),
+                Revision::INITIAL,
+            ),
+            "CreateWorkflowRun",
+            CommandMutation::CreateWorkflowRun {
+                run_id: self.run,
+                mission_id: self.mission,
+                workflow_version_id: VERSION.to_owned(),
+                purpose: "operational".to_owned(),
+                candidate_ref: None,
+                predecessor_run_id: None,
+                selection_reason: "fixture version".to_owned(),
+                effective_bundle_hash: self.plan.effective_bundle_hash,
+            },
+        );
+        self.commit_setup(
+            4,
+            (
+                AggregateKind::WorkflowRun,
+                self.run.as_uuid(),
+                Revision::new(1),
+            ),
+            "StartRun",
+            CommandMutation::TransitionWorkflowRun {
+                run_id: self.run,
+                target_state: RunState::Running,
+                ended_at_ms: None,
+            },
+        );
+    }
+
+    fn commit_setup(
+        &self,
+        command: u128,
+        (kind, target, revision): (AggregateKind, Uuid, Revision),
+        name: &str,
+        mutation: CommandMutation,
+    ) {
+        let actor = self.actor.clone();
+        let mut envelope = self.envelope(command, target, revision, name);
+        envelope.actor_ref = Some(actor.to_string());
+        let outcome = self
+            .store
+            .commit_command(CommitCommandRequest {
+                actor_id: actor,
+                envelope,
+                target_aggregate: kind,
+                operation_id: None,
+                receipt_state: ReceiptState::Completed,
+                result_ref: None,
+                retention_days_override: None,
+                fence_assertion: None,
+                mutation,
+                events: vec![],
+                capacity_reservations: vec![],
+                budget_reservations: vec![],
+            })
+            .unwrap();
+        assert!(matches!(outcome, CommitOutcome::Committed(_)));
+    }
+
+    pub(crate) fn envelope(
+        &self,
+        command: u128,
+        target: Uuid,
+        revision: Revision,
+        name: &str,
+    ) -> CommandEnvelope {
+        CommandEnvelope {
+            protocol_version: ProtocolVersion,
+            request_id: RequestId::from_u128(command + 10),
+            command_id: CommandId::from_u128(command),
+            authority_generation: self.store.active_authority_generation().unwrap(),
+            actor_ref: None,
+            project_id: Some(self.project),
+            aggregate_id: target,
+            expected_revision: revision,
+            command_type: name.to_owned(),
+            payload: serde_json::Map::new(),
+        }
+    }
+
+    pub(crate) fn activation(
+        &self,
+        command: u128,
+        revision: u64,
+        plan: &WorkflowTaskActivationPlan,
+    ) -> CommandEnvelope {
+        let mut envelope = self.envelope(
+            command,
+            self.run.as_uuid(),
+            Revision::new(revision),
+            "ActivateWorkflowTask",
+        );
+        envelope.payload = serde_json::from_value(serde_json::to_value(plan).unwrap()).unwrap();
+        envelope
+    }
+}
+
+pub(crate) fn initial_context_fixture(
+    store: &UnleashStore,
+    session: &str,
+    hashes: &[Sha256Digest],
+) -> (InitialContextPlan, Value) {
+    let daemon = store.daemon_state().unwrap();
+    let plan = InitialContextPlan {
+        manifest_id: Uuid::from_u128(0x5010),
+        authority_generation: daemon.authority_generation,
+        daemon_epoch: daemon.daemon_epoch,
+    };
+    let entries: Vec<_> = hashes
+        .iter()
+        .map(|hash| serde_json::json!({"object_hash": hash}))
+        .collect();
+    let document = serde_json::json!({
+        "schema_version": 1,
+        "session_id": session,
+        "base_session_revision": 0,
+        "parent_manifest_id": null,
+        "entries": entries,
+    });
+    (plan, document)
+}
