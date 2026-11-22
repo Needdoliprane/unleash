@@ -12,9 +12,10 @@ use serde_json::{Map, Value, json};
 use std::path::Path;
 use unleash_client::{ClientConfig, ClientError, UnleashClient};
 use unleash_daemon::{DaemonConfig, DaemonStartOutcome, UnleashDaemon};
-use unleash_domain::{CommandId, RequestId, Revision};
+use unleash_domain::{CommandId, ProjectId, RequestId, Revision};
 use unleash_protocol::{
-    ClientKind, CommandEnvelope, CommandReceipt, ErrorCode, ProtocolVersion, ReceiptState,
+    ClientKind, CommandEnvelope, CommandReceipt, ErrorCode, ProtocolVersion, QueryEnvelope,
+    ReceiptState,
 };
 use unleash_testkit::local_test_dir;
 use uuid::Uuid;
@@ -88,6 +89,49 @@ async fn running_fixture(label: &str) -> (RunningFixture, UnleashClient) {
         },
         client,
     )
+}
+
+async fn seed_profiles_for_list(
+    client: &mut UnleashClient,
+    project: ProjectId,
+    first: Uuid,
+    second: Uuid,
+    scoped: Uuid,
+) {
+    let create_project = CommandEnvelope {
+        protocol_version: ProtocolVersion,
+        request_id: RequestId::from_u128(1100),
+        command_id: CommandId::from_u128(1100),
+        authority_generation: client.hello().authority_generation,
+        actor_ref: None,
+        project_id: Some(project),
+        aggregate_id: project.as_uuid(),
+        expected_revision: Revision::INITIAL,
+        command_type: "CreateProject".into(),
+        payload: Map::from_iter([
+            ("name".into(), json!("Profiles")),
+            ("weight".into(), json!(1)),
+        ]),
+    };
+    client.send_command(&create_project).await.unwrap();
+    for (id, profile, revision, model, scope) in [
+        (1101, second, 0, "second", None),
+        (1102, first, 0, "first-v1", None),
+        (1103, first, 1, "first-v2", None),
+        (1104, scoped, 0, "project-only", Some(project)),
+    ] {
+        let mut request = command(client, profile, id, revision, model);
+        request.project_id = scope;
+        client.send_command(&request).await.unwrap();
+    }
+}
+
+fn only_listed_profile(page: &Value) -> &Value {
+    let profiles = page.get("profiles").and_then(Value::as_array).unwrap();
+    let [profile] = profiles.as_slice() else {
+        panic!("La page doit contenir exactement un profil");
+    };
+    profile
 }
 
 async fn provider_cli(binary: &Path, socket: &Path, arguments: &[&str]) -> Value {
@@ -197,6 +241,176 @@ async fn t_f012_cli_sets_and_revises_a_profile() {
     fixture
         .handle
         .shutdown_graceful("profile-set-cli-test")
+        .await
+        .unwrap();
+}
+
+// T-F012-018 / AC-F012-018 / REQ-MODEL-018 — sélection CLI d'une version configurée.
+#[tokio::test]
+#[ignore = "requires UNLEASH_F012_CLI_BIN built from the same checkout"]
+async fn t_f012_cli_list_selects_a_version_for_show() {
+    let executable = std::env::var_os("UNLEASH_F012_CLI_BIN").unwrap();
+    let binary = Path::new(&executable);
+    assert!(binary.is_absolute() && binary.is_file());
+    let (fixture, mut client) = running_fixture("f012-cli-list").await;
+    let first = Uuid::from_u128(0xf012_1101);
+    seed_profiles_for_list(
+        &mut client,
+        ProjectId::from_u128(0xf012_1200),
+        first,
+        Uuid::from_u128(0xf012_1102),
+        Uuid::from_u128(0xf012_1103),
+    )
+    .await;
+
+    let socket = fixture.handle.socket_path();
+    let listed = provider_cli(binary, socket, &["list", "--limit", "1"]).await;
+    let profile = only_listed_profile(listed.get("result").unwrap());
+    let id = profile.get("profile_id").and_then(Value::as_str).unwrap();
+    let version = profile
+        .get("profile_version")
+        .and_then(Value::as_u64)
+        .unwrap();
+    assert_eq!(id.parse::<Uuid>().unwrap(), first);
+    assert_eq!(version, 2);
+    assert_eq!(
+        listed.pointer("/result/next_after_profile_id"),
+        Some(&json!(id))
+    );
+    let watermark = listed
+        .get("watermark")
+        .filter(|value| value.is_object())
+        .unwrap();
+
+    let detail = provider_cli(
+        binary,
+        socket,
+        &[
+            "show",
+            "--profile-id",
+            id,
+            "--profile-version",
+            &version.to_string(),
+        ],
+    )
+    .await;
+    assert_eq!(detail.pointer("/result/profile_id"), Some(&json!(id)));
+    assert_eq!(
+        detail.pointer("/result/profile_version"),
+        Some(&json!(version))
+    );
+    assert_eq!(
+        detail.pointer("/result/profile_version_ref"),
+        profile.get("profile_version_ref")
+    );
+    assert_eq!(detail.pointer("/result/observations"), Some(&json!([])));
+    assert_eq!(detail.get("watermark"), Some(watermark));
+    drop(client);
+    fixture
+        .handle
+        .shutdown_graceful("profile-list-cli-test")
+        .await
+        .unwrap();
+}
+
+// T-F012-018 / AC-F012-018 / REQ-MODEL-018 — portée et pagination via IPC.
+#[tokio::test]
+async fn t_f012_profile_list_latest_versions_in_scope() {
+    let (fixture, mut client) = running_fixture("f012-list").await;
+    let first = Uuid::from_u128(0xf012_1101);
+    let second = Uuid::from_u128(0xf012_1102);
+    let scoped = Uuid::from_u128(0xf012_1103);
+    let project = ProjectId::from_u128(0xf012_1200);
+    seed_profiles_for_list(&mut client, project, first, second, scoped).await;
+
+    let list = |id, project_id, payload| QueryEnvelope {
+        protocol_version: ProtocolVersion,
+        request_id: RequestId::from_u128(id),
+        query_type: "ListProviderProfiles".into(),
+        project_id,
+        payload,
+    };
+    let page = client
+        .query(&list(
+            1110,
+            None,
+            Map::from_iter([("limit".into(), json!(1))]),
+        ))
+        .await
+        .unwrap();
+    let entry = only_listed_profile(&page.result);
+    let reference = entry
+        .get("profile_version_ref")
+        .and_then(Value::as_str)
+        .unwrap();
+    assert!(!reference.is_empty());
+    assert_eq!(
+        entry,
+        &json!({
+            "profile_id": first,
+            "profile_version": 2,
+            "profile_version_ref": reference,
+            "model": "first-v2",
+            "provider_kind": "lmstudio",
+            "qualification": "required",
+        })
+    );
+    assert_eq!(
+        page.result.get("next_after_profile_id"),
+        Some(&json!(first))
+    );
+    assert_eq!(page.request_id, RequestId::from_u128(1110));
+    assert!(page.watermark.is_some());
+
+    for (id, scope, after, expected) in [
+        (1111, None, Some(first), second),
+        (1112, Some(project), None, scoped),
+    ] {
+        let remaining = client
+            .query(&list(
+                id,
+                scope,
+                Map::from_iter([("after_profile_id".into(), json!(after))]),
+            ))
+            .await
+            .unwrap();
+        let listed = only_listed_profile(&remaining.result);
+        assert_eq!(listed.get("profile_id"), Some(&json!(expected)));
+        assert_eq!(
+            remaining.result.get("next_after_profile_id"),
+            Some(&Value::Null)
+        );
+        assert_eq!(remaining.watermark, page.watermark);
+    }
+    let end = client
+        .query(&list(
+            1113,
+            None,
+            Map::from_iter([("after_profile_id".into(), json!(second))]),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        end.result,
+        json!({"profiles": [], "next_after_profile_id": null})
+    );
+    for (id, field, value) in [
+        (1114, "limit", json!(0)),
+        (1115, "limit", json!(101)),
+        (1116, "after_profile_id", json!(Uuid::nil())),
+        (1117, "profile_version", json!(2)),
+    ] {
+        let invalid = client
+            .query(&list(id, None, Map::from_iter([(field.into(), value)])))
+            .await;
+        assert!(
+            matches!(invalid, Err(ClientError::Remote(error)) if error.code == ErrorCode::InvalidArgument),
+            "entrée invalide acceptée ou mal classée : {field}",
+        );
+    }
+    fixture
+        .handle
+        .shutdown_graceful("profile-list-test")
         .await
         .unwrap();
 }

@@ -892,6 +892,83 @@ fn test_validate_ipc_query_schemas() {
     );
 }
 
+// T-F012-018 / AC-F012-018 / REQ-MODEL-018 — contrat de la liste passive.
+#[test]
+fn test_validate_list_provider_profiles_contract() {
+    let id = "00000000-0000-4000-8000-000000000051";
+    let nil = uuid::Uuid::nil();
+    let query_schema = build_validator("ipc-query.schema.json");
+    let mut query = QueryEnvelope {
+        protocol_version: ProtocolVersion,
+        request_id: RequestId::from_u128(1),
+        query_type: "ListProviderProfiles".to_owned(),
+        project_id: None,
+        payload: Map::new(),
+    };
+    for payload in [
+        json!({}),
+        json!({"after_profile_id": null}),
+        json!({"after_profile_id": id, "limit": 1}),
+        json!({"limit": 100}),
+    ] {
+        query.payload = json_obj(payload);
+        let serialized = serde_json::to_string(&query).unwrap();
+        assert!(query_schema.is_valid(&serde_json::from_str(&serialized).unwrap()));
+        let decoded: QueryEnvelope = from_json_str_strict(&serialized).unwrap();
+        assert_eq!(decoded.payload, query.payload);
+    }
+    for payload in [
+        json!({"limit": 0}),
+        json!({"limit": 101}),
+        json!({"limit": null}),
+        json!({"after_profile_id": nil}),
+        json!({"profile_version": 2}),
+    ] {
+        query.payload = json_obj(payload);
+        assert!(!query_schema.is_valid(&serde_json::to_value(&query).unwrap()));
+    }
+
+    let response_schema = load_schema("ipc-query-response.schema.json");
+    let schema_id = response_schema["$id"].as_str().unwrap().to_owned();
+    let registry = referencing::Registry::new()
+        .add(schema_id.as_str(), response_schema)
+        .unwrap()
+        .prepare()
+        .unwrap();
+    let validator = jsonschema::options()
+        .should_validate_formats(true)
+        .with_registry(&registry)
+        .build(&json!({
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "$ref": format!("{schema_id}#/$defs/provider_profile_list_response")
+        }))
+        .unwrap();
+    let fixture = include_str!("../../../.claude/examples/ipc-provider-profile-list-response.json");
+    let expected: Value = serde_json::from_str(fixture).unwrap();
+    let decoded: QueryResponse = from_json_str_strict(fixture).unwrap();
+    assert_eq!(serde_json::to_value(&decoded).unwrap(), expected);
+    assert!(validator.is_valid(&expected));
+
+    let mut empty = expected.clone();
+    empty["result"] = json!({"profiles": [], "next_after_profile_id": null});
+    assert!(validator.is_valid(&empty));
+    let mut no_watermark = expected.clone();
+    no_watermark.as_object_mut().unwrap().remove("watermark");
+    assert!(!validator.is_valid(&no_watermark));
+    let mut nil_cursor = expected.clone();
+    nil_cursor["result"]["next_after_profile_id"] = json!(nil);
+    assert!(!validator.is_valid(&nil_cursor));
+    for (field, value) in [
+        ("profile_id", json!(nil)),
+        ("profile_version", json!(0)),
+        ("endpoint", json!("fixture-only")),
+    ] {
+        let mut invalid = expected.clone();
+        invalid["result"]["profiles"][0][field] = value;
+        assert!(!validator.is_valid(&invalid), "champ accepté : {field}");
+    }
+}
+
 #[test]
 fn test_validate_ipc_hello_schema() {
     let validator = build_validator("ipc-hello.schema.json");
