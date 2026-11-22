@@ -4,16 +4,19 @@
     reason = "Fixtures locales et assertions de contrat"
 )]
 
-use serde_json::json;
+use serde_json::{Value, json};
 use std::sync::{
     Arc, Barrier, Mutex,
     atomic::{AtomicBool, Ordering},
     mpsc,
 };
 use std::time::Duration;
-use unleash_domain::{ActorId, CommandId, ProjectId, RequestId, Revision, SecretRef, Sha256Digest};
+use unleash_domain::{
+    ActorId, CommandId, ProjectId, RequestId, Revision, SecretRef, Sha256Digest, TaskId,
+};
 use unleash_protocol::{
-    CommandEnvelope, ProtocolVersion, ReceiptState, SetProviderProfilePayload, canonicalize_to_vec,
+    CommandEnvelope, ProtocolVersion, ReasonCode, ReceiptState, SetProviderProfilePayload,
+    canonical_sha256, canonicalize_to_vec,
 };
 use unleash_store::{
     AggregateKind, CallerAuthority, CallerRole, CommandMutation, CommitCommandRequest,
@@ -22,7 +25,8 @@ use unleash_store::{
     PublishObjectReferenceRequest, SecretReferenceInput, StoreCutpoint, StoreError,
 };
 use unleash_store::{
-    BackupRetentionTier, PrepareBackupRequest, StoreConfig, UnleashStore, WriteCriticality,
+    BackupRetentionTier, PrepareBackupRequest, PreparedAgentCreation, SettingsPatch,
+    SettingsScopeKind, StoreConfig, UnleashStore, WriteCriticality,
 };
 use unleash_testkit::local_test_dir;
 use uuid::Uuid;
@@ -31,6 +35,336 @@ const PROFILE: Uuid = Uuid::from_u128(0xf012);
 
 #[path = "support/provider_probe_generation_placement.rs"]
 mod generation_placement;
+
+#[path = "support/workflow_run.rs"]
+mod workflow_run;
+
+fn ready_assignment(
+    config: StoreConfig,
+) -> (workflow_run::Fixture, CommandEnvelope, CallerAuthority) {
+    let (fixture, create, caller) = workflow_run::prepare(
+        config,
+        actor(),
+        unleash_domain::AgentLevel::N,
+        |_, scope, project| {
+            *scope.pointer_mut("/scopes/implementation").unwrap() =
+                json!({"scope_id":project,"scope_revision":1});
+        },
+    );
+    fixture
+        .store
+        .create_prepared_workflow_run(create, caller.clone())
+        .unwrap();
+    fixture
+        .store
+        .start_prepared_workflow_run(
+            fixture.envelope(
+                40,
+                workflow_run::RUN.as_uuid(),
+                Revision::new(1),
+                "StartRun",
+            ),
+            caller.clone(),
+        )
+        .unwrap();
+    let task: Uuid = fixture
+        .store
+        .read_snapshot(|db, _| {
+            let id: String = db.query_row(
+                "SELECT task_id FROM tasks WHERE run_id=?1",
+                [workflow_run::RUN.to_string()],
+                |row| row.get(0),
+            )?;
+            Ok(id.parse().unwrap())
+        })
+        .unwrap();
+    let agent = Uuid::from_u128(0xf013);
+    let mut create_agent = fixture.envelope(41, agent, Revision::INITIAL, "CreateAgent");
+    create_agent.payload = serde_json::from_value(json!({
+        "mission_id": fixture.mission, "mission_revision": 1, "task_id": task, "task_revision": 1,
+    }))
+    .unwrap();
+    fixture
+        .store
+        .create_agent_from_task(create_agent, caller.clone())
+        .unwrap();
+    let mut assign = fixture.envelope(42, task, Revision::new(1), "AssignTask");
+    assign.actor_ref = Some(caller.actor_id.to_string());
+    assign.payload.insert("agent_id".to_owned(), json!(agent));
+    (fixture, assign, caller)
+}
+
+fn set_skill_preference(
+    fixture: &workflow_run::Fixture,
+    caller: &CallerAuthority,
+    id: u128,
+    config_project: Option<ProjectId>,
+    expected: Revision,
+    profile: Option<(u64, Sha256Digest)>,
+) -> unleash_protocol::CommandReceipt {
+    let (kind, scope_id, aggregate, config_scope) = config_project.map_or_else(
+        || {
+            (
+                SettingsScopeKind::User,
+                "default".to_owned(),
+                fixture
+                    .store
+                    .active_authority_generation()
+                    .unwrap()
+                    .as_uuid(),
+                json!({"kind":"global","owner_id":null}),
+            )
+        },
+        |project| {
+            (
+                SettingsScopeKind::Project,
+                project.to_string(),
+                project.as_uuid(),
+                json!({"kind":"project","owner_id":project}),
+            )
+        },
+    );
+    let mut envelope = fixture.envelope(id, aggregate, expected, "SetSettings");
+    let mut binding = json!({
+        "operation": if profile.is_some() {"upsert"} else {"remove"},
+        "configuration_scope": config_scope,
+        "skill_ref": {"skill_id":"skill.fixture","skill_version":1,
+            "skill_scope":{"kind":"project","owner_id":envelope.project_id}},
+    });
+    if let Some((version, digest)) = profile {
+        binding.as_object_mut().unwrap().insert(
+            "preferred_profile_ref".to_owned(),
+            json!({"profile_id":PROFILE,"profile_version":version,"digest":digest}),
+        );
+    }
+    envelope.project_id = config_project;
+    envelope.actor_ref = Some(caller.actor_id.to_string());
+    envelope.payload = serde_json::from_value(json!({
+        "scope_kind":kind,"scope_id":scope_id,"patch":{"model_selection_binding":binding}
+    }))
+    .unwrap();
+    fixture
+        .store
+        .commit_command(CommitCommandRequest {
+            actor_id: caller.actor_id.clone(),
+            envelope,
+            target_aggregate: AggregateKind::Settings,
+            operation_id: None,
+            receipt_state: ReceiptState::Accepted,
+            result_ref: None,
+            retention_days_override: None,
+            fence_assertion: None,
+            mutation: CommandMutation::SetSettingsWithModelSelectionBinding {
+                scope_kind: kind,
+                scope_id,
+                caller: caller.clone(),
+                patch: SettingsPatch::default(),
+                binding: Box::new(serde_json::from_value(binding).unwrap()),
+            },
+            events: vec![],
+            capacity_reservations: vec![],
+            budget_reservations: vec![],
+        })
+        .unwrap()
+        .receipt()
+        .clone()
+}
+
+// T-F012-002 / T-F003-002 — An assigned role supplies the skill and Settings supplies the preference.
+#[test]
+fn t_f012_002_resolves_the_preference_of_the_assigned_primary_skill() {
+    let directory = local_test_dir("f012-primary-skill-selection").unwrap();
+    let (fixture, assign, caller) = ready_assignment(StoreConfig::new(directory.path()));
+    let resolve = || {
+        fixture
+            .store
+            .resolve_task_skill_model_binding(&assign, &caller)
+    };
+    assert_eq!(resolve().unwrap(), None);
+    let first = prepare(&fixture.store, 1, None, "user-preference");
+    let first_digest = first.content_object_hash;
+    fixture
+        .store
+        .commit_command(request(&fixture.store, first, 43))
+        .unwrap();
+    let user = set_skill_preference(
+        &fixture,
+        &caller,
+        45,
+        None,
+        Revision::INITIAL,
+        Some((1, first_digest)),
+    );
+    let second = prepare(&fixture.store, 2, None, "project-preference");
+    let second_digest = second.content_object_hash;
+    fixture
+        .store
+        .commit_command(request(&fixture.store, second, 44))
+        .unwrap();
+    let project = set_skill_preference(
+        &fixture,
+        &caller,
+        46,
+        assign.project_id,
+        Revision::INITIAL,
+        Some((2, second_digest)),
+    );
+    let binding: Value = serde_json::to_value(resolve().unwrap().unwrap()).unwrap();
+    assert_eq!(
+        binding.get("command_receipt_id"),
+        Some(&json!(project.receipt_id)),
+    );
+    assert_eq!(
+        binding.get("preferred_profile_ref"),
+        Some(&json!({"profile_id":PROFILE,"profile_version":2,"digest":second_digest})),
+    );
+
+    fixture
+        .store
+        .execute_in_writer_tx(WriteCriticality::Normal, move |tx, _| {
+            tx.execute(
+            "UPDATE object_references SET state='tombstone', tombstone_reason='fixture-retirement'
+              WHERE owner_kind='provider_profile' AND object_hash=?1",
+            [second_digest.to_string()],
+        )?;
+            Ok(())
+        })
+        .unwrap();
+    assert!(matches!(
+        resolve(),
+        Err(StoreError::ContractViolation {
+            reason: Some(ReasonCode::ModelConfigurationConflict),
+            ..
+        })
+    ));
+
+    set_skill_preference(
+        &fixture,
+        &caller,
+        47,
+        assign.project_id,
+        Revision::new(1),
+        None,
+    );
+    let fallback: Value = serde_json::to_value(resolve().unwrap().unwrap()).unwrap();
+    assert_eq!(
+        fallback.get("command_receipt_id"),
+        Some(&json!(user.receipt_id)),
+    );
+    assert_eq!(
+        fallback.get("preferred_profile_ref"),
+        Some(&json!({"profile_id":PROFILE,"profile_version":1,"digest":first_digest})),
+    );
+
+    let mut other = assign.clone();
+    let outsider = CallerAuthority {
+        actor_id: ActorId::new("user:other").unwrap(),
+        role: CallerRole::HumanOperator,
+    };
+    other.actor_ref = Some(outsider.actor_id.to_string());
+    assert!(matches!(
+        fixture
+            .store
+            .resolve_task_skill_model_binding(&other, &outsider),
+        Err(StoreError::NotFound(_))
+    ));
+    fixture.store.shutdown().unwrap();
+}
+
+// T-F012-002 — A role retained for another slot may have the same project scope.
+#[test]
+fn t_f012_002_refuses_an_assignment_with_a_role_from_another_slot() {
+    let directory = local_test_dir("f012-primary-skill-other-role").unwrap();
+    let (fixture, mut assign, caller) = ready_assignment(StoreConfig::new(directory.path()));
+    let project = assign.project_id.unwrap();
+    let scope = json!({"kind":"project","owner_id":project});
+    let skill = json!({"id":"skill.fixture","version":1,"scope":scope});
+    let document = json!({
+        "schema_version":"unleash.role.v1", "role_id":"role.other", "version":1,
+        "level":"N", "scope":scope, "entry_skill":skill, "skills":[skill],
+        "contracts":[{"id":"contract.fixture","version":1,"scope":scope}],
+    });
+    workflow_run::publish_fixture_version(
+        &fixture,
+        caller.actor_id.as_str(),
+        "role",
+        "role.other",
+        "role-other-v1",
+        &document,
+    );
+    let agent = Uuid::from_u128(0xf014);
+    let prepared = PreparedAgentCreation {
+        daemon_epoch: fixture.store.daemon_state().unwrap().daemon_epoch,
+        assignment_id: Uuid::from_u128(0xf015),
+        mission_id: fixture.mission,
+        mission_revision: Revision::new(1),
+        task_id: TaskId::from_uuid(assign.aggregate_id),
+        task_revision: assign.expected_revision,
+        scope_id: project.to_string(),
+        scope_revision: Revision::new(1),
+        role_version_id: "role-other-v1".to_owned(),
+        role_content_hash: canonical_sha256(&document).unwrap(),
+    };
+    let mut create = fixture.envelope(48, agent, Revision::INITIAL, "CreateAgent");
+    create.payload = serde_json::from_value(serde_json::to_value(prepared).unwrap()).unwrap();
+    fixture
+        .store
+        .create_assigned_agent(create, caller.clone())
+        .unwrap();
+    assign.payload.insert("agent_id".to_owned(), json!(agent));
+    assert!(matches!(
+        fixture
+            .store
+            .resolve_task_skill_model_binding(&assign, &caller),
+        Err(StoreError::EvidenceUnavailable(_))
+    ));
+    fixture.store.shutdown().unwrap();
+}
+
+// T-F012-002 — Deprecation preserves a pinned skill, while revocation invalidates it.
+#[test]
+fn t_f012_002_keeps_the_preference_for_a_deprecated_pinned_skill() {
+    let directory = local_test_dir("f012-primary-skill-deprecated").unwrap();
+    let (fixture, assign, caller) = ready_assignment(StoreConfig::new(directory.path()));
+    let preference = prepare(&fixture.store, 1, None, "pinned-skill-preference");
+    let digest = preference.content_object_hash;
+    fixture
+        .store
+        .commit_command(request(&fixture.store, preference, 43))
+        .unwrap();
+    set_skill_preference(
+        &fixture,
+        &caller,
+        44,
+        assign.project_id,
+        Revision::INITIAL,
+        Some((1, digest)),
+    );
+    let resolve = || {
+        fixture
+            .store
+            .resolve_task_skill_model_binding(&assign, &caller)
+    };
+    let before = resolve().unwrap().unwrap();
+
+    let set_state = |state: &'static str| {
+        fixture.store.execute_in_writer_tx(WriteCriticality::Normal, move |tx, _| {
+            tx.execute("UPDATE registry_versions SET publication_state=?1 WHERE registry_version_id='skill-v1'",[state])?;
+            Ok(())
+        }).unwrap();
+    };
+    set_state("deprecated");
+    assert_eq!(resolve().unwrap(), Some(before));
+    set_state("revoked");
+    assert!(matches!(
+        resolve(),
+        Err(StoreError::ContractViolation {
+            reason: Some(ReasonCode::ModelConfigurationConflict),
+            ..
+        })
+    ));
+    fixture.store.shutdown().unwrap();
+}
 
 #[test]
 fn t_f012_002_authenticated_command_lookup_needs_no_preparation() {

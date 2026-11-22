@@ -51,6 +51,7 @@ struct AssignmentRevision {
     revision: Revision,
     session: String,
     session_revision: Revision,
+    role_version: String,
 }
 
 impl AssignmentRevision {
@@ -71,6 +72,43 @@ struct Publication {
 }
 
 impl UnleashStore {
+    /// Resolve the preference for the assigned role's primary skill in one snapshot.
+    ///
+    /// The authenticated `AssignTask` envelope identifies the task and agent.
+    /// Settings supply the exact version and its provenance for bundle preparation.
+    /// The result is the preference at skill priority, before policy intersection.
+    ///
+    /// # Errors
+    /// Refuses an unavailable assignment or a conflicting active preference.
+    pub fn resolve_task_skill_model_binding(
+        &self,
+        envelope: &CommandEnvelope,
+        caller: &CallerAuthority,
+    ) -> Result<Option<crate::ModelSelectionBinding>, StoreError> {
+        let assignee = validate_assignment_envelope(envelope, caller)?;
+        let project = envelope
+            .project_id
+            .ok_or_else(|| invalid("task project is required"))?;
+        self.read_snapshot(|conn, _| {
+            let daemon = current_daemon(conn, envelope)?;
+            let slot = ready_assignment(conn, envelope, caller, assignee)?;
+            let skill = crate::agent_from_task::resolve_assigned_primary_skill(
+                conn,
+                self.config(),
+                envelope,
+                caller,
+                project,
+                (slot.id, &slot.role_version),
+            )?;
+            crate::model_selection_bindings::resolve_primary_skill_preference(
+                conn,
+                daemon.authority_generation,
+                project,
+                skill,
+            )
+        })
+    }
+
     /// Publish the harness's resolved bundle for one exact task and assignment.
     ///
     /// The harness supplies the effective roles, bindings, policy and limits.
@@ -380,8 +418,8 @@ fn ready_assignment(
     caller: &CallerAuthority,
     assignee: AgentId,
 ) -> Result<AssignmentRevision, StoreError> {
-    let (state, current_revision, assignment_id, epoch, assignment_revision, session, session_revision): (String, i64, String, i64, i64, String, i64) = conn.query_row(
-        "SELECT t.state,t.revision,a.assignment_id,a.assignment_epoch,a.revision,s.session_id,s.revision
+    let (state, current_revision, assignment_id, epoch, assignment_revision, session, session_revision, role_version): (String, i64, String, i64, i64, String, i64, String) = conn.query_row(
+        "SELECT t.state,t.revision,a.assignment_id,a.assignment_epoch,a.revision,s.session_id,s.revision,a.role_version_id
          FROM tasks t
          JOIN missions m ON m.mission_id=t.mission_id AND m.owner_kind='user'
          JOIN principals owner ON owner.principal_id=m.owner_user_id
@@ -393,7 +431,7 @@ fn ready_assignment(
          JOIN sessions s ON s.agent_id=g.agent_id AND s.state='open'
          WHERE t.task_id=?1 AND m.project_id=?2",
         params![envelope.aggregate_id.to_string(), envelope.project_id.map(|id| id.to_string()), assignee.to_string(), caller.actor_id.as_str()],
-        |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?,row.get(5)?,row.get(6)?)),
+        |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?,row.get(5)?,row.get(6)?,row.get(7)?)),
     ).optional()?.ok_or_else(|| StoreError::NotFound("task assignment unavailable for this caller".to_owned()))?;
     let current_revision = Revision::new(stored_counter(current_revision)?);
     if envelope.expected_revision != current_revision {
@@ -415,6 +453,7 @@ fn ready_assignment(
         revision: Revision::new(stored_counter(assignment_revision)?),
         session,
         session_revision: Revision::new(stored_counter(session_revision)?),
+        role_version,
     })
 }
 

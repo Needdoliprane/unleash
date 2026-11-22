@@ -7,6 +7,7 @@ use unleash_domain::{
     DaemonMode, MissionId, ProjectId, Revision, RunId, Sha256Digest, TaskId, TimestampMs,
 };
 use unleash_protocol::{CommandEnvelope, ReceiptState, compute_command_digest_v2};
+use uuid::Uuid;
 
 use crate::{
     AggregateKind, CallerAuthority, CommandMutation, CommitCommandRequest, CommitOutcome,
@@ -14,7 +15,9 @@ use crate::{
     agent_creation::{COMMAND, commit_agent_plan, result_ref},
     commands::{classify_command_replay, read_daemon_state_conn},
     policies_secrets::require_human_decider,
-    workflow_run_plan::{self, ExecutionScope, RunManifestTarget, RunPlan, invalid, parse_hash},
+    workflow_run_plan::{
+        self, ExecutionScope, RunManifestTarget, RunPlan, VersionRef, invalid, parse_hash,
+    },
 };
 
 #[derive(Debug, Deserialize)]
@@ -28,6 +31,7 @@ struct AgentTarget {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ReadyTask {
+    mission: MissionId,
     run: RunId,
     version: String,
     definition: Sha256Digest,
@@ -184,21 +188,9 @@ fn prepare_agent(
         .project_id
         .ok_or_else(|| invalid("agent project required"))?;
     let task = read_ready_task(conn, envelope, project, caller, selection)?;
-    let mission = selection.mission_id.to_string();
-    let plan = workflow_run_plan::load_run_manifest(
-        conn,
-        config,
-        &RunManifestTarget {
-            run: task.run,
-            mission: &mission,
-            version: &task.version,
-            definition_hash: task.definition,
-            bundle_hash: task.bundle,
-        },
-    )?;
-    verify_mission_and_scopes(&plan, &task, envelope, project)?;
+    let plan = read_task_plan(conn, config, envelope, project, &task)?;
     plan.revalidate_start(conn)?;
-    let (role_version_id, role_content_hash) = plan.resolve_task_worker_role(
+    let role = plan.resolve_task_worker_role(
         (conn, config),
         &task.node_id,
         task.step_attempt,
@@ -214,8 +206,8 @@ fn prepare_agent(
         task_revision: task.task_revision,
         scope_id: task.scope.scope_id.clone(),
         scope_revision: task.scope.scope_revision,
-        role_version_id,
-        role_content_hash,
+        role_version_id: role.version_id,
+        role_content_hash: role.content_hash,
     };
     Ok(AgentWorkflowPreparation {
         caller: caller.clone(),
@@ -226,6 +218,54 @@ fn prepare_agent(
     })
 }
 
+pub(crate) fn resolve_assigned_primary_skill(
+    conn: &Connection,
+    config: &StoreConfig,
+    envelope: &CommandEnvelope,
+    caller: &CallerAuthority,
+    project: ProjectId,
+    (assignment_id, role_version): (Uuid, &str),
+) -> Result<VersionRef, StoreError> {
+    let task = lookup_ready_task(
+        conn,
+        project,
+        caller,
+        TaskId::from_uuid(envelope.aggregate_id),
+    )?;
+    require_revision(envelope, task.task_revision, envelope.expected_revision)?;
+    let plan = read_task_plan(conn, config, envelope, project, &task)?;
+    let role = plan.resolve_task_worker_role(
+        (conn, config),
+        &task.node_id,
+        task.step_attempt,
+        &task.scope,
+        &task.contract,
+    )?;
+    role.assigned_primary_skill(conn, assignment_id, role_version)
+}
+
+fn read_task_plan(
+    conn: &Connection,
+    config: &StoreConfig,
+    envelope: &CommandEnvelope,
+    project: ProjectId,
+    task: &ReadyTask,
+) -> Result<RunPlan, StoreError> {
+    let plan = workflow_run_plan::load_run_manifest(
+        conn,
+        config,
+        &RunManifestTarget {
+            run: task.run,
+            mission: &task.mission.to_string(),
+            version: &task.version,
+            definition_hash: task.definition,
+            bundle_hash: task.bundle,
+        },
+    )?;
+    verify_mission_and_scopes(&plan, task, envelope, project)?;
+    Ok(plan)
+}
+
 fn read_ready_task(
     conn: &Connection,
     envelope: &CommandEnvelope,
@@ -233,9 +273,28 @@ fn read_ready_task(
     caller: &CallerAuthority,
     selection: &AgentTarget,
 ) -> Result<ReadyTask, StoreError> {
-    let (run, version, definition, bundle, mission_rev, project_rev, task_rev, scope, scope_rev,
+    let task = lookup_ready_task(conn, project, caller, selection.task_id)?;
+    if task.mission != selection.mission_id {
+        return Err(ready_task_unavailable());
+    }
+    require_revision(envelope, task.mission_revision, selection.mission_revision)?;
+    require_revision(envelope, task.task_revision, selection.task_revision)?;
+    Ok(task)
+}
+
+fn ready_task_unavailable() -> StoreError {
+    StoreError::NotFound("ready task unavailable to this project and mission owner".to_owned())
+}
+
+fn lookup_ready_task(
+    conn: &Connection,
+    project: ProjectId,
+    caller: &CallerAuthority,
+    task_id: TaskId,
+) -> Result<ReadyTask, StoreError> {
+    let (mission, run, version, definition, bundle, mission_rev, project_rev, task_rev, scope, scope_rev,
         node, step_attempt, contract) = conn.query_row(
-        "SELECT r.run_id,r.workflow_version_id,v.content_hash,r.effective_bundle_hash,
+        "SELECT m.mission_id,r.run_id,r.workflow_version_id,v.content_hash,r.effective_bundle_hash,
                 m.revision,p.revision,t.revision,t.scope_id,t.scope_revision,
                 s.definition_node_id,s.step_attempt,t.contract_version_id
            FROM tasks t
@@ -245,33 +304,27 @@ fn read_ready_task(
            JOIN missions m ON m.mission_id=t.mission_id
            JOIN projects p ON p.project_id=m.project_id
            JOIN principals u ON u.principal_id=m.owner_user_id
-          WHERE t.task_id=?1 AND m.mission_id=?2 AND m.project_id=?3 AND u.actor_id=?4
+          WHERE t.task_id=?1 AND m.project_id=?2 AND u.actor_id=?3
             AND p.state='active' AND m.owner_kind='user' AND m.state IN ('ready','active')
             AND u.principal_kind='user' AND u.state='active'
             AND r.state='running' AND r.purpose='operational' AND s.state='ready' AND t.state='ready'",
-        params![selection.task_id.to_string(), selection.mission_id.to_string(),
-                project.to_string(), caller.actor_id.as_str()],
+        params![task_id.to_string(), project.to_string(), caller.actor_id.as_str()],
         |row| Ok((
-            row.get::<_, String>(0)?, row.get(1)?, row.get::<_, String>(2)?,
-            row.get::<_, String>(3)?, row.get::<_, i64>(4)?, row.get::<_, i64>(5)?,
-            row.get::<_, i64>(6)?, row.get(7)?, row.get::<_, i64>(8)?,
-            row.get(9)?, row.get(10)?, row.get(11)?,
+            row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get(2)?, row.get::<_, String>(3)?,
+            row.get::<_, String>(4)?, row.get::<_, i64>(5)?, row.get::<_, i64>(6)?,
+            row.get::<_, i64>(7)?, row.get(8)?, row.get::<_, i64>(9)?,
+            row.get(10)?, row.get(11)?, row.get(12)?,
         )),
-    ).optional()?.ok_or_else(|| StoreError::NotFound(
-        "ready task unavailable to this project and mission owner".to_owned(),
-    ))?;
-    let task_rev = stored_revision(task_rev)?;
-    let mission_rev = stored_revision(mission_rev)?;
-    require_revision(envelope, mission_rev, selection.mission_revision)?;
-    require_revision(envelope, task_rev, selection.task_revision)?;
+    ).optional()?.ok_or_else(ready_task_unavailable)?;
     Ok(ReadyTask {
+        mission: mission.parse()?,
         run: run.parse()?,
         version,
         definition: parse_hash(&definition)?,
         bundle: parse_hash(&bundle)?,
-        mission_revision: mission_rev,
+        mission_revision: stored_revision(mission_rev)?,
         project_revision: stored_revision(project_rev)?,
-        task_revision: task_rev,
+        task_revision: stored_revision(task_rev)?,
         scope: ExecutionScope {
             scope_id: scope,
             scope_revision: stored_revision(scope_rev)?,
