@@ -15,6 +15,12 @@ Jalons : M0 → M7 — Features : F001–F019 — Exigences : 239 REQ — Invari
 
 Exécuter Cargo, rustc, rustfmt, Clippy, rustdoc et les binaires Rust de test exclusivement dans Docker pour les travaux locaux du programme. Confier les validations natives Darwin à un runner macOS dédié. Chaque résultat indique la plateforme réellement utilisée.
 
+### Conduite vers la V1 commercialisable
+
+Enchaîner les jalons du plan et qualifier chaque rapport de sortie avant de déclarer le jalon clos. Poursuivre les travaux indépendants lorsqu’une gate externe reste ouverte. La préparation à la distribution comprend les paquets macOS et Ubuntu, l’installation, la mise à jour, la restauration et les contrôles de sécurité du plan de recette. Suivre les pièces externes de signature et de release jusqu’à leur qualification.
+
+Appliquer les [skills de Matt Pocock](https://github.com/mattpocock/skills) à chaque incrément concerné. Utiliser `tdd` pour vérifier le comportement par l’interface d’acceptation avec un cycle rouge puis vert. Consulter `codebase-design` pour les décisions d’interface. Utiliser `code-review` pour obtenir une revue indépendante de la spécification et des standards sur le candidat figé. Consigner le résultat des tests et le SHA examiné dans le journal du jalon.
+
 ## Critères de terminé
 - [ ] Jalons M0 à M7 sortis avec rapports `qualification/m0/exit.md` .. `qualification/m7/exit.md`
 - [ ] 19 features (F001–F019) implémentées (tests `T-F…` écrits avant implémentation) et acceptées sur preuves réelles dans `qualification/evidence/`
