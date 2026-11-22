@@ -14,7 +14,7 @@
     "cache/"
   ],
   "hash_algorithm": "sha256",
-  "source_tree_digest": "1f8f542298fab84cfb0c44743028d137aaa9a546723c75eaa04a3f5545ad3378",
+  "source_tree_digest": "9b3a43ae5b3841267df04e3b2330e97e6d554afcdc86a7e92469b5ba8b7a8594",
   "files": [
     {
       "path": "INDEX.md",
@@ -348,8 +348,8 @@
     },
     {
       "path": "architecture/ipc-and-apis.md",
-      "sha256": "a0d7ebe9d24bfa363c4ab86e6fae21c9b0f735e06512602fd11bfd11aa58cfff",
-      "bytes": 32395,
+      "sha256": "b92aee7709be4650b8069375560152404e55a9ce0066dc3c060933b01328a15b",
+      "bytes": 32774,
       "media_type": "text/markdown"
     },
     {
@@ -995,6 +995,12 @@
       "media_type": "application/json"
     },
     {
+      "path": "examples/ipc-set-model-selection-binding.json",
+      "sha256": "b2d0831295265a1872757d6666b610406f0add2fd9d3a6944a46f321524cee48",
+      "bytes": 1185,
+      "media_type": "application/json"
+    },
+    {
       "path": "examples/ipc-set-policy-probe-mandate.json",
       "sha256": "111b4390c53e3605f6b27cba6cd233ca0da124ac0a0c16b6aaed6daae2c11a7e",
       "bytes": 1047,
@@ -1542,8 +1548,8 @@
     },
     {
       "path": "features/F012-model-api-router/interfaces.md",
-      "sha256": "9b4d929e3cc2e9a503f345cbeee95efec32adc9093b996723fa969cbfe6db78a",
-      "bytes": 37372,
+      "sha256": "6f44509bd7fbae3a5c7bf074465930bbb9cab7b8b031ac14afe16b690f0911ca",
+      "bytes": 38117,
       "media_type": "text/markdown"
     },
     {
@@ -1560,8 +1566,8 @@
     },
     {
       "path": "features/F012-model-api-router/tests.md",
-      "sha256": "f8ec73d8535951e4e7c821fcb3f07412927d6174d7c1f53e789479728b168993",
-      "bytes": 13327,
+      "sha256": "46cf0d864b943e350e0d169bd6089a30f2f789cf84ad5151a54d856bf13d9081",
+      "bytes": 14049,
       "media_type": "text/markdown"
     },
     {
@@ -2070,8 +2076,8 @@
     },
     {
       "path": "schemas/ipc-command.schema.json",
-      "sha256": "f3d42ad4a97e823e47d59fbf61bc20e427778288a4c6230057133bae15e33def",
-      "bytes": 29645,
+      "sha256": "88c8631da9670ae03abd3828b8071a6be735fbf818801937908915f6f7ad2d94",
+      "bytes": 33275,
       "media_type": "application/json"
     },
     {

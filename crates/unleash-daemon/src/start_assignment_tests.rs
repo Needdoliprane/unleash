@@ -9,13 +9,14 @@
 use std::{os::unix::fs::PermissionsExt, path::Path, sync::Arc};
 
 use serde_json::{Value, json};
-use unleash_client::{ClientConfig, UnleashClient};
+use unleash_client::{ClientConfig, ClientError, UnleashClient};
 use unleash_domain::{
     ActorId, AgentId, CommandId, InvocationId, MissionId, RequestId, Revision, Sha256Digest,
 };
 use unleash_platform::{current_boot_identity, effective_uid};
 use unleash_protocol::{
-    ClientKind, CommandEnvelope, ProtocolVersion, QueryEnvelope, ReceiptState, canonical_sha256,
+    ClientKind, CommandEnvelope, ErrorCode, ProtocolVersion, QueryEnvelope, ReasonCode,
+    ReceiptState, canonical_sha256,
 };
 use unleash_store::{
     CallerAuthority, InitialContextPlan, PreparedTaskAssignment, StoreConfig, StoreError,
@@ -121,8 +122,13 @@ async fn prepare_task(client: &mut UnleashClient, create: &mut CommandEnvelope) 
         .unwrap();
 }
 
-async fn configure_profile(client: &mut UnleashClient, create: &CommandEnvelope, current: u64) {
-    client.send_command(&command(create, 0x5994 + u128::from(current), "SetProviderProfile", PROFILE, current, json!({
+async fn configure_profile(
+    client: &mut UnleashClient,
+    create: &CommandEnvelope,
+    profile_id: Uuid,
+    current: u64,
+) {
+    client.send_command(&command(create, profile_id.as_u128() + 0x10 + u128::from(current), "SetProviderProfile", profile_id, current, json!({
         "provider_kind":"lmstudio", "dialect":{"kind":"openai_chat_completions","version":1},
         "endpoint":"http://127.0.0.1:9/v1","model":format!("workflow-fixture-local-{}", current + 1),"locality":"local_only",
         "server_management":"user_managed","auth":{"kind":"none"},"pricing":{"kind":"none_local"},
@@ -157,7 +163,7 @@ async fn route() -> Route {
         .unwrap();
     let (daemon, mut client) = start(config.clone()).await;
     prepare_task(&mut client, &mut create).await;
-    configure_profile(&mut client, &create, 0).await;
+    configure_profile(&mut client, &create, PROFILE, 0).await;
     let task: Uuid = daemon
         .test_runtime_state()
         .store
@@ -311,12 +317,262 @@ async fn publish(route: &Route, available_profile: bool) -> Result<Sha256Digest,
         .unwrap()
 }
 
+async fn configured_profile_reference(
+    client: &mut UnleashClient,
+    command: &CommandEnvelope,
+    profile_id: Uuid,
+) -> Value {
+    let result = client
+        .query(&QueryEnvelope {
+            protocol_version: ProtocolVersion,
+            request_id: RequestId::from_u128(0x59a5),
+            query_type: "GetProviderProfile".to_owned(),
+            project_id: command.project_id,
+            payload: serde_json::from_value(json!({"profile_id":profile_id,"profile_version":1}))
+                .unwrap(),
+        })
+        .await
+        .unwrap()
+        .result;
+    assert_eq!(result["profile_id"], json!(profile_id));
+    assert_eq!(result["profile_version"], 1);
+    json!({"profile_id":profile_id,"profile_version":1,"digest":result["configuration_digest"]})
+}
+
+// T-F012-002 — Un binding de configuration garde la référence exacte du profil.
+#[expect(
+    clippy::too_many_lines,
+    reason = "One binding lifecycle through IPC and restart"
+)]
+#[tokio::test]
+async fn persists_and_removes_a_versioned_skill_model_preference() {
+    let mut route = route().await;
+    let project = route.assign.project_id.unwrap();
+    let scope = json!({"kind":"project","owner_id":project});
+    let skill = json!({"skill_id":"skill.fixture","skill_version":1,"skill_scope":scope});
+    let preferred = configured_profile_reference(&mut route.client, &route.assign, PROFILE).await;
+    let read = QueryEnvelope {
+        protocol_version: ProtocolVersion,
+        request_id: RequestId::from_u128(0x59a0),
+        query_type: "ReadSettings".to_owned(),
+        project_id: Some(project),
+        payload: serde_json::from_value(json!({"scope_kind":"project","scope_id":project}))
+            .unwrap(),
+    };
+    let upsert = command(
+        &route.assign,
+        0x59a1,
+        "SetSettings",
+        project.as_uuid(),
+        0,
+        json!({"scope_kind":"project","scope_id":project,"patch":{
+            "model_selection_binding":{
+                "operation":"upsert","configuration_scope":scope,"skill_ref":skill,
+                "preferred_profile_ref":preferred
+            }
+        }}),
+    );
+    let unrelated_project = Uuid::from_u128(0x59b0);
+    for (id, path, value) in [
+        (
+            0x59b1,
+            "/preferred_profile_ref/digest",
+            json!(Sha256Digest::from_bytes(b"not the configured version")),
+        ),
+        (
+            0x59b2,
+            "/configuration_scope/owner_id",
+            json!(unrelated_project),
+        ),
+        (
+            0x59b3,
+            "/skill_ref/skill_scope/owner_id",
+            json!(unrelated_project),
+        ),
+        (0x59b4, "/skill_ref/skill_version", json!(2)),
+    ] {
+        let mut invalid = upsert.clone();
+        invalid.command_id = CommandId::from_u128(id);
+        *invalid.payload.get_mut("patch").unwrap()["model_selection_binding"]
+            .pointer_mut(path)
+            .unwrap() = value;
+        assert!(
+            matches!(
+                route.client.send_command(&invalid).await,
+                Err(ClientError::Remote(error))
+                    if error.reason_code == Some(ReasonCode::ModelConfigurationConflict)
+            ),
+            "invalid reference at {path}"
+        );
+    }
+    assert_eq!(
+        route.client.query(&read).await.unwrap().result["revision"],
+        0
+    );
+
+    let receipt = route.client.send_command(&upsert).await.unwrap();
+    assert_eq!(receipt.state, ReceiptState::Accepted);
+    assert_eq!(receipt.new_revision, Revision::new(1));
+    configure_profile(&mut route.client, &route.assign, PROFILE, 1).await;
+    let settings = route.client.query(&read).await.unwrap().result;
+    assert_eq!(settings["revision"], 1);
+    let [active] = settings["model_selection_bindings"]
+        .as_array()
+        .unwrap()
+        .as_slice()
+    else {
+        panic!("expected one binding after upsert");
+    };
+    assert_eq!(active["configuration_scope"], scope);
+    assert_eq!(active["skill_ref"], skill);
+    assert_eq!(active["preferred_profile_ref"], preferred);
+    assert_eq!(active["binding_version"], 1);
+    assert_eq!(active["state"], "active");
+    assert_eq!(active["command_receipt_id"], json!(receipt.receipt_id));
+    assert_eq!(active["principal_id"], json!(route.caller.actor_id));
+    let mut document = active.clone();
+    let digest = document.as_object_mut().unwrap().remove("digest").unwrap();
+    assert_eq!(digest, json!(canonical_sha256(&document).unwrap()));
+    let expected_ref = format!(
+        "model-selection-binding:{}:1:{}",
+        active["binding_id"].as_str().unwrap(),
+        digest.as_str().unwrap()
+    );
+    assert_eq!(receipt.result_ref.as_deref(), Some(expected_ref.as_str()));
+
+    let mut remove = command(
+        &route.assign,
+        0x59a3,
+        "SetSettings",
+        project.as_uuid(),
+        0,
+        json!({"scope_kind":"project","scope_id":project,"patch":{
+            "model_selection_binding":{
+                "operation":"remove","configuration_scope":scope,"skill_ref":skill
+            }
+        }}),
+    );
+    assert!(matches!(
+        route.client.send_command(&remove).await,
+        Err(ClientError::Remote(error)) if error.code == ErrorCode::RevisionConflict
+    ));
+    remove.command_id = CommandId::from_u128(0x59a4);
+    remove.expected_revision = Revision::new(1);
+    let removal = route.client.send_command(&remove).await.unwrap();
+    assert_eq!(removal.state, ReceiptState::Accepted);
+
+    drop(route.client);
+    route
+        .daemon
+        .shutdown_graceful("restart settings fixture")
+        .await
+        .unwrap();
+    drop(route.daemon);
+    let (daemon, mut client) = start(route.config).await;
+    assert_eq!(client.send_command(&upsert).await.unwrap(), receipt);
+    let settings = client.query(&read).await.unwrap().result;
+    assert_eq!(settings["revision"], 2);
+    let [original, removed] = settings["model_selection_bindings"]
+        .as_array()
+        .unwrap()
+        .as_slice()
+    else {
+        panic!("expected the original version and a tombstone");
+    };
+    assert_eq!(original, active);
+    assert_eq!(removed["binding_id"], active["binding_id"]);
+    assert_eq!(removed["binding_version"], 2);
+    assert_eq!(removed["command_receipt_id"], json!(removal.receipt_id));
+    assert_eq!(removed["state"], "removed");
+    assert_eq!(removed["preferred_profile_ref"], Value::Null);
+    drop(client);
+    daemon
+        .shutdown_graceful("finish settings fixture")
+        .await
+        .unwrap();
+}
+
+// T-F012-002 — Le niveau utilisateur peut choisir un profil utilisateur pour un skill de projet.
+#[tokio::test]
+async fn user_preferences_resolve_exact_skill_and_profile_namespaces_independently() {
+    const USER_PROFILE: Uuid = Uuid::from_u128(0x59c0);
+
+    let mut route = route().await;
+    let mut user = route.assign.clone();
+    user.project_id = None;
+    configure_profile(&mut route.client, &user, USER_PROFILE, 0).await;
+    let project_profile =
+        configured_profile_reference(&mut route.client, &route.assign, PROFILE).await;
+    let user_profile = configured_profile_reference(&mut route.client, &user, USER_PROFILE).await;
+    let read = QueryEnvelope {
+        protocol_version: ProtocolVersion,
+        request_id: RequestId::from_u128(0x59c1),
+        query_type: "ReadSettings".to_owned(),
+        project_id: None,
+        payload: serde_json::from_value(json!({"scope_kind":"user","scope_id":"default"})).unwrap(),
+    };
+    let configure = |id, reference| {
+        command(
+            &user,
+            id,
+            "SetSettings",
+            user.authority_generation.as_uuid(),
+            0,
+            json!({"scope_kind":"user","scope_id":"default","patch":{
+                "model_selection_binding":{
+                    "operation":"upsert",
+                    "configuration_scope":{"kind":"global","owner_id":null},
+                    "skill_ref":{"skill_id":"skill.fixture","skill_version":1,
+                        "skill_scope":{"kind":"project","owner_id":route.assign.project_id}},
+                    "preferred_profile_ref":reference
+                }
+            }}),
+        )
+    };
+    let refused = configure(0x59c2, project_profile);
+    assert!(matches!(
+        route.client.send_command(&refused).await,
+        Err(ClientError::Remote(error))
+            if error.reason_code == Some(ReasonCode::ModelConfigurationConflict)
+    ));
+    assert_eq!(
+        route.client.query(&read).await.unwrap().result["revision"],
+        0
+    );
+    let permitted = configure(0x59c3, user_profile.clone());
+    let receipt = route.client.send_command(&permitted).await.unwrap();
+    assert_eq!(receipt.new_revision, Revision::new(1));
+    let result = route.client.query(&read).await.unwrap().result;
+    let [binding] = result["model_selection_bindings"]
+        .as_array()
+        .unwrap()
+        .as_slice()
+    else {
+        panic!("expected one binding after upsert");
+    };
+    assert_eq!(
+        binding["configuration_scope"],
+        json!({"kind":"global","owner_id":null})
+    );
+    assert_eq!(
+        binding["skill_ref"]["skill_scope"]["owner_id"],
+        json!(route.assign.project_id)
+    );
+    assert_eq!(binding["preferred_profile_ref"], user_profile);
+    drop(route.client);
+    route
+        .daemon
+        .shutdown_graceful("finish user settings fixture")
+        .await
+        .unwrap();
+}
+
 // T-F003-002 — Bundle épinglé et mise en file. L'observation d'admission est synthétique.
 #[tokio::test]
 async fn queues_the_first_task_from_start_run_and_recovers_its_receipt() {
     let mut route = route().await;
     let hash = publish(&route, true).await.unwrap();
-    configure_profile(&mut route.client, &route.assign, 1).await;
+    configure_profile(&mut route.client, &route.assign, PROFILE, 1).await;
     let receipt = route.client.send_command(&route.assign).await.unwrap();
     assert_eq!(receipt.state, ReceiptState::Accepted);
     let result = receipt

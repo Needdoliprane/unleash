@@ -55,7 +55,7 @@ df106c0992582ad578a0f3fb906918e2919b517a1ce4257b05be313f98930e1d  .claude/archit
 1a2667b989b7b527b7d9a3906ded1796de7185ce8639bbfb969b6d99c5486045  .claude/architecture/event-model.md
 1f7cb90cd8328349d78b736ac7b7a9ffab47b8305df9b4fb82a4f272a6daf2ac  .claude/architecture/failure-recovery.md
 b8e522e79e9aaa3e59db144a49edd80640f4c2825d2ada71ac6654f0ac21bf1b  .claude/architecture/git-coordination.md
-a0d7ebe9d24bfa363c4ab86e6fae21c9b0f735e06512602fd11bfd11aa58cfff  .claude/architecture/ipc-and-apis.md
+b92aee7709be4650b8069375560152404e55a9ce0066dc3c060933b01328a15b  .claude/architecture/ipc-and-apis.md
 7edbb5ab306c316934d5420733a0d94e0093f23c04c4e446a47a72ba0a17de3e  .claude/architecture/knowledge-indexing.md
 f20005a2fb4701a41e1b30b8d16e51407856c648cb380cca29ea404daf0dba78  .claude/architecture/process-supervision.md
 c8f45af2ab1a811389c98a36c0d2005d76731e9a86b2dcd20bf650cc3aa3f212  .claude/architecture/runtime-lifecycle.md
@@ -121,7 +121,7 @@ fd66815a76ace8b136778face8afcfd940d6b6d02d1f2dbe1c2a162d5ef3e666  .claude/brief/
 08e0a0152f290d07fa66453243218c404530afc1dcb92e9fc5d8e24aa366b6eb  .claude/catalog/README.md
 a87fbd5d995747bc222abdef47db8fb9c561b93c0ba0846c08ead13d1a1c6529  .claude/catalog/design-catalog.json
 bcdc9be2f4559a4d743d08307d710c818606896b4c59f55cb831b01539ddd3d7  .claude/catalog/operations.json
-839d5f80078012db13d9cc7607741b1c119c0c0a2d96f063506f912d25dbc18d  .claude/catalog/package-manifest.json
+f4d63d4c0bae2156e9cace8761621898e976330d4b28d9bde01165bfe654363c  .claude/catalog/package-manifest.json
 dc670318f9a2834c72d589fa921567ab3c2da5a6777d6d348697fd54b643f60b  .claude/design/activity-timeline.md
 7e66e407555c2cd16175e2f26c9515ede0d802d8e2bc53b2675d3883dfbfa2a8  .claude/design/agent-tree-and-status.md
 1558c901b73b4ce6ca5963a1b2a1c06864afc92f61b4f9ed1950ff841669c6ed  .claude/design/cli-tui-design.md
@@ -164,6 +164,7 @@ a75e061c132a2f1060ff2f825168234e9486f103fa4eb7704dfb2c289aaf778c  .claude/exampl
 e7ba0a4167bd6d773a8d6486a6cdbde625758019a23245d4bd40423ddaa63827  .claude/examples/integration-role.json
 f8d8824324fdcf53bf685e6c2f0a94a6e4bb61850a5e237444acb2f3310b3aac  .claude/examples/integration-skill.json
 4d01b8549b6f6f1d294bd6c08dbc180d936c2cf16f08ce392043a4cd251e3c81  .claude/examples/ipc-command.json
+b2d0831295265a1872757d6666b610406f0add2fd9d3a6944a46f321524cee48  .claude/examples/ipc-set-model-selection-binding.json
 111b4390c53e3605f6b27cba6cd233ca0da124ac0a0c16b6aaed6daae2c11a7e  .claude/examples/ipc-set-policy-probe-mandate.json
 4be15a1b1cb4dd4faa284e10b57aaed186cdd2e2f85ed00bdd1b7360bb8a9221  .claude/examples/leader-role.json
 9a39721030587019a2de9754f37edf8fe100aea328ced1cd14ff47d209d3ff23  .claude/examples/leader-skill.json
@@ -255,10 +256,10 @@ b85a03aa29a31be6b4b1bd2c71551c6eef762e124533f404db91c2ac698e0b4a  .claude/featur
 b9f21c2478166b16d4bbe1b4822fe5acab37e13eda7fc6964accfaac72d54ce8  .claude/features/F012-model-api-router/README.md
 78cefdee2a746ebe369e2e6ac1e41ad8dae2f8af30ab57c8236a3566219accb8  .claude/features/F012-model-api-router/acceptance.md
 17eabd25f5c6da4c3ccedde0df06f286383ff140d82bd7f5b8f75b4f5e8582d6  .claude/features/F012-model-api-router/dependencies.md
-9b4d929e3cc2e9a503f345cbeee95efec32adc9093b996723fa969cbfe6db78a  .claude/features/F012-model-api-router/interfaces.md
+6f44509bd7fbae3a5c7bf074465930bbb9cab7b8b031ac14afe16b690f0911ca  .claude/features/F012-model-api-router/interfaces.md
 8018d1411c5558cd5d31bef6b3e316fa8b17ff85fe82d0204b6ce2cd56bea4e2  .claude/features/F012-model-api-router/requirements.md
 3954281050233639413d62f93a294d3755c9c2964242b796520255060584c9eb  .claude/features/F012-model-api-router/technical-design.md
-f8ec73d8535951e4e7c821fcb3f07412927d6174d7c1f53e789479728b168993  .claude/features/F012-model-api-router/tests.md
+46cf0d864b943e350e0d169bd6089a30f2f789cf84ad5151a54d856bf13d9081  .claude/features/F012-model-api-router/tests.md
 a5642f550fb3a07078255816a1e476814454ece09d1090b440e2c6443edd9540  .claude/features/F013-document-connectors/README.md
 726ccd8e5248483e067ee4739ed9742696a4492298c789fee54d49f3a7f652a1  .claude/features/F013-document-connectors/acceptance.md
 1511e5e029e894bb1565b12df54b3f530422f9bdcef935729ee00eaeaf24b282  .claude/features/F013-document-connectors/dependencies.md
@@ -343,7 +344,7 @@ edce6c09345b7cd58ffc3ea7e92f9275be3f4b7d445ce6a874d3961cdd881e15  .claude/schema
 1a99cbe714a0483467439a131498ae30c9c3e4fae7cdcb3806b169cb5c09e1af  .claude/schemas/expected-execution-binding.schema.json
 aa92d205cdecb94568aba7dd81bc8aff146eb7fdcaed9a0c6c7ec8a72269927b  .claude/schemas/expected-test-execution.schema.json
 0917d3e7a88f6b6e6b47df46782306fed09c7dd7f9356d3beec01d88a5498e85  .claude/schemas/ipc-client-upload-segment.schema.json
-f3d42ad4a97e823e47d59fbf61bc20e427778288a4c6230057133bae15e33def  .claude/schemas/ipc-command.schema.json
+88c8631da9670ae03abd3828b8071a6be735fbf818801937908915f6f7ad2d94  .claude/schemas/ipc-command.schema.json
 d3b118d24928142054b108194e3706e221f4d7f18b2b35d2574eca7aa6caaa5f  .claude/schemas/ipc-error.schema.json
 a63ee5b8b43d130fa67e86aeb165b95f84688784d7be5b3d586a095a55038929  .claude/schemas/ipc-hello.schema.json
 b11455eae28aa9b5a4d7ed16e29e004f628a5dcf952fe13bff0eaf2288b6d14d  .claude/schemas/ipc-query-response.schema.json

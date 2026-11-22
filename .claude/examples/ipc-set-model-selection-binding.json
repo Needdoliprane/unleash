@@ -1,0 +1,37 @@
+{
+  "protocol_version": "unleash.ipc.v2",
+  "request_id": "10000000-0000-4000-8000-000000000001",
+  "command_id": "10000000-0000-4000-8000-000000000002",
+  "authority_generation": "10000000-0000-4000-8000-000000000003",
+  "actor_ref": null,
+  "project_id": "10000000-0000-4000-8000-000000000004",
+  "aggregate_id": "10000000-0000-4000-8000-000000000004",
+  "expected_revision": 0,
+  "command_type": "SetSettings",
+  "payload": {
+    "scope_kind": "project",
+    "scope_id": "10000000-0000-4000-8000-000000000004",
+    "patch": {
+      "model_selection_binding": {
+        "operation": "upsert",
+        "configuration_scope": {
+          "kind": "project",
+          "owner_id": "10000000-0000-4000-8000-000000000004"
+        },
+        "skill_ref": {
+          "skill_id": "skill.fixture",
+          "skill_version": 1,
+          "skill_scope": {
+            "kind": "global",
+            "owner_id": null
+          }
+        },
+        "preferred_profile_ref": {
+          "profile_id": "10000000-0000-4000-8000-000000000005",
+          "profile_version": 1,
+          "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        }
+      }
+    }
+  }
+}

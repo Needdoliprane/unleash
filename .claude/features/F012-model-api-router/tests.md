@@ -51,6 +51,10 @@ Les étapes suivantes sont à implémenter dans le harness Rust ; aucune exécut
 
 La [fixture de contexte v2](../../examples/context-manifest.json) et le [schéma](../../schemas/context-manifest.schema.json) utilisent exclusivement identités, digests et tailles synthétiques : ils vérifient la forme, pas l'existence de contenus ni le calcul réel des hashes. Variantes documentaires négatives à vérifier en mémoire : version v1, mode distant, champ de continuation, politique manquante, filiation inconnue incluse, dérivé complet sans source, segment purgé inclus et opaque sans métadonnées. Les oracles sémantiques restent dans les futurs tests ci-dessus ; une fixture structurellement valide n'atteste aucune déclassification légitime.
 
+### Configuration de la préférence de skill — T-F012-002
+
+Vérifier le [patch IPC fermé](../../examples/ipc-set-model-selection-binding.json). Créer une préférence par le socket, lire son profil exact et son reçu, puis retirer la préférence et redémarrer le daemon. L’historique expose la même identité, les versions ordonnées et le retrait. Un rejeu exact conserve le reçu et la révision. Un digest, une révision, un namespace ou une version de skill incompatible laisse le réglage intact. Qualifier les agrégats projet et utilisateur. Sur ce dernier, utiliser un profil utilisateur pour la référence exacte d’un skill publié de projet et vérifier le refus d’un profil réservé au projet.
+
 ### R6 : T-F012-013/014/018
 
 Fixture d’installation vide puis validate_config/connect/inventory/generation_probe explicites. EV-F012-013/014/018 contient origine authentifiée, absence de session/agent factice, contexte synthétique exact, ledger partagé et résultat fournisseur de double. Tester saturation 5/50, fausse origine control_plane, source forbidden, coût inconnu, interruption après envoi et redelivery. Les tests de produit restent not_run ; ce corpus définit leur oracle.
