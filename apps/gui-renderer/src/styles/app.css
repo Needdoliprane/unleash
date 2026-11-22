@@ -481,12 +481,32 @@ body,
   margin: 0;
 }
 
-.provider-observations li {
+.provider-observations > li {
   display: flex;
   align-items: baseline;
   flex-wrap: wrap;
   column-gap: var(--space-3);
   padding-block: var(--space-2);
+}
+
+.provider-inventory {
+  flex-basis: 100%;
+  min-width: 0;
+  margin-block: var(--space-2) 0;
+}
+
+.provider-inventory ul {
+  margin: 0;
+  padding-inline-start: var(--space-5);
+  overflow-wrap: anywhere;
+}
+
+.provider-inventory-pages {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  margin-bottom: var(--space-2);
 }
 
 @media (min-width: 1101px) {
