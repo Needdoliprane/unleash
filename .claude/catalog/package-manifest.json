@@ -14,7 +14,7 @@
     "cache/"
   ],
   "hash_algorithm": "sha256",
-  "source_tree_digest": "2d39008412a8729f61d76b0a7e613695b7673a8ee78315d049d37db3bedcbf29",
+  "source_tree_digest": "6b6094ffdd51121602ee514abde842a80bf37a2122c1f6bb0adc1b655c9acb5b",
   "files": [
     {
       "path": "INDEX.md",
@@ -348,8 +348,8 @@
     },
     {
       "path": "architecture/ipc-and-apis.md",
-      "sha256": "b92aee7709be4650b8069375560152404e55a9ce0066dc3c060933b01328a15b",
-      "bytes": 32774,
+      "sha256": "3affa0173680200da66a1b94b15fbf4a8ebf3ae5305d0cbd3e850c2159dae5b0",
+      "bytes": 33120,
       "media_type": "text/markdown"
     },
     {
@@ -1007,6 +1007,12 @@
       "media_type": "application/json"
     },
     {
+      "path": "examples/ipc-set-model-policy-version.json",
+      "sha256": "c59e9c3b3cc7720365774aa29d3de894fc5d04bd6d5fd5509c8865da075e3231",
+      "bytes": 1172,
+      "media_type": "application/json"
+    },
+    {
       "path": "examples/ipc-set-model-selection-binding.json",
       "sha256": "b2d0831295265a1872757d6666b610406f0add2fd9d3a6944a46f321524cee48",
       "bytes": 1185,
@@ -1182,8 +1188,8 @@
     },
     {
       "path": "features/F003-agent-runtime/interfaces.md",
-      "sha256": "5e3de4a1a1a9d4baec791b7f1a43f993ae8d324dadce06393ac0ac7bb3a7d2a0",
-      "bytes": 10192,
+      "sha256": "c414fb0a21c9ac3d518d5a9824e470e7886590e4e57d2c135653189b0deb9e12",
+      "bytes": 10593,
       "media_type": "text/markdown"
     },
     {
@@ -1548,8 +1554,8 @@
     },
     {
       "path": "features/F012-model-api-router/acceptance.md",
-      "sha256": "78cefdee2a746ebe369e2e6ac1e41ad8dae2f8af30ab57c8236a3566219accb8",
-      "bytes": 14019,
+      "sha256": "fcfc4c0f91114326fbf00bee5564afd5f8925851db26b30b1b3b3dd07558766d",
+      "bytes": 14360,
       "media_type": "text/markdown"
     },
     {
@@ -1560,8 +1566,8 @@
     },
     {
       "path": "features/F012-model-api-router/interfaces.md",
-      "sha256": "5c1e211b6073b0226afcd13feb4c06742f182c8cd0f4634aacd5aa1b20914a5b",
-      "bytes": 39248,
+      "sha256": "d35ba615e5fa6430f72d4c10ef8a7c976287aada00cdd983bb4861579766c7b9",
+      "bytes": 41636,
       "media_type": "text/markdown"
     },
     {
@@ -1578,8 +1584,8 @@
     },
     {
       "path": "features/F012-model-api-router/tests.md",
-      "sha256": "46cf0d864b943e350e0d169bd6089a30f2f789cf84ad5151a54d856bf13d9081",
-      "bytes": 14049,
+      "sha256": "1749c2748059a33c704892ff0e12cd13392d44d3ff34cc97b6f4ff8e11bebf35",
+      "bytes": 15130,
       "media_type": "text/markdown"
     },
     {
@@ -2088,8 +2094,8 @@
     },
     {
       "path": "schemas/ipc-command.schema.json",
-      "sha256": "88c8631da9670ae03abd3828b8071a6be735fbf818801937908915f6f7ad2d94",
-      "bytes": 33275,
+      "sha256": "0c1fea0bfc8f9749c35d0649c9f72812ec71d4f3489e914a3bc0b90694cd56ec",
+      "bytes": 36577,
       "media_type": "application/json"
     },
     {
@@ -2256,8 +2262,8 @@
     },
     {
       "path": "specs/model-routing.md",
-      "sha256": "93788827f0d7e31ef004d28966692fd3a01354612a55cb9e0d20101260b25e45",
-      "bytes": 21196,
+      "sha256": "c1343889ff19b5d421cac358abd471b626f347a08eb1256059664931c6d88954",
+      "bytes": 21610,
       "media_type": "text/markdown"
     },
     {
@@ -2274,8 +2280,8 @@
     },
     {
       "path": "specs/role-registry.md",
-      "sha256": "d4eb41cf819cb4b60c1bf6365909c9003c4b4714d5a19c1bfbf8c009a167a06c",
-      "bytes": 6601,
+      "sha256": "aaf36906b508ec31c47e88d26d860a83fb04e6740cb4749069928a6eac185b2c",
+      "bytes": 6846,
       "media_type": "text/markdown"
     },
     {

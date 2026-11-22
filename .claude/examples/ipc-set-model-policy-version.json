@@ -1,0 +1,36 @@
+{
+  "protocol_version": "unleash.ipc.v2",
+  "request_id": "10000000-0000-4000-8000-000000000021",
+  "command_id": "10000000-0000-4000-8000-000000000022",
+  "authority_generation": "10000000-0000-4000-8000-000000000003",
+  "actor_ref": null,
+  "project_id": "10000000-0000-4000-8000-000000000004",
+  "aggregate_id": "10000000-0000-4000-8000-000000000004",
+  "expected_revision": 1,
+  "command_type": "SetSettings",
+  "payload": {
+    "scope_kind": "project",
+    "scope_id": "10000000-0000-4000-8000-000000000004",
+    "patch": {
+      "model_policy_version": {
+        "operation": "publish",
+        "policy_id": "policy.fixture",
+        "allowed_profiles": [
+          {
+            "profile_id": "10000000-0000-4000-8000-000000000005",
+            "profile_version": 1,
+            "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          }
+        ],
+        "allowed_capabilities": ["text", "streaming"],
+        "fallback_profiles": [],
+        "limits": {
+          "max_llm_calls": 1,
+          "max_output_tokens": 128,
+          "max_cost_microusd": 10000,
+          "max_duration_seconds": 60
+        }
+      }
+    }
+  }
+}

@@ -8,6 +8,8 @@ Une version contient `role_id`, `version`, `name`, `scope`, `level`, `objective`
 
 Le [schéma](../schemas/role.schema.json) contrôle la forme. La validation sémantique contrôle l'existence des versions, la compatibilité des contrats et la non-escalade des permissions. Un rôle de niveau N ne reçoit pas la capacité d'organiser des sous-agents uniquement parce que sa prose l'affirme.
 
+La référence `model_policy.policy_ref` désigne l’ID et la version d’une [politique publiée par Settings](../features/F012-model-api-router/interfaces.md#politique-modèle-versionnée-du-rôle) dans le namespace de publication du rôle.
+
 ## Portées et résolution
 
 Les portées sont `repository`, `project`, `global`. Pour une recherche non qualifiée dans un repository connu, la priorité de présentation et de résolution est repository > projet > global ([ADR-06](../architecture/adr/ADR-06-skill-role-registry.md), R7). Toutes les variantes autorisées sont visibles, avec indication du masquage éventuel. Une référence pleinement qualifiée inclut portée et owner de namespace ; elle ne retombe pas sur une autre version en cas d'absence.
