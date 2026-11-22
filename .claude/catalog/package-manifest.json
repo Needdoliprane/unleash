@@ -14,7 +14,7 @@
     "cache/"
   ],
   "hash_algorithm": "sha256",
-  "source_tree_digest": "5d23dba3f02165ef7b307493ff48bafb5ce023aa8b39db2cdf858bf1946526b6",
+  "source_tree_digest": "3823726c75fadbb1d25e93c51625531981e4f1332221cf19173aff66636fc4bf",
   "files": [
     {
       "path": "INDEX.md",
@@ -1944,8 +1944,8 @@
     },
     {
       "path": "research/local-model-sources.md",
-      "sha256": "12daa42ef13ee2b2554ea5b6895de992648b5f2b8da7643ae9b27ebbc69ff778",
-      "bytes": 10770,
+      "sha256": "37df30a95a319181d9b43282e43e600650e1601a44e8c7332380d521cc8b67de",
+      "bytes": 12494,
       "media_type": "text/markdown"
     },
     {

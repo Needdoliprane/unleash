@@ -59,4 +59,12 @@ Les tailles exactes, les SHA-256 LFS et les licences figurent aussi dans les mé
 
 La référence de format décrit la structure binaire des modèles GGML. La version du serveur est à relever sur le binaire utilisé. [Spécification GGUF](https://github.com/ggml-org/ggml/blob/master/docs/gguf.md).
 
-Lors de la qualification, comparer l’empreinte du fichier chargé par LM Studio et llama.cpp à celle publiée. Relever le digest propre au modèle exposé par Ollama dans son inventaire. La qualification des tuples et de leurs capacités reste ouverte.
+Lors de la qualification, comparer l’empreinte du fichier chargé par LM Studio et llama.cpp à celle de l’artefact retenu et conserver sa provenance. Relever le digest propre au modèle exposé par Ollama dans son inventaire. La qualification des tuples et de leurs capacités reste ouverte.
+
+### Pré-essai Nomic à 8 192 tokens
+
+La fiche Nomic de la révision épinglée annonce un contexte par défaut de 2 048 et donne un exemple llama.cpp avec mise à l’échelle YaRN à `0.75`. La configuration publiée déclare 8 192 positions et 2 048 positions d’entraînement. [Fiche GGUF](https://huggingface.co/nomic-ai/nomic-embed-text-v1.5-GGUF/blob/0188c9bf409793f810680a5a431e7b899c46104c/README.md), [configuration épinglée](https://huggingface.co/nomic-ai/nomic-embed-text-v1.5/blob/7528b56c55d6e85353b78b1d998427c385713e52/config.json).
+
+Le candidat expérimental `nomic-v1.5-Q4_K_M-yarn8192.gguf` mesure 84 106 784 octets et a pour SHA-256 `3d2c2440e8c801ceada28dcdd959be8eaa9d94a0b3b0cb27b18037a9d4a36232`. Ses 112 descripteurs de tenseurs et toute sa section de données sont identiques à ceux du fichier Nomic Q4_K_M ci-dessus. Les métadonnées ajoutent YaRN, le facteur réciproque `1 / 0.75` et le contexte d’origine de 2 048. Le contexte déclaré passe à 8 192. [Recette et preuve](../state/goals/g0003-m2/journal.md#résultats-du-pré-essai-nomic-à-8-192-tokens).
+
+Sur Apple Silicon avec 128 Gio, Ollama 0.40.16 traite 2 506 et 8 192 tokens avec `truncate=false`, puis répond HTTP 400 au-delà. Sur son runner llama-server livré, l’original avec les options YaRN de l’éditeur et la variante retournent exactement les mêmes vecteurs à 10 et 2 506 tokens. À 8 192, l’original est refusé par le slot limité à 2 730, tandis que la variante est acceptée. Le binaire autonome de la release b12177 est resté au démarrage avant l’ouverture du port sur ce poste. H1, H2 et les parcours du daemon restent à vérifier selon la matrice Q-19.
