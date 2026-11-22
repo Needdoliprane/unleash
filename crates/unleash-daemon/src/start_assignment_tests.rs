@@ -492,6 +492,114 @@ async fn persists_and_removes_a_versioned_skill_model_preference() {
         .unwrap();
 }
 
+// T-F012-002 — Le vrai writer engage une première politique modèle et son reçu.
+#[tokio::test]
+async fn publishes_a_role_model_policy_through_settings() {
+    let mut route = route().await;
+    let project = route.assign.project_id.unwrap();
+    let profile = configured_profile_reference(&mut route.client, &route.assign, PROFILE).await;
+    let policy = json!({
+        "operation": "publish",
+        "policy_id": "policy.fixture",
+        "allowed_profiles": [profile],
+        "allowed_capabilities": ["text"],
+        "fallback_profiles": [],
+        "limits": {
+            "max_llm_calls": 1,
+            "max_output_tokens": 128,
+            "max_cost_microusd": 10000,
+            "max_duration_seconds": 60
+        }
+    });
+    let publish = command(
+        &route.assign,
+        0x59d0,
+        "SetSettings",
+        project.as_uuid(),
+        0,
+        json!({"scope_kind":"project","scope_id":project,"patch":{"model_policy_version":policy}}),
+    );
+    let read = QueryEnvelope {
+        protocol_version: ProtocolVersion,
+        request_id: RequestId::from_u128(0x59d1),
+        query_type: "ReadSettings".to_owned(),
+        project_id: Some(project),
+        payload: serde_json::from_value(json!({"scope_kind":"project","scope_id":project}))
+            .unwrap(),
+    };
+    let receipt = route.client.send_command(&publish).await.unwrap();
+    assert_eq!(receipt.state, ReceiptState::Accepted);
+    assert_eq!(receipt.new_revision, Revision::new(1));
+    let published = route.client.query(&read).await.unwrap().result;
+    assert_eq!(published.get("scope_kind"), Some(&json!("project")));
+    assert_eq!(published.get("scope_id"), Some(&json!(project)));
+    assert_eq!(published.get("revision"), Some(&json!(1)));
+    let [version] = published
+        .get("model_policy_versions")
+        .and_then(Value::as_array)
+        .unwrap()
+        .as_slice()
+    else {
+        panic!("expected the single published policy version");
+    };
+    for field in [
+        "policy_id",
+        "allowed_profiles",
+        "allowed_capabilities",
+        "fallback_profiles",
+        "limits",
+    ] {
+        assert_eq!(
+            version.get(field),
+            Some(policy.get(field).unwrap()),
+            "{field}"
+        );
+    }
+    assert_eq!(version.get("version"), Some(&json!(1)));
+    assert_eq!(
+        version.get("principal_id"),
+        Some(&json!(route.caller.actor_id))
+    );
+    assert_eq!(
+        version.get("command_receipt_id"),
+        Some(&json!(receipt.receipt_id))
+    );
+    let digest: Sha256Digest = version
+        .get("digest")
+        .and_then(Value::as_str)
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert_eq!(version.get("digest"), Some(&json!(digest)));
+    let reference = format!("model-policy:policy.fixture:1:{digest}");
+    assert_eq!(receipt.result_ref.as_deref(), Some(reference.as_str()));
+
+    drop(route.client);
+    route
+        .daemon
+        .shutdown_graceful("restart model policy fixture")
+        .await
+        .unwrap();
+    drop(route.daemon);
+    let (daemon, mut client) = start(route.config).await;
+    let mut retry = publish.clone();
+    retry.request_id = RequestId::from_u128(0x59d2);
+    assert_eq!(client.send_command(&retry).await.unwrap(), receipt);
+    let mut stale = publish;
+    stale.request_id = RequestId::from_u128(0x59d3);
+    stale.command_id = CommandId::from_u128(0x59d3);
+    assert!(matches!(
+        client.send_command(&stale).await,
+        Err(ClientError::Remote(error)) if error.code == ErrorCode::RevisionConflict
+    ));
+    assert_eq!(client.query(&read).await.unwrap().result, published);
+    drop(client);
+    daemon
+        .shutdown_graceful("finish model policy fixture")
+        .await
+        .unwrap();
+}
+
 // T-F012-002 — Le niveau utilisateur peut choisir un profil utilisateur pour un skill de projet.
 #[tokio::test]
 async fn user_preferences_resolve_exact_skill_and_profile_namespaces_independently() {
