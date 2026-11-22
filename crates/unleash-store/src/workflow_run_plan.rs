@@ -6,7 +6,8 @@ use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::Value;
 use unleash_domain::{MissionId, ProjectId, Revision, Sha256Digest};
-use unleash_protocol::from_json_str_strict;
+use unleash_protocol::{ReasonCode, from_json_str_strict};
+use uuid::Uuid;
 
 use crate::{
     StoreConfig, StoreError, objects::read_verified_object_bytes_conn,
@@ -31,19 +32,19 @@ pub(crate) struct MissionScopes {
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-struct VersionRef {
-    id: String,
-    version: u32,
+pub(crate) struct VersionRef {
+    pub(crate) id: String,
+    pub(crate) version: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    scope: Option<RegistryScope>,
+    pub(crate) scope: Option<RegistryScope>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-struct RegistryScope {
-    kind: String,
+pub(crate) struct RegistryScope {
+    pub(crate) kind: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    owner_id: Option<String>,
+    pub(crate) owner_id: Option<String>,
 }
 
 impl RegistryScope {
@@ -490,6 +491,50 @@ pub(crate) fn verify_activation(
     Ok(())
 }
 
+pub(crate) struct TaskWorkerRole {
+    pub(crate) version_id: String,
+    pub(crate) content_hash: Sha256Digest,
+    primary_skill: VersionRef,
+    pinned_skill: RegistryVersion,
+}
+
+impl TaskWorkerRole {
+    pub(crate) fn assigned_primary_skill(
+        self,
+        conn: &Connection,
+        assignment: Uuid,
+        assigned_role_version: &str,
+    ) -> Result<VersionRef, StoreError> {
+        if self.version_id != assigned_role_version {
+            return Err(StoreError::EvidenceUnavailable(
+                "assignment role differs from the role pinned to the task".to_owned(),
+            ));
+        }
+        require_registry_version(conn, &self.version_id, self.content_hash, true)?;
+        require_reference(
+            conn,
+            "mission_assignment",
+            &assignment.to_string(),
+            "role_version_id",
+            self.content_hash,
+        )?;
+        require_registry_version(
+            conn,
+            &self.pinned_skill.id,
+            self.pinned_skill.content_hash,
+            true,
+        )
+        .map_err(|error| match error {
+            StoreError::EvidenceUnavailable(message) => StoreError::ContractViolation {
+                reason: Some(ReasonCode::ModelConfigurationConflict),
+                message,
+            },
+            other => other,
+        })?;
+        Ok(self.primary_skill)
+    }
+}
+
 impl RunPlan {
     pub(crate) fn resolve_task_worker_role(
         &self,
@@ -498,15 +543,21 @@ impl RunPlan {
         attempt: u32,
         scope: &ExecutionScope,
         contract: &str,
-    ) -> Result<(String, Sha256Digest), StoreError> {
+    ) -> Result<TaskWorkerRole, StoreError> {
         let definition: Value = read_document(conn, config, self.definition_hash)?;
         let task = crate::workflow_activation::verify_task_node(&definition, node_id, attempt)?;
-        let role = self.bound_role(task, &scope.scope_id, scope.scope_revision, contract)?;
+        let (role, entry_skill) =
+            self.bound_role(task, &scope.scope_id, scope.scope_revision, contract)?;
         let document: Role = read_document(conn, config, role.content_hash)?;
         if !matches!(document.level, Some(WorkflowLevel::N)) {
             return Err(invalid("task agent requires a retained role at level N"));
         }
-        Ok((role.id.clone(), role.content_hash))
+        Ok(TaskWorkerRole {
+            version_id: role.id.clone(),
+            content_hash: role.content_hash,
+            primary_skill: document.entry_skill,
+            pinned_skill: entry_skill.clone(),
+        })
     }
 
     fn bound_role(
@@ -515,7 +566,7 @@ impl RunPlan {
         scope_id: &str,
         scope_revision: Revision,
         contract: &str,
-    ) -> Result<&RegistryVersion, StoreError> {
+    ) -> Result<(&RegistryVersion, &RegistryVersion), StoreError> {
         let scope = task
             .get("scope_key")
             .and_then(Value::as_str)
@@ -530,7 +581,10 @@ impl RunPlan {
             return Err(invalid("task coordinates do not match its retained scope"));
         }
         let Some(RunBinding::Bound {
-            role, contracts, ..
+            role,
+            entry_skill,
+            contracts,
+            ..
         }) = binding
         else {
             return Err(invalid("the workflow task slot is not bound"));
@@ -540,7 +594,7 @@ impl RunPlan {
                 "task coordinates do not match a contract pinned to its slot",
             ));
         }
-        Ok(role)
+        Ok((role, entry_skill))
     }
 }
 
@@ -596,6 +650,27 @@ fn require_reference(
     }
 }
 
+fn require_registry_version(
+    conn: &Connection,
+    version: &str,
+    hash: Sha256Digest,
+    allow_deprecated: bool,
+) -> Result<(), StoreError> {
+    let published: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM registry_versions
+         WHERE registry_version_id=?1 AND content_hash=?2
+           AND (publication_state='published' OR (?3 AND publication_state='deprecated')))",
+        params![version, hash.to_string(), allow_deprecated],
+        |row| row.get(0),
+    )?;
+    if !published {
+        return Err(StoreError::EvidenceUnavailable(
+            "selected registry version changed during preparation".to_owned(),
+        ));
+    }
+    require_reference(conn, "registry_version", version, "content_hash", hash)
+}
+
 impl RunPlan {
     pub(crate) fn registry_versions(&self) -> BTreeMap<&str, Sha256Digest> {
         let mut versions = BTreeMap::new();
@@ -646,19 +721,7 @@ impl RunPlan {
             self.scope_manifest_hash,
         )?;
         for (version, hash) in self.registry_versions() {
-            let published: bool = conn.query_row(
-                "SELECT EXISTS(SELECT 1 FROM registry_versions
-                 WHERE registry_version_id=?1 AND content_hash=?2
-                   AND (publication_state='published' OR (?3 AND publication_state='deprecated')))",
-                params![version, hash.to_string(), allow_deprecated],
-                |row| row.get(0),
-            )?;
-            if !published {
-                return Err(StoreError::EvidenceUnavailable(
-                    "selected registry version changed during preparation".to_owned(),
-                ));
-            }
-            require_reference(conn, "registry_version", version, "content_hash", hash)?;
+            require_registry_version(conn, version, hash, allow_deprecated)?;
         }
         Ok(())
     }

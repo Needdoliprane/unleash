@@ -1,13 +1,15 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Versioned model preferences for exact published skill references (REQ-MODEL-002).
 
-use rusqlite::{OptionalExtension, Transaction, params};
+use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
-use unleash_domain::{ActorId, IdGeneratorPort, ProjectId, ReceiptId, Sha256Digest};
+use unleash_domain::{
+    ActorId, AuthorityGeneration, IdGeneratorPort, ProjectId, ReceiptId, Sha256Digest,
+};
 use unleash_protocol::{CommandEnvelope, ReasonCode, canonical_sha256};
 use uuid::Uuid;
 
-use crate::{SettingsScopeKind, StoreError, provider_profiles};
+use crate::{SettingsScopeKind, StoreError, provider_profiles, workflow_run_plan::VersionRef};
 
 const MAX_WIRE_VERSION: u64 = 9_007_199_254_740_991;
 
@@ -28,6 +30,50 @@ struct SkillRef {
     version: u64,
     #[serde(rename = "skill_scope")]
     scope: Scope,
+}
+
+impl SkillRef {
+    fn registry_scope(
+        &self,
+        project: Option<ProjectId>,
+    ) -> Result<(&'static str, String), StoreError> {
+        if self.id.len() > 128
+            || !self.id.split(['.', '_', '-']).all(|part| {
+                !part.is_empty()
+                    && part
+                        .bytes()
+                        .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
+            })
+            || !(1..=MAX_WIRE_VERSION).contains(&self.version)
+        {
+            return Err(conflict("invalid exact skill reference"));
+        }
+        match self.scope {
+            Scope::Global { .. } => Ok(("global", "global".to_owned())),
+            Scope::Project { owner_id } if project.is_none_or(|id| id == owner_id) => {
+                Ok(("project", owner_id.to_string()))
+            }
+            _ => Err(conflict("skill is outside the supported settings scope")),
+        }
+    }
+
+    fn from_role_entry(entry: VersionRef) -> Result<Self, StoreError> {
+        let unavailable =
+            || conflict("assigned primary skill requires an exact authorized namespace");
+        let scope = entry.scope.ok_or_else(unavailable)?;
+        let scope = match (scope.kind.as_str(), scope.owner_id.as_deref()) {
+            ("global", None) => Scope::Global { owner_id: () },
+            ("project", Some(id)) => Scope::Project {
+                owner_id: id.parse().map_err(|_| unavailable())?,
+            },
+            _ => return Err(unavailable()),
+        };
+        Ok(Self {
+            id: entry.id,
+            version: u64::from(entry.version),
+            scope,
+        })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
@@ -95,6 +141,15 @@ pub struct ModelSelectionBinding {
     digest: Sha256Digest,
 }
 
+impl ModelSelectionBinding {
+    fn version_ref(&self) -> String {
+        format!(
+            "model-selection-binding:{}:{}:{}",
+            self.document.binding_id, self.document.binding_version, self.digest,
+        )
+    }
+}
+
 #[derive(Clone, Copy)]
 pub(crate) struct BindingEdit<'a> {
     pub command: &'a CommandEnvelope,
@@ -143,28 +198,11 @@ pub(crate) fn append_tx(
             ));
         }
     }
-    let (skill_scope, skill_owner) = match &skill_ref.scope {
-        Scope::Global { .. } => ("global", "global".to_owned()),
-        Scope::Project { owner_id } if project.is_none_or(|project| project == *owner_id) => {
-            ("project", owner_id.to_string())
-        }
-        _ => return Err(conflict("skill is outside the edited settings scope")),
-    };
-    if skill_ref.id.len() > 128
-        || !skill_ref.id.split(['.', '_', '-']).all(|part| {
-            !part.is_empty()
-                && part
-                    .bytes()
-                    .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
-        })
-        || !(1..=MAX_WIRE_VERSION).contains(&skill_ref.version)
-    {
-        return Err(conflict("invalid exact skill reference"));
-    }
+    let (skill_scope, skill_owner) = skill_ref.registry_scope(project)?;
 
     if let Some(reference) = profile {
         require_published_skill(tx, skill_ref, skill_scope, &skill_owner)?;
-        require_profile(tx, edit.command, reference)?;
+        require_profile(tx, edit.command.authority_generation, project, reference)?;
     }
     let history_json: String = tx.query_row(
         "SELECT model_selection_bindings_json FROM settings WHERE scope_kind=?1 AND scope_id=?2",
@@ -217,15 +255,128 @@ pub(crate) fn append_tx(
     Ok(())
 }
 
+pub(crate) fn resolve_primary_skill_preference(
+    conn: &Connection,
+    authority: AuthorityGeneration,
+    project: ProjectId,
+    entry_skill: VersionRef,
+) -> Result<Option<ModelSelectionBinding>, StoreError> {
+    let skill = SkillRef::from_role_entry(entry_skill)?;
+    skill.registry_scope(Some(project))?;
+    for config_project in [Some(project), None] {
+        let Some(binding) = current_binding(conn, authority, config_project, &skill)? else {
+            continue;
+        };
+        let Some(profile) = binding.document.preferred_profile_ref.as_ref() else {
+            continue;
+        };
+        require_profile(conn, authority, config_project, profile)?;
+        return Ok(Some(binding));
+    }
+    Ok(None)
+}
+
+fn current_binding(
+    conn: &Connection,
+    authority: AuthorityGeneration,
+    project: Option<ProjectId>,
+    skill: &SkillRef,
+) -> Result<Option<ModelSelectionBinding>, StoreError> {
+    let (kind, id, aggregate, scope) = match project {
+        Some(project) => (
+            "project",
+            project.to_string(),
+            project.as_uuid(),
+            Scope::Project { owner_id: project },
+        ),
+        None => (
+            "user",
+            "default".to_owned(),
+            authority.as_uuid(),
+            Scope::Global { owner_id: () },
+        ),
+    };
+    let history: Option<String> = conn.query_row(
+        "SELECT model_selection_bindings_json FROM settings WHERE scope_kind=?1 AND scope_id=?2",
+        params![kind, id],
+        |row| row.get(0),
+    ).optional()?;
+    let Some(history) = history else {
+        return Ok(None);
+    };
+    let versions: Vec<ModelSelectionBinding> =
+        serde_json::from_str(&history).map_err(|_| conflict("invalid model preference history"))?;
+    let mut current: Option<ModelSelectionBinding> = None;
+    for binding in versions
+        .into_iter()
+        .filter(|entry| &entry.document.skill_ref == skill)
+    {
+        let document = &binding.document;
+        if document.configuration_scope != scope
+            || document.binding_id.is_nil()
+            || !(1..=MAX_WIRE_VERSION).contains(&document.binding_version)
+            || current.as_ref().is_some_and(|previous| {
+                previous.document.binding_id != document.binding_id
+                    || previous.document.binding_version >= document.binding_version
+            })
+        {
+            return Err(conflict(
+                "conflicting model preference versions in the same scope",
+            ));
+        }
+        current = Some(binding);
+    }
+    if let Some(binding) = &current {
+        require_binding_provenance(conn, authority, aggregate, binding)?;
+    }
+    Ok(current)
+}
+
+fn require_binding_provenance(
+    conn: &Connection,
+    authority: AuthorityGeneration,
+    aggregate: Uuid,
+    binding: &ModelSelectionBinding,
+) -> Result<(), StoreError> {
+    let doc = &binding.document;
+    if canonical_sha256(doc)? != binding.digest
+        || (doc.state == State::Active) != doc.preferred_profile_ref.is_some()
+    {
+        return Err(conflict(
+            "model preference contents do not match their provenance",
+        ));
+    }
+    let recorded: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM command_receipts
+          WHERE receipt_id=?1 AND actor_id=?2 AND authority_generation=?3 AND aggregate_id=?4
+            AND command_type='SetSettings' AND state IN ('accepted','completed')
+            AND (response_state='tombstone' OR json_extract(response_json,'$.result_ref')=?5))",
+        params![
+            doc.command_receipt_id.to_string(),
+            doc.principal_id.as_str(),
+            authority.to_string(),
+            aggregate.to_string(),
+            binding.version_ref()
+        ],
+        |row| row.get(0),
+    )?;
+    if !recorded {
+        return Err(conflict(
+            "model preference receipt is unavailable in this scope",
+        ));
+    }
+    Ok(())
+}
+
 fn require_published_skill(
-    tx: &Transaction<'_>,
+    conn: &Connection,
     reference: &SkillRef,
     kind: &str,
     owner: &str,
 ) -> Result<(), StoreError> {
     let version =
         i64::try_from(reference.version).map_err(|_| conflict("invalid exact skill version"))?;
-    let published: bool = tx.query_row(
+    let published: bool = conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM registry_versions v
          JOIN object_references ref ON ref.owner_kind='registry_version'
            AND ref.owner_id=v.registry_version_id AND ref.source_field='content_hash'
@@ -243,8 +394,9 @@ fn require_published_skill(
 }
 
 fn require_profile(
-    tx: &Transaction<'_>,
-    command: &CommandEnvelope,
+    conn: &Connection,
+    authority: AuthorityGeneration,
+    project: Option<ProjectId>,
     reference: &PreferredProfileRef,
 ) -> Result<(), StoreError> {
     let unavailable = || conflict("exact configured profile is unavailable in this scope");
@@ -252,16 +404,17 @@ fn require_profile(
     {
         return Err(unavailable());
     }
-    let profile = provider_profiles::resolve(tx, reference.profile_id, reference.profile_version)?
-        .filter(|profile| {
-            profile.configuration_digest == reference.digest
-                && profile
-                    .configuration
-                    .project_id
-                    .is_none_or(|id| Some(id) == command.project_id)
-        })
-        .ok_or_else(unavailable)?;
-    let retained: bool = tx.query_row(
+    let profile =
+        provider_profiles::resolve(conn, reference.profile_id, reference.profile_version)?
+            .filter(|profile| {
+                profile.configuration_digest == reference.digest
+                    && profile
+                        .configuration
+                        .project_id
+                        .is_none_or(|id| Some(id) == project)
+            })
+            .ok_or_else(unavailable)?;
+    let retained: bool = conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM command_receipts c
          JOIN object_references ref ON ref.owner_kind='provider_profile'
            AND ref.owner_id=?4 AND ref.source_field='configuration'
@@ -273,7 +426,7 @@ fn require_profile(
         params![
             profile.receipt_id.to_string(),
             reference.profile_id.to_string(),
-            command.authority_generation.to_string(),
+            authority.to_string(),
             profile.profile_version_ref,
             reference.digest.as_prefixed_str(),
             profile.actor_id.as_str(),
@@ -308,8 +461,5 @@ pub(crate) fn result_ref_tx(
             "model preference and command receipt diverge".to_owned(),
         ));
     }
-    Ok(format!(
-        "model-selection-binding:{}:{}:{}",
-        binding.document.binding_id, binding.document.binding_version, binding.digest
-    ))
+    Ok(binding.version_ref())
 }

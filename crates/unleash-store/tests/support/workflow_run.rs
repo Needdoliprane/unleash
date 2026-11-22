@@ -116,7 +116,7 @@ pub(crate) fn prepare(
     (fixture, command, caller)
 }
 
-fn publish_fixture_version(
+pub(crate) fn publish_fixture_version(
     fixture: &Fixture,
     principal: &str,
     kind: &str,
