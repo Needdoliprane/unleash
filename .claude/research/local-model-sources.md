@@ -46,6 +46,17 @@ Les informations de `master` constituent une observation documentaire datée. Un
 
 La présence de ces backends dans la V1 est une exigence de périmètre. Elle n’équivaut pas à leur qualification effective. Les scénarios et preuves attendues sont dans [local-model-tests](../testing/local-model-tests.md) et [F012](../features/F012-model-api-router/README.md).
 
-## Sources à relever au gel M2 (Q-19)
+## Sources des modèles de référence Q-19 avant gel M2
 
-Au gel M2, ajouter ici les sources primaires datées des modèles de référence : fiche officielle du modèle texte et du modèle d’embedding retenus, licence de leurs poids et spécification du format GGUF. Ces sources ne sont pas consultées par cette recherche ; aucun fait n’en est déduit.
+**Consultation documentaire du 22 novembre 2026.** Les dépôts des éditeurs publient les fichiers suivants. Les révisions Git identifient les états consultés. Les tailles et les SHA-256 proviennent des métadonnées LFS publiées pour ces fichiers. Le [journal M2](../state/goals/g0003-m2/journal.md#reprise-de-la-fixture-ollama) conserve la mesure du fichier Nomic et l’identité de son import Ollama.
+
+| Référence | Révision Git du dépôt | Fichier GGUF Q4_K_M | Octets | SHA-256 LFS déclaré | Licence déclarée |
+| --- | --- | --- | ---: | --- | --- |
+| Texte, [fiche Qwen](https://huggingface.co/Qwen/Qwen3-8B-GGUF/blob/7c41481f57cb95916b40956ab2f0b139b296d974/README.md) | `7c41481f57cb95916b40956ab2f0b139b296d974` | [Qwen3-8B-Q4_K_M.gguf](https://huggingface.co/Qwen/Qwen3-8B-GGUF/blob/7c41481f57cb95916b40956ab2f0b139b296d974/Qwen3-8B-Q4_K_M.gguf) | 5 027 783 488 | `d98cdcbd03e17ce47681435b5150e34c1417f50b5c0019dd560e4882c5745785` | [Apache-2.0](https://huggingface.co/Qwen/Qwen3-8B-GGUF/blob/7c41481f57cb95916b40956ab2f0b139b296d974/LICENSE) |
+| Embedding, [fiche Nomic](https://huggingface.co/nomic-ai/nomic-embed-text-v1.5-GGUF/blob/0188c9bf409793f810680a5a431e7b899c46104c/README.md) | `0188c9bf409793f810680a5a431e7b899c46104c` | [nomic-embed-text-v1.5.Q4_K_M.gguf](https://huggingface.co/nomic-ai/nomic-embed-text-v1.5-GGUF/blob/0188c9bf409793f810680a5a431e7b899c46104c/nomic-embed-text-v1.5.Q4_K_M.gguf) | 84 106 624 | `d4e388894e09cf3816e8b0896d81d265b55e7a9fff9ab03fe8bf4ef5e11295ac` | Apache-2.0, déclaré dans la fiche |
+
+Les tailles exactes, les SHA-256 LFS et les licences figurent aussi dans les métadonnées JSON des révisions. [Qwen](https://huggingface.co/api/models/Qwen/Qwen3-8B-GGUF/revision/7c41481f57cb95916b40956ab2f0b139b296d974?blobs=true), [Nomic](https://huggingface.co/api/models/nomic-ai/nomic-embed-text-v1.5-GGUF/revision/0188c9bf409793f810680a5a431e7b899c46104c?blobs=true).
+
+La référence de format décrit la structure binaire des modèles GGML. La version du serveur est à relever sur le binaire utilisé. [Spécification GGUF](https://github.com/ggml-org/ggml/blob/master/docs/gguf.md).
+
+Lors de la qualification, comparer l’empreinte du fichier chargé par LM Studio et llama.cpp à celle publiée. Relever le digest propre au modèle exposé par Ollama dans son inventaire. La qualification des tuples et de leurs capacités reste ouverte.

@@ -26,6 +26,8 @@ La compilation de composition M2 a échoué sur des répertoires en lecture seul
 
 Les [règles de test](../rules/testing.md) font vérifier l’API puis l’écriture dans les chemins utilisés par la compilation après un tel incident. Le premier contrôle a identifié le moteur comme prérequis immédiat avant une nouvelle compilation. L’écriture dans le conteneur et les tests ciblés restent à qualifier. Voir la [preuve RETEX-004](../state/goals/g0003-m2/journal.md#preuve-retex-004).
 
+Sur la fixture Ollama de Q-19, le port était en écoute pendant la détection du GPU. La première sonde a interrompu ce démarrage. Après correction du banc, deux sondes ont expiré puis l’API a répondu sur le même PID, avant l’échéance de démarrage. Après un autre arrêt, la lecture du manifeste v2 a retrouvé l’import engagé et permis de reprendre avec le modèle existant. Voir la [reprise de la fixture Ollama](../state/goals/g0003-m2/journal.md#reprise-de-la-fixture-ollama).
+
 ## RETEX-005 — Valider les expressions du workflow avant intégration
 
 La rétro G7 du cycle Settings a retrouvé trois conditions `jobs.*.if` invalides dans le workflow publié avec M1. Elles utilisaient `hashFiles`, disponible au niveau des étapes après le checkout.
