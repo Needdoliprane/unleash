@@ -148,7 +148,7 @@ existe. La fiche du goal reste la référence pour l’état des lots.
 
 | Étape | Skills |
 | --- | --- |
-| G7 | `retro`, [`retex`](../skills/retex/SKILL.md) pour un écart observé, puis `improve-codebase-architecture` lorsque le code le justifie. |
+| G7 | [`retro`](https://github.com/mattpocock/skills/blob/abeeaf95660ba9e8b7c753eb38f441ca707a8823/skills/engineering/retro/SKILL.md), [`retex`](../skills/retex/SKILL.md) pour un écart observé, puis [`improve-codebase-architecture`](https://github.com/mattpocock/skills/blob/abeeaf95660ba9e8b7c753eb38f441ca707a8823/skills/engineering/improve-codebase-architecture/SKILL.md) lorsque le code le justifie. |
 
 À la clôture d’un cycle, lire la grille de `retro` et l’appliquer aux preuves
 et aux entrées déjà consignées dans la [base de retours d’expérience](retours-experience.md).
@@ -157,8 +157,8 @@ navigation ou d’outillage. Retenir les corrections dont l’effet peut être
 vérifié. Appliquer `retex` aux écarts nouveaux. Pour un écart déjà traité,
 reprendre la même entrée et vérifier l’effet de la correction. Utiliser
 `improve-codebase-architecture` si les observations mettent en cause la
-structure du code. Les deux skills amont sont fournis par les
-[skills de Matt Pocock](https://github.com/mattpocock/skills).
+structure du code. Les liens G7 donnent accès aux versions amont utilisées
+par Unleash depuis un checkout neuf.
 
 1. Rejouer toutes les gates sur `goal/<goal-id>` ; consigner les sorties dans le journal.
 2. Si tout est vert et que `--no-merge` n'est pas demandé : `git checkout dev && git merge --no-ff goal/<goal-id>`, rejouer les gates sur `dev`, puis `git push origin dev` et vérifier la CI GitHub Actions de `dev` (`gh run list --branch dev`) jusqu'au vert. `main` ne reçoit que les releases, sur demande de l'utilisateur.

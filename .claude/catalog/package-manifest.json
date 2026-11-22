@@ -14,7 +14,7 @@
     "cache/"
   ],
   "hash_algorithm": "sha256",
-  "source_tree_digest": "3d0c329eb4b24ff34e53a2d21663b003d1ab1ec64b909b7a3eec00254a2310b4",
+  "source_tree_digest": "880cf99c383f29c9315a9da4ffc9cbb3f3e9ed4bd717317a0ec52d0095b3ae10",
   "files": [
     {
       "path": "INDEX.md",
@@ -858,8 +858,8 @@
     },
     {
       "path": "dev/goal-protocol.md",
-      "sha256": "f10ee1e6ddab5791e968970894ed7dbf182f01955f02df15c4f5a085e69bba32",
-      "bytes": 20904,
+      "sha256": "f293972efc6be7456314b985fe71fa4112bf7c2f9bc2157ce06488947b900b52",
+      "bytes": 21157,
       "media_type": "text/markdown"
     },
     {
@@ -876,8 +876,8 @@
     },
     {
       "path": "dev/retours-experience.md",
-      "sha256": "b91f3d73bc058a5422d81848c88cb0494eeca2cc33b50bd273c45f8205671a1e",
-      "bytes": 4315,
+      "sha256": "d588be56da1b79b20dea0797c65d0cf3f9da909e8c9741faa664d48b1bed47fe",
+      "bytes": 5116,
       "media_type": "text/markdown"
     },
     {
@@ -1986,8 +1986,8 @@
     },
     {
       "path": "rules/gui-renderer.md",
-      "sha256": "123f7c808a97339e520ce15dd3135194a5492b9a232c610b1be266f42a279caa",
-      "bytes": 2357,
+      "sha256": "e7918c88bfbd2a0c12b351ab15e74530423577d32890f35c514b8a4cde08d337",
+      "bytes": 3142,
       "media_type": "text/markdown"
     },
     {

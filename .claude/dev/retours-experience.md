@@ -31,3 +31,9 @@ Les [règles de test](../rules/testing.md) font vérifier l’API puis l’écri
 La rétro G7 du cycle Settings a retrouvé trois conditions `jobs.*.if` invalides dans le workflow publié avec M1. Elles utilisaient `hashFiles`, disponible au niveau des étapes après le checkout.
 
 Les trois manifestes sont requis et suivis. Le correctif retire ces conditions de job et prend la version de pnpm dans le manifeste du renderer. `actionlint` relève trois erreurs sur le workflow publié et passe sur le candidat. Les [règles de test](../rules/testing.md) prévoient ce contrôle pour chaque workflow modifié. Le résultat de la CI distante reste à observer. Voir la [preuve du correctif CI](../state/goals/g0003-m2/journal.md#preuve-du-correctif-ci).
+
+## RETEX-006 — Identifier le chargement natif bloqué sur SMB
+
+Le banc Settings est resté muet avant les tests. Un échantillon a situé l’attente dans `dlopen`. Après le remplacement des compilateurs natifs par leurs distributions WebAssembly, le même type d’attente a persisté et `lsof` a identifié le fichier facultatif `fsevents.node` sur SMB.
+
+Le banc ponctuel redirige esbuild et Rollup vers les distributions de la même version et écarte le watcher facultatif. Le build Vite se termine et Vitest exécute les quatre cas ciblés de validation de configuration. Les [règles du renderer](../rules/gui-renderer.md#contrôles-ponctuels-sur-smb) donnent la condition d’emploi. La [preuve RETEX-006](../state/goals/g0003-m2/journal.md#preuve-retex-006) indique la portée qualifiée.
