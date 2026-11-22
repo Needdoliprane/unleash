@@ -128,6 +128,36 @@ fn cli_binary_exposes_provider_set() {
     }
 }
 
+// T-F012-018 / REQ-MODEL-018 — aide du contrôle de configuration.
+#[test]
+fn cli_binary_exposes_provider_validate() {
+    let output = Command::new(env!("CARGO_BIN_EXE_unleash"))
+        .args(["provider", "validate", "--help"])
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "provider validate help: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let help = String::from_utf8(output.stdout).unwrap();
+    for flag in [
+        "--profile-id",
+        "--profile-version",
+        "--project-id",
+        "--probe-id",
+        "--configuration-receipt-id",
+        "--command-id",
+        "--authority-generation",
+    ] {
+        assert!(
+            help.contains(flag),
+            "missing provider validate option {flag}"
+        );
+    }
+}
+
 #[test]
 fn cli_binary_help_lists_tui_and_non_tty_tui_refuses_raw_mode() {
     let bin = env!("CARGO_BIN_EXE_unleash");
