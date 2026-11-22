@@ -14,7 +14,7 @@
     "cache/"
   ],
   "hash_algorithm": "sha256",
-  "source_tree_digest": "b6aaa8ffb00d56e0d9309e19744675315fc79856767c0f71a52ed701a0d60edd",
+  "source_tree_digest": "2d39008412a8729f61d76b0a7e613695b7673a8ee78315d049d37db3bedcbf29",
   "files": [
     {
       "path": "INDEX.md",
@@ -858,8 +858,8 @@
     },
     {
       "path": "dev/goal-protocol.md",
-      "sha256": "678ff599e3ce08d9c3562f42870e3227f6e7b03c47de2fbe626ccf19a1af0dd3",
-      "bytes": 19829,
+      "sha256": "f10ee1e6ddab5791e968970894ed7dbf182f01955f02df15c4f5a085e69bba32",
+      "bytes": 20904,
       "media_type": "text/markdown"
     },
     {
@@ -872,6 +872,12 @@
       "path": "dev/model-routing.md",
       "sha256": "7f03b381c3c22be0f40064b324d55d5d8cdc2f4fcefcce2fc9764649a6845d38",
       "bytes": 4200,
+      "media_type": "text/markdown"
+    },
+    {
+      "path": "dev/retours-experience.md",
+      "sha256": "3ea39420ed629d1dede65629899b4f78252bb57ec78f26b25f6095adc48b0cd9",
+      "bytes": 2830,
       "media_type": "text/markdown"
     },
     {
@@ -1986,8 +1992,8 @@
     },
     {
       "path": "rules/testing.md",
-      "sha256": "82697a8f8145bb14227525a8b4744cbfb0cca4a6f4f3bf85bf0213dc942cd459",
-      "bytes": 3031,
+      "sha256": "145dba3c8daece00bd95d90b10e0a7258f0ae92c66eef103dc98969021a0e0f6",
+      "bytes": 3451,
       "media_type": "text/markdown"
     },
     {
@@ -2174,6 +2180,12 @@
       "path": "skills/goal/SKILL.md",
       "sha256": "61f284d196708b0143c6d1865cbd2b7201e5ba0bba54aa2c2a0ee45b2223b2fa",
       "bytes": 2848,
+      "media_type": "text/markdown"
+    },
+    {
+      "path": "skills/retex/SKILL.md",
+      "sha256": "1ef183f3b9a514e34714d06294bcc3a579183b66e5b943ffdee950fba50fbd91",
+      "bytes": 1982,
       "media_type": "text/markdown"
     },
     {

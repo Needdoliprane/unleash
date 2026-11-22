@@ -21,6 +21,8 @@ Enchaîner les jalons du plan et qualifier chaque rapport de sortie avant de dé
 
 Appliquer les [skills de Matt Pocock](https://github.com/mattpocock/skills) à chaque incrément concerné. Utiliser `tdd` pour vérifier le comportement par l’interface d’acceptation avec un cycle rouge puis vert. Consulter `codebase-design` pour les décisions d’interface. Utiliser `code-review` pour obtenir une revue indépendante de la spécification et des standards sur le candidat figé. Consigner le résultat des tests et le SHA examiné dans le journal du jalon.
 
+À [G7](../../../dev/goal-protocol.md#7-clôture-et-rapport), combiner `retro` et `retex` en utilisant les preuves du jalon et leurs entrées de retour d’expérience.
+
 ## Critères de terminé
 - [ ] Jalons M0 à M7 sortis avec rapports `qualification/m0/exit.md` .. `qualification/m7/exit.md`
 - [ ] 19 features (F001–F019) implémentées (tests `T-F…` écrits avant implémentation) et acceptées sur preuves réelles dans `qualification/evidence/`
