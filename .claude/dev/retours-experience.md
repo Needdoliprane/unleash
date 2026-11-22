@@ -19,3 +19,9 @@ Les [règles de test](../rules/testing.md) demandent d’actualiser les dates, d
 La première revue de la préférence du skill a trouvé deux cas absents du banc. Un rôle de la même portée provenait d’une autre affectation. La dépréciation d’un skill encore épinglé était traitée comme sa révocation.
 
 Pour une lecture issue d’un plan engagé, reprendre le lecteur de l’affectation effective et ajouter les contre-cas d’identité et de cycle de vie au test du contrat. Les deux cas ont échoué sur `9699167`, puis réussi sur `8acdc07`. Le candidat corrigé a été intégré dans `f0c0a20` après deux nouvelles revues. Voir la [preuve RETEX-003](../state/goals/g0003-m2/journal.md#preuve-retex-003).
+
+## RETEX-004 — Vérifier le banc avant de recompiler
+
+La compilation de composition M2 a échoué sur des répertoires en lecture seule. À la reprise, Docker Desktop s’annonçait démarré alors que son API expirait sans répondre. L’état de l’application indiquait seulement que son service hôte était lancé.
+
+Les [règles de test](../rules/testing.md) font vérifier l’API puis l’écriture dans les chemins utilisés par la compilation après un tel incident. Le premier contrôle a identifié le moteur comme prérequis immédiat avant une nouvelle compilation. L’écriture dans le conteneur et les tests ciblés restent à qualifier. Voir la [preuve RETEX-004](../state/goals/g0003-m2/journal.md#preuve-retex-004).
