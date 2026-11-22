@@ -509,6 +509,11 @@ body,
   margin-bottom: var(--space-2);
 }
 
+.provider-inventory-pages .control-button:disabled {
+  color: var(--color-text-secondary);
+  cursor: default;
+}
+
 @media (min-width: 1101px) {
   .provider-layout:has(.provider-detail) {
     grid-template-columns: minmax(0, 1fr) minmax(16rem, 0.65fr);
