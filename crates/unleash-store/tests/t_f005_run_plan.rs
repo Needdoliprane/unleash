@@ -415,7 +415,8 @@ fn t_f002_005_preserves_legacy_run_and_refuses_activation_with_unknown_budget() 
         .unwrap();
     fixture.store.shutdown().unwrap();
 
-    let config = StoreConfig::new(directory.path());
+    let mut config = StoreConfig::new(directory.path());
+    config.max_supported_schema_version = 20;
     let store = UnleashStore::open_with_migration_backup(config, Some(backup.backup_id)).unwrap();
     assert_eq!(store.daemon_state().unwrap().schema_version, 20);
     let inspect = || {
