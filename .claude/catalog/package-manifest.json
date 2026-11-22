@@ -14,7 +14,7 @@
     "cache/"
   ],
   "hash_algorithm": "sha256",
-  "source_tree_digest": "c577bb3562206124e37635db38d85d2c3b777f1430c198516a10909952569dd0",
+  "source_tree_digest": "5d23dba3f02165ef7b307493ff48bafb5ce023aa8b39db2cdf858bf1946526b6",
   "files": [
     {
       "path": "INDEX.md",
@@ -858,8 +858,8 @@
     },
     {
       "path": "dev/goal-protocol.md",
-      "sha256": "f10ee1e6ddab5791e968970894ed7dbf182f01955f02df15c4f5a085e69bba32",
-      "bytes": 20904,
+      "sha256": "f293972efc6be7456314b985fe71fa4112bf7c2f9bc2157ce06488947b900b52",
+      "bytes": 21157,
       "media_type": "text/markdown"
     },
     {
@@ -876,8 +876,8 @@
     },
     {
       "path": "dev/retours-experience.md",
-      "sha256": "b91f3d73bc058a5422d81848c88cb0494eeca2cc33b50bd273c45f8205671a1e",
-      "bytes": 4315,
+      "sha256": "fab6dac9d0fe86dbfbe3e23d2fe9d32b1307f642da3a650ffade06f4ee23ab77",
+      "bytes": 5616,
       "media_type": "text/markdown"
     },
     {
@@ -1004,6 +1004,12 @@
       "path": "examples/ipc-provider-profile-list-response.json",
       "sha256": "48a934ec4f92a4198c935f091a00a98043fe96739a4066015f89d26e0ef2bf51",
       "bytes": 550,
+      "media_type": "application/json"
+    },
+    {
+      "path": "examples/ipc-read-settings-model-policies-response.json",
+      "sha256": "2f69a82b85aa58a75b692ba2811e8568a3b51bc669f28723992c13cb84420fa5",
+      "bytes": 2408,
       "media_type": "application/json"
     },
     {
@@ -1566,8 +1572,8 @@
     },
     {
       "path": "features/F012-model-api-router/interfaces.md",
-      "sha256": "685b045767160538cb0adddefd3bca7ae06058e9c0e94fa27d312cb270b90d24",
-      "bytes": 41801,
+      "sha256": "fd37feb9b89964bb06b431f660032d4c9661bfabca2597d6de2d5e42541a2e83",
+      "bytes": 42346,
       "media_type": "text/markdown"
     },
     {
@@ -1584,8 +1590,8 @@
     },
     {
       "path": "features/F012-model-api-router/tests.md",
-      "sha256": "1749c2748059a33c704892ff0e12cd13392d44d3ff34cc97b6f4ff8e11bebf35",
-      "bytes": 15130,
+      "sha256": "0079b775f4756231faeaea82d1b919b164268fbaa3b623ce61d38ce540f29e9b",
+      "bytes": 15456,
       "media_type": "text/markdown"
     },
     {
@@ -1938,8 +1944,8 @@
     },
     {
       "path": "research/local-model-sources.md",
-      "sha256": "06226812ac6abcfd0737fabd1c969e9e96de1ab229f75c9db9af77d4573af29c",
-      "bytes": 8643,
+      "sha256": "12daa42ef13ee2b2554ea5b6895de992648b5f2b8da7643ae9b27ebbc69ff778",
+      "bytes": 10770,
       "media_type": "text/markdown"
     },
     {
@@ -1986,8 +1992,8 @@
     },
     {
       "path": "rules/gui-renderer.md",
-      "sha256": "123f7c808a97339e520ce15dd3135194a5492b9a232c610b1be266f42a279caa",
-      "bytes": 2357,
+      "sha256": "e7918c88bfbd2a0c12b351ab15e74530423577d32890f35c514b8a4cde08d337",
+      "bytes": 3142,
       "media_type": "text/markdown"
     },
     {
@@ -1998,8 +2004,8 @@
     },
     {
       "path": "rules/testing.md",
-      "sha256": "a99901fea6055e15cf0fcfc15affbf66457d291198b7a259fa6c1a3603e6147b",
-      "bytes": 4235,
+      "sha256": "822d03285b157ddedd15c451a4f093c7aa424da7212f94b49e4360340a44160d",
+      "bytes": 4681,
       "media_type": "text/markdown"
     },
     {
@@ -2112,8 +2118,8 @@
     },
     {
       "path": "schemas/ipc-query-response.schema.json",
-      "sha256": "d63724c76eef88e716441ada3c2d41e368233bcc2ff47b4a9269c07218d24e19",
-      "bytes": 12722,
+      "sha256": "c97ee8d5fb4f7e42bb3e8f071ff1c0d4a75a9a720f67561af496f35fa9c69a4a",
+      "bytes": 15664,
       "media_type": "application/json"
     },
     {

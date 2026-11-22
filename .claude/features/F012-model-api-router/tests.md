@@ -59,6 +59,8 @@ Vérifier le [patch IPC fermé](../../examples/ipc-set-model-selection-binding.j
 
 Valider la [fixture de publication](../../examples/ipc-set-model-policy-version.json) avec le schéma IPC. Refuser un profil sans version positive, un digest mal formé, un budget négatif, une identité ou une version fournie à la publication, une révocation contenant des paramètres de publication et les portées incompatibles. Vérifier une mutation composée avec la préférence de skill.
 
+Valider la [fixture de réponse](../../examples/ipc-read-settings-model-policies-response.json) dans les deux états de révocation. Refuser une entrée sans reçu de publication, une révocation sans son propre reçu et un résultat sans watermark. Les autres champs de Settings peuvent accompagner le volet des politiques.
+
 Par le socket du daemon, publier une politique avec un profil exact autorisé, relire le reçu et la version avec `ReadSettings`, puis vérifier leur conservation après redémarrage et rejeu. Publier une version suivante et constater qu’un rôle épinglé résout encore sa version. Révoquer cette version et vérifier le refus du raccord `AssignTask` avant bundle et invocation. Rejeter un profil hors portée, un fallback hors liste, une divergence de digest et un acteur sans droit d’édition. La validation structurelle de la fixture et la qualification de l’autorité par le daemon ont leurs propres résultats.
 
 ### R6 : T-F012-013/014/018
