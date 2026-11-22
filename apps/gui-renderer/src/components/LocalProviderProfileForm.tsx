@@ -1,4 +1,4 @@
-import { useEffect, useId, useRef, useState, type FormEvent } from "react";
+import { useEffect, useId, useRef, useState, type SubmitEvent } from "react";
 import { Button } from "react-aria-components";
 import { profileDetail } from "../ipc/providerProfileViews";
 import type { CommandReceipt, GuiCommandInput, TransportAdapter } from "../ipc/types";
@@ -73,7 +73,6 @@ export function LocalProviderProfileForm({
     }, [submission]);
 
     async function readVersion(request: GuiCommandInput, receiptId: string | null) {
-        if (!mounted.current) return;
         let reference: string | null = null;
         try {
             const { result } = await transport.executeQuery("GetProviderProfile", {
@@ -152,7 +151,7 @@ export function LocalProviderProfileForm({
         });
     }
 
-    function submit(event: FormEvent<HTMLFormElement>) {
+    function submit(event: SubmitEvent<HTMLFormElement>) {
         event.preventDefault();
         if (submission.state !== "editing") {
             return;
@@ -229,7 +228,9 @@ export function LocalProviderProfileForm({
                         aria-describedby={`${id}-hint`}
                         value={endpoint}
                         required
-                        onChange={(event) => setEndpoint(event.currentTarget.value)}
+                        onChange={(event) => {
+                            setEndpoint(event.currentTarget.value);
+                        }}
                     />
                 </label>
                 <label>
@@ -238,7 +239,9 @@ export function LocalProviderProfileForm({
                         className="control-input"
                         value={model}
                         required
-                        onChange={(event) => setModel(event.currentTarget.value)}
+                        onChange={(event) => {
+                            setModel(event.currentTarget.value);
+                        }}
                     />
                 </label>
             </fieldset>
@@ -285,9 +288,9 @@ export function LocalProviderProfileForm({
                     </p>
                     <Button
                         className="control-button"
-                        onPress={() =>
-                            perform(() => readVersion(submission.request, submission.receiptId))
-                        }
+                        onPress={() => {
+                            perform(() => readVersion(submission.request, submission.receiptId));
+                        }}
                     >
                         Relire le profil
                     </Button>
@@ -300,7 +303,9 @@ export function LocalProviderProfileForm({
                     </p>
                     <Button
                         className="control-button"
-                        onPress={() => perform(() => send(submission.request))}
+                        onPress={() => {
+                            perform(() => send(submission.request));
+                        }}
                     >
                         Reprendre l’enregistrement
                     </Button>

@@ -117,11 +117,13 @@ describe("T-F012-018 — création d’un profil local", () => {
                             );
                         }
                         if (receiptStatus === "expiré") {
-                            return Promise.reject({
-                                code: "ContractViolation",
-                                reason_code: "IDEMPOTENCY_WINDOW_EXPIRED",
-                                retry_class: "never",
-                            });
+                            return Promise.reject(
+                                Object.assign(new Error("La fenêtre d’idempotence est expirée."), {
+                                    code: "ContractViolation",
+                                    reason_code: "IDEMPOTENCY_WINDOW_EXPIRED",
+                                    retry_class: "never",
+                                }),
+                            );
                         }
                         return Promise.resolve({
                             ...completedReceipt(created),
@@ -207,32 +209,39 @@ describe("T-F012-018 — création d’un profil local", () => {
 
     it("reprend une soumission LM Studio après attente avec les mêmes identifiants", async () => {
         let lastWrite: GuiCommandInput | null = null;
-        const { invoke, user } = fixture(async (operation, { input }) => {
+        const { invoke, user } = fixture((operation, { input }) => {
             switch (operation) {
                 case "op_list_projects":
-                    return response([]);
+                    return Promise.resolve(response([]));
                 case "op_list_provider_profiles":
-                    return response({ profiles: [], next_after_profile_id: null });
+                    return Promise.resolve(response({ profiles: [], next_after_profile_id: null }));
                 case "op_set_provider_profile": {
                     const wasSubmitted = lastWrite !== null;
                     lastWrite = submittedInput(input);
                     if (!wasSubmitted) {
-                        throw Object.assign(new Error("Soumission temporairement indisponible"), {
-                            code: "ResourceBusy",
-                            retry_class: "after_backoff",
-                        });
+                        return Promise.reject(
+                            Object.assign(new Error("Soumission temporairement indisponible"), {
+                                code: "ResourceBusy",
+                                retry_class: "after_backoff",
+                            }),
+                        );
                     }
-                    return { ...completedReceipt(lastWrite), receipt_id: configurationReceiptId };
+                    return Promise.resolve({
+                        ...completedReceipt(lastWrite),
+                        receipt_id: configurationReceiptId,
+                    });
                 }
                 case "op_get_provider_profile":
-                    return response({
-                        ...initialProfile,
-                        profile_id: lastWrite?.aggregate_id,
-                        profile_version: 1,
-                        configuration_receipt_id: configurationReceiptId,
-                        qualification: "required",
-                        observations: [],
-                    });
+                    return Promise.resolve(
+                        response({
+                            ...initialProfile,
+                            profile_id: lastWrite?.aggregate_id,
+                            profile_version: 1,
+                            configuration_receipt_id: configurationReceiptId,
+                            qualification: "required",
+                            observations: [],
+                        }),
+                    );
                 default:
                     throw new Error(`Appel inattendu à ${operation}`);
             }

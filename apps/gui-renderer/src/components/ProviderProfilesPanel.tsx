@@ -332,7 +332,9 @@ export function ProviderProfilesPanel({ transport }: { transport: TransportAdapt
                     <Button
                         className="control-button"
                         aria-expanded={creating}
-                        onPress={() => setCreating((open) => !open)}
+                        onPress={() => {
+                            setCreating((open) => !open);
+                        }}
                     >
                         {creating ? "Fermer l’ajout" : "Ajouter un profil local"}
                     </Button>
