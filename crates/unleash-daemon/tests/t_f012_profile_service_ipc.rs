@@ -158,6 +158,90 @@ async fn provider_cli(binary: &Path, socket: &Path, arguments: &[&str]) -> Value
     serde_json::from_slice(&output.stdout).unwrap()
 }
 
+// T-F012-013 / AC-F012-013 / REQ-MODEL-013 — reçu exact du contrôle local.
+#[tokio::test]
+#[ignore = "requires UNLEASH_F012_CLI_BIN built from the same checkout"]
+async fn t_f012_cli_validates_the_configured_version() {
+    let executable = std::env::var_os("UNLEASH_F012_CLI_BIN").unwrap();
+    let binary = Path::new(&executable);
+    assert!(binary.is_absolute() && binary.is_file());
+    let (fixture, mut client) = running_fixture("f012-cli-verify").await;
+    let profile = Uuid::from_u128(0xf012_1300);
+    let probe = Uuid::from_u128(0xf012_1302);
+    let command_id = CommandId::from_u128(1302);
+    let generation = client.hello().authority_generation;
+    let configure = command(&client, profile, 1301, 0, "synthetic-validate");
+    let configured = client.send_command(&configure).await.unwrap();
+
+    let socket = fixture.handle.socket_path();
+    let arguments: &[&str] = &[
+        "validate",
+        "--profile-id",
+        &profile.to_string(),
+        "--profile-version",
+        "1",
+        "--probe-id",
+        &probe.to_string(),
+        "--configuration-receipt-id",
+        &configured.receipt_id.to_string(),
+        "--command-id",
+        &command_id.to_string(),
+        "--authority-generation",
+        &generation.to_string(),
+    ];
+    let response = provider_cli(binary, socket, arguments).await;
+    assert_eq!(
+        response.get("authority_generation"),
+        Some(&json!(generation))
+    );
+    let receipt: CommandReceipt =
+        serde_json::from_value(response.get("receipt").unwrap().clone()).unwrap();
+    assert_eq!(receipt.aggregate_id, probe);
+    assert_eq!(receipt.command_id, command_id);
+    assert_eq!(receipt.state, ReceiptState::Completed);
+    assert!(receipt.result_ref.is_some());
+    assert_eq!(provider_cli(binary, socket, arguments).await, response);
+
+    let shown = provider_cli(
+        binary,
+        socket,
+        &[
+            "show",
+            "--profile-id",
+            &profile.to_string(),
+            "--profile-version",
+            "1",
+        ],
+    )
+    .await;
+    assert_eq!(shown.get("watermark"), Some(&json!(receipt.event_cursor)));
+    assert_eq!(shown.pointer("/result/profile_version"), Some(&json!(1)));
+    assert_eq!(
+        shown.pointer("/result/qualification"),
+        Some(&json!("required"))
+    );
+    let observations = shown
+        .pointer("/result/observations")
+        .and_then(Value::as_array)
+        .unwrap();
+    assert_eq!(observations.len(), 1);
+    let observation = observations.first().unwrap();
+    assert_eq!(observation.get("phase"), Some(&json!("validate_config")));
+    assert_eq!(observation.get("status"), Some(&json!("validated")));
+    assert_eq!(observation.get("probe_id"), Some(&json!(probe)));
+    assert_eq!(
+        observation.get("result_ref"),
+        Some(&json!(receipt.result_ref))
+    );
+    assert_eq!(counts(fixture.data.path()), (1, 1, 0, 0));
+    drop(client);
+    fixture
+        .handle
+        .shutdown_graceful("profile-validate-cli-test")
+        .await
+        .unwrap();
+}
+
 async fn set_profile_with_cli(
     binary: &Path,
     socket: &Path,

@@ -4,11 +4,18 @@
 use clap::{Args, Subcommand};
 use serde_json::{Map, Value, json};
 use unleash_client::UnleashClient;
-use unleash_domain::{ProjectId, RequestId};
-use unleash_protocol::{ProtocolVersion, QueryEnvelope};
+use unleash_domain::{
+    AuthorityGeneration, DataLocality, MicrosAmount, ProjectId, RequestId, Revision,
+};
+use unleash_protocol::{
+    CommandEnvelope, ProtocolVersion, ProviderTestLimits, ProviderTestPhase, QueryEnvelope,
+};
 use uuid::Uuid;
 
-use crate::configuration::{ConfigurationArgs, ConfigurationTarget};
+use crate::configuration::{
+    ConfigurationArgs, ConfigurationCommandIdentity, ConfigurationTarget,
+    submit_configuration_command,
+};
 use crate::{CliError, next_uuid};
 
 /// Sous-commandes de `unleash provider`.
@@ -20,6 +27,8 @@ pub enum ProviderCommand {
     Set(ProviderSetArgs),
     /// Affiche le profil versionné et les observations enregistrées par le daemon.
     Show(ProviderProfileArgs),
+    /// Contrôle localement la configuration d'une version enregistrée.
+    Validate(ProviderValidateArgs),
 }
 
 /// Identité et définition complète du profil à enregistrer.
@@ -107,6 +116,54 @@ impl ProviderProfileArgs {
     }
 }
 
+/// Contrôle local d'une version exacte à partir de son reçu de configuration.
+#[derive(Debug, Args)]
+pub struct ProviderValidateArgs {
+    #[command(flatten)]
+    profile: ProviderProfileArgs,
+    /// UUID du contrôle. Conserver la même valeur pour rejouer la commande.
+    #[arg(long, value_parser = parse_non_nil_uuid)]
+    probe_id: Uuid,
+    /// Reçu de configuration de cette version, renvoyé par `provider set` ou `provider show`.
+    #[arg(long, value_parser = parse_non_nil_uuid)]
+    configuration_receipt_id: Uuid,
+    #[command(flatten)]
+    identity: ConfigurationCommandIdentity,
+}
+
+impl ProviderValidateArgs {
+    fn command(
+        &self,
+        current_generation: AuthorityGeneration,
+    ) -> Result<CommandEnvelope, CliError> {
+        let (command_id, authority_generation) = self.identity.resolve(current_generation)?;
+        let limits = ProviderTestLimits::new(1_000, 0, 0, MicrosAmount::ZERO);
+        Ok(CommandEnvelope {
+            protocol_version: ProtocolVersion,
+            request_id: RequestId::from_uuid(next_uuid()),
+            command_id,
+            authority_generation,
+            actor_ref: None,
+            project_id: self.profile.project_id.map(ProjectId::from_uuid),
+            aggregate_id: self.probe_id,
+            expected_revision: Revision::INITIAL,
+            command_type: "TestProviderProfile".into(),
+            payload: Map::from_iter([
+                ("profile_id".into(), json!(self.profile.profile_id)),
+                (
+                    "profile_version".into(),
+                    json!(self.profile.profile_version),
+                ),
+                ("phase".into(), json!(ProviderTestPhase::ValidateConfig)),
+                ("capability_set".into(), json!([])),
+                ("limits".into(), json!(limits)),
+                ("locality".into(), json!(DataLocality::LocalOnly)),
+                ("mandate_ref".into(), json!(self.configuration_receipt_id)),
+            ]),
+        })
+    }
+}
+
 pub(super) async fn run_provider_command(
     client: &mut UnleashClient,
     action: &ProviderCommand,
@@ -126,6 +183,10 @@ pub(super) async fn run_provider_command(
                 .await;
         }
         ProviderCommand::Show(profile) => profile.query(),
+        ProviderCommand::Validate(validation) => {
+            let command = validation.command(client.hello().authority_generation)?;
+            return submit_configuration_command(client, &command).await;
+        }
     };
     let response = client.query(&query).await?;
     Ok(json!({"watermark": response.watermark, "result": response.result}))
