@@ -572,6 +572,11 @@ async fn publishes_a_role_model_policy_through_settings() {
         .unwrap();
     assert_eq!(version.get("digest"), Some(&json!(digest)));
     let reference = format!("model-policy:policy.fixture:1:{digest}");
+    assert_eq!(
+        version.get("policy_version_ref").and_then(Value::as_str),
+        Some(reference.as_str())
+    );
+    assert_eq!(version.get("revocation"), Some(&Value::Null));
     assert_eq!(receipt.result_ref.as_deref(), Some(reference.as_str()));
 
     drop(route.client);
