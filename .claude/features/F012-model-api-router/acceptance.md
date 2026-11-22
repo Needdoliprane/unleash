@@ -18,6 +18,7 @@ Exigence : REQ-MODEL-002.
 - Étant donné : Agent, rôle, skill principal et projet définissent des préférences concurrentes ; le skill possède des ModelSelectionBinding versionnés ciblant son ID/version/namespace exacts, deux skills auxiliaires et des homonymes dans d'autres scopes.
 - Lorsque : Résoudre sous le même snapshot avec un ordre de maps différent, modifier/supprimer un binding après matérialisation, puis présenter une référence active invalide ou un effort natif incompatible.
 - Alors : Priorité inter-niveaux et repository > projet > global au niveau skill produisent le même profil ; versions/provenance restent épinglées pour l'invocation en file ou en reprise. Une version removed laisse chercher au scope suivant ; une référence active invalide ou une option incompatible échoue avant réseau. Les auxiliaires n'imposent aucune préférence et aucune configuration n'élargit les grants.
+- Sur le parcours Settings, `policy_ref` du rôle retrouve une version exacte publiée dans son namespace. Le profil choisi satisfait la liste de cette version et les plafonds restent sous les bornes du mandat. Une révocation conserve le reçu et le contenu historique, puis empêche de nouveaux préparatifs et dispatchs de cette version.
 - Limite de la preuve : le test doit préciser environnement, versions et scope ; un résultat de double ne vaut pas un succès de service réel.
 
 ## AC-F012-003 — Capacités

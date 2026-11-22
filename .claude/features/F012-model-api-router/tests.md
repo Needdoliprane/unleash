@@ -55,6 +55,12 @@ La [fixture de contexte v2](../../examples/context-manifest.json) et le [schéma
 
 Vérifier le [patch IPC fermé](../../examples/ipc-set-model-selection-binding.json). Créer une préférence par le socket, lire son profil exact et son reçu, puis retirer la préférence et redémarrer le daemon. L’historique expose la même identité, les versions ordonnées et le retrait. Un rejeu exact conserve le reçu et la révision. Un digest, une révision, un namespace ou une version de skill incompatible laisse le réglage intact. Qualifier les agrégats projet et utilisateur. Sur ce dernier, utiliser un profil utilisateur pour la référence exacte d’un skill publié de projet et vérifier le refus d’un profil réservé au projet.
 
+### Publication de la politique modèle — T-F012-002
+
+Valider la [fixture de publication](../../examples/ipc-set-model-policy-version.json) avec le schéma IPC. Refuser un profil sans version positive, un digest mal formé, un budget négatif, une identité ou une version fournie à la publication, une révocation contenant des paramètres de publication et les portées incompatibles. Vérifier une mutation composée avec la préférence de skill.
+
+Par le socket du daemon, publier une politique avec un profil exact autorisé, relire le reçu et la version avec `ReadSettings`, puis vérifier leur conservation après redémarrage et rejeu. Publier une version suivante et constater qu’un rôle épinglé résout encore sa version. Révoquer cette version et vérifier le refus du raccord `AssignTask` avant bundle et invocation. Rejeter un profil hors portée, un fallback hors liste, une divergence de digest et un acteur sans droit d’édition. La validation structurelle de la fixture et la qualification de l’autorité par le daemon ont leurs propres résultats.
+
 ### R6 : T-F012-013/014/018
 
 Fixture d’installation vide puis validate_config/connect/inventory/generation_probe explicites. EV-F012-013/014/018 contient origine authentifiée, absence de session/agent factice, contexte synthétique exact, ledger partagé et résultat fournisseur de double. Tester saturation 5/50, fausse origine control_plane, source forbidden, coût inconnu, interruption après envoi et redelivery. Les tests de produit restent not_run ; ce corpus définit leur oracle.

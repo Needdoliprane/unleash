@@ -18,6 +18,8 @@ Le niveau « skill principal » lit un `ModelSelectionBinding` de configuration,
 
 La préférence de profil sélectionne atomiquement fournisseur, modèle et dialecte. Les surcharges de génération autorisées suivent ensuite la priorité par champ, dans le dialecte exact auquel elles sont attachées ; un effort d'un autre profil n'est ni recopié ni converti implicitement. Le bundle épingle les IDs/versions/digests des bindings et profils résolus, leurs scopes et la provenance des champs. Une modification de configuration ne remplace pas ces références pendant l'invocation, ses reprises ou ses fallbacks ; elle devient candidate à une prochaine matérialisation permise par la politique du run.
 
+La [politique modèle versionnée du rôle](../features/F012-model-api-router/interfaces.md#politique-modèle-versionnée-du-rôle) est publiée par Settings. La référence du rôle épinglé détermine la version et son namespace. Le mode du workflow, le mandat et les politiques de données peuvent restreindre ses autorisations. Le bundle conserve les références exactes utilisées dans cette intersection.
+
 ## Contrats internes proposés
 
 ModelRequest porte origin_ref typé (invocation ou provider_probe), action_id, model_call_id, provider_profile_version, model_id, capability_requirements, context_ref typé, generation_limits, output_contract_ref, tool_catalog_digest, budget_reservation_id, deadline et références des politiques modèle/données effectives. ProviderEvent distingue TextDelta, ToolArgumentsDelta, ToolCallFinalized, UsageUpdate, Refusal, Completed, Interrupted et ProviderError. Un événement inconnu est archivé de manière bornée et n’est jamais interprété comme commande.

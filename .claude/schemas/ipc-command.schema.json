@@ -17,6 +17,71 @@
     "payload"
   ],
   "$defs": {
+    "provider_profile_version_ref": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["profile_id", "profile_version", "digest"],
+      "properties": {
+        "profile_id": { "type": "string", "format": "uuid" },
+        "profile_version": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
+        "digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" }
+      }
+    },
+    "model_policy_limit": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
+    "model_policy_version_change": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["operation", "policy_id"],
+      "properties": {
+        "operation": { "enum": ["publish", "revoke"] },
+        "policy_id": {
+          "type": "string",
+          "pattern": "^[a-z0-9]+(?:[._-][a-z0-9]+)*$",
+          "maxLength": 128
+        },
+        "version": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
+        "allowed_profiles": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/provider_profile_version_ref" }
+        },
+        "allowed_capabilities": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/probe_reference" }
+        },
+        "fallback_profiles": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/provider_profile_version_ref" }
+        },
+        "limits": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["max_llm_calls", "max_output_tokens", "max_cost_microusd", "max_duration_seconds"],
+          "properties": {
+            "max_llm_calls": { "$ref": "#/$defs/model_policy_limit" },
+            "max_output_tokens": { "$ref": "#/$defs/model_policy_limit" },
+            "max_cost_microusd": { "$ref": "#/$defs/model_policy_limit" },
+            "max_duration_seconds": { "type": "integer", "minimum": 1, "maximum": 2592000 }
+          }
+        }
+      },
+      "if": { "properties": { "operation": { "const": "publish" } } },
+      "then": {
+        "required": ["allowed_profiles", "allowed_capabilities", "fallback_profiles", "limits"],
+        "properties": { "version": false }
+      },
+      "else": {
+        "required": ["version"],
+        "properties": {
+          "allowed_profiles": false,
+          "allowed_capabilities": false,
+          "fallback_profiles": false,
+          "limits": false
+        }
+      }
+    },
     "model_selection_scope": {
       "type": "object",
       "additionalProperties": false,
@@ -58,16 +123,7 @@
             "skill_scope": { "$ref": "#/$defs/model_selection_scope" }
           }
         },
-        "preferred_profile_ref": {
-          "type": "object",
-          "additionalProperties": false,
-          "required": ["profile_id", "profile_version", "digest"],
-          "properties": {
-            "profile_id": { "type": "string", "format": "uuid" },
-            "profile_version": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
-            "digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" }
-          }
-        }
+        "preferred_profile_ref": { "$ref": "#/$defs/provider_profile_version_ref" }
       },
       "if": { "properties": { "operation": { "const": "upsert" } } },
       "then": { "required": ["preferred_profile_ref"] },
@@ -809,7 +865,13 @@
           "payload": {
             "required": ["patch"],
             "properties": {
-              "patch": { "type": "object", "required": ["model_selection_binding"] }
+              "patch": {
+                "type": "object",
+                "anyOf": [
+                  { "required": ["model_selection_binding"] },
+                  { "required": ["model_policy_version"] }
+                ]
+              }
             }
           }
         }
@@ -832,10 +894,37 @@
                   "confirm_retention_shortening": true,
                   "analyzer_paths": true,
                   "terminal_runtime": { "$ref": "#/$defs/terminal_runtime_settings" },
-                  "model_selection_binding": { "$ref": "#/$defs/model_selection_binding_change" }
+                  "model_selection_binding": { "$ref": "#/$defs/model_selection_binding_change" },
+                  "model_policy_version": { "$ref": "#/$defs/model_policy_version_change" }
                 }
               }
             }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "command_type": { "const": "SetSettings" },
+          "payload": {
+            "required": ["patch"],
+            "properties": { "patch": { "type": "object", "required": ["model_policy_version"] } }
+          }
+        }
+      },
+      "then": {
+        "if": { "properties": { "payload": { "properties": { "scope_kind": { "const": "user" } } } } },
+        "then": {
+          "properties": {
+            "project_id": { "type": "null" },
+            "payload": { "properties": { "scope_id": { "const": "default" } } }
+          }
+        },
+        "else": {
+          "properties": {
+            "project_id": { "type": "string", "format": "uuid" },
+            "payload": { "properties": { "scope_id": { "format": "uuid" } } }
           }
         }
       }
@@ -871,7 +960,8 @@
                   "confirm_retention_shortening": true,
                   "analyzer_paths": true,
                   "terminal_runtime": { "$ref": "#/$defs/terminal_runtime_settings" },
-                  "model_selection_binding": { "$ref": "#/$defs/model_selection_binding_change" }
+                  "model_selection_binding": { "$ref": "#/$defs/model_selection_binding_change" },
+                  "model_policy_version": { "$ref": "#/$defs/model_policy_version_change" }
                 }
               }
             }

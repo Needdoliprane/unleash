@@ -24,6 +24,16 @@ Résolution dans une transaction de snapshot de configuration : dériver le skil
 
 Un provider_probe utilise directement son profil exact autorisé et ne résout pas de préférence de skill : il n'a ni rôle ni skill fictif.
 
+## Politique modèle versionnée du rôle
+
+`SetSettings` accepte le [patch typé `model_policy_version`](../../examples/ipc-set-model-policy-version.json) dans les agrégats `user/default` et projet. `publish` porte `policy_id`, les profils et capacités autorisés, la liste ordonnée des profils de repli et les plafonds d’appels, de tokens de sortie, de coût et de durée. Un profil est identifié par son ID, sa version et son digest. `revoke` cible `policy_id` et `version`. L’enveloppe et le [schéma IPC](../../schemas/ipc-command.schema.json) fixent le scope et la révision de Settings.
+
+Le writer vérifie l’autorité humaine sur le scope et déduit le principal du transport. Il compare la portée à celle de l’enveloppe, vérifie les profils exacts et exige que chaque repli figure parmi les profils autorisés. Le writer attribue une version croissante par `(scope, policy_id)` et calcule le digest du document canonique. La version, l’auteur et le reçu s’engagent ensemble. La révocation enregistre un fait distinct ciblant la version exacte. `ReadSettings.model_policy_versions` expose la référence `model-policy:<id>:<version>:<digest>`, la provenance, le contenu immuable et l’état de révocation dans le scope autorisé. Le rejeu rend le reçu conservé selon le pipeline IPC.
+
+Le daemon résout `role.model_policy.policy_ref` dans le namespace de publication du rôle épinglé. Un rôle global lit `user/default`. Un rôle projet lit son projet exact. La résolution repository exige le writer Settings de ce repository. Une version inaccessible, absente ou révoquée rend `ModelConfigurationConflict`. Les politiques de mandat, de workflow et de données continuent de s’intersecter avec la politique référencée. Le mode de workflow `forbidden` rend `CapabilityDenied/MODEL_CALLS_FORBIDDEN` avant activation agente. Le profil configuré et sa préférence servent à la sélection. La politique immuable fournit l’autorisation et ses limites.
+
+Le bundle conserve l’identité, la version, le digest et la provenance de la politique résolue. Une nouvelle version reste candidate pour une prochaine matérialisation autorisée. Revalider la révocation et les droits effectifs avant dispatch. Conserver les objets et reçus historiques pour la lecture causale. Les politiques des sources de contexte restent des références distinctes.
+
 ## Événements et erreurs
 
 ModelCallPrepared → ModelCallDispatched → ModelCallCompleted/ModelCallInterrupted/ModelCallFailed, puis UsageReconciled si nécessaire. ModelFallbackSelected porte la cause, les anciens/nouveaux profils et l’autorité qui l’autorise. Les sorties d’outils deviennent ToolActionProposed, jamais actions exécutées dans l’adaptateur.
