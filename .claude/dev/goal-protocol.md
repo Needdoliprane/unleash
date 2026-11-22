@@ -33,6 +33,8 @@ Un goal n'autorise jamais : push sur `main`, push forcé, tag, release ou public
 
 Reformuler le goal en résultat mesurable. Le relier au jalon (M0–M7 du [plan](../plans/v1-implementation-plan.md)), aux features, exigences `REQ-…` et tests `T-…` concernés, et aux gates du [chemin critique](../plans/critical-path.md). Fixer les critères de terminé sous forme de commandes et d'observations attendues. Lister ce qui est hors périmètre. Si le goal contredit un invariant ou une décision adoptée, s'arrêter et poser la question.
 
+Pour un jalon qui dépend de la CI distante, vérifier l’accès à un résultat existant. Si l’accès échoue, noter la preuve attendue et son responsable dans la fiche du jalon. Les travaux indépendants continuent.
+
 Créer `.claude/state/goals/<goal-id>/` à partir du [modèle de journal](goal-journal-template.md) : `goal.md` (objectif, critères, statut) et `journal.md` (événements horodatés). `goal-id` = `g` + numéro sur quatre chiffres + slug court (`g0001-m0-workspace`). Créer la branche `goal/<goal-id>` depuis `dev`.
 
 ### 2. Plan et découpage
@@ -47,6 +49,8 @@ Découper en tâches indépendantes et vérifiables :
 Écrire le plan dans `goal.md`. Pour un goal large ou ambigu, faire relire le plan par un agent de niveau `frontier` avant d'exécuter.
 
 Pour chaque lot en cours, le plan nomme l'opération qui permet de l'accepter, sa dépendance immédiate et le responsable de la prochaine action. Séparer dès le découpage les parcours livrables dont les critères et les fichiers peuvent être figés séparément. Quand un lot dispose d'un candidat testable, prioriser sa revue et son intégration avant d'étendre ce lot.
+
+Pour un raccord sur le chemin critique, partir du plus petit test qui atteint le point d’entrée produit et observe l’effet attendu. Les fixtures fournissent les entrées et doubles des dépendances externes. Le producteur réel doit émettre le résultat que le test vérifie. Affecter le raccord manquant au responsable du parcours avant de multiplier les sous-lots. Voir [RETEX-001](retours-experience.md#retex-001--raccorder-le-parcours-avant-de-compter-un-lot-clos).
 
 ### 3. Exécution déléguée
 
@@ -135,10 +139,12 @@ Un blocage partiel n'arrête pas le goal : continuer les tâches indépendantes.
 
 Quand une livraison stagne après un cycle, ROOT rapproche les candidats
 testables, les lots acceptés, le dernier SHA intégré et le dernier SHA publié.
-Pour chaque lot encore ouvert, il donne le prochain résultat qui permet de
-l’accepter, l’action et son responsable. Il traite en priorité le premier
-raccord manquant sur le chemin de livraison. Si une gate externe échoue,
-il suit la qualification locale acquise et la preuve distante attendue.
+Pour chaque lot ouvert, il date le dernier effet vérifié dans le journal et
+indique dans la fiche le prochain résultat, le premier prérequis manquant et
+son responsable. Donner la priorité au raccord qui permet d’observer cet
+effet. Face à une exécution bloquée, conserver le candidat et son filtre,
+puis reprendre sur un signal de rétablissement de l’opération concernée ou
+sur un banc de qualification autorisé dont le fonctionnement est vérifié.
 En cas de correction de Louis, de preuve invalidée ou de blocage répété, il
 applique le [skill `retex`](../skills/retex/SKILL.md). Le journal
 cite l’effet mesuré de la correction et la leçon réutilisable, lorsqu’elle
