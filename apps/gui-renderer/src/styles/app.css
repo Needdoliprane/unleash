@@ -336,6 +336,53 @@ body,
   max-width: min(100%, 28rem);
 }
 
+.provider-settings-actions,
+.provider-create-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-3);
+}
+
+.provider-create {
+  display: grid;
+  gap: var(--space-3);
+  padding-block: var(--space-4);
+  margin-block-end: var(--space-5);
+  border-block: 1px solid var(--color-border);
+}
+
+.provider-create h3,
+.provider-create p {
+  margin: 0;
+}
+
+.provider-create-fields {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 14rem), 1fr));
+  gap: var(--space-3);
+  min-width: 0;
+  padding: 0;
+  margin: 0;
+  border: 0;
+}
+
+.provider-create-fields label {
+  display: grid;
+  gap: var(--space-1);
+  min-width: 0;
+}
+
+.provider-create-fields .control-input {
+  width: 100%;
+  min-width: 0;
+  font: inherit;
+}
+
+.provider-create-note {
+  color: var(--color-text-secondary);
+}
+
 .provider-layout {
   display: grid;
   gap: var(--space-5);

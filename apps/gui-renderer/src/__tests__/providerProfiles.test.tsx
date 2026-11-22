@@ -49,7 +49,7 @@ function detailResponse(
 
 function submittedInput(input: GuiQueryInput | GuiCommandInput): GuiCommandInput {
     if (!("command_id" in input)) {
-        throw new Error("Le contrôle de configuration doit être une commande IPC.");
+        throw new Error("Une commande IPC était attendue.");
     }
     return input;
 }
@@ -78,6 +78,252 @@ function fixture(handler: Invoke) {
 
 afterEach(() => {
     vi.unstubAllGlobals();
+});
+
+describe("T-F012-018 — création d’un profil local", () => {
+    it.each(["accepté", "perdu", "expiré"])(
+        "retrouve le profil Ollama dans la portée projet avec un reçu %s",
+        async (receiptStatus) => {
+            let created: GuiCommandInput | null = null;
+            const model = "exemple-local:8b";
+            const { invoke, user } = fixture((operation, { input }) => {
+                switch (operation) {
+                    case "op_list_projects":
+                        return Promise.resolve(response([project]));
+                    case "op_list_provider_profiles":
+                        return Promise.resolve(
+                            response({
+                                profiles:
+                                    created && input.project_id === project.project_id
+                                        ? [
+                                              {
+                                                  ...initialProfile,
+                                                  model,
+                                                  profile_id: created.aggregate_id,
+                                                  profile_version: 1,
+                                                  provider_kind: "ollama",
+                                                  qualification: "required",
+                                              },
+                                          ]
+                                        : [],
+                                next_after_profile_id: null,
+                            }),
+                        );
+                    case "op_set_provider_profile":
+                        created = submittedInput(input);
+                        if (receiptStatus === "perdu") {
+                            return Promise.reject(
+                                new Error("Réponse perdue après l’enregistrement."),
+                            );
+                        }
+                        if (receiptStatus === "expiré") {
+                            return Promise.reject(
+                                Object.assign(new Error("La fenêtre d’idempotence est expirée."), {
+                                    code: "ContractViolation",
+                                    reason_code: "IDEMPOTENCY_WINDOW_EXPIRED",
+                                    retry_class: "never",
+                                }),
+                            );
+                        }
+                        return Promise.resolve({
+                            ...completedReceipt(created),
+                            receipt_id: configurationReceiptId,
+                            state: "accepted",
+                            result_ref: null,
+                        });
+                    case "op_get_provider_profile":
+                        if (created === null) {
+                            throw new Error("Le profil doit être créé avant sa lecture.");
+                        }
+                        return Promise.resolve(
+                            response({
+                                ...initialProfile,
+                                profile_id: created.aggregate_id,
+                                profile_version: 1,
+                                configuration_receipt_id: configurationReceiptId,
+                                qualification: "required",
+                                observations: [],
+                            }),
+                        );
+                    default:
+                        throw new Error(`Appel inattendu à ${operation}`);
+                }
+            });
+
+            await user.click(screen.getByRole("tab", { name: /Settings/ }));
+            await screen.findByRole("option", { name: /Atlas/ });
+            await user.selectOptions(
+                screen.getByRole("combobox", { name: "Portée" }),
+                project.project_id,
+            );
+            await user.click(screen.getByRole("button", { name: "Ajouter un profil local" }));
+            await user.type(screen.getByLabelText("Modèle"), model);
+            await user.click(screen.getByRole("button", { name: "Enregistrer le profil" }));
+
+            expect(await screen.findByText("Profil enregistré.")).toBeVisible();
+            expect(
+                await screen.findByRole("button", { name: new RegExp(model, "u") }),
+            ).toBeVisible();
+
+            const writes = invoke.mock.calls.filter(([op]) => op === "op_set_provider_profile");
+            expect(writes).toHaveLength(1);
+            const call = writes[0];
+            if (call === undefined) {
+                throw new Error("La création doit envoyer une commande.");
+            }
+            const { command_id, aggregate_id, ...write } = submittedInput(call[1].input);
+            expect(command_id).toMatch(freshUuid);
+            expect(aggregate_id).toMatch(freshUuid);
+            expect(write).toEqual({
+                expected_revision: 0,
+                project_id: project.project_id,
+                payload: {
+                    provider_kind: "ollama",
+                    dialect: { kind: "ollama_chat", version: 1 },
+                    endpoint: "http://127.0.0.1:11434",
+                    model,
+                    locality: "local_only",
+                    server_management: "user_managed",
+                    auth: { kind: "none" },
+                    limits: {
+                        max_inflight: 1,
+                        connect_timeout_ms: 2000,
+                        queue_timeout_ms: 1000,
+                        load_timeout_ms: 180000,
+                        first_token_timeout_ms: 60000,
+                        generation_timeout_ms: 300000,
+                    },
+                    declared_capabilities: [],
+                    pricing: { kind: "none_local" },
+                },
+            });
+            const reads = invoke.mock.calls.filter(([op]) => op === "op_get_provider_profile");
+            expect(reads).toHaveLength(1);
+            expect(reads[0]?.[1].input).toEqual({
+                project_id: project.project_id,
+                payload: { profile_id: aggregate_id, profile_version: 1 },
+            });
+            expect(invoke.mock.calls.some(([op]) => op === "op_test_provider_profile")).toBe(false);
+        },
+    );
+
+    it("reprend une soumission LM Studio après attente avec les mêmes identifiants", async () => {
+        let lastWrite: GuiCommandInput | null = null;
+        const { invoke, user } = fixture((operation, { input }) => {
+            switch (operation) {
+                case "op_list_projects":
+                    return Promise.resolve(response([]));
+                case "op_list_provider_profiles":
+                    return Promise.resolve(response({ profiles: [], next_after_profile_id: null }));
+                case "op_set_provider_profile": {
+                    const wasSubmitted = lastWrite !== null;
+                    lastWrite = submittedInput(input);
+                    if (!wasSubmitted) {
+                        return Promise.reject(
+                            Object.assign(new Error("Soumission temporairement indisponible"), {
+                                code: "ResourceBusy",
+                                retry_class: "after_backoff",
+                            }),
+                        );
+                    }
+                    return Promise.resolve({
+                        ...completedReceipt(lastWrite),
+                        receipt_id: configurationReceiptId,
+                    });
+                }
+                case "op_get_provider_profile":
+                    return Promise.resolve(
+                        response({
+                            ...initialProfile,
+                            profile_id: lastWrite?.aggregate_id,
+                            profile_version: 1,
+                            configuration_receipt_id: configurationReceiptId,
+                            qualification: "required",
+                            observations: [],
+                        }),
+                    );
+                default:
+                    throw new Error(`Appel inattendu à ${operation}`);
+            }
+        });
+        await user.click(screen.getByRole("tab", { name: /Settings/ }));
+        await user.click(screen.getByRole("button", { name: "Ajouter un profil local" }));
+        await user.selectOptions(screen.getByLabelText("Fournisseur"), "lmstudio");
+        await user.type(screen.getByLabelText("Modèle"), "exemple-local");
+        await user.click(screen.getByRole("button", { name: "Enregistrer le profil" }));
+        expect(await screen.findByRole("alert")).toHaveTextContent(
+            "Enregistrement temporairement indisponible.",
+        );
+        const writes = () =>
+            invoke.mock.calls.filter(([operation]) => operation === "op_set_provider_profile");
+        expect(writes()).toHaveLength(1);
+        expect(writes()[0]?.[1].input).toMatchObject({
+            project_id: null,
+            payload: {
+                provider_kind: "lmstudio",
+                dialect: { kind: "openai_chat_completions", version: 1 },
+                endpoint: "http://127.0.0.1:1234/v1",
+            },
+        });
+        await user.click(screen.getByRole("button", { name: "Reprendre l’enregistrement" }));
+        expect(await screen.findByText("Profil enregistré.")).toBeVisible();
+        expect(writes()).toHaveLength(2);
+        expect(writes()[1]).toEqual(writes()[0]);
+    });
+
+    it("ignore un reçu tardif après le passage de la portée utilisateur à Atlas", async () => {
+        let resolveCreation!: (receipt: CommandReceipt) => void;
+        let pendingWrite: GuiCommandInput | null = null;
+        const receipt = new Promise<CommandReceipt>((resolve) => {
+            resolveCreation = resolve;
+        });
+        const { invoke, user } = fixture(async (operation, { input }) => {
+            switch (operation) {
+                case "op_list_projects":
+                    return response([project]);
+                case "op_list_provider_profiles":
+                    return input.project_id === project.project_id
+                        ? response({
+                              profiles: [{ ...initialProfile, model: "atlas-model" }],
+                              next_after_profile_id: null,
+                          })
+                        : response({ profiles: [], next_after_profile_id: null });
+                case "op_set_provider_profile":
+                    pendingWrite = submittedInput(input);
+                    return receipt;
+                default:
+                    throw new Error(`Appel inattendu à ${operation}`);
+            }
+        });
+        await user.click(screen.getByRole("tab", { name: /Settings/ }));
+        await screen.findByRole("option", { name: /Atlas/ });
+        await user.click(screen.getByRole("button", { name: "Ajouter un profil local" }));
+        await user.selectOptions(screen.getByLabelText("Fournisseur"), "llama_cpp");
+        await user.type(screen.getByLabelText("Modèle"), "exemple-local");
+        await user.click(screen.getByRole("button", { name: "Enregistrer le profil" }));
+        expect(await screen.findByText("Enregistrement en cours…")).toBeVisible();
+        await user.selectOptions(screen.getByLabelText("Portée"), project.project_id);
+        expect(await screen.findByRole("button", { name: /atlas-model/ })).toBeVisible();
+        await act(async () => {
+            if (pendingWrite === null) {
+                throw new Error("Le profil utilisateur doit être en attente.");
+            }
+            expect(pendingWrite).toMatchObject({
+                project_id: null,
+                payload: {
+                    provider_kind: "llama_cpp",
+                    dialect: { kind: "openai_chat_completions", version: 1 },
+                    endpoint: "http://127.0.0.1:8080/v1",
+                },
+            });
+            resolveCreation(completedReceipt(pendingWrite));
+            await receipt;
+        });
+        expect(screen.queryByText("Profil enregistré.")).not.toBeInTheDocument();
+        expect(
+            invoke.mock.calls.some(([operation]) => operation === "op_get_provider_profile"),
+        ).toBe(false);
+    });
 });
 
 describe("T-F012-018 — vérification explicite de la configuration", () => {

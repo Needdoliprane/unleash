@@ -7,6 +7,8 @@ import {
     type ProviderProfileRow,
 } from "../ipc/providerProfileViews";
 import type { GuiCommandInput, GuiQueryInput, OperationName, TransportAdapter } from "../ipc/types";
+import { newUuid } from "../ipc/uuid";
+import { LocalProviderProfileForm } from "./LocalProviderProfileForm";
 
 type Reading<T> = { state: "loading" } | { state: "error" } | { state: "ready"; data: T };
 
@@ -94,21 +96,6 @@ type Verification =
     | { state: "submitting" | "refused" }
     | { state: "retryable"; command: GuiCommandInput }
     | { state: "observing"; probeId: string; resultRef: string | null };
-
-function newUuid(): string {
-    const bytes = crypto.getRandomValues(new Uint8Array(16));
-    const view = new DataView(bytes.buffer);
-    view.setUint8(6, (view.getUint8(6) & 0x0f) | 0x40);
-    view.setUint8(8, (view.getUint8(8) & 0x3f) | 0x80);
-    const hex = Array.from(bytes, (value) => value.toString(16).padStart(2, "0")).join("");
-    return [
-        hex.slice(0, 8),
-        hex.slice(8, 12),
-        hex.slice(12, 16),
-        hex.slice(16, 20),
-        hex.slice(20),
-    ].join("-");
-}
 
 function SelectedProfile({
     profile,
@@ -303,6 +290,7 @@ export function ProviderProfilesPanel({ transport }: { transport: TransportAdapt
     const [cursor, setCursor] = useState<string | null>(null);
     const [selected, setSelected] = useState<ProviderProfileRow | null>(null);
     const [attempt, setAttempt] = useState(0);
+    const [creating, setCreating] = useState(false);
     const listRequest = useMemo(
         () => ({ project_id: scope, payload: { limit: 50, after_profile_id: cursor } }),
         [scope, cursor],
@@ -340,9 +328,20 @@ export function ProviderProfilesPanel({ transport }: { transport: TransportAdapt
         <section className="provider-settings" aria-labelledby="provider-settings-title">
             <div className="provider-settings-header">
                 <h2 id="provider-settings-title">Profils de modèles</h2>
-                <Button className="control-button" onPress={reload}>
-                    Actualiser les profils
-                </Button>
+                <div className="provider-settings-actions">
+                    <Button
+                        className="control-button"
+                        aria-expanded={creating}
+                        onPress={() => {
+                            setCreating((open) => !open);
+                        }}
+                    >
+                        {creating ? "Fermer l’ajout" : "Ajouter un profil local"}
+                    </Button>
+                    <Button className="control-button" onPress={reload}>
+                        Actualiser les profils
+                    </Button>
+                </div>
             </div>
             <div className="provider-scope">
                 <label htmlFor="provider-scope">Portée</label>
@@ -352,6 +351,7 @@ export function ProviderProfilesPanel({ transport }: { transport: TransportAdapt
                     className="control-input"
                     onChange={(event) => {
                         setScope(event.currentTarget.value || null);
+                        setCreating(false);
                         moveToPage(null);
                     }}
                 >
@@ -372,6 +372,10 @@ export function ProviderProfilesPanel({ transport }: { transport: TransportAdapt
                     <span role="alert">Impossible de lire les projets.</span>
                 ) : null}
             </div>
+
+            {creating ? (
+                <LocalProviderProfileForm transport={transport} scope={scope} onSaved={reload} />
+            ) : null}
 
             <div className="provider-layout">
                 <div className="provider-list-region">
