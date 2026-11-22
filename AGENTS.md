@@ -54,6 +54,7 @@ tools/design-package/    sync.py, regen.py, validate.py (outillage du dossier)
 - **Choix du modèle** : l'agent root choisit pour chaque délégation le niveau `frontier`, `strong`, `standard` ou `fast` selon [le routage](.claude/dev/model-routing.md) et le consigne dans le journal.
 - **Worktrees** : uniquement sous `.claude/worktrees/<goal-id>-<task-id>`, nulle part ailleurs ([règle](.claude/rules/worktrees.md)). Un worktree = une tâche = un seul agent écrivain.
 - **Suivi** — après chaque transition, mettre à jour les fiches et régénérer `.claude/state/current-state.md` selon le [protocole de goal](.claude/dev/goal-protocol.md#suivi-des-travaux-journal-et-reprise). Retirer branches intégrées, worktrees et caches arrivés en fin d’usage selon leur [cycle de vie](.claude/dev/worktrees.md).
+- **Retex** — à la suite d’une correction de Louis, d’une preuve invalidée ou d’un blocage qui revient, appliquer le [skill `retex`](.claude/skills/retex/SKILL.md) avant de reprendre l’action concernée.
 - **Tests d'abord** pour chaque exigence `REQ-…` : écrire le test `T-…` du dossier, le voir échouer, implémenter ([règles de test](.claude/rules/testing.md)).
 - **Règles de code** : [Rust](.claude/rules/rust.md), [renderer GUI](.claude/rules/gui-renderer.md). Commits au format Conventional Commits citant les `REQ-…`.
 - **Interfaces**. Lire et appliquer le [design system OVPT d’Unleash](.claude/design/visual-design-system.md) avant tout changement GUI ou TUI. Inventorier le rendu et les composants existants, puis vérifier l’accessibilité et les dimensions applicables.

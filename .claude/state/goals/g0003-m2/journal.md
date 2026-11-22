@@ -2233,3 +2233,11 @@ Résultat observé. Les trois refs locales ont été retirées par `git branch -
 - La branche M1 et le résidu du checkout t02 restent suivis dans la fiche M1.
   Consigner les retraits effectifs et les conditions de reprise, avec les preuves
   conservées dans Git. Les caches Rust privés de test suivent la vie du conteneur.
+
+### Preuve RETEX-002
+
+Le 22 novembre, l’ancien log Settings `ipc-ram-green.log` contenait une exécution du binaire de référence. ROOT a réextrait les deux arbres avec `tar -m -xf -`, comparé les empreintes et vérifié la recompilation de `unleash-store`, `unleash-daemon` et du banc IPC sous Docker Linux arm64, Rust 1.94.1, sans modèle. Dans le banc IPC, `cargo test --offline --locked` a donné 0 réussi et 2 échecs attendus sur les sources `fcf5db4`, puis 2 réussis et 0 échec sur `0350f90`. Les sorties examinées étaient `ipc-rebuilt-reference.log` et `ipc-rebuilt-candidate.log` dans le pack Settings du 22 novembre. Le contrôle porte sur le socket et les mutations Settings exercées, avec une autorité et des profils synthétiques.
+
+### Preuve RETEX-003
+
+Le 22 novembre, les deux contre-cas `t_f012_002_refuses_an_assignment_with_a_role_from_another_slot` et `t_f012_002_keeps_the_preference_for_a_deprecated_pinned_skill` ont échoué sur `9699167` avec la fixture de revue, arbre `1cf8dde944d2663357c5e6b4b4716c8482c2eb33`. Ils passent dans `cargo test --locked --offline -p unleash-store --test t_f012_profile_versions` sur `8acdc07`, arbre `8a921f3adbf0def010d9b62cf128c245ead12b04`. Le banc Docker Linux arm64 sans réseau, Rust 1.94.1, rend 27 réussites, zéro échec et zéro ignoré. Les six empreintes correspondent au candidat dans `skill-binding-final.log`. Les deux vérificateurs acceptent la lecture ciblée et la fusion `f0c0a20` intègre le même arbre. Le filtrage qualifie le résolveur Store et ses contre-cas.

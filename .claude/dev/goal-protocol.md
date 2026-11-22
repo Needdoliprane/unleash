@@ -135,13 +135,30 @@ Un blocage partiel n'arrête pas le goal : continuer les tâches indépendantes.
 
 Quand une livraison stagne après un cycle, ROOT rapproche les candidats
 testables, les lots acceptés, le dernier SHA intégré et le dernier SHA publié.
-Il traite la première étape en attente sur le chemin de la livraison. Si une
-gate échoue, il isole le contrôle rouge et son responsable. Si elle est externe,
-il suit séparément la qualification locale acquise et la preuve distante
-attendue. Le prochain point de situation donne l'effet observé de la correction
-ou l'étape qui reste ouverte. Le plan et le journal du goal suffisent au suivi.
+Pour chaque lot encore ouvert, il donne le prochain résultat qui permet de
+l’accepter, l’action et son responsable. Il traite en priorité le premier
+raccord manquant sur le chemin de livraison. Si une gate externe échoue,
+il suit la qualification locale acquise et la preuve distante attendue.
+En cas de correction de Louis, de preuve invalidée ou de blocage répété, il
+applique le [skill `retex`](../skills/retex/SKILL.md). Le journal
+cite l’effet mesuré de la correction et la leçon réutilisable, lorsqu’elle
+existe. La fiche du goal reste la référence pour l’état des lots.
 
 ### 7. Clôture et rapport
+
+| Étape | Skills |
+| --- | --- |
+| G7 | `retro`, [`retex`](../skills/retex/SKILL.md) pour un écart observé, puis `improve-codebase-architecture` lorsque le code le justifie. |
+
+À la clôture d’un cycle, lire la grille de `retro` et l’appliquer aux preuves
+et aux entrées déjà consignées dans la [base de retours d’expérience](retours-experience.md).
+Comparer l’effet attendu et l’effort des changements de méthode, de
+navigation ou d’outillage. Retenir les corrections dont l’effet peut être
+vérifié. Appliquer `retex` aux écarts nouveaux. Pour un écart déjà traité,
+reprendre la même entrée et vérifier l’effet de la correction. Utiliser
+`improve-codebase-architecture` si les observations mettent en cause la
+structure du code. Les deux skills amont sont fournis par les
+[skills de Matt Pocock](https://github.com/mattpocock/skills).
 
 1. Rejouer toutes les gates sur `goal/<goal-id>` ; consigner les sorties dans le journal.
 2. Si tout est vert et que `--no-merge` n'est pas demandé : `git checkout dev && git merge --no-ff goal/<goal-id>`, rejouer les gates sur `dev`, puis `git push origin dev` et vérifier la CI GitHub Actions de `dev` (`gh run list --branch dev`) jusqu'au vert. `main` ne reçoit que les releases, sur demande de l'utilisateur.
