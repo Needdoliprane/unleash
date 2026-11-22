@@ -84,6 +84,25 @@ fn cli_binary_exposes_provider_show() {
     }
 }
 
+// T-F012-018 / REQ-MODEL-018 — aide de l'inspection des profils.
+#[test]
+fn cli_binary_exposes_provider_list() {
+    let output = Command::new(env!("CARGO_BIN_EXE_unleash"))
+        .args(["provider", "list", "--help"])
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "provider list help: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let help = String::from_utf8(output.stdout).unwrap();
+    for flag in ["--project-id", "--after-profile-id", "--limit"] {
+        assert!(help.contains(flag), "missing provider list option {flag}");
+    }
+}
+
 #[test]
 fn cli_binary_exposes_provider_set() {
     let output = Command::new(env!("CARGO_BIN_EXE_unleash"))

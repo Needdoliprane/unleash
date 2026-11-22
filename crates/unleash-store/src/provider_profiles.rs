@@ -7,13 +7,13 @@ use crate::commands::{
     ensure_scope_not_frozen_tx,
 };
 use crate::policies_secrets::{SubjectKind, ensure_subject_not_blocked_tx, require_security_admin};
-use crate::{SecretReferenceInput, StoreConfig, StoreError};
+use crate::{SecretReferenceInput, SnapshotProjection, StoreConfig, StoreError, UnleashStore};
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use unleash_domain::{ActorId, ProjectId, ReceiptId, Revision, Sha256Digest, TimestampMs};
 use unleash_protocol::{
-    EventCausationKind, ProviderAuthentication, ProviderPricing, Sensitivity,
+    EventCausationKind, ProviderAuthentication, ProviderKind, ProviderPricing, Sensitivity,
     SetProviderProfilePayload, canonical_sha256,
 };
 use uuid::Uuid;
@@ -147,6 +147,84 @@ pub struct ConfiguredProviderProfile {
     pub receipt_id: ReceiptId,
     /// Aucune qualification inférée de la déclaration.
     pub qualification: ProviderProfileQualification,
+}
+
+/// Métadonnées de la dernière version configurée d'un profil.
+#[derive(Debug, Serialize)]
+struct ProviderProfileListEntry {
+    profile_id: Uuid,
+    profile_version: u64,
+    profile_version_ref: String,
+    provider_kind: ProviderKind,
+    model: String,
+    qualification: ProviderProfileQualification,
+}
+
+/// Page de profils dans une seule portée.
+#[derive(Debug, Serialize)]
+pub struct ProviderProfilePage {
+    profiles: Vec<ProviderProfileListEntry>,
+    next_after_profile_id: Option<Uuid>,
+}
+
+impl UnleashStore {
+    /// Dernières versions configurées dans la portée demandée et watermark de la même lecture.
+    ///
+    /// # Errors
+    /// Retourne les erreurs de lecture ou un argument de pagination invalide.
+    pub fn list_provider_profiles_snapshot(
+        &self,
+        project: Option<ProjectId>,
+        after_profile_id: Option<Uuid>,
+        limit: u32,
+    ) -> Result<SnapshotProjection<ProviderProfilePage>, StoreError> {
+        if !(1..=100).contains(&limit) || after_profile_id.is_some_and(|id| id.is_nil()) {
+            return Err(invalid("pagination des profils invalide"));
+        }
+        let (scope_kind, scope_owner) = scope(project);
+        let after = after_profile_id.map_or_else(String::new, |id| id.to_string());
+        self.project_snapshot(|conn| {
+            let mut statement = conn.prepare(
+                "SELECT profile_id, MAX(profile_version) FROM provider_profiles
+                 WHERE scope_kind = ?1 AND scope_owner_key = ?2
+                   AND profile_id IS NOT NULL AND profile_version IS NOT NULL AND profile_id > ?3
+                 GROUP BY profile_id ORDER BY profile_id LIMIT ?4",
+            )?;
+            let mut rows = statement.query(params![scope_kind, scope_owner, after, limit + 1])?;
+            let mut profiles = Vec::<ProviderProfileListEntry>::new();
+            let mut next_after_profile_id = None;
+            while let Some(row) = rows.next()? {
+                if profiles.len() == limit as usize {
+                    next_after_profile_id = profiles.last().map(|entry| entry.profile_id);
+                    break;
+                }
+                let profile_id = row.get::<_, String>(0)?.parse().map_err(|_| {
+                    StoreError::InvariantViolation("UUID de profil stocké invalide".into())
+                })?;
+                let profile_version = u64::try_from(row.get::<_, i64>(1)?).map_err(|_| {
+                    StoreError::InvariantViolation("version de profil stockée invalide".into())
+                })?;
+                let profile = resolve(conn, profile_id, profile_version)?.ok_or_else(|| {
+                    StoreError::InvariantViolation(
+                        "version de profil absente de la projection".into(),
+                    )
+                })?;
+                let payload = profile.configuration.payload;
+                profiles.push(ProviderProfileListEntry {
+                    profile_id,
+                    profile_version,
+                    profile_version_ref: profile.profile_version_ref,
+                    provider_kind: payload.provider_kind(),
+                    model: payload.model().to_owned(),
+                    qualification: profile.qualification,
+                });
+            }
+            Ok(ProviderProfilePage {
+                profiles,
+                next_after_profile_id,
+            })
+        })
+    }
 }
 
 fn invalid(message: &str) -> StoreError {

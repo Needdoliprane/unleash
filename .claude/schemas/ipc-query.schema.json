@@ -45,6 +45,25 @@
   },
   "allOf": [
     {
+      "if": { "properties": { "query_type": { "const": "ListProviderProfiles" } } },
+      "then": {
+        "properties": {
+          "payload": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "after_profile_id": {
+                "type": ["string", "null"],
+                "format": "uuid",
+                "not": { "const": "00000000-0000-0000-0000-000000000000" }
+              },
+              "limit": { "type": "integer", "minimum": 1, "maximum": 100, "default": 50 }
+            }
+          }
+        }
+      }
+    },
+    {
       "if": {
         "properties": {
           "query_type": {

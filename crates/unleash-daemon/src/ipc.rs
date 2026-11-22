@@ -508,6 +508,14 @@ async fn dispatch_query(
             )
             .await
         }
+        "ListProviderProfiles" => {
+            crate::provider_profile_validation_service::list(
+                Arc::clone(&state.store),
+                session,
+                query,
+            )
+            .await
+        }
         "ListProjects" | "GetProject" | "ReadSettings" | "ReadPolicySummary"
         | "ReadGuardHealth" | "InspectRecovery" => query_m1_projection(state, session, query).await,
         other => Err(IpcError::new(

@@ -1,0 +1,20 @@
+{
+  "request_id": "00000000-0000-4000-8000-000000000001",
+  "watermark": {
+    "stream_id": "00000000-0000-4000-8000-000000000006",
+    "sequence": 42
+  },
+  "result": {
+    "profiles": [
+      {
+        "profile_id": "00000000-0000-4000-8000-000000000051",
+        "profile_version": 2,
+        "profile_version_ref": "00000000-0000-4000-8000-000000000053",
+        "provider_kind": "lmstudio",
+        "model": "first-v2",
+        "qualification": "required"
+      }
+    ],
+    "next_after_profile_id": "00000000-0000-4000-8000-000000000051"
+  }
+}

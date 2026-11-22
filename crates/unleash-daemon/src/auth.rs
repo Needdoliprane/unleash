@@ -288,10 +288,22 @@ pub fn authorize_query(
     }
     let required = match query.query_type.as_str() {
         "GetDaemonStatus" => Capability::QueryDaemonDiagnostic,
-        "GetHealth" | "GetStateSnapshot" | "GetCommandReceipt" | "ListProjects" | "GetProject"
-        | "ReadSettings" | "ReadPolicySummary" | "ReadGuardHealth" | "InspectRecovery"
-        | "GetBackupManifest" | "ReadTerminalLog" | "GetProviderProfile" | "GetAgent"
-        | "GetInvocation" | "GetRun" => Capability::QueryState,
+        "GetHealth"
+        | "GetStateSnapshot"
+        | "GetCommandReceipt"
+        | "ListProjects"
+        | "GetProject"
+        | "ReadSettings"
+        | "ReadPolicySummary"
+        | "ReadGuardHealth"
+        | "InspectRecovery"
+        | "GetBackupManifest"
+        | "ReadTerminalLog"
+        | "GetProviderProfile"
+        | "GetAgent"
+        | "GetInvocation"
+        | "GetRun"
+        | "ListProviderProfiles" => Capability::QueryState,
         _ => {
             return Err(IpcError::new(
                 ErrorCode::InvalidArgument,

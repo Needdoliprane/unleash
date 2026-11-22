@@ -115,6 +115,52 @@
     "uuid": { "type": "string", "format": "uuid" },
     "wire_uint": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
     "optional_uuid": { "type": ["string", "null"], "format": "uuid" },
+    "provider_profile_id": {
+      "$ref": "#/$defs/uuid",
+      "not": { "const": "00000000-0000-0000-0000-000000000000" }
+    },
+    "provider_profile_list_response": {
+      "$ref": "#",
+      "required": ["watermark"],
+      "properties": {
+        "watermark": { "type": "object" },
+        "result": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["profiles", "next_after_profile_id"],
+          "properties": {
+            "next_after_profile_id": {
+              "anyOf": [
+                { "$ref": "#/$defs/provider_profile_id" },
+                { "type": "null" }
+              ]
+            },
+            "profiles": {
+              "type": "array",
+              "maxItems": 100,
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "profile_id", "profile_version", "profile_version_ref",
+                  "provider_kind", "model", "qualification"
+                ],
+                "properties": {
+                  "profile_id": { "$ref": "#/$defs/provider_profile_id" },
+                  "profile_version": { "$ref": "#/$defs/wire_uint", "minimum": 1 },
+                  "profile_version_ref": { "type": "string", "minLength": 1 },
+                  "provider_kind": {
+                    "enum": ["openai", "anthropic", "lmstudio", "ollama", "llama_cpp", "openai_compatible"]
+                  },
+                  "model": { "type": "string", "minLength": 1 },
+                  "qualification": { "const": "required" }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "agent_projection_response": {
       "$ref": "#",
       "required": ["watermark"],

@@ -3,7 +3,7 @@
 use crate::auth::{AuthenticatedSession, Capability};
 use serde::Deserialize;
 use std::sync::Arc;
-use unleash_domain::ProviderProbeId;
+use unleash_domain::{ProjectId, ProviderProbeId};
 use unleash_protocol::{
     CommandEnvelope, ErrorCode, IpcError, ProviderTestPhase, QueryEnvelope, QueryResponse,
     RetryClass, TestProviderProfilePayload, canonical_sha256, canonicalize_to_vec,
@@ -201,20 +201,19 @@ struct ProfileQuery {
     profile_version: u64,
 }
 
-/// Lecture exacte, sans effet et avec le watermark de la même projection `SQLite`.
-pub(crate) async fn query(
-    store: Arc<UnleashStore>,
-    session: AuthenticatedSession,
-    query: QueryEnvelope,
-) -> Result<QueryResponse, IpcError> {
-    let invalid = || {
-        IpcError::new(
-            ErrorCode::InvalidArgument,
-            None,
-            "Lecture de profil invalide",
-            RetryClass::Never,
-        )
-    };
+fn invalid_query() -> IpcError {
+    IpcError::new(
+        ErrorCode::InvalidArgument,
+        None,
+        "Lecture de profil invalide",
+        RetryClass::Never,
+    )
+}
+
+fn require_profile_read(
+    session: &AuthenticatedSession,
+    project_id: Option<ProjectId>,
+) -> Result<(), IpcError> {
     if !session.capabilities.contains(&Capability::QueryState) {
         return Err(IpcError::new(
             ErrorCode::CapabilityDenied,
@@ -226,7 +225,7 @@ pub(crate) async fn query(
     if session
         .allowed_projects
         .as_ref()
-        .is_some_and(|allowed| query.project_id.is_none_or(|id| !allowed.contains(&id)))
+        .is_some_and(|allowed| project_id.is_none_or(|id| !allowed.contains(&id)))
     {
         return Err(IpcError::new(
             ErrorCode::ScopeDenied,
@@ -235,12 +234,22 @@ pub(crate) async fn query(
             RetryClass::Never,
         ));
     }
-    let payload: ProfileQuery =
-        serde_json::from_value(serde_json::Value::Object(query.payload)).map_err(|_| invalid())?;
+    Ok(())
+}
+
+/// Lecture exacte, sans effet et avec le watermark de la même projection `SQLite`.
+pub(crate) async fn query(
+    store: Arc<UnleashStore>,
+    session: AuthenticatedSession,
+    query: QueryEnvelope,
+) -> Result<QueryResponse, IpcError> {
+    require_profile_read(&session, query.project_id)?;
+    let payload: ProfileQuery = serde_json::from_value(serde_json::Value::Object(query.payload))
+        .map_err(|_| invalid_query())?;
     if payload.profile_id.is_nil()
         || !(1..=9_007_199_254_740_991).contains(&payload.profile_version)
     {
-        return Err(invalid());
+        return Err(invalid_query());
     }
     let projection = tokio::task::spawn_blocking(move || {
         store.get_provider_profile_snapshot(
@@ -264,5 +273,43 @@ pub(crate) async fn query(
         request_id: query.request_id,
         watermark: Some(projection.cursor),
         result: serde_json::to_value(profile).map_err(|_| unavailable())?,
+    })
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ProfileListQuery {
+    after_profile_id: Option<uuid::Uuid>,
+    #[serde(default = "default_page_limit")]
+    limit: u32,
+}
+
+const fn default_page_limit() -> u32 {
+    50
+}
+
+pub(crate) async fn list(
+    store: Arc<UnleashStore>,
+    session: &AuthenticatedSession,
+    query: QueryEnvelope,
+) -> Result<QueryResponse, IpcError> {
+    require_profile_read(session, query.project_id)?;
+    let payload: ProfileListQuery =
+        serde_json::from_value(serde_json::Value::Object(query.payload))
+            .map_err(|_| invalid_query())?;
+    let projection = tokio::task::spawn_blocking(move || {
+        store.list_provider_profiles_snapshot(
+            query.project_id,
+            payload.after_profile_id,
+            payload.limit,
+        )
+    })
+    .await
+    .map_err(|_| unavailable())?
+    .map_err(|error| crate::error::store_error_to_ipc_error(&error, None))?;
+    Ok(QueryResponse {
+        request_id: query.request_id,
+        watermark: Some(projection.cursor),
+        result: serde_json::to_value(projection.value).map_err(|_| unavailable())?,
     })
 }
