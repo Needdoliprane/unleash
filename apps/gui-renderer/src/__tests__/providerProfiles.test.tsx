@@ -740,7 +740,7 @@ describe("T-F012-018 — lecture de l’inventaire observé", () => {
         const last = "dernier-modèle:26";
         const { invoke, user } = settingsInventory([
             first,
-            ...Array.from({ length: 24 }, (_, index) => `modèle:${index + 2}`),
+            ...Array.from({ length: 24 }, (_, index) => `modèle:${String(index + 2)}`),
             last,
         ]);
         await user.click(screen.getByRole("tab", { name: /Settings/ }));
