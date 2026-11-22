@@ -25,3 +25,9 @@ Pour une lecture issue d’un plan engagé, reprendre le lecteur de l’affectat
 La compilation de composition M2 a échoué sur des répertoires en lecture seule. À la reprise, Docker Desktop s’annonçait démarré alors que son API expirait sans répondre. L’état de l’application indiquait seulement que son service hôte était lancé.
 
 Les [règles de test](../rules/testing.md) font vérifier l’API puis l’écriture dans les chemins utilisés par la compilation après un tel incident. Le premier contrôle a identifié le moteur comme prérequis immédiat avant une nouvelle compilation. L’écriture dans le conteneur et les tests ciblés restent à qualifier. Voir la [preuve RETEX-004](../state/goals/g0003-m2/journal.md#preuve-retex-004).
+
+## RETEX-005 — Valider les expressions du workflow avant intégration
+
+La rétro G7 du cycle Settings a retrouvé trois conditions `jobs.*.if` invalides dans le workflow publié avec M1. Elles utilisaient `hashFiles`, disponible au niveau des étapes après le checkout.
+
+Les trois manifestes sont requis et suivis. Le correctif retire ces conditions de job et prend la version de pnpm dans le manifeste du renderer. `actionlint` relève trois erreurs sur le workflow publié et passe sur le candidat. Les [règles de test](../rules/testing.md) prévoient ce contrôle pour chaque workflow modifié. Le résultat de la CI distante reste à observer. Voir la [preuve du correctif CI](../state/goals/g0003-m2/journal.md#preuve-du-correctif-ci).
