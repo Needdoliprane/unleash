@@ -67,6 +67,7 @@ export function profileDetail(value: unknown) {
     const fields = record(value);
     return {
         ...profileIdentity(fields),
+        configurationReceiptId: text(fields.configuration_receipt_id),
         qualification: text(fields.qualification),
         observations: list(fields.observations).map((item) => {
             const observation = record(item);
@@ -74,6 +75,7 @@ export function profileDetail(value: unknown) {
                 id: text(observation.probe_id),
                 phase: text(observation.phase),
                 status: text(observation.status),
+                resultRef: text(observation.result_ref),
                 observedAt: new Date(number(observation.observed_at_ms)).toISOString(),
             };
         }),
