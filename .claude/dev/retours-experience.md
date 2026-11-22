@@ -8,6 +8,8 @@ Sur M2, les intégrations ont ajouté le démarrage du run, la création d’age
 
 Le [protocole de goal](goal-protocol.md#6-boucle-et-conditions-darrêt) demande désormais un résultat d’acceptation, une action et un responsable pour chaque lot ouvert. Dans la [fiche M2](../state/goals/g0003-m2/goal.md#actions-de-clôture-ouvertes), le premier contrôle F003 suit `StartRun`, `CreateAgent` et `AssignTask` sur l’IPC public. L’assertion vérifie que le daemon produit le bundle à partir de la politique autorisée et des sources de contexte, puis observe l’admissibilité. Le rattachement de ce contrôle aux lots est appliqué au suivi. La preuve produit reste à obtenir.
 
+La [rétro des trois lots M2](../state/goals/g0003-m2/journal.md#rétrospective-des-trois-lots-ouverts-de-m2) retrouve le même écart pour la disposition terminal F011 et la génération durable F012. Le [découpage](goal-protocol.md#2-plan-et-découpage) part désormais du plus petit test au point d’entrée produit. Les bancs existants doivent permettre d’observer le bundle émis par le daemon, la disposition et le devenir des ressources, puis l’adoption d’un résultat de génération après consommation unique du permis. Le premier rouge fonctionnel et le vert sur le candidat mesureront l’effet de cette correction pour chaque raccord.
+
 ## RETEX-002 — Rejouer le bon binaire
 
 Pendant la qualification de Settings, une réextraction a conservé les dates Git et Cargo a réutilisé le binaire de référence. Le journal attribué au candidat contenait encore les deux échecs de la référence.
@@ -24,7 +26,7 @@ Pour une lecture issue d’un plan engagé, reprendre le lecteur de l’affectat
 
 La compilation de composition M2 a échoué sur des répertoires en lecture seule. À la reprise, Docker Desktop s’annonçait démarré alors que son API expirait sans répondre. L’état de l’application indiquait seulement que son service hôte était lancé.
 
-Les [règles de test](../rules/testing.md) font vérifier l’API puis l’écriture dans les chemins utilisés par la compilation après un tel incident. Le premier contrôle a identifié le moteur comme prérequis immédiat avant une nouvelle compilation. L’écriture dans le conteneur et les tests ciblés restent à qualifier. Voir la [preuve RETEX-004](../state/goals/g0003-m2/journal.md#preuve-retex-004).
+Au redémarrage du 22 novembre, les écritures du banc et deux tests du Store ont réussi. Au blocage suivant, l’API a répondu HTTP 200 alors qu’une commande dans le conteneur expirait. Les [règles de test](../rules/testing.md) vérifient maintenant une sortie dans le conteneur avant de tester ses écritures. Le premier effet est observé sur le banc F003. La sonde a isolé l’étape en défaut en 12 secondes et le test IPC est resté non exécuté. La [reprise Docker de V021](../state/goals/g0003-m2/journal.md#reprise-docker-et-validation-rust-v021) conserve les deux résultats verts, et la [rétro](../state/goals/g0003-m2/journal.md#rétrospective-des-trois-lots-ouverts-de-m2) donne le contrôle de reprise du test suivant.
 
 Sur la fixture Ollama de Q-19, le port était en écoute pendant la détection du GPU. La première sonde a interrompu ce démarrage. Après correction du banc, deux sondes ont expiré puis l’API a répondu sur le même PID, avant l’échéance de démarrage. Après un autre arrêt, la lecture du manifeste v2 a retrouvé l’import engagé et permis de reprendre avec le modèle existant. Voir la [reprise de la fixture Ollama](../state/goals/g0003-m2/journal.md#reprise-de-la-fixture-ollama).
 
