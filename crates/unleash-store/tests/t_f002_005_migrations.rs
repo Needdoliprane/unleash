@@ -5,8 +5,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use unleash_store::{
-    BackupRetentionTier, CutpointObserver, MonotonicClockPort, PrepareBackupRequest, StoreConfig,
-    StoreCutpoint, StoreError, UnleashStore,
+    BackupRetentionTier, CutpointObserver, ExecutionPoolSettings, MonotonicClockPort,
+    PrepareBackupRequest, RetentionPolicySettings, SettingsScopeKind, StoreConfig, StoreCutpoint,
+    StoreError, UnleashStore, WriteCriticality,
 };
 use unleash_testkit::{
     Cutpoint, CutpointAction, CutpointController, DeterministicIdGenerator, ManualClock,
@@ -237,6 +238,69 @@ fn migration_v004_to_v005_requires_backup_and_preserves_v004_checksum() {
     }).unwrap();
     assert_eq!(retained, checksum);
     assert_eq!(tables, 4);
+}
+
+#[test]
+fn migration_v020_to_v021_preserves_settings_without_granting_model_authority() {
+    let dir = local_test_dir("f012-policy-v020").unwrap();
+    let mut previous = StoreConfig::new(dir.path());
+    previous.max_supported_schema_version = 20;
+    let store = UnleashStore::open(previous).unwrap();
+    store
+        .execute_in_writer_tx(WriteCriticality::Normal, |tx, now| {
+            tx.execute(
+                "INSERT INTO settings (scope_kind, scope_id, revision, execution_pool_json,
+                     retention_policy_json, extra_typed_json, updated_at_ms, updated_by_actor)
+                 VALUES ('user', 'default', 7, ?1, ?2, ?3, ?4, 'fixture')",
+                rusqlite::params![
+                    serde_json::to_string(&ExecutionPoolSettings::default())?,
+                    serde_json::to_string(&RetentionPolicySettings::default())?,
+                    r#"{"model_policy_versions":[{"policy_id":"legacy-metadata"}]}"#,
+                    now.as_i64(),
+                ],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    let before = store
+        .read_settings(SettingsScopeKind::User, "default")
+        .unwrap();
+    let backup = store
+        .prepare_backup(PrepareBackupRequest {
+            destination_dir: dir.path().join("v020-backup"),
+            retention_tier: BackupRetentionTier::Manual,
+            coverage: "db_and_objects".to_owned(),
+        })
+        .unwrap();
+    store.shutdown().unwrap();
+
+    let mut next = StoreConfig::new(dir.path());
+    next.max_supported_schema_version = 21;
+    assert!(matches!(
+        UnleashStore::open(next.clone()),
+        Err(StoreError::MigrationBackupRequired)
+    ));
+    let upgraded = UnleashStore::open_with_migration_backup(next, Some(backup.backup_id)).unwrap();
+    assert_eq!(upgraded.daemon_state().unwrap().schema_version, 21);
+    assert_eq!(
+        upgraded
+            .read_settings(SettingsScopeKind::User, "default")
+            .unwrap(),
+        before
+    );
+    let history: String = upgraded
+        .read_snapshot(|db, _| {
+            db.query_row(
+                "SELECT model_policy_history_json FROM settings
+                 WHERE scope_kind='user' AND scope_id='default'",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(StoreError::from_rusqlite)
+        })
+        .unwrap();
+    assert_eq!(history, "[]");
+    upgraded.shutdown().unwrap();
 }
 
 #[test]

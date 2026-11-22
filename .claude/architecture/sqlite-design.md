@@ -176,6 +176,12 @@ Les migrations sont monotones, idempotentes par version et checksum, protégées
 
 V017 ajoute à `terminal_renewal_intents` le pointeur nullable et immuable `refusal_event_id` vers l’événement causal de refus avant dispatch. Le contexte V016 et son digest sont conservés. L’index partiel et les gardes d’entrée et de transfert excluent uniquement les refus prouvés du contrôle concurrent. La transaction engage l’événement, l’outbox et le pointeur sans prolonger l’ancien bail. Les gardes SQL rendent exclusifs un refus engagé et tout futur marqueur de la même action. Après tombstone Q-12, l’en-tête, son digest et le lien continuent de porter cette décision.
 
+### Historique des politiques modèle V021
+
+La migration V021 ajoute `settings.model_policy_history_json`, un tableau JSON non nul dont la valeur initiale est `[]`. La montée depuis V020 exige une sauvegarde, puis conserve chaque portée, sa révision et ses réglages. L’historique d’autorité débute vide. Les métadonnées historiques de `extra_typed_json` restent séparées des politiques publiées.
+
+Pour [la publication et la révocation](../features/F012-model-api-router/interfaces.md#politique-modèle-versionnée-du-rôle), le writer ajoute un fait à l’historique du scope dans la même transaction que la révision Settings et le reçu. Les écritures Settings ordinaires préservent cet historique. Le document publié et son digest restent stables quand un fait de révocation est ajouté.
+
 ## Extensions de données R3–R5 — procédures et missions sans dépôt
 
 Les migrations de conception ajoutent à missions une responsabilité typée OwnerRef user/agent et completion_policy mechanical/human/owner_agent ; leader_agent_id et worktree_id restent optionnels. Une contrainte vérifie exactement un owner autorisé, sans créer un faux agent pour une procédure mécanique. Project/source_bindings autorise des sources fichiers, documents et comptes sans repository.

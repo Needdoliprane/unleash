@@ -64,7 +64,7 @@ c8f45af2ab1a811389c98a36c0d2005d76731e9a86b2dcd20bf650cc3aa3f212  .claude/archit
 e946587cb98515bb8faaab4a2c8eea2267e51ab2d94cb724e5d5da69e40eda57  .claude/architecture/security-boundaries.md
 a061a5e2c342f501f5206af75b6bb370fd1663c89a7ed9b0aa93fb16aa0b8ef7  .claude/architecture/session-model.md
 18d6c5daddbe78f08315034057f439666548b2d480a9192dabed0917f8037d05  .claude/architecture/skills-contract-model.md
-e39a16d5f1c64f6e9439fa8598409e2ce43d38de9642d9270d83bbcb2318f1ef  .claude/architecture/sqlite-design.md
+e5a82049e94bb33dc06fdacdd863d7e5c90e6bd28abb0b6542d1eb31353ee444  .claude/architecture/sqlite-design.md
 45676028a5669b3021240c649576ecb1d81d7a03196b1ad07389c36faf76d854  .claude/architecture/state-machines.md
 11a2150eb7c0e28e5462bda08022e676480aa8a2c4f0b7f7d1cd5e81eb1abd2e  .claude/architecture/storage-model.md
 86e3b61e1bce0b42ec71dcd2b9b9829bf840e0a90ae37c227dbbab84d50466bf  .claude/architecture/system-overview.md
@@ -122,7 +122,7 @@ fd66815a76ace8b136778face8afcfd940d6b6d02d1f2dbe1c2a162d5ef3e666  .claude/brief/
 08e0a0152f290d07fa66453243218c404530afc1dcb92e9fc5d8e24aa366b6eb  .claude/catalog/README.md
 a87fbd5d995747bc222abdef47db8fb9c561b93c0ba0846c08ead13d1a1c6529  .claude/catalog/design-catalog.json
 bcdc9be2f4559a4d743d08307d710c818606896b4c59f55cb831b01539ddd3d7  .claude/catalog/operations.json
-bea9766dc3e2cfaaa09aefe2bb8440e84351201c1389e7074edba655a6f1e97a  .claude/catalog/package-manifest.json
+2d0f35065be75066375d9f4f81801d7acb7ef0bfc867dbbd383e1b95eb461aa3  .claude/catalog/package-manifest.json
 dc670318f9a2834c72d589fa921567ab3c2da5a6777d6d348697fd54b643f60b  .claude/design/activity-timeline.md
 7e66e407555c2cd16175e2f26c9515ede0d802d8e2bc53b2675d3883dfbfa2a8  .claude/design/agent-tree-and-status.md
 1558c901b73b4ce6ca5963a1b2a1c06864afc92f61b4f9ed1950ff841669c6ed  .claude/design/cli-tui-design.md
@@ -261,7 +261,7 @@ b85a03aa29a31be6b4b1bd2c71551c6eef762e124533f404db91c2ac698e0b4a  .claude/featur
 b9f21c2478166b16d4bbe1b4822fe5acab37e13eda7fc6964accfaac72d54ce8  .claude/features/F012-model-api-router/README.md
 fcfc4c0f91114326fbf00bee5564afd5f8925851db26b30b1b3b3dd07558766d  .claude/features/F012-model-api-router/acceptance.md
 17eabd25f5c6da4c3ccedde0df06f286383ff140d82bd7f5b8f75b4f5e8582d6  .claude/features/F012-model-api-router/dependencies.md
-c961ae8aa7f3ac5a722a468b0f82bd973a7d7e15cd2991dfd8aa8cb0748a9c46  .claude/features/F012-model-api-router/interfaces.md
+fd37feb9b89964bb06b431f660032d4c9661bfabca2597d6de2d5e42541a2e83  .claude/features/F012-model-api-router/interfaces.md
 8018d1411c5558cd5d31bef6b3e316fa8b17ff85fe82d0204b6ce2cd56bea4e2  .claude/features/F012-model-api-router/requirements.md
 3954281050233639413d62f93a294d3755c9c2964242b796520255060584c9eb  .claude/features/F012-model-api-router/technical-design.md
 0079b775f4756231faeaea82d1b919b164268fbaa3b623ce61d38ce540f29e9b  .claude/features/F012-model-api-router/tests.md
