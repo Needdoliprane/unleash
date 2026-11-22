@@ -14,7 +14,7 @@
     "cache/"
   ],
   "hash_algorithm": "sha256",
-  "source_tree_digest": "6b6094ffdd51121602ee514abde842a80bf37a2122c1f6bb0adc1b655c9acb5b",
+  "source_tree_digest": "118e81ace2053056d371096e34ecdeb7689517d26ba69427285554426d5f627c",
   "files": [
     {
       "path": "INDEX.md",
@@ -876,8 +876,8 @@
     },
     {
       "path": "dev/retours-experience.md",
-      "sha256": "3ea39420ed629d1dede65629899b4f78252bb57ec78f26b25f6095adc48b0cd9",
-      "bytes": 2830,
+      "sha256": "4d18dcd2d79386895db9de3871c11f37c4a194ed0dfb3235679acf30b71b70e8",
+      "bytes": 3569,
       "media_type": "text/markdown"
     },
     {
@@ -1998,8 +1998,8 @@
     },
     {
       "path": "rules/testing.md",
-      "sha256": "145dba3c8daece00bd95d90b10e0a7258f0ae92c66eef103dc98969021a0e0f6",
-      "bytes": 3451,
+      "sha256": "c92765e8bca701303777f78f452f87883be1c1ed42b7f4b7c8c236a38b0d7a2b",
+      "bytes": 3965,
       "media_type": "text/markdown"
     },
     {
