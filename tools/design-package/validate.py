@@ -139,14 +139,28 @@ try:
             c = s.get("properties", {}).get(key, {}).get("const")
             if c is not None:
                 bykey[(key, c)] = rel
+    typed_query_responses = {
+        "examples/ipc-read-settings-model-policies-response.json": "read_settings_model_policies_response",
+    }
     ok = 0
     for rel, d in jsons.items():
-        if rel.startswith("schemas/") or not isinstance(d, dict):
+        if rel.startswith("schemas/"):
             continue
-        target = next((bykey[(k, d.get(k))] for k in ("schema_version", "protocol_version") if (k, d.get(k)) in bykey), None)
-        if target is None:
-            continue
-        v = Draft202012Validator(schemas[target], registry=reg, format_checker=FormatChecker())
+        if (definition := typed_query_responses.get(rel)) is not None:
+            target = "schemas/ipc-query-response.schema.json"
+            query_response = schemas.get(target, {})
+            if definition not in query_response.get("$defs", {}):
+                err(f"{rel}: missing {target} definition {definition}")
+                continue
+            selected = {"$ref": f"{query_response['$id']}#/$defs/{definition}"}
+        else:
+            if not isinstance(d, dict):
+                continue
+            target = next((bykey[(k, d.get(k))] for k in ("schema_version", "protocol_version") if (k, d.get(k)) in bykey), None)
+            if target is None:
+                continue
+            selected = schemas[target]
+        v = Draft202012Validator(selected, registry=reg, format_checker=FormatChecker())
         es = sorted(v.iter_errors(d), key=lambda e: list(e.path))
         for e in es[:5]:
             err(f"{rel} !~ {target}: {'/'.join(map(str, e.path))}: {e.message[:200]}")

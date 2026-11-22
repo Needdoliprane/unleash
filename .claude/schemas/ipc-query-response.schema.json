@@ -119,6 +119,75 @@
       "$ref": "#/$defs/uuid",
       "not": { "const": "00000000-0000-0000-0000-000000000000" }
     },
+    "read_settings_model_policies_response": {
+      "$ref": "#",
+      "required": ["watermark"],
+      "properties": {
+        "watermark": { "type": "object" },
+        "result": {
+          "type": "object",
+          "required": ["scope_kind", "scope_id", "revision", "model_policy_versions"],
+          "properties": {
+            "scope_kind": { "enum": ["user", "project"] },
+            "scope_id": { "type": "string" },
+            "revision": { "$ref": "#/$defs/wire_uint" },
+            "model_policy_versions": {
+              "type": "array",
+              "items": { "$ref": "#/$defs/model_policy_version_projection" }
+            }
+          },
+          "if": { "properties": { "scope_kind": { "const": "user" } } },
+          "then": { "properties": { "scope_id": { "const": "default" } } },
+          "else": { "properties": { "scope_id": { "$ref": "#/$defs/uuid" } } }
+        }
+      }
+    },
+    "model_policy_version_projection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "policy_id", "version", "digest", "policy_version_ref",
+        "allowed_profiles", "allowed_capabilities", "fallback_profiles", "limits",
+        "principal_id", "command_receipt_id", "revocation"
+      ],
+      "properties": {
+        "policy_id": {
+          "$ref": "urn:ovpt:unleash:ipc-command:2#/$defs/model_policy_version_change/properties/policy_id"
+        },
+        "version": {
+          "$ref": "urn:ovpt:unleash:ipc-command:2#/$defs/model_policy_version_change/properties/version"
+        },
+        "digest": { "type": "string", "maxLength": 71, "pattern": "^sha256:[0-9a-f]{64}$" },
+        "policy_version_ref": {
+          "type": "string",
+          "pattern": "^model-policy:[a-z0-9]+(?:[._-][a-z0-9]+)*:[1-9][0-9]*:sha256:[0-9a-f]{64}$",
+          "not": { "pattern": "\\s" }
+        },
+        "allowed_profiles": {
+          "$ref": "urn:ovpt:unleash:ipc-command:2#/$defs/model_policy_version_change/properties/allowed_profiles"
+        },
+        "allowed_capabilities": {
+          "$ref": "urn:ovpt:unleash:ipc-command:2#/$defs/model_policy_version_change/properties/allowed_capabilities"
+        },
+        "fallback_profiles": {
+          "$ref": "urn:ovpt:unleash:ipc-command:2#/$defs/model_policy_version_change/properties/fallback_profiles"
+        },
+        "limits": {
+          "$ref": "urn:ovpt:unleash:ipc-command:2#/$defs/model_policy_version_change/properties/limits"
+        },
+        "principal_id": { "type": "string", "pattern": "\\S" },
+        "command_receipt_id": { "$ref": "#/$defs/uuid" },
+        "revocation": {
+          "type": ["object", "null"],
+          "additionalProperties": false,
+          "required": ["principal_id", "command_receipt_id"],
+          "properties": {
+            "principal_id": { "type": "string", "pattern": "\\S" },
+            "command_receipt_id": { "$ref": "#/$defs/uuid" }
+          }
+        }
+      }
+    },
     "provider_profile_list_response": {
       "$ref": "#",
       "required": ["watermark"],

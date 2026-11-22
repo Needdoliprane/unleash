@@ -14,7 +14,7 @@
     "cache/"
   ],
   "hash_algorithm": "sha256",
-  "source_tree_digest": "880cf99c383f29c9315a9da4ffc9cbb3f3e9ed4bd717317a0ec52d0095b3ae10",
+  "source_tree_digest": "1371d00cbbe6516cf9c93037c01f980ec3753a0eca207b669284838154d2530d",
   "files": [
     {
       "path": "INDEX.md",
@@ -1007,6 +1007,12 @@
       "media_type": "application/json"
     },
     {
+      "path": "examples/ipc-read-settings-model-policies-response.json",
+      "sha256": "2f69a82b85aa58a75b692ba2811e8568a3b51bc669f28723992c13cb84420fa5",
+      "bytes": 2408,
+      "media_type": "application/json"
+    },
+    {
       "path": "examples/ipc-set-model-policy-version.json",
       "sha256": "c59e9c3b3cc7720365774aa29d3de894fc5d04bd6d5fd5509c8865da075e3231",
       "bytes": 1172,
@@ -1566,8 +1572,8 @@
     },
     {
       "path": "features/F012-model-api-router/interfaces.md",
-      "sha256": "d35ba615e5fa6430f72d4c10ef8a7c976287aada00cdd983bb4861579766c7b9",
-      "bytes": 41636,
+      "sha256": "c961ae8aa7f3ac5a722a468b0f82bd973a7d7e15cd2991dfd8aa8cb0748a9c46",
+      "bytes": 42181,
       "media_type": "text/markdown"
     },
     {
@@ -1584,8 +1590,8 @@
     },
     {
       "path": "features/F012-model-api-router/tests.md",
-      "sha256": "1749c2748059a33c704892ff0e12cd13392d44d3ff34cc97b6f4ff8e11bebf35",
-      "bytes": 15130,
+      "sha256": "0079b775f4756231faeaea82d1b919b164268fbaa3b623ce61d38ce540f29e9b",
+      "bytes": 15456,
       "media_type": "text/markdown"
     },
     {
@@ -2112,8 +2118,8 @@
     },
     {
       "path": "schemas/ipc-query-response.schema.json",
-      "sha256": "d63724c76eef88e716441ada3c2d41e368233bcc2ff47b4a9269c07218d24e19",
-      "bytes": 12722,
+      "sha256": "c97ee8d5fb4f7e42bb3e8f071ff1c0d4a75a9a720f67561af496f35fa9c69a4a",
+      "bytes": 15664,
       "media_type": "application/json"
     },
     {

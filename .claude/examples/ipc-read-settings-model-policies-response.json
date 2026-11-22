@@ -1,0 +1,67 @@
+{
+  "request_id": "10000000-0000-4000-8000-000000000030",
+  "watermark": {
+    "stream_id": "10000000-0000-4000-8000-000000000031",
+    "sequence": 13
+  },
+  "result": {
+    "scope_kind": "project",
+    "scope_id": "10000000-0000-4000-8000-000000000004",
+    "revision": 4,
+    "model_selection_bindings": [],
+    "model_policy_versions": [
+      {
+        "policy_id": "policy.fixture",
+        "version": 1,
+        "digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "policy_version_ref": "model-policy:policy.fixture:1:sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "allowed_profiles": [
+          {
+            "profile_id": "10000000-0000-4000-8000-000000000005",
+            "profile_version": 1,
+            "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          }
+        ],
+        "allowed_capabilities": ["text", "streaming"],
+        "fallback_profiles": [],
+        "limits": {
+          "max_llm_calls": 1,
+          "max_output_tokens": 128,
+          "max_cost_microusd": 10000,
+          "max_duration_seconds": 60
+        },
+        "principal_id": "uid:501",
+        "command_receipt_id": "10000000-0000-4000-8000-000000000028",
+        "revocation": {
+          "principal_id": "uid:501",
+          "command_receipt_id": "10000000-0000-4000-8000-000000000029"
+        }
+      },
+      {
+        "policy_id": "policy.fixture",
+        "version": 2,
+        "digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "policy_version_ref": "model-policy:policy.fixture:2:sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "allowed_profiles": [
+          {
+            "profile_id": "10000000-0000-4000-8000-000000000005",
+            "profile_version": 1,
+            "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          }
+        ],
+        "allowed_capabilities": ["text", "streaming"],
+        "fallback_profiles": [],
+        "limits": {
+          "max_llm_calls": 1,
+          "max_output_tokens": 256,
+          "max_cost_microusd": 10000,
+          "max_duration_seconds": 60
+        },
+        "principal_id": "uid:501",
+        "command_receipt_id": "10000000-0000-4000-8000-000000000032",
+        "revocation": null
+      }
+    ],
+    "extra_typed": {}
+  }
+}
