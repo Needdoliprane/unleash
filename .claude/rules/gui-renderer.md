@@ -17,3 +17,7 @@ Appliquer le [design system OVPT d’Unleash](../design/visual-design-system.md)
 - **Accessibilité et qualité** : WCAG 2.2 AA, navigation clavier complète, focus visible, IME, lecteurs d'écran ; listes longues virtualisées ; budgets de performance d'AC-F014.
 - **Parité.** Chaque fonction a son équivalent TUI dans le même groupe `PAR-…` ([parité](../design/gui-tui-parity.md)).
 - **Tests** : logique de présentation testée sans rendu, composants testés avec Testing Library, parcours testés contre un serveur de fixtures du protocole.
+
+## Contrôles ponctuels sur SMB
+
+Si Vite ou Vitest attend dans un chargement natif, identifier le fichier ouvert par le processus avant de relancer. Pour les commandes ponctuelles `vite build` et `vitest run`, utiliser au besoin les distributions `esbuild-wasm` et `@rollup/wasm-node` aux versions du verrou. Vérifier l’intégrité des archives publiées et préparer le banc dans le pack de preuves. Le hook de résolution de Node peut aussi écarter le module facultatif `fsevents` lorsque le chargement de `fsevents.node` est la cause observée. Consigner les substitutions, les versions, les entrées et les sorties. Ce contrôle couvre le renderer dans le banc décrit. Voir [RETEX-006](../dev/retours-experience.md#retex-006--identifier-le-chargement-natif-bloqué-sur-smb).
