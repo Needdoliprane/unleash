@@ -32,13 +32,12 @@ jobs:
 
   gui-renderer:
     name: GUI Renderer (React/TypeScript)
-    if: ${{ hashFiles('apps/gui-renderer/package.json') != '' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
         with:
-          version: 10
+          package_json_file: apps/gui-renderer/package.json
       - uses: actions/setup-node@v4
         with:
           node-version: 22
@@ -54,7 +53,6 @@ jobs:
 
   rust:
     name: Rust (${{ matrix.os }})
-    if: ${{ hashFiles('Cargo.toml') != '' }}
     strategy:
       fail-fast: false
       matrix:
@@ -71,7 +69,7 @@ jobs:
         if: ${{ hashFiles('apps/gui-renderer/package.json') != '' }}
         uses: pnpm/action-setup@v4
         with:
-          version: 10
+          package_json_file: apps/gui-renderer/package.json
       - if: ${{ hashFiles('apps/gui-renderer/package.json') != '' }}
         uses: actions/setup-node@v4
         with:
@@ -97,7 +95,6 @@ jobs:
 
   deny:
     name: Dépendances (cargo-deny)
-    if: ${{ hashFiles('Cargo.lock') != '' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
