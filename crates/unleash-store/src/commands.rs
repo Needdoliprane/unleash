@@ -422,6 +422,19 @@ pub enum CommandMutation {
         /// Patch typé des paramètres.
         patch: SettingsPatch,
     },
+    /// Met à jour les réglages et une préférence versionnée dans le même commit.
+    SetSettingsWithModelSelectionBinding {
+        /// Portée des paramètres modifiés.
+        scope_kind: SettingsScopeKind,
+        /// Identifiant de portée.
+        scope_id: String,
+        /// Autorité authentifiée.
+        caller: CallerAuthority,
+        /// Autres réglages de la même modification.
+        patch: SettingsPatch,
+        /// Changement de préférence pour la référence exacte du skill.
+        binding: Box<crate::ModelSelectionBindingChange>,
+    },
     /// Met à jour la politique d'isolation (`SetPolicy` : `standard` ou `strict`).
     SetPolicy {
         /// Portée de politique.
@@ -1309,6 +1322,21 @@ pub(crate) fn tx_commit_command(
         CommandMutation::PrepareProviderServiceLaunch { .. }
     )
     .then(|| format!("provider-service-launch:{}", req.envelope.aggregate_id));
+    let model_selection_result = if let CommandMutation::SetSettingsWithModelSelectionBinding {
+        scope_kind,
+        scope_id,
+        ..
+    } = &req.mutation
+    {
+        Some(crate::model_selection_bindings::result_ref_tx(
+            tx,
+            *scope_kind,
+            scope_id,
+            receipt_id,
+        )?)
+    } else {
+        None
+    };
     let receipt = CommandReceipt {
         receipt_id,
         command_id: req.envelope.command_id,
@@ -1326,6 +1354,7 @@ pub(crate) fn tx_commit_command(
             .or_else(|| reserved_backup.map(|id| format!("backup:{id}")))
             .or_else(|| prepared_probe.map(|id| format!("provider-probe:{id}")))
             .or(service_launch_result)
+            .or(model_selection_result)
             .or(release_result)
             .or_else(|| {
                 if matches!(req.mutation, CommandMutation::SetProviderProfile { .. }) {
@@ -2333,6 +2362,13 @@ fn apply_command_mutation(
             scope_id,
             caller,
             patch,
+        }
+        | CommandMutation::SetSettingsWithModelSelectionBinding {
+            scope_kind,
+            scope_id,
+            caller,
+            patch,
+            ..
         } => {
             let project_id = if *scope_kind == SettingsScopeKind::Project {
                 Some(scope_id.parse::<ProjectId>()?)
@@ -2356,6 +2392,25 @@ fn apply_command_mutation(
                 patch,
                 config.id_generator.as_ref(),
             )?;
+            if let CommandMutation::SetSettingsWithModelSelectionBinding { binding, .. } = mutation
+            {
+                if &caller.actor_id != actor_id || envelope.command_type != "SetSettings" {
+                    return Err(StoreError::InvariantViolation(
+                        "model preference command identity diverges".to_owned(),
+                    ));
+                }
+                crate::model_selection_bindings::append_tx(
+                    tx,
+                    (*scope_kind, scope_id),
+                    crate::model_selection_bindings::BindingEdit {
+                        command: envelope,
+                        actor: actor_id,
+                        receipt_id,
+                    },
+                    binding,
+                    config.id_generator.as_ref(),
+                )?;
+            }
             let mut payload = Map::new();
             payload.insert(
                 "scope_kind".to_owned(),

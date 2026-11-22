@@ -17,6 +17,62 @@
     "payload"
   ],
   "$defs": {
+    "model_selection_scope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "owner_id"],
+      "properties": {
+        "kind": { "enum": ["global", "project", "repository"] },
+        "owner_id": { "type": ["null", "string"], "minLength": 1, "maxLength": 256 }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "kind": { "const": "global" } } },
+          "then": { "properties": { "owner_id": { "type": "null" } } },
+          "else": { "properties": { "owner_id": { "type": "string" } } }
+        },
+        {
+          "if": { "properties": { "kind": { "const": "project" } } },
+          "then": { "properties": { "owner_id": { "format": "uuid" } } }
+        }
+      ]
+    },
+    "model_selection_binding_change": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["operation", "configuration_scope", "skill_ref"],
+      "properties": {
+        "operation": { "enum": ["upsert", "remove"] },
+        "configuration_scope": { "$ref": "#/$defs/model_selection_scope" },
+        "skill_ref": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["skill_id", "skill_version", "skill_scope"],
+          "properties": {
+            "skill_id": {
+              "type": "string",
+              "pattern": "^[a-z0-9]+(?:[._-][a-z0-9]+)*$",
+              "maxLength": 128
+            },
+            "skill_version": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
+            "skill_scope": { "$ref": "#/$defs/model_selection_scope" }
+          }
+        },
+        "preferred_profile_ref": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["profile_id", "profile_version", "digest"],
+          "properties": {
+            "profile_id": { "type": "string", "format": "uuid" },
+            "profile_version": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
+            "digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" }
+          }
+        }
+      },
+      "if": { "properties": { "operation": { "const": "upsert" } } },
+      "then": { "required": ["preferred_profile_ref"] },
+      "else": { "properties": { "preferred_profile_ref": false } }
+    },
     "create_operational_run": {
       "type": "object",
       "additionalProperties": false,
@@ -753,6 +809,44 @@
           "payload": {
             "required": ["patch"],
             "properties": {
+              "patch": { "type": "object", "required": ["model_selection_binding"] }
+            }
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["scope_kind", "scope_id", "patch"],
+            "properties": {
+              "scope_kind": { "enum": ["user", "project"] },
+              "scope_id": { "type": "string", "minLength": 1 },
+              "patch": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "execution_pool": true,
+                  "retention_policy": true,
+                  "confirm_retention_shortening": true,
+                  "analyzer_paths": true,
+                  "terminal_runtime": { "$ref": "#/$defs/terminal_runtime_settings" },
+                  "model_selection_binding": { "$ref": "#/$defs/model_selection_binding_change" }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "command_type": { "const": "SetSettings" },
+          "payload": {
+            "required": ["patch"],
+            "properties": {
               "patch": { "type": "object", "required": ["terminal_runtime"] }
             }
           }
@@ -776,7 +870,8 @@
                   "retention_policy": true,
                   "confirm_retention_shortening": true,
                   "analyzer_paths": true,
-                  "terminal_runtime": { "$ref": "#/$defs/terminal_runtime_settings" }
+                  "terminal_runtime": { "$ref": "#/$defs/terminal_runtime_settings" },
+                  "model_selection_binding": { "$ref": "#/$defs/model_selection_binding_change" }
                 }
               }
             }

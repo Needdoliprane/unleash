@@ -323,6 +323,9 @@ pub struct SettingsRecord {
     pub pending_retention: Option<RetentionShorteningNotice>,
     /// Chemins d'analyseurs explicites (Q-13).
     pub analyzer_paths: Vec<AnalyzerPathConfig>,
+    /// Historique des préférences de modèle du scope, versions retirées comprises.
+    #[serde(default)]
+    pub model_selection_bindings: Vec<crate::ModelSelectionBinding>,
     /// Champs typés additionnels.
     pub extra_typed: Map<String, Value>,
     /// Date de dernière mise à jour.
@@ -787,6 +790,7 @@ fn parse_settings_row(
         Option<i64>,
         String,
         String,
+        String,
         i64,
         String,
     ),
@@ -798,6 +802,7 @@ fn parse_settings_row(
         pending_ret_s,
         pending_eff_opt,
         analyzers_s,
+        bindings_s,
         extra_s,
         updated_at,
         updated_by_actor,
@@ -831,6 +836,7 @@ fn parse_settings_row(
         retention_policy,
         pending_retention,
         analyzer_paths,
+        model_selection_bindings: serde_json::from_str(&bindings_s)?,
         extra_typed,
         updated_at_ms: TimestampMs::new(updated_at),
         updated_by_actor,
@@ -855,13 +861,15 @@ pub(crate) fn read_settings_conn(
         Option<i64>,
         String,
         String,
+        String,
         i64,
         String,
     )> = conn
         .query_row(
             "SELECT revision, execution_pool_json, retention_policy_json,
                     pending_retention_policy_json, pending_effective_at_ms,
-                    analyzer_paths_json, extra_typed_json, updated_at_ms, updated_by_actor
+                    analyzer_paths_json, model_selection_bindings_json, extra_typed_json,
+                    updated_at_ms, updated_by_actor
              FROM settings WHERE scope_kind = ?1 AND scope_id = ?2",
             rusqlite::params![scope_kind.as_str(), scope_id],
             |r| {
@@ -875,6 +883,7 @@ pub(crate) fn read_settings_conn(
                     r.get(6)?,
                     r.get(7)?,
                     r.get(8)?,
+                    r.get(9)?,
                 ))
             },
         )
@@ -891,6 +900,7 @@ pub(crate) fn read_settings_conn(
             retention_policy: RetentionPolicySettings::default(),
             pending_retention: None,
             analyzer_paths: vec![],
+            model_selection_bindings: vec![],
             extra_typed: Map::new(),
             updated_at_ms: TimestampMs::new(0),
             updated_by_actor: "system".to_owned(),

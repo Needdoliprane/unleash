@@ -1689,7 +1689,9 @@ async fn prepare_command_request(
                 &cmd,
             )
             .await?
-                && let CommandMutation::SetSettings { patch, .. } = &mut prepared.req.mutation
+                && let CommandMutation::SetSettings { patch, .. }
+                | CommandMutation::SetSettingsWithModelSelectionBinding { patch, .. } =
+                    &mut prepared.req.mutation
             {
                 patch.extra_typed.get_or_insert_with(Map::new).insert(
                     "__terminal_prepared".into(),
@@ -2141,16 +2143,36 @@ fn prepare_admin_command(
                     }) => {}
                 _ => return Err(invalid()),
             }
-            let patch = strict_settings_patch(payload.patch).ok_or_else(invalid)?;
-            (
-                AggregateKind::Settings,
+            let mut patch = payload.patch;
+            let fields = patch.as_object_mut().ok_or_else(invalid)?;
+            let binding: Option<unleash_store::ModelSelectionBindingChange> = fields
+                .remove("model_selection_binding")
+                .map(serde_json::from_value)
+                .transpose()
+                .map_err(|_| invalid())?;
+            if binding.is_some() {
+                fields
+                    .entry("confirm_retention_shortening")
+                    .or_insert(Value::Bool(false));
+            }
+            let patch = strict_settings_patch(patch).ok_or_else(invalid)?;
+            let mutation = if let Some(binding) = binding {
+                CommandMutation::SetSettingsWithModelSelectionBinding {
+                    scope_kind: payload.scope_kind,
+                    scope_id: payload.scope_id,
+                    caller,
+                    patch,
+                    binding: Box::new(binding),
+                }
+            } else {
                 CommandMutation::SetSettings {
                     scope_kind: payload.scope_kind,
                     scope_id: payload.scope_id,
                     caller,
                     patch,
-                },
-            )
+                }
+            };
+            (AggregateKind::Settings, mutation)
         }
         "SetPolicy" => prepare_policy_mutation(&cmd, raw, caller, state.authority_generation)?,
         "ConfigureGuard" => prepare_guard_mutation(state, &cmd, raw, caller)?,

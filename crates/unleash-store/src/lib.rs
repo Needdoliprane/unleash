@@ -26,6 +26,7 @@ mod invocation_projection;
 pub mod leases;
 pub mod migrations;
 mod mission_scope;
+mod model_selection_bindings;
 pub mod objects;
 pub mod policies_secrets;
 pub mod projects_settings;
@@ -102,6 +103,7 @@ pub use invocation_projection::{InvocationAttemptProjection, InvocationProjectio
 pub use leases::{AcquireLeaseRequest, FenceAssertion, LeaseState, ResourceLeaseRecord};
 pub use migrations::{CURRENT_SCHEMA_VERSION, MigrationRecord, MigrationReport, MigrationState};
 pub use mission_scope::PreparedMissionScope;
+pub use model_selection_bindings::{ModelSelectionBinding, ModelSelectionBindingChange};
 pub use objects::{
     DeletionIntent, ObjectReconciliationReport, ObjectRecordView, ObjectState, PinKind, PinState,
     PrepareObjectDeletionRequest, PrepareObjectRequest, PreparedObjectHandle,

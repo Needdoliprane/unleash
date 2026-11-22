@@ -56,6 +56,42 @@ fn ipc_command_fixture() -> String {
         .expect("Lecture fixture ipc-command.json")
 }
 
+// T-F012-002 — Seul le patch fermé et versionné est accepté sur le fil.
+#[test]
+fn validates_the_exact_skill_model_preference_patch() {
+    let validator = build_validator("ipc-command.schema.json");
+    let upsert: Value = serde_json::from_str(include_str!(
+        "../../../.claude/examples/ipc-set-model-selection-binding.json"
+    ))
+    .unwrap();
+    let binding_path = "/payload/patch/model_selection_binding";
+    let mut remove = upsert.clone();
+    let removal = remove.pointer_mut(binding_path).unwrap();
+    removal["operation"] = json!("remove");
+    removal
+        .as_object_mut()
+        .unwrap()
+        .remove("preferred_profile_ref");
+    assert!(validator.is_valid(&upsert));
+    assert!(validator.is_valid(&remove));
+
+    for (field, value) in [
+        ("principal_id", json!("caller")),
+        ("operation", json!("replace")),
+        (
+            "preferred_profile_ref",
+            json!({"profile_id": upsert["aggregate_id"]}),
+        ),
+    ] {
+        let mut invalid = upsert.clone();
+        invalid.pointer_mut(binding_path).unwrap()[field] = value;
+        assert!(!validator.is_valid(&invalid), "accepted {field}");
+    }
+    remove.pointer_mut(binding_path).unwrap()["preferred_profile_ref"] =
+        upsert.pointer(binding_path).unwrap()["preferred_profile_ref"].clone();
+    assert!(!validator.is_valid(&remove));
+}
+
 // REQ-AGENT-002: la provenance du bundle est résolue par le serveur.
 #[test]
 fn test_validate_assign_task_payload_schema() {
