@@ -63,6 +63,16 @@ export function profilePage(value: unknown) {
 
 export type ProviderProfileRow = ReturnType<typeof profilePage>["profiles"][number];
 
+function inventoryModelNames(value: unknown): string[] {
+    return list(record(value).models).map((model) => {
+        const { name } = record(model);
+        if (typeof name !== "string") {
+            throw new Error("Nom de modèle IPC illisible");
+        }
+        return name;
+    });
+}
+
 export function profileDetail(value: unknown) {
     const fields = record(value);
     return {
@@ -71,12 +81,18 @@ export function profileDetail(value: unknown) {
         qualification: text(fields.qualification),
         observations: list(fields.observations).map((item) => {
             const observation = record(item);
+            const phase = text(observation.phase);
+            const status = text(observation.status);
             return {
                 id: text(observation.probe_id),
-                phase: text(observation.phase),
-                status: text(observation.status),
+                phase,
+                status,
                 resultRef: text(observation.result_ref),
                 observedAt: new Date(number(observation.observed_at_ms)).toISOString(),
+                modelNames:
+                    phase === "inventory" && status === "inventory_observed"
+                        ? inventoryModelNames(observation.inventory)
+                        : null,
             };
         }),
     };

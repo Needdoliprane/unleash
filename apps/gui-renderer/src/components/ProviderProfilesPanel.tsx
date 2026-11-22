@@ -92,6 +92,52 @@ function observationLabel(phase: string, status: string) {
         : `${PHASE_LABELS.get(phase) ?? phase} · ${status}`;
 }
 
+const MODELS_PER_PAGE = 25;
+
+function InventoryModels({ names }: { names: string[] }) {
+    const [page, setPage] = useState(0);
+    if (names.length === 0) {
+        return <p className="provider-inventory">Aucun modèle dans cet inventaire.</p>;
+    }
+
+    const start = page * MODELS_PER_PAGE;
+    const pageCount = Math.ceil(names.length / MODELS_PER_PAGE);
+    return (
+        <div className="provider-inventory">
+            {pageCount > 1 ? (
+                <div className="provider-inventory-pages">
+                    <Button
+                        className="control-button"
+                        isDisabled={page === 0}
+                        onPress={() => {
+                            setPage(page - 1);
+                        }}
+                    >
+                        Modèles précédents
+                    </Button>
+                    <Button
+                        className="control-button"
+                        isDisabled={page + 1 === pageCount}
+                        onPress={() => {
+                            setPage(page + 1);
+                        }}
+                    >
+                        Modèles suivants
+                    </Button>
+                    <span role="status">
+                        Page {page + 1} sur {pageCount}
+                    </span>
+                </div>
+            ) : null}
+            <ul aria-label="Modèles observés">
+                {names.slice(start, start + MODELS_PER_PAGE).map((name, index) => (
+                    <li key={start + index}>{name.trim() === "" ? "Nom non renseigné" : name}</li>
+                ))}
+            </ul>
+        </div>
+    );
+}
+
 type Verification =
     | { state: "submitting" | "refused" }
     | { state: "retryable"; command: GuiCommandInput }
@@ -269,14 +315,23 @@ function SelectedProfile({
                         <p>Aucune observation enregistrée pour cette version.</p>
                     ) : (
                         <ul className="provider-observations">
-                            {read.data.observations.map(({ id, phase, status, observedAt }) => (
-                                <li key={id}>
-                                    <span>{observationLabel(phase, status)}</span>
-                                    <time dateTime={observedAt}>
-                                        {DATE_FORMAT.format(new Date(observedAt))}
-                                    </time>
-                                </li>
-                            ))}
+                            {read.data.observations.map(
+                                ({ id, phase, status, observedAt, modelNames }) => (
+                                    <li key={id}>
+                                        <span>
+                                            {modelNames === null
+                                                ? observationLabel(phase, status)
+                                                : "Inventaire observé"}
+                                        </span>
+                                        <time dateTime={observedAt}>
+                                            {DATE_FORMAT.format(new Date(observedAt))}
+                                        </time>
+                                        {modelNames === null ? null : (
+                                            <InventoryModels names={modelNames} />
+                                        )}
+                                    </li>
+                                ),
+                            )}
                         </ul>
                     )}
                 </>

@@ -682,3 +682,121 @@ describe("T-F012-018 — lecture des profils dans Settings", () => {
         expect(screen.queryByRole("alert")).not.toBeInTheDocument();
     });
 });
+
+describe("T-F012-018 — lecture de l’inventaire observé", () => {
+    const ollamaProfile = { ...initialProfile, provider_kind: "ollama" };
+
+    function settingsInventory(models: string[] | null, version = ollamaProfile.profile_version) {
+        const probeId = "00000000-0000-4000-8000-000000000041";
+        return fixture((operation) => {
+            switch (operation) {
+                case "op_list_projects":
+                    return Promise.resolve(response([project]));
+                case "op_list_provider_profiles":
+                    return Promise.resolve(
+                        response({ profiles: [ollamaProfile], next_after_profile_id: null }),
+                    );
+                case "op_get_provider_profile":
+                    return Promise.resolve(
+                        response({
+                            ...ollamaProfile,
+                            profile_version: version,
+                            configuration_receipt_id: configurationReceiptId,
+                            observations: [
+                                {
+                                    phase: "inventory",
+                                    status: "inventory_observed",
+                                    observed_at_ms: 1795348800000,
+                                    probe_id: probeId,
+                                    result_ref: `provider-probe:${probeId}`,
+                                    inventory: {
+                                        fact_ref: {
+                                            evidence_id: "00000000-0000-4000-8000-000000000042",
+                                            object_hash: "cd".repeat(32),
+                                        },
+                                        inventory_digest: "ef".repeat(32),
+                                        models:
+                                            models?.map((name) => ({
+                                                name,
+                                                model: null,
+                                                modified_at: null,
+                                                size: null,
+                                                digest: null,
+                                                details: null,
+                                            })) ?? null,
+                                    },
+                                },
+                            ],
+                        }),
+                    );
+                default:
+                    throw new Error(`Appel inattendu à ${operation}`);
+            }
+        });
+    }
+
+    it("affiche les modèles de la version projet et les parcourt sans nouvel appel IPC", async () => {
+        const first = "<modele-observe:1>";
+        const last = "dernier-modèle:26";
+        const { invoke, user } = settingsInventory([
+            first,
+            ...Array.from({ length: 24 }, (_, index) => `modèle:${String(index + 2)}`),
+            last,
+        ]);
+        await user.click(screen.getByRole("tab", { name: /Settings/ }));
+        await screen.findByRole("option", { name: /Atlas/ });
+        await user.selectOptions(
+            screen.getByRole("combobox", { name: "Portée" }),
+            project.project_id,
+        );
+        await user.click(await screen.findByRole("button", { name: /first-v2/ }));
+        expect(await screen.findByText("Inventaire observé")).toBeVisible();
+        expect(screen.getByText(first)).toBeVisible();
+        expect(screen.queryByText(last)).not.toBeInTheDocument();
+        expect(screen.getAllByText("Qualification requise")).toHaveLength(2);
+        expect(invoke).toHaveBeenLastCalledWith("op_get_provider_profile", {
+            input: {
+                project_id: project.project_id,
+                payload: {
+                    profile_id: ollamaProfile.profile_id,
+                    profile_version: ollamaProfile.profile_version,
+                },
+            },
+        });
+        expect(invoke.mock.calls.every(([operation]) => !operation.startsWith("op_test"))).toBe(
+            true,
+        );
+        const reads = invoke.mock.calls.length;
+        await user.click(screen.getByRole("button", { name: "Modèles suivants" }));
+        expect(screen.getByText(last)).toBeVisible();
+        expect(screen.queryByText(first)).not.toBeInTheDocument();
+        await user.click(screen.getByRole("button", { name: "Modèles précédents" }));
+        expect(screen.getByText(first)).toBeVisible();
+        expect(invoke).toHaveBeenCalledTimes(reads);
+    });
+
+    it("affiche une liste vide constatée par le daemon", async () => {
+        const { user } = settingsInventory([]);
+        await user.click(screen.getByRole("tab", { name: /Settings/ }));
+        await user.click(await screen.findByRole("button", { name: /first-v2/ }));
+        expect(await screen.findByText("Aucun modèle dans cet inventaire.")).toBeVisible();
+    });
+
+    it.each(["illisible", "d’une autre version"])(
+        "refuse un inventaire %s sans le présenter comme vide",
+        async (variant) => {
+            const model = "autre-version:latest";
+            const { user } =
+                variant === "illisible"
+                    ? settingsInventory(null)
+                    : settingsInventory([model], ollamaProfile.profile_version + 1);
+            await user.click(screen.getByRole("tab", { name: /Settings/ }));
+            await user.click(await screen.findByRole("button", { name: /first-v2/ }));
+            expect(await screen.findByRole("alert")).toHaveTextContent(
+                "Impossible de lire cette version.",
+            );
+            expect(screen.queryByText("Aucun modèle dans cet inventaire.")).not.toBeInTheDocument();
+            expect(screen.queryByText(model)).not.toBeInTheDocument();
+        },
+    );
+});
