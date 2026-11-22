@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Button } from "react-aria-components";
 import {
     profileDetail,
@@ -6,7 +6,7 @@ import {
     projectChoices,
     type ProviderProfileRow,
 } from "../ipc/providerProfileViews";
-import type { GuiQueryInput, OperationName, TransportAdapter } from "../ipc/types";
+import type { GuiCommandInput, GuiQueryInput, OperationName, TransportAdapter } from "../ipc/types";
 
 type Reading<T> = { state: "loading" } | { state: "error" } | { state: "ready"; data: T };
 
@@ -90,28 +90,193 @@ function observationLabel(phase: string, status: string) {
         : `${PHASE_LABELS.get(phase) ?? phase} · ${status}`;
 }
 
+type Verification =
+    | { state: "submitting" | "refused" }
+    | { state: "retryable"; command: GuiCommandInput }
+    | { state: "observing"; probeId: string; resultRef: string | null };
+
+function newUuid(): string {
+    const bytes = crypto.getRandomValues(new Uint8Array(16));
+    const view = new DataView(bytes.buffer);
+    view.setUint8(6, (view.getUint8(6) & 0x0f) | 0x40);
+    view.setUint8(8, (view.getUint8(8) & 0x3f) | 0x80);
+    const hex = Array.from(bytes, (value) => value.toString(16).padStart(2, "0")).join("");
+    return [
+        hex.slice(0, 8),
+        hex.slice(8, 12),
+        hex.slice(12, 16),
+        hex.slice(16, 20),
+        hex.slice(20),
+    ].join("-");
+}
+
 function SelectedProfile({
     profile,
-    read,
+    scope,
+    transport,
 }: {
     profile: ProviderProfileRow;
-    read: Reading<ReturnType<typeof profileDetail>>;
+    scope: string | null;
+    transport: TransportAdapter;
 }) {
+    const [attempt, setAttempt] = useState(0);
+    const [verification, setVerification] = useState<Verification | null>(null);
+    const submitting = useRef(false);
+    const request = useMemo<GuiQueryInput>(
+        () => ({
+            project_id: scope,
+            payload: { profile_id: profile.id, profile_version: profile.version },
+        }),
+        [profile.id, profile.version, scope],
+    );
+    const detail = useSettingsRead(
+        transport,
+        "GetProviderProfile",
+        request,
+        profileDetail,
+        attempt,
+    );
+    const read: Reading<ReturnType<typeof profileDetail>> =
+        detail.state === "ready" &&
+        (detail.data.id !== profile.id ||
+            detail.data.version !== profile.version ||
+            detail.data.reference !== profile.reference)
+            ? { state: "error" }
+            : detail;
+
+    const observed =
+        verification?.state === "observing" &&
+        read.state === "ready" &&
+        read.data.observations.some(
+            (item) =>
+                item.id === verification.probeId &&
+                item.phase === "validate_config" &&
+                item.status === "validated" &&
+                (verification.resultRef === null || item.resultRef === verification.resultRef),
+        );
+    const needsRead = verification?.state === "observing" && !observed;
+    const checking =
+        verification?.state === "submitting" || (needsRead && read.state === "loading");
+
+    function observe(probeId: string, resultRef: string | null) {
+        setVerification({ state: "observing", probeId, resultRef });
+        setAttempt((value) => value + 1);
+    }
+
+    async function verifyConfiguration() {
+        if (checking || submitting.current) return;
+        if (needsRead) {
+            setAttempt((value) => value + 1);
+            return;
+        }
+        if (read.state !== "ready") return;
+
+        const command: GuiCommandInput =
+            verification?.state === "retryable"
+                ? verification.command
+                : {
+                      project_id: scope,
+                      aggregate_id: newUuid(),
+                      command_id: newUuid(),
+                      expected_revision: 0,
+                      payload: {
+                          profile_id: read.data.id,
+                          profile_version: read.data.version,
+                          phase: "validate_config",
+                          capability_set: [],
+                          limits: {
+                              timeout_ms: 1000,
+                              max_calls: 0,
+                              max_output_tokens: 0,
+                              max_cost_usd_micros: 0,
+                          },
+                          locality: "local_only",
+                          mandate_ref: read.data.configurationReceiptId,
+                      },
+                  };
+
+        submitting.current = true;
+        setVerification({ state: "submitting" });
+        try {
+            const receipt = await transport.submitCommand("TestProviderProfile", command);
+            const matches =
+                receipt.command_id === command.command_id &&
+                receipt.aggregate_id === command.aggregate_id;
+            if (matches && (receipt.state === "blocked" || receipt.state === "rejected")) {
+                setVerification({ state: "refused" });
+            } else {
+                observe(
+                    command.aggregate_id,
+                    matches && receipt.state === "completed" ? (receipt.result_ref ?? null) : null,
+                );
+            }
+        } catch (error) {
+            const retryClass =
+                typeof error === "object" && error !== null && "retry_class" in error
+                    ? error.retry_class
+                    : null;
+            if (retryClass === "after_backoff") {
+                setVerification({ state: "retryable", command });
+            } else if (retryClass === "never") {
+                setVerification({ state: "refused" });
+            } else {
+                observe(command.aggregate_id, null);
+            }
+        } finally {
+            submitting.current = false;
+        }
+    }
+
+    const actionLabel = needsRead
+        ? "Relire le résultat"
+        : verification?.state === "retryable"
+          ? "Reprendre la vérification"
+          : "Vérifier la configuration";
+
     return (
         <section className="provider-detail" aria-labelledby="provider-detail-title">
             <h3 id="provider-detail-title">{profile.model}</h3>
             {read.state === "loading" ? <p role="status">Lecture du détail…</p> : null}
-            {read.state === "error" ? <p role="alert">Impossible de lire cette version.</p> : null}
+            {read.state === "error" && !needsRead ? (
+                <p role="alert">Impossible de lire cette version.</p>
+            ) : null}
+            {read.state === "ready" ? (
+                <dl className="provider-detail-fields">
+                    <dt>Version configurée</dt>
+                    <dd>{read.data.version}</dd>
+                    <dt>Référence de version</dt>
+                    <dd className="mono">{read.data.reference}</dd>
+                    <dt>Qualification</dt>
+                    <dd>{qualificationLabel(read.data.qualification)}</dd>
+                </dl>
+            ) : null}
+            <div className="provider-validation">
+                <Button
+                    className="control-button"
+                    isDisabled={!needsRead && read.state !== "ready"}
+                    isPending={checking}
+                    onPress={() => {
+                        void verifyConfiguration();
+                    }}
+                >
+                    {actionLabel}
+                </Button>
+                {verification?.state === "submitting" ? (
+                    <p role="status">Vérification en cours…</p>
+                ) : null}
+                {verification?.state === "retryable" ? (
+                    <p role="alert">Vérification non confirmée.</p>
+                ) : null}
+                {verification?.state === "refused" ? (
+                    <p role="alert">Vérification refusée.</p>
+                ) : null}
+                {needsRead && !checking ? (
+                    <p role="alert">Résultat de cette vérification indisponible.</p>
+                ) : null}
+                {observed ? <p role="status">Vérification enregistrée.</p> : null}
+            </div>
             {read.state === "ready" ? (
                 <>
-                    <dl className="provider-detail-fields">
-                        <dt>Version configurée</dt>
-                        <dd>{read.data.version}</dd>
-                        <dt>Référence de version</dt>
-                        <dd className="mono">{read.data.reference}</dd>
-                        <dt>Qualification</dt>
-                        <dd>{qualificationLabel(read.data.qualification)}</dd>
-                    </dl>
                     <h4>Observations enregistrées</h4>
                     {read.data.observations.length === 0 ? (
                         <p>Aucune observation enregistrée pour cette version.</p>
@@ -142,16 +307,6 @@ export function ProviderProfilesPanel({ transport }: { transport: TransportAdapt
         () => ({ project_id: scope, payload: { limit: 50, after_profile_id: cursor } }),
         [scope, cursor],
     );
-    const detailRequest = useMemo(
-        () =>
-            selected === null
-                ? null
-                : {
-                      project_id: scope,
-                      payload: { profile_id: selected.id, profile_version: selected.version },
-                  },
-        [scope, selected],
-    );
     const projects = useSettingsRead(
         transport,
         "ListProjects",
@@ -166,13 +321,6 @@ export function ProviderProfilesPanel({ transport }: { transport: TransportAdapt
         profilePage,
         attempt,
     );
-    const detail = useSettingsRead(
-        transport,
-        "GetProviderProfile",
-        detailRequest,
-        profileDetail,
-        attempt,
-    );
 
     function moveToPage(after: string | null) {
         setCursor(after);
@@ -184,12 +332,6 @@ export function ProviderProfilesPanel({ transport }: { transport: TransportAdapt
         setAttempt((value) => value + 1);
     }
 
-    const detailMatches =
-        detail.state !== "ready" ||
-        (selected !== null &&
-            detail.data.id === selected.id &&
-            detail.data.version === selected.version &&
-            detail.data.reference === selected.reference);
     const showCurrentScope =
         scope !== null &&
         (projects.state !== "ready" || !projects.data.some(({ id }) => id === scope));
@@ -295,8 +437,10 @@ export function ProviderProfilesPanel({ transport }: { transport: TransportAdapt
                 </div>
                 {selected ? (
                     <SelectedProfile
+                        key={selected.reference}
                         profile={selected}
-                        read={detailMatches ? detail : { state: "error" }}
+                        scope={scope}
+                        transport={transport}
                     />
                 ) : null}
             </div>

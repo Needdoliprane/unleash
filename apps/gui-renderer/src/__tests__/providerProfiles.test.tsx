@@ -3,7 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import listResponse from "../../../../.claude/examples/ipc-provider-profile-list-response.json";
 import { App } from "../App";
-import type { GuiQueryInput, QueryResponse } from "../ipc/types";
+import type { CommandReceipt, GuiCommandInput, GuiQueryInput, QueryResponse } from "../ipc/types";
 
 const [initialProfile] = listResponse.result.profiles;
 if (initialProfile === undefined) {
@@ -14,24 +14,58 @@ const project = {
     name: "Atlas",
 };
 
-type Invoke = (command: string, args: { input: GuiQueryInput }) => Promise<QueryResponse>;
+const configurationReceiptId = "00000000-0000-4000-8000-000000000020";
+const validationResultRef = `sha256:${"ab".repeat(32)}`;
+const freshUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
+
+type Invoke = (
+    command: string,
+    args: { input: GuiQueryInput | GuiCommandInput },
+) => Promise<QueryResponse | CommandReceipt>;
 
 function response(result: unknown): QueryResponse {
     return { ...listResponse, result };
 }
 
-function detailResponse(): QueryResponse {
+function observation(probeId: string) {
+    return {
+        phase: "validate_config",
+        status: "validated",
+        observed_at_ms: 1795348800000,
+        probe_id: probeId,
+        result_ref: validationResultRef,
+    };
+}
+
+function detailResponse(
+    observations = [observation("00000000-0000-4000-8000-000000000010")],
+): QueryResponse {
     return response({
         ...initialProfile,
-        observations: [
-            {
-                phase: "validate_config",
-                status: "validated",
-                observed_at_ms: 1795348800000,
-                probe_id: "00000000-0000-4000-8000-000000000010",
-            },
-        ],
+        configuration_receipt_id: configurationReceiptId,
+        observations,
     });
+}
+
+function submittedInput(input: GuiQueryInput | GuiCommandInput): GuiCommandInput {
+    if (!("command_id" in input)) {
+        throw new Error("Le contrôle de configuration doit être une commande IPC.");
+    }
+    return input;
+}
+
+function completedReceipt(input: GuiCommandInput): CommandReceipt {
+    return {
+        receipt_id: "00000000-0000-4000-8000-000000000021",
+        command_id: input.command_id,
+        aggregate_id: input.aggregate_id,
+        accepted_at: "2026-11-22T12:00:00Z",
+        new_revision: 1,
+        operation_id: null,
+        state: "completed",
+        event_cursor: listResponse.watermark,
+        result_ref: validationResultRef,
+    };
 }
 
 function fixture(handler: Invoke) {
@@ -44,6 +78,222 @@ function fixture(handler: Invoke) {
 
 afterEach(() => {
     vi.unstubAllGlobals();
+});
+
+describe("T-F012-018 — vérification explicite de la configuration", () => {
+    it("soumet le contrôle local de la version projet et relit son observation", async () => {
+        let submitted: GuiCommandInput | null = null;
+        const { invoke, user } = fixture((command, { input }) => {
+            switch (command) {
+                case "op_list_projects":
+                    return Promise.resolve(response([project]));
+                case "op_list_provider_profiles":
+                    return Promise.resolve(
+                        response({ ...listResponse.result, next_after_profile_id: null }),
+                    );
+                case "op_get_provider_profile":
+                    return Promise.resolve(
+                        detailResponse(
+                            submitted === null ? [] : [observation(submitted.aggregate_id)],
+                        ),
+                    );
+                case "op_test_provider_profile":
+                    submitted = submittedInput(input);
+                    return Promise.resolve(completedReceipt(submitted));
+                default:
+                    throw new Error(`Appel inattendu à ${command}`);
+            }
+        });
+
+        await user.click(screen.getByRole("tab", { name: /Settings/ }));
+        await user.selectOptions(
+            screen.getByRole("combobox", { name: "Portée" }),
+            project.project_id,
+        );
+        await user.click(await screen.findByRole("button", { name: /first-v2/ }));
+        expect(
+            await screen.findByText("Aucune observation enregistrée pour cette version."),
+        ).toBeVisible();
+        expect(invoke.mock.calls.some(([command]) => command === "op_test_provider_profile")).toBe(
+            false,
+        );
+
+        const check = screen.getByRole("button", { name: "Vérifier la configuration" });
+        await user.tab();
+        expect(check).toHaveFocus();
+        await user.keyboard("{Enter}");
+        expect(await screen.findByText("Configuration validée")).toBeVisible();
+        expect(screen.getAllByText("Qualification requise")).toHaveLength(2);
+        expect(check).toHaveFocus();
+
+        const requests = invoke.mock.calls.filter(
+            ([command]) => command === "op_test_provider_profile",
+        );
+        expect(requests).toHaveLength(1);
+        const [call] = requests;
+        if (call === undefined) throw new Error("Le contrôle n’a pas été transmis.");
+        const issued = submittedInput(call[1].input);
+        const { aggregate_id: probeId, command_id: commandId, ...selection } = issued;
+        expect(probeId).toMatch(freshUuid);
+        expect(commandId).toMatch(freshUuid);
+        expect(commandId).not.toBe(probeId);
+        expect(selection).toEqual({
+            project_id: project.project_id,
+            expected_revision: 0,
+            payload: {
+                profile_id: initialProfile.profile_id,
+                profile_version: initialProfile.profile_version,
+                phase: "validate_config",
+                capability_set: [],
+                limits: {
+                    timeout_ms: 1000,
+                    max_calls: 0,
+                    max_output_tokens: 0,
+                    max_cost_usd_micros: 0,
+                },
+                locality: "local_only",
+                mandate_ref: configurationReceiptId,
+            },
+        });
+        const detail = {
+            project_id: project.project_id,
+            payload: {
+                profile_id: initialProfile.profile_id,
+                profile_version: initialProfile.profile_version,
+            },
+        };
+        expect(invoke.mock.calls.slice(-3)).toEqual([
+            ["op_get_provider_profile", { input: detail }],
+            ["op_test_provider_profile", { input: issued }],
+            ["op_get_provider_profile", { input: detail }],
+        ]);
+    });
+
+    it("conserve les identifiants du contrôle pour une reprise autorisée", async () => {
+        let submissions = 0;
+        let committed: GuiCommandInput | null = null;
+        const { invoke, user } = fixture((command, { input }) => {
+            switch (command) {
+                case "op_list_projects":
+                    return Promise.resolve(response([]));
+                case "op_list_provider_profiles":
+                    return Promise.resolve(listResponse);
+                case "op_get_provider_profile":
+                    return Promise.resolve(
+                        detailResponse(
+                            committed === null ? [] : [observation(committed.aggregate_id)],
+                        ),
+                    );
+                case "op_test_provider_profile":
+                    submissions += 1;
+                    if (submissions === 1) {
+                        return Promise.reject(
+                            Object.assign(new Error("Réessai après attente"), {
+                                code: "ResourceBusy",
+                                reason_code: null,
+                                retry_class: "after_backoff",
+                            }),
+                        );
+                    }
+                    committed = submittedInput(input);
+                    return Promise.resolve(completedReceipt(committed));
+                default:
+                    throw new Error(`Appel inattendu à ${command}`);
+            }
+        });
+
+        await user.click(screen.getByRole("tab", { name: /Settings/ }));
+        await user.click(await screen.findByRole("button", { name: /first-v2/ }));
+        await screen.findByText("Aucune observation enregistrée pour cette version.");
+        await user.click(screen.getByRole("button", { name: "Vérifier la configuration" }));
+        expect(await screen.findByRole("alert")).toHaveTextContent("Vérification non confirmée.");
+        expect(screen.queryByText("Configuration validée")).not.toBeInTheDocument();
+        expect(submissions).toBe(1);
+
+        await user.click(screen.getByRole("button", { name: "Reprendre la vérification" }));
+        expect(await screen.findByText("Configuration validée")).toBeVisible();
+        const requests = invoke.mock.calls.filter(
+            ([command]) => command === "op_test_provider_profile",
+        );
+        expect(requests).toHaveLength(2);
+        expect(requests[0]).toEqual(requests[1]);
+    });
+
+    it("retrouve le contrôle enregistré quand son reçu n’atteint pas le renderer", async () => {
+        let committed: GuiCommandInput | null = null;
+        const { invoke, user } = fixture((command, { input }) => {
+            switch (command) {
+                case "op_list_projects":
+                    return Promise.resolve(response([]));
+                case "op_list_provider_profiles":
+                    return Promise.resolve(listResponse);
+                case "op_get_provider_profile":
+                    return Promise.resolve(
+                        detailResponse(
+                            committed === null ? [] : [observation(committed.aggregate_id)],
+                        ),
+                    );
+                case "op_test_provider_profile":
+                    committed = submittedInput(input);
+                    return Promise.reject(new Error("Réponse de la commande perdue"));
+                default:
+                    throw new Error(`Appel inattendu à ${command}`);
+            }
+        });
+
+        await user.click(screen.getByRole("tab", { name: /Settings/ }));
+        await user.click(await screen.findByRole("button", { name: /first-v2/ }));
+        await screen.findByText("Aucune observation enregistrée pour cette version.");
+        await user.click(screen.getByRole("button", { name: "Vérifier la configuration" }));
+        expect(await screen.findByText("Vérification enregistrée.")).toBeVisible();
+        expect(screen.getByText("Configuration validée")).toBeVisible();
+        expect(invoke.mock.calls.slice(-3).map(([command]) => command)).toEqual([
+            "op_get_provider_profile",
+            "op_test_provider_profile",
+            "op_get_provider_profile",
+        ]);
+    });
+
+    it("relit un résultat absent sans envoyer de nouveau contrôle", async () => {
+        let submitted: GuiCommandInput | null = null;
+        let detailsAfterValidation = 0;
+        const { invoke, user } = fixture((command, { input }) => {
+            switch (command) {
+                case "op_list_projects":
+                    return Promise.resolve(response([]));
+                case "op_list_provider_profiles":
+                    return Promise.resolve(listResponse);
+                case "op_get_provider_profile":
+                    if (submitted === null) return Promise.resolve(detailResponse([]));
+                    detailsAfterValidation += 1;
+                    return Promise.resolve(
+                        detailsAfterValidation === 1
+                            ? detailResponse()
+                            : detailResponse([observation(submitted.aggregate_id)]),
+                    );
+                case "op_test_provider_profile":
+                    submitted = submittedInput(input);
+                    return Promise.resolve(completedReceipt(submitted));
+                default:
+                    throw new Error(`Appel inattendu à ${command}`);
+            }
+        });
+
+        await user.click(screen.getByRole("tab", { name: /Settings/ }));
+        await user.click(await screen.findByRole("button", { name: /first-v2/ }));
+        await screen.findByText("Aucune observation enregistrée pour cette version.");
+        await user.click(screen.getByRole("button", { name: "Vérifier la configuration" }));
+        expect(await screen.findByRole("alert")).toHaveTextContent(
+            "Résultat de cette vérification indisponible.",
+        );
+        await user.click(screen.getByRole("button", { name: "Relire le résultat" }));
+        await screen.findByRole("button", { name: "Vérifier la configuration" });
+        expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+        expect(detailsAfterValidation).toBe(2);
+        expect(
+            invoke.mock.calls.filter(([command]) => command === "op_test_provider_profile"),
+        ).toHaveLength(1);
+    });
 });
 
 describe("T-F012-018 — lecture des profils dans Settings", () => {
