@@ -14,7 +14,7 @@
     "cache/"
   ],
   "hash_algorithm": "sha256",
-  "source_tree_digest": "3d0c329eb4b24ff34e53a2d21663b003d1ab1ec64b909b7a3eec00254a2310b4",
+  "source_tree_digest": "c577bb3562206124e37635db38d85d2c3b777f1430c198516a10909952569dd0",
   "files": [
     {
       "path": "INDEX.md",
@@ -396,8 +396,8 @@
     },
     {
       "path": "architecture/sqlite-design.md",
-      "sha256": "e39a16d5f1c64f6e9439fa8598409e2ce43d38de9642d9270d83bbcb2318f1ef",
-      "bytes": 77921,
+      "sha256": "e5a82049e94bb33dc06fdacdd863d7e5c90e6bd28abb0b6542d1eb31353ee444",
+      "bytes": 78735,
       "media_type": "text/markdown"
     },
     {
@@ -1566,8 +1566,8 @@
     },
     {
       "path": "features/F012-model-api-router/interfaces.md",
-      "sha256": "d35ba615e5fa6430f72d4c10ef8a7c976287aada00cdd983bb4861579766c7b9",
-      "bytes": 41636,
+      "sha256": "685b045767160538cb0adddefd3bca7ae06058e9c0e94fa27d312cb270b90d24",
+      "bytes": 41801,
       "media_type": "text/markdown"
     },
     {
