@@ -1,6 +1,6 @@
 import { type SubmitEvent, useCallback, useId, useMemo, useRef, useState } from "react";
 import { Button } from "react-aria-components";
-import { number, PROJECTS_REQUEST, projectChoices, record, text } from "../ipc/projections";
+import { list, number, PROJECTS_REQUEST, projectChoices, record, text } from "../ipc/projections";
 import type { GuiCommandInput, GuiQueryInput, TransportAdapter } from "../ipc/types";
 import { type Reading, useIpcRead } from "../ipc/useIpcRead";
 import { newUuid } from "../ipc/uuid";
@@ -212,11 +212,134 @@ function RunDetail({
     );
 }
 
+function runPage(value: unknown, projectId: string) {
+    const fields = record(value);
+    if (fields.project_id !== projectId || record(fields.coverage).status !== "complete") {
+        throw new Error("Page de runs hors de la portée demandée");
+    }
+    return {
+        nextCursor: fields.next_cursor === null ? null : text(fields.next_cursor),
+        items: list(fields.items).map((item) => {
+            const run = record(item);
+            const state = text(run.state);
+            return {
+                id: text(run.run_id),
+                version: text(run.workflow_version_id),
+                state: RUN_STATES.get(state) ?? state,
+            };
+        }),
+    };
+}
+
+function WorkflowRunList({
+    id,
+    projectId,
+    onOpen,
+    transport,
+}: {
+    id: string;
+    projectId: string;
+    onOpen: (runId: string) => void;
+    transport: TransportAdapter;
+}) {
+    const [cursor, setCursor] = useState<string | null>(null);
+    const [attempt, setAttempt] = useState(0);
+    const request = useMemo<GuiQueryInput>(
+        () => ({
+            project_id: projectId,
+            payload: cursor === null ? { page_size: 20 } : { page_size: 20, opaque_cursor: cursor },
+        }),
+        [cursor, projectId],
+    );
+    const decode = useCallback((value: unknown) => runPage(value, projectId), [projectId]);
+    const read = useIpcRead(transport, "ListRuns", request, decode, attempt);
+    const page = read.state === "ready" ? read.data : null;
+    const nextCursor = page?.nextCursor ?? null;
+    const expired = read.state === "error" && read.code === "ResyncRequired" && cursor !== null;
+
+    return (
+        <section className="workflow-run-list" id={id} aria-labelledby={`${id}-heading`}>
+            <h3 id={`${id}-heading`}>Runs du projet</h3>
+            {read.state === "loading" ? <p role="status">Lecture des runs…</p> : null}
+            {read.state === "error" ? (
+                <div>
+                    <p role="alert">
+                        {expired
+                            ? "La liste des runs doit être relue depuis le début."
+                            : "Impossible de lire les runs de ce projet."}
+                    </p>
+                    {expired ? null : (
+                        <Button
+                            className="control-button"
+                            onPress={() => {
+                                setAttempt((current) => current + 1);
+                            }}
+                        >
+                            Relire la page
+                        </Button>
+                    )}
+                </div>
+            ) : null}
+            {page?.items.length === 0 ? <p>Aucun run sur cette page.</p> : null}
+            {page && page.items.length > 0 ? (
+                <ul className="workflow-run-rows">
+                    {page.items.map((run) => (
+                        <li key={run.id}>
+                            <div className="workflow-run-row">
+                                <div className="workflow-run-row-text">
+                                    <strong>
+                                        <code>{run.version}</code>
+                                    </strong>
+                                    <span>{run.state}</span>
+                                    <code>{run.id}</code>
+                                </div>
+                                <Button
+                                    className="control-button"
+                                    aria-label={`Ouvrir le run ${run.id}`}
+                                    onPress={() => {
+                                        onOpen(run.id);
+                                    }}
+                                >
+                                    Ouvrir
+                                </Button>
+                            </div>
+                        </li>
+                    ))}
+                </ul>
+            ) : null}
+            <div className="workflow-run-actions" role="group" aria-label="Pages de runs">
+                <Button
+                    className="control-button"
+                    isDisabled={cursor === null}
+                    isPending={read.state === "loading"}
+                    onPress={() => {
+                        setCursor(null);
+                    }}
+                >
+                    Première page
+                </Button>
+                <Button
+                    className="control-button"
+                    isDisabled={nextCursor === null}
+                    isPending={read.state === "loading"}
+                    onPress={() => {
+                        setCursor(nextCursor);
+                    }}
+                >
+                    Page suivante
+                </Button>
+            </div>
+        </section>
+    );
+}
+
 export function WorkflowRunPanel({ transport }: { transport: TransportAdapter }) {
     const formId = useId();
+    const listId = `${formId}-runs`;
     const [projectId, setProjectId] = useState("");
     const [runId, setRunId] = useState("");
     const [target, setTarget] = useState<RunTarget | null>(null);
+    const [showList, setShowList] = useState(false);
     const [projectsAttempt, setProjectsAttempt] = useState(0);
     const projects = useIpcRead(
         transport,
@@ -236,6 +359,7 @@ export function WorkflowRunPanel({ transport }: { transport: TransportAdapter })
     const read = useIpcRead(transport, "GetRun", request, decode);
     const readingRun = target !== null && read.state === "loading";
     const hasProjects = projects.state === "ready" && projects.data.length > 0;
+    const listVisible = showList && projectId !== "";
 
     function submit(event: SubmitEvent<HTMLFormElement>) {
         event.preventDefault();
@@ -285,6 +409,18 @@ export function WorkflowRunPanel({ transport }: { transport: TransportAdapter })
                             ))}
                         </select>
                     </label>
+                    <Button
+                        className="control-button"
+                        type="button"
+                        aria-expanded={listVisible}
+                        {...(listVisible ? { "aria-controls": listId } : {})}
+                        isDisabled={projectId === ""}
+                        onPress={() => {
+                            setShowList((current) => !current);
+                        }}
+                    >
+                        {listVisible ? "Masquer la liste" : "Parcourir les runs"}
+                    </Button>
                     <label className="workflow-run-field" htmlFor={`${formId}-run`}>
                         Identifiant du run
                         <input
@@ -311,6 +447,18 @@ export function WorkflowRunPanel({ transport }: { transport: TransportAdapter })
                         Consulter le run
                     </Button>
                 </form>
+            ) : null}
+            {hasProjects && listVisible ? (
+                <WorkflowRunList
+                    key={projectId}
+                    id={listId}
+                    projectId={projectId}
+                    transport={transport}
+                    onOpen={(selectedRun) => {
+                        setRunId(selectedRun);
+                        setTarget({ projectId, runId: selectedRun });
+                    }}
+                />
             ) : null}
             <div aria-live="polite">
                 {readingRun ? <p>Lecture du run…</p> : null}

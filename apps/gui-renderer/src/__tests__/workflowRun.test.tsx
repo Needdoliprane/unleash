@@ -44,6 +44,32 @@ function response(result: unknown): QueryResponse {
     };
 }
 
+function runListPage(project: string, rows: (typeof run)[], nextCursor: string | null) {
+    return response({
+        project_id: project,
+        items: rows.map(
+            ({ run_id, mission_id, workflow_version_id, state, revision, purpose }) => ({
+                run_id,
+                mission_id,
+                workflow_version_id,
+                state,
+                revision,
+                purpose,
+            }),
+        ),
+        next_cursor: nextCursor,
+        coverage: { status: "complete" },
+    });
+}
+
+async function browseRuns(user: ReturnType<typeof userEvent.setup>) {
+    await user.click(screen.getByRole("tab", { name: /^Workflows/u }));
+    await screen.findByRole("option", { name: /^Atlas · /u });
+    await user.selectOptions(screen.getByRole("combobox", { name: "Projet" }), projectId);
+    await user.click(screen.getByRole("button", { name: "Parcourir les runs" }));
+    return within(await screen.findByRole("region", { name: "Runs du projet" }));
+}
+
 async function consultRun(user: ReturnType<typeof userEvent.setup>) {
     await user.click(screen.getByRole("tab", { name: /^Workflows/u }));
     await screen.findByRole("option", { name: /^Atlas · /u });
@@ -153,6 +179,153 @@ it("T-F005-001 (renderer) — ignore la réponse tardive après le changement de
     expect(invoke.mock.calls.filter(([command]) => command === "op_get_run")).toEqual([
         ["op_get_run", { input: { project_id: projectId, payload: { run_id: runId } } }],
         ["op_get_run", { input: { project_id: otherProject, payload: { run_id: otherRun } } }],
+    ]);
+});
+
+it("T-F005-001 (renderer) — ouvre un run depuis la liste paginée de son projet", async () => {
+    const selected = {
+        ...run,
+        run_id: "00000000-0000-4000-8000-000000000011",
+        workflow_version_id: "workflow.feature@2",
+        state: "running",
+        revision: 3,
+    };
+    const cursor = "fixture-next-page";
+    const listReads: GuiQueryInput[] = [];
+    const detailReads: GuiQueryInput[] = [];
+    const invoke = vi.fn((command: string, { input }: { input: GuiQueryInput }) => {
+        switch (command) {
+            case "op_list_projects":
+                return Promise.resolve(response([{ project_id: projectId, name: "Atlas" }]));
+            case "op_list_runs":
+                listReads.push(input);
+                return Promise.resolve(
+                    input.payload.opaque_cursor === cursor
+                        ? runListPage(projectId, [selected], null)
+                        : runListPage(projectId, [run], cursor),
+                );
+            case "op_get_run":
+                detailReads.push(input);
+                return Promise.resolve(response(selected));
+            default:
+                throw new Error(`Opération inattendue : ${command}`);
+        }
+    });
+    vi.stubGlobal("__TAURI_INTERNALS__", { invoke });
+    const user = userEvent.setup();
+    render(<App agentCount={4} eventTotalCount={12} diffLineCount={20} />);
+
+    const listing = await browseRuns(user);
+    expect(await listing.findByText("workflow.feature@1")).toBeVisible();
+    expect(listing.getByText("Préparé")).toBeVisible();
+    expect(detailReads).toHaveLength(0);
+
+    await user.click(listing.getByRole("button", { name: "Page suivante" }));
+    expect(await listing.findByText("workflow.feature@2")).toBeVisible();
+    expect(listing.queryByText("workflow.feature@1")).not.toBeInTheDocument();
+    expect(listing.getByRole("button", { name: "Page suivante" })).toBeDisabled();
+    await user.click(listing.getByRole("button", { name: `Ouvrir le run ${selected.run_id}` }));
+
+    const detail = within(await screen.findByRole("region", { name: "Détail du run" }));
+    expect(detail.getByText(selected.run_id)).toBeVisible();
+    expect(detail.getByText("En cours")).toBeVisible();
+    expect(detail.getByText("workflow.feature@2")).toBeVisible();
+    expect(listReads).toEqual([
+        { project_id: projectId, payload: { page_size: 20 } },
+        { project_id: projectId, payload: { page_size: 20, opaque_cursor: cursor } },
+    ]);
+    expect(detailReads).toEqual([{ project_id: projectId, payload: { run_id: selected.run_id } }]);
+});
+
+it("T-F005-001 (renderer) — reprend depuis la première page après expiration du curseur", async () => {
+    const cursor = "fixture-expired-page";
+    const reads: GuiQueryInput[] = [];
+    const failure: GuiErrorPayload = {
+        code: "ResyncRequired",
+        reason_code: "CURSOR_EXPIRED",
+        retry_class: "after_refresh",
+        message: "Le curseur n’est plus servi.",
+    };
+    const invoke = vi.fn((command: string, { input }: { input: GuiQueryInput }) => {
+        if (command === "op_list_projects") {
+            return Promise.resolve(response([{ project_id: projectId, name: "Atlas" }]));
+        }
+        if (command !== "op_list_runs") throw new Error(`Opération inattendue : ${command}`);
+        reads.push(input);
+        if (input.payload.opaque_cursor === cursor) {
+            return Promise.reject(Object.assign(new Error(failure.message), failure));
+        }
+        return Promise.resolve(runListPage(projectId, [run], cursor));
+    });
+    vi.stubGlobal("__TAURI_INTERNALS__", { invoke });
+    const user = userEvent.setup();
+    render(<App agentCount={4} eventTotalCount={12} diffLineCount={20} />);
+
+    const listing = await browseRuns(user);
+    expect(await listing.findByText("workflow.feature@1")).toBeVisible();
+    await user.click(listing.getByRole("button", { name: "Page suivante" }));
+
+    expect(await listing.findByRole("alert")).toHaveTextContent("relue depuis le début");
+    expect(listing.queryByRole("button", { name: "Relire la page" })).not.toBeInTheDocument();
+    expect(reads).toHaveLength(2);
+    await user.click(listing.getByRole("button", { name: "Première page" }));
+    expect(await listing.findByText("workflow.feature@1")).toBeVisible();
+    expect(reads).toEqual([
+        { project_id: projectId, payload: { page_size: 20 } },
+        { project_id: projectId, payload: { page_size: 20, opaque_cursor: cursor } },
+        { project_id: projectId, payload: { page_size: 20 } },
+    ]);
+});
+
+it("T-F005-001 (renderer) — repart sans curseur lors du changement de projet", async () => {
+    const otherProject = "00000000-0000-4000-8000-000000000020";
+    const cursor = "fixture-atlas-next";
+    const reads: GuiQueryInput[] = [];
+    let finishAtlas: ((value: QueryResponse) => void) | undefined;
+    const pendingAtlas = new Promise<QueryResponse>((resolve) => {
+        finishAtlas = resolve;
+    });
+    const invoke = vi.fn((command: string, { input }: { input: GuiQueryInput }) => {
+        if (command === "op_list_projects") {
+            return Promise.resolve(
+                response([
+                    { project_id: projectId, name: "Atlas" },
+                    { project_id: otherProject, name: "Nova" },
+                ]),
+            );
+        }
+        if (command !== "op_list_runs") throw new Error(`Opération inattendue : ${command}`);
+        reads.push(input);
+        if (input.project_id === otherProject) {
+            return Promise.resolve(runListPage(otherProject, [], null));
+        }
+        return input.payload.opaque_cursor === cursor
+            ? pendingAtlas
+            : Promise.resolve(runListPage(projectId, [run], cursor));
+    });
+    vi.stubGlobal("__TAURI_INTERNALS__", { invoke });
+    const user = userEvent.setup();
+    render(<App agentCount={4} eventTotalCount={12} diffLineCount={20} />);
+
+    const atlas = await browseRuns(user);
+    expect(await atlas.findByText("workflow.feature@1")).toBeVisible();
+    await user.click(atlas.getByRole("button", { name: "Page suivante" }));
+    expect(await atlas.findByRole("status")).toHaveTextContent("Lecture des runs");
+    await user.selectOptions(screen.getByRole("combobox", { name: "Projet" }), otherProject);
+    const nova = within(await screen.findByRole("region", { name: "Runs du projet" }));
+    expect(await nova.findByText("Aucun run sur cette page.")).toBeVisible();
+
+    await act(async () => {
+        if (finishAtlas === undefined) throw new Error("Réponse Atlas différée indisponible");
+        finishAtlas(runListPage(projectId, [run], null));
+        await pendingAtlas;
+    });
+    expect(nova.getByText("Aucun run sur cette page.")).toBeVisible();
+    expect(nova.queryByText("workflow.feature@1")).not.toBeInTheDocument();
+    expect(reads).toEqual([
+        { project_id: projectId, payload: { page_size: 20 } },
+        { project_id: projectId, payload: { page_size: 20, opaque_cursor: cursor } },
+        { project_id: otherProject, payload: { page_size: 20 } },
     ]);
 });
 
