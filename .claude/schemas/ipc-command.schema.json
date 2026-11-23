@@ -129,6 +129,38 @@
       "then": { "required": ["preferred_profile_ref"] },
       "else": { "properties": { "preferred_profile_ref": false } }
     },
+    "publish_workflow_version": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "draft_id",
+        "draft_revision",
+        "validation_report_id",
+        "normalized_digest",
+        "workflow_id",
+        "expected_previous_version"
+      ],
+      "properties": {
+        "draft_id": { "type": "string", "format": "uuid" },
+        "draft_revision": { "$ref": "#/$defs/wire_unsigned_integer", "minimum": 1 },
+        "validation_report_id": { "type": "string", "format": "uuid" },
+        "normalized_digest": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "maxLength": 71
+        },
+        "workflow_id": {
+          "type": "string",
+          "pattern": "^[a-z0-9]+(?:[._-][a-z0-9]+)*$",
+          "maxLength": 128
+        },
+        "expected_previous_version": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 4294967295
+        }
+      }
+    },
     "create_operational_run": {
       "type": "object",
       "additionalProperties": false,
@@ -704,6 +736,10 @@
     }
   },
   "allOf": [
+    {
+      "if": { "properties": { "command_type": { "const": "PublishWorkflowVersion" } } },
+      "then": { "properties": { "payload": { "$ref": "#/$defs/publish_workflow_version" } } }
+    },
     {
       "if": {
         "properties": {

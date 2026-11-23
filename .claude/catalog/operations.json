@@ -2473,14 +2473,15 @@
       "kind": "command",
       "owner_features": [
         "F005",
+        "F006",
         "F019"
       ],
       "status": "proposed",
       "contract_stage": "documented",
-      "description": "CreateRun porte une source discriminée workflow_version ou automation_version et ses références exactes ; l’automatisation ajoute AutomationDataRevision, automation_mode et paramètres. Le backend dérive workflow/politique modèle et épingle les manifests. Même Run et même machine d’état ; acceptation sur étape/preuves exactes. Adoption de version/données/mode = nouveau CreateRun à frontière éligible.",
+      "description": "Draft révisionné, rapport de validation et empreinte normalisée exacts. La version précédente attendue protège la publication concurrente. La version publiée est immuable et aucun run ne change de version.",
       "contract_source": {
         "path": "architecture/client-operation-catalog.md",
-        "subject": "Versions et runs / F005 avec F019"
+        "subject": "Publication de workflow / F006 avec F005 et F019"
       },
       "payload_schema_ref": null,
       "runtime_executable": false,

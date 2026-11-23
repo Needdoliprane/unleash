@@ -1,0 +1,19 @@
+{
+  "protocol_version": "unleash.ipc.v2",
+  "request_id": "10000000-0000-4000-8000-000000000031",
+  "command_id": "10000000-0000-4000-8000-000000000032",
+  "authority_generation": "10000000-0000-4000-8000-000000000003",
+  "actor_ref": null,
+  "project_id": "10000000-0000-4000-8000-000000000004",
+  "aggregate_id": "10000000-0000-4000-8000-000000000033",
+  "expected_revision": 3,
+  "command_type": "PublishWorkflowVersion",
+  "payload": {
+    "draft_id": "10000000-0000-4000-8000-000000000033",
+    "draft_revision": 3,
+    "validation_report_id": "10000000-0000-4000-8000-000000000034",
+    "normalized_digest": "sha256:5e0309449c265a65e65653567f52a97dc32ed9851dc79eb85a0ed7ebcc03ae79",
+    "workflow_id": "workflow.merge-only",
+    "expected_previous_version": 0
+  }
+}

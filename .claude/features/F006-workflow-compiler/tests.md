@@ -14,3 +14,7 @@
 | T-F006-010 | AC-F006-010 | Correction incrémentale avec ancien rapport conservé. | EV-F006-010 : filiation des drafts et diagnostics stables. |
 
 Les tests de fuzzing doivent cibler le parseur borné, les références et les calculs de profondeur sans déclencher de ressource réseau. Les tests de propriétés comparent compilation répétée à catalogue figé. Une future campagne de qualité NL évaluera séparément fidélité d'intention et taux de clarification ; elle ne pourra déclarer l'intention toujours correctement comprise. Les contrôles JSON de ce dossier ne constituent que validation documentaire préalable.
+
+Pour T-F006-009, envoyer la commande de [publication](../../examples/ipc-publish-workflow-version.json) après validation du brouillon. Vérifier le refus sans rapport, sans empreinte ou avec un rapport lié à une autre révision. Refaire l’essai avec un document dont l’identité ou la version diverge, puis avec un dernier numéro qui épuise la borne de `CreateRun`. Vérifier l’absence de version ajoutée après chaque refus.
+
+À version précédente identique, deux commandes concurrentes produisent une seule nouvelle version et un conflit pour l’autre commande. Le rejeu de la commande gagnante rend le même reçu. Relire la version exacte, ses octets et son digest, puis l’utiliser pour un nouveau run. Le run déjà engagé doit conserver sa version. La cohérence des fixtures et le test de la transaction IPC ont des preuves distinctes.

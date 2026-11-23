@@ -14,7 +14,7 @@
     "cache/"
   ],
   "hash_algorithm": "sha256",
-  "source_tree_digest": "2e6e77a8a296c5aebb6dd15df19b81b6951567c7a72d99987feb37d61e88ea72",
+  "source_tree_digest": "a73b639cc54e53ed7f1532e1c2934b188694d004f14887d0f7f45682c8651145",
   "files": [
     {
       "path": "INDEX.md",
@@ -312,8 +312,8 @@
     },
     {
       "path": "architecture/client-operation-catalog.md",
-      "sha256": "07ba9b993902ea830cb99316ed26bfb64c9b0862f543458c18d6ac944eaf6ef4",
-      "bytes": 39804,
+      "sha256": "4e093bea21663ad95e72c395fe5a406818d9a127f4f2785c959d8f905c1e57b8",
+      "bytes": 40073,
       "media_type": "text/markdown"
     },
     {
@@ -348,8 +348,8 @@
     },
     {
       "path": "architecture/ipc-and-apis.md",
-      "sha256": "61c703623fa4d1553e643fcb33d31479e80f9288007471895d0921677f0f1aba",
-      "bytes": 33355,
+      "sha256": "eff64cabc1826d3500f5fba435b20a3b081f60f4f178df6ab49746e6814404e6",
+      "bytes": 33675,
       "media_type": "text/markdown"
     },
     {
@@ -738,8 +738,8 @@
     },
     {
       "path": "catalog/operations.json",
-      "sha256": "1406d7af22fb58cc4a78e73959a991ca885973845d4b3f554b65dd2a10f4d84d",
-      "bytes": 209422,
+      "sha256": "4cb4ebf845723bca920c6d4dd9cf07a54a33b6af40741c84c0736aa670d51f2b",
+      "bytes": 209244,
       "media_type": "application/json"
     },
     {
@@ -1016,6 +1016,12 @@
       "path": "examples/ipc-provider-profile-list-response.json",
       "sha256": "48a934ec4f92a4198c935f091a00a98043fe96739a4066015f89d26e0ef2bf51",
       "bytes": 550,
+      "media_type": "application/json"
+    },
+    {
+      "path": "examples/ipc-publish-workflow-version.json",
+      "sha256": "92de9adf1520ff23288e3b6ff52931515d8e943f4a796db2521e0976215ae8fa",
+      "bytes": 772,
       "media_type": "application/json"
     },
     {
@@ -1332,8 +1338,8 @@
     },
     {
       "path": "features/F006-workflow-compiler/interfaces.md",
-      "sha256": "cd14dac493a5d153271850071c53e9b292558cad3dbead6f57d2225b59f18992",
-      "bytes": 2927,
+      "sha256": "2c6e359c2495b0bb5b8952e7ce59eaf49408f2d2c2bfccb3e031f705e8ff252b",
+      "bytes": 4013,
       "media_type": "text/markdown"
     },
     {
@@ -1350,8 +1356,8 @@
     },
     {
       "path": "features/F006-workflow-compiler/tests.md",
-      "sha256": "04227a9ebeae529120db8f92d2692792457c8d855cc4b7a0b0eb232ce993e377",
-      "bytes": 2022,
+      "sha256": "1774a2359c1995f2274fb5bd7584eb7c3c848f96e1a83661223d375615661259",
+      "bytes": 2884,
       "media_type": "text/markdown"
     },
     {
@@ -2028,8 +2034,8 @@
     },
     {
       "path": "schemas/README.md",
-      "sha256": "3e65b55bc418931cd4ffdb0b7d1d2edcb32260f8173f0e0f6ba26a088957b54b",
-      "bytes": 6843,
+      "sha256": "4e8ee1cb2eb098555666527b2fc3a5cf9b530288a0fcf3c75095c1ef85bdf842",
+      "bytes": 6953,
       "media_type": "text/markdown"
     },
     {
@@ -2112,8 +2118,8 @@
     },
     {
       "path": "schemas/ipc-command.schema.json",
-      "sha256": "0c1fea0bfc8f9749c35d0649c9f72812ec71d4f3489e914a3bc0b90694cd56ec",
-      "bytes": 36577,
+      "sha256": "894acdf4a5eb8d0cdd1e773e7c715360c17fb8055d528e2ee560364486c13834",
+      "bytes": 37739,
       "media_type": "application/json"
     },
     {

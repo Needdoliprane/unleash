@@ -4,7 +4,7 @@ Ces JSON Schema 2020-12 décrivent des **contrats Unleash de conception**, à im
 
 ## Autorités
 
-- ipc-command : enveloppe commune de commande et payload fermé de `TestProviderProfile`. Le serveur vérifie l’acteur authentifié et la révision attendue.
+- ipc-command : enveloppe commune de commande et payloads fermés, dont `TestProviderProfile` et [`PublishWorkflowVersion`](../features/F006-workflow-compiler/interfaces.md#publication-dune-version). Le serveur vérifie l’acteur authentifié et la révision attendue.
 - ipc-receipt / ipc-error : réponse commune, sous-résultat métier référencé, erreurs normalisées.
 - event : enveloppe wire de fait engagé, cause typée et curseur stream_id/sequence.
 - workflow : AST fermé ; graphe, domination, bornes, registre et permissions nécessitent une passe sémantique.
