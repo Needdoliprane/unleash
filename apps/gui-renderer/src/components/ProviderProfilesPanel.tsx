@@ -4,6 +4,7 @@ import {
     profileDetail,
     profilePage,
     projectChoices,
+    type InventoryModel,
     type ProviderProfileRow,
 } from "../ipc/providerProfileViews";
 import type { GuiCommandInput, GuiQueryInput, OperationName, TransportAdapter } from "../ipc/types";
@@ -94,14 +95,14 @@ function observationLabel(phase: string, status: string) {
 
 const MODELS_PER_PAGE = 25;
 
-function InventoryModels({ names }: { names: string[] }) {
+function InventoryModels({ models }: { models: InventoryModel[] }) {
     const [page, setPage] = useState(0);
-    if (names.length === 0) {
+    if (models.length === 0) {
         return <p className="provider-inventory">Aucun modèle dans cet inventaire.</p>;
     }
 
     const start = page * MODELS_PER_PAGE;
-    const pageCount = Math.ceil(names.length / MODELS_PER_PAGE);
+    const pageCount = Math.ceil(models.length / MODELS_PER_PAGE);
     return (
         <div className="provider-inventory">
             {pageCount > 1 ? (
@@ -130,9 +131,21 @@ function InventoryModels({ names }: { names: string[] }) {
                 </div>
             ) : null}
             <ul aria-label="Modèles observés">
-                {names.slice(start, start + MODELS_PER_PAGE).map((name, index) => (
-                    <li key={start + index}>{name.trim() === "" ? "Nom non renseigné" : name}</li>
-                ))}
+                {models
+                    .slice(start, start + MODELS_PER_PAGE)
+                    .map(({ name, format, quantization }, index) => (
+                        <li key={start + index}>
+                            <span>{name.trim() === "" ? "Nom non renseigné" : name}</span>
+                            {format !== null || quantization !== null ? (
+                                <small className="provider-model-details">
+                                    {format === null ? null : <span>Format {format}</span>}
+                                    {quantization === null ? null : (
+                                        <span>Quantification {quantization}</span>
+                                    )}
+                                </small>
+                            ) : null}
+                        </li>
+                    ))}
             </ul>
         </div>
     );
@@ -316,18 +329,18 @@ function SelectedProfile({
                     ) : (
                         <ul className="provider-observations">
                             {read.data.observations.map(
-                                ({ id, phase, status, observedAt, modelNames }) => (
+                                ({ id, phase, status, observedAt, models }) => (
                                     <li key={id}>
                                         <span>
-                                            {modelNames === null
+                                            {models === null
                                                 ? observationLabel(phase, status)
                                                 : "Inventaire observé"}
                                         </span>
                                         <time dateTime={observedAt}>
                                             {DATE_FORMAT.format(new Date(observedAt))}
                                         </time>
-                                        {modelNames === null ? null : (
-                                            <InventoryModels names={modelNames} />
+                                        {models === null ? null : (
+                                            <InventoryModels models={models} />
                                         )}
                                     </li>
                                 ),
