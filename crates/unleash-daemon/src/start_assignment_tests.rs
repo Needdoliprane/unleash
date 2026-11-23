@@ -15,8 +15,8 @@ use unleash_domain::{
 };
 use unleash_platform::{current_boot_identity, effective_uid};
 use unleash_protocol::{
-    ClientKind, CommandEnvelope, ErrorCode, ProtocolVersion, QueryEnvelope, ReasonCode,
-    ReceiptState, canonical_sha256,
+    ClientKind, CommandEnvelope, CommandReceipt, ErrorCode, ProtocolVersion, QueryEnvelope,
+    ReasonCode, ReceiptState, canonical_sha256,
 };
 use unleash_store::{
     CallerAuthority, InitialContextPlan, PreparedTaskAssignment, StoreConfig, StoreError,
@@ -654,7 +654,7 @@ async fn publish_policy_for_assignment(
     revision: u64,
     policy_id: &str,
     profile: &Value,
-) -> String {
+) -> CommandReceipt {
     let project = route.assign.project_id.unwrap();
     let publish = command(
         &route.assign,
@@ -683,20 +683,53 @@ async fn publish_policy_for_assignment(
     let receipt = route.client.send_command(&publish).await.unwrap();
     assert_eq!(receipt.state, ReceiptState::Accepted);
     assert_eq!(receipt.new_revision, Revision::new(revision + 1));
-    receipt.result_ref.unwrap()
+    receipt
 }
 
-async fn assert_materialized_bundle(route: &Route, observed: &Value, preferred: &Value) {
+async fn assert_materialized_bundle(
+    daemon: &DaemonHandle,
+    assign: &CommandEnvelope,
+    observed: &Value,
+    preferred: &Value,
+    publication: &CommandReceipt,
+    publisher: &ActorId,
+) -> (Sha256Digest, Sha256Digest) {
+    assert_eq!(observed.get("agent_id"), Some(&json!(WORKER)));
+    assert_eq!(observed.get("state"), Some(&json!("queued")));
+    assert_eq!(observed.get("attempts"), Some(&json!([])));
     let bundle_hash: Sha256Digest = observed
         .get("effective_bundle_hash")
         .and_then(Value::as_str)
         .unwrap()
         .parse()
         .unwrap();
-    let store = Arc::clone(&route.daemon.test_runtime_state().store);
-    let bundle: Value = tokio::task::spawn_blocking(move || {
-        let document = store.read_verified_object_bytes(bundle_hash).unwrap();
-        serde_json::from_slice(&document).unwrap()
+    let manifest_id: Uuid = observed
+        .get("context_manifest_id")
+        .and_then(Value::as_str)
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert!(!manifest_id.is_nil());
+    let store = Arc::clone(&daemon.test_runtime_state().store);
+    let assign = assign.clone();
+    let (bundle, context, context_hash, expected) = tokio::task::spawn_blocking(move || {
+        let expected = facts(&store, &assign);
+        let context_hash = store
+            .read_snapshot(|db, _| {
+                let digest: String = db.query_row(
+                    "SELECT content_hash FROM context_manifests
+                     WHERE manifest_id=?1 AND session_id=?2",
+                    rusqlite::params![manifest_id.to_string(), &expected.session],
+                    |row| row.get(0),
+                )?;
+                Ok(digest.parse::<Sha256Digest>().unwrap())
+            })
+            .unwrap();
+        let bundle: Value =
+            serde_json::from_slice(&store.read_verified_object_bytes(bundle_hash).unwrap()).unwrap();
+        let context: Value =
+            serde_json::from_slice(&store.read_verified_object_bytes(context_hash).unwrap()).unwrap();
+        (bundle, context, context_hash, expected)
     })
     .await
     .unwrap();
@@ -704,16 +737,70 @@ async fn assert_materialized_bundle(route: &Route, observed: &Value, preferred: 
         bundle.get("role_version_id"),
         Some(&json!(ROLE_WITH_POLICY_VERSION))
     );
+    assert_eq!(bundle.get("trigger_event_id"), Some(&json!(expected.trigger)));
     assert_eq!(
         bundle.get("requested_model_profile_digest"),
         Some(preferred.get("digest").unwrap())
     );
-    let context = observed
-        .get("context_manifest_id")
-        .and_then(Value::as_str)
-        .unwrap();
-    assert!(!context.parse::<Uuid>().unwrap().is_nil());
-    assert_eq!(bundle.get("initial_context_manifest_id"), Some(&json!(context)));
+    let policy = bundle.get("role_model_policy").unwrap();
+    assert_eq!(
+        policy.get("policy_version_ref").and_then(Value::as_str),
+        Some(publication.result_ref.as_deref().unwrap())
+    );
+    assert_eq!(
+        policy.get("command_receipt_id"),
+        Some(&json!(publication.receipt_id))
+    );
+    assert_eq!(policy.get("principal_id"), Some(&json!(publisher)));
+    assert_eq!(
+        bundle.get("initial_context_manifest_id"),
+        Some(&json!(manifest_id))
+    );
+    assert_eq!(observed.get("session_id"), Some(&json!(expected.session)));
+    assert_eq!(bundle.get("session_id"), observed.get("session_id"));
+    assert_eq!(context.get("session_id"), observed.get("session_id"));
+    assert_eq!(context.get("base_session_revision"), Some(&json!(0)));
+    assert_eq!(context.get("parent_manifest_id"), Some(&Value::Null));
+    assert!(context.get("entries").and_then(Value::as_array).is_some());
+    (bundle_hash, context_hash)
+}
+
+async fn select_assignment_profile(route: &mut Route, id: u128, revision: u64, profile: &Value) {
+    let project = route.assign.project_id.unwrap();
+    let scope = json!({"kind":"project","owner_id":project});
+    let select = command(
+        &route.assign,
+        id,
+        "SetSettings",
+        project.as_uuid(),
+        revision,
+        json!({
+            "scope_kind":"project",
+            "scope_id":project,
+            "patch":{"model_selection_binding":{
+                "operation":"upsert",
+                "configuration_scope":scope,
+                "skill_ref":{"skill_id":"skill.fixture","skill_version":1,"skill_scope":scope},
+                "preferred_profile_ref":profile
+            }}
+        }),
+    );
+    let preference = route.client.send_command(&select).await.unwrap();
+    assert_eq!(preference.state, ReceiptState::Accepted);
+    assert_eq!(preference.new_revision, Revision::new(revision + 1));
+}
+
+async fn assert_assignment_policy_conflict(route: &mut Route, id: u128) {
+    let mut rejected = route.assign.clone();
+    rejected.request_id = RequestId::from_u128(id);
+    rejected.command_id = CommandId::from_u128(id);
+    let denied = route.client.send_command(&rejected).await;
+    assert!(
+        matches!(&denied, Err(ClientError::Remote(error))
+            if error.code == ErrorCode::ContractViolation
+                && error.reason_code == Some(ReasonCode::ModelConfigurationConflict)),
+        "la politique du rôle doit bloquer l'affectation : {denied:?}"
+    );
 }
 
 // T-F003-002 / REQ-AGENT-002. Le daemon matérialise le bundle et le contexte de l'affectation.
@@ -724,44 +811,28 @@ async fn assign_task_materializes_a_bundle_from_the_pinned_role_policy() {
     let mut route = route_with_role_policy(Some(POLICY)).await;
     let project = route.assign.project_id.unwrap();
     let preferred = configured_profile_reference(&mut route.client, &route.assign, PROFILE).await;
-    let scope = json!({"kind":"project","owner_id":project});
-    let select = command(
-        &route.assign,
-        0x5a01,
-        "SetSettings",
-        project.as_uuid(),
-        0,
-        json!({
-            "scope_kind":"project",
-            "scope_id":project,
-            "patch":{"model_selection_binding":{
-                "operation":"upsert",
-                "configuration_scope":scope,
-                "skill_ref":{"skill_id":"skill.fixture","skill_version":1,"skill_scope":scope},
-                "preferred_profile_ref":preferred
-            }}
-        }),
-    );
-    let preference = route.client.send_command(&select).await.unwrap();
-    assert_eq!(preference.new_revision, Revision::new(1));
-
-    let mut missing_policy = route.assign.clone();
-    missing_policy.request_id = RequestId::from_u128(0x5a02);
-    missing_policy.command_id = CommandId::from_u128(0x5a02);
-    let denied = route.client.send_command(&missing_policy).await;
-    assert!(
-        matches!(&denied, Err(ClientError::Remote(error))
-            if error.code == ErrorCode::ContractViolation
-                && error.reason_code == Some(ReasonCode::ModelConfigurationConflict)),
-        "la politique absente doit bloquer l'affectation : {denied:?}"
-    );
+    select_assignment_profile(&mut route, 0x5a01, 0, &preferred).await;
+    assert_assignment_policy_conflict(&mut route, 0x5a02).await;
 
     let v1 = publish_policy_for_assignment(&mut route, 0x5a03, 1, POLICY, &preferred).await;
-    assert!(v1.starts_with("model-policy:policy.first-task:1:sha256:"));
+    assert!(
+        v1.result_ref
+            .as_deref()
+            .unwrap()
+            .starts_with("model-policy:policy.first-task:1:sha256:")
+    );
     configure_profile(&mut route.client, &route.assign, OTHER_PROFILE, 0).await;
     let other = configured_profile_reference(&mut route.client, &route.assign, OTHER_PROFILE).await;
     let v2 = publish_policy_for_assignment(&mut route, 0x5a04, 2, POLICY, &other).await;
-    assert!(v2.starts_with("model-policy:policy.first-task:2:sha256:"));
+    assert!(
+        v2.result_ref
+            .as_deref()
+            .unwrap()
+            .starts_with("model-policy:policy.first-task:2:sha256:")
+    );
+    select_assignment_profile(&mut route, 0x5a07, 3, &other).await;
+    assert_assignment_policy_conflict(&mut route, 0x5a08).await;
+    select_assignment_profile(&mut route, 0x5a09, 4, &preferred).await;
 
     // Le test n'écrit ni contexte initial, ni bundle, ni preuve d'admission.
     let receipt = route.client.send_command(&route.assign).await.unwrap();
@@ -782,8 +853,15 @@ async fn assign_task_materializes_a_bundle_from_the_pinned_role_policy() {
     };
     let observed = route.client.query(&query).await.unwrap().result;
     assert_eq!(observed.get("invocation_id"), Some(&json!(invocation)));
-    assert_eq!(observed.get("agent_id"), Some(&json!(WORKER)));
-    assert_materialized_bundle(&route, &observed, &preferred).await;
+    let documents = assert_materialized_bundle(
+        &route.daemon,
+        &route.assign,
+        &observed,
+        &preferred,
+        &v1,
+        &route.caller.actor_id,
+    )
+    .await;
 
     let first_epoch = route.daemon.daemon_epoch();
     drop(route.client);
@@ -798,9 +876,17 @@ async fn assign_task_materializes_a_bundle_from_the_pinned_role_policy() {
     route.assign.request_id = RequestId::from_u128(0x5a06);
     assert_eq!(client.send_command(&route.assign).await.unwrap(), receipt);
     let recovered = client.query(&query).await.unwrap().result;
-    for field in ["invocation_id", "effective_bundle_hash", "context_manifest_id"] {
-        assert_eq!(recovered.get(field), observed.get(field), "{field}");
-    }
+    assert_eq!(recovered, observed);
+    let recovered_documents = assert_materialized_bundle(
+        &daemon,
+        &route.assign,
+        &recovered,
+        &preferred,
+        &v1,
+        &route.caller.actor_id,
+    )
+    .await;
+    assert_eq!(recovered_documents, documents);
     drop(client);
     daemon
         .shutdown_graceful("finish policy-bound assignment fixture")
