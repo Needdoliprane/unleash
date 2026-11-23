@@ -15,6 +15,12 @@
 
 Le harness de test doit explorer les entrelacements des commandes incompatibles et produire un journal minimal de reproduction. Les tests de propriété ciblent unicité d'activation, conservation des budgets et immutabilité du run ; ils ne répliquent pas simplement le code d'implémentation. Les tests de sécurité injectent acteur forgé, preuve hors scope et changement de rôle augmentant les capacités. Tous restent planifiés ; la validation documentaire des exemples JSON est un contrôle différent, insuffisant pour déclarer cette feature implémentée.
 
+### Consultation paginée des runs engagés
+
+Pour la lecture de T-F005-001, préparer deux runs dans un projet, dont un sur v1 alors que v2 est publiée. Garder un troisième run dans un autre projet. Via le socket avec `page_size=1`, vérifier l’ordre croissant, les deux identités sans doublon, le watermark et la fin de liste. Ouvrir le run v1 avec `GetRun` et comparer son identité, sa version engagée et les champs de résumé à état stable.
+
+Vérifier aussi la page vide d’un projet autorisé, le refus d’un projet hors mandat, la reprise avec un curseur d’un autre projet, l’expiration après changement de lignée et l’absence de mutation. Faire le même choix de run depuis GUI et TUI pour PAR-WORKFLOWS-05. Les schémas contrôlent les bornes, les champs et les formes. Les tests produit restent requis pour la visibilité, l’ordre, la provenance du curseur et la lecture concurrente.
+
 ### Persistance d'une activation de tâche
 
 Le sous-cas Store de T-F005-001/009 matérialise une tâche depuis un run de fixture avec définition épinglée et objet retenu. Il vérifie étape, tâche, reçu et événement, le rejeu, le refus d'une source rattachée à une autre version, les bornes du nœud ainsi que l'annulation atomique avant commit. L'exécution du reducer et l'admission réelle ont leurs propres preuves.

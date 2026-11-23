@@ -76,6 +76,8 @@ de l’invocation.
 
 Le détail d’un compte ou d’une politique est filtré selon le mandat, y compris dans Settings. L’absence d’accès donne NotFoundOrHidden ou CapabilityDenied selon le contrat, sans fuite du nom d’une ressource cachée. Les noms wire de cette table s’ajoutent au catalogue IPC commun ; aucune famille CLI n’autorise un accès direct SQL.
 
+Dans Workflows, [`ListRuns`](../features/F005-workflow-engine/interfaces.md#liste-des-runs-par-projet) liste les résumés durables et la version engagée des runs visibles du projet demandé. `GetRun` ouvre le détail sous le même projet et l’identité exacte du run.
+
 ## Drafts, diff, exports et authentification
 
 **Drafts.** SaveWorkflowDraft, SaveSkillDraft, SaveRoleDraft, SaveAutomationDraft et SaveGuidedSetupDraft conservent le document de travail exact sous révision, y compris invalide, avec auteur/provenance et invalidation des validations périmées. Ils ne publient ni n’exécutent. Les diagnostics sont `path`, `code`, `message`, `severity`, `source_ref` et éventuelle suggestion déclarative. Les différences portent sur texte et champs structurés. Les modifications locales non encore envoyées ne sont pas présentées comme visibles dans l’autre client.

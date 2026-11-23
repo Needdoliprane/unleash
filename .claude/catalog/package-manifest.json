@@ -14,7 +14,7 @@
     "cache/"
   ],
   "hash_algorithm": "sha256",
-  "source_tree_digest": "217f14717e5d1e15131f078069a3a70ca119246a773a5f96478214b8e85b62b7",
+  "source_tree_digest": "2e6e77a8a296c5aebb6dd15df19b81b6951567c7a72d99987feb37d61e88ea72",
   "files": [
     {
       "path": "INDEX.md",
@@ -312,8 +312,8 @@
     },
     {
       "path": "architecture/client-operation-catalog.md",
-      "sha256": "211d28a2551da5858d09014fd6dc11d20fe9226732b2909911bd383b35a1cd06",
-      "bytes": 39531,
+      "sha256": "07ba9b993902ea830cb99316ed26bfb64c9b0862f543458c18d6ac944eaf6ef4",
+      "bytes": 39804,
       "media_type": "text/markdown"
     },
     {
@@ -348,8 +348,8 @@
     },
     {
       "path": "architecture/ipc-and-apis.md",
-      "sha256": "3affa0173680200da66a1b94b15fbf4a8ebf3ae5305d0cbd3e850c2159dae5b0",
-      "bytes": 33120,
+      "sha256": "61c703623fa4d1553e643fcb33d31479e80f9288007471895d0921677f0f1aba",
+      "bytes": 33355,
       "media_type": "text/markdown"
     },
     {
@@ -738,8 +738,8 @@
     },
     {
       "path": "catalog/operations.json",
-      "sha256": "bcdc9be2f4559a4d743d08307d710c818606896b4c59f55cb831b01539ddd3d7",
-      "bytes": 209490,
+      "sha256": "1406d7af22fb58cc4a78e73959a991ca885973845d4b3f554b65dd2a10f4d84d",
+      "bytes": 209422,
       "media_type": "application/json"
     },
     {
@@ -792,8 +792,8 @@
     },
     {
       "path": "design/gui-tui-parity.md",
-      "sha256": "a501eb8a7d1e8598dd31bd1f8aa956c6521d691d806ef9000b6aaf852c337251",
-      "bytes": 28913,
+      "sha256": "7653cefd81dbce85891fb7600a9be533dbc4a24f343f9046a7776bdc8fa7dc47",
+      "bytes": 29039,
       "media_type": "text/markdown"
     },
     {
@@ -998,6 +998,18 @@
       "path": "examples/ipc-command.json",
       "sha256": "4d01b8549b6f6f1d294bd6c08dbc180d936c2cf16f08ce392043a4cd251e3c81",
       "bytes": 492,
+      "media_type": "application/json"
+    },
+    {
+      "path": "examples/ipc-list-runs-query.json",
+      "sha256": "c1904ef7d37ab333da6247418aac0715566d680b8727ca1ebe1762de5ca237bc",
+      "bytes": 222,
+      "media_type": "application/json"
+    },
+    {
+      "path": "examples/ipc-list-runs-response.json",
+      "sha256": "c20fcb77ee9606292cc1bf1d374a5836df46ad32a4811e67ab2fe76af7b17ee1",
+      "bytes": 623,
       "media_type": "application/json"
     },
     {
@@ -1278,8 +1290,8 @@
     },
     {
       "path": "features/F005-workflow-engine/interfaces.md",
-      "sha256": "4e77942889336522cf1c7a59d55bd11f3a5bfbee2e692c3557d9ebb902d69f96",
-      "bytes": 9918,
+      "sha256": "9b8619696834e1946a3035ebebc584f8017c863cb2d405719b5d002996b78732",
+      "bytes": 12144,
       "media_type": "text/markdown"
     },
     {
@@ -1296,8 +1308,8 @@
     },
     {
       "path": "features/F005-workflow-engine/tests.md",
-      "sha256": "62fb112b6a80ca22dcfd2a25b634934adbed67ae2f9640aac6643639e151eb88",
-      "bytes": 3394,
+      "sha256": "98da2ce7844cef396f9ad5c8acf478d061d8463ce66259dace542b2d2227a871",
+      "bytes": 4309,
       "media_type": "text/markdown"
     },
     {
@@ -2016,8 +2028,8 @@
     },
     {
       "path": "schemas/README.md",
-      "sha256": "a7a9e87505ef245baa706774edd430e82eda75deac844c0a7e3b342e1c29afcf",
-      "bytes": 6679,
+      "sha256": "3e65b55bc418931cd4ffdb0b7d1d2edcb32260f8173f0e0f6ba26a088957b54b",
+      "bytes": 6843,
       "media_type": "text/markdown"
     },
     {
@@ -2118,14 +2130,14 @@
     },
     {
       "path": "schemas/ipc-query-response.schema.json",
-      "sha256": "c97ee8d5fb4f7e42bb3e8f071ff1c0d4a75a9a720f67561af496f35fa9c69a4a",
-      "bytes": 15664,
+      "sha256": "ee54d6fc5c7f3a60fb6a20697599db82ac40a3e4644553795542c3800df97072",
+      "bytes": 17584,
       "media_type": "application/json"
     },
     {
       "path": "schemas/ipc-query.schema.json",
-      "sha256": "8fff6b05ce3f8cd19ec6d1a60d100d46a14b9294d231e2f99b7797a3c95b34fc",
-      "bytes": 4072,
+      "sha256": "d52586091618d18cb2714881dc5263a579dae291b458053e8013a93254693fa7",
+      "bytes": 4938,
       "media_type": "application/json"
     },
     {

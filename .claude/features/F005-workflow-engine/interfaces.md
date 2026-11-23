@@ -41,6 +41,18 @@ Les événements comprennent RunCreated, RunStarted, NodeActivated, EffectReques
 
 Une erreur contient code, run, activation éventuelle, révision courante et action recommandée. `UnresolvedEffect` retourne les références nécessaires à la réconciliation, sans autoriser la répétition. `BindingAlreadyEngaged` retourne la version effective et l'identifiant d'engagement. Les interfaces sont internes proposées ; aucune de ces méthodes n'est annoncée comme API existante d'un fournisseur.
 
+### Liste des runs par projet
+
+`ListRuns` exige l’UUID non nul du projet dans l’enveloppe de lecture. Le payload fermé accepte `page_size` de 1 à 100 (50 par défaut) et `opaque_cursor` (omis ou nul pour la première page). Un curseur non nul comporte de 1 à 512 caractères alphanumériques ASCII, tirets ou underscores. Le daemon applique la même autorisation de lecture et les mêmes règles de visibilité que `GetRun` avant de paginer. Une portée hors mandat rend `ScopeDenied/ACCESS_DENIED` indépendamment de l’existence du projet. Un projet absent dans la portée du demandeur rend `NotFoundOrHidden`.
+
+La page contient `project_id`, `items`, `next_cursor` et `coverage.status=complete`. Chaque entrée donne `run_id`, `mission_id`, `workflow_version_id`, `state`, `revision` et `purpose` du run durable. La version engagée est conservée même après une nouvelle publication. Le plan, ses empreintes et les détails du run restent accessibles via `GetRun` avec les mêmes `project_id` et `run_id`.
+
+Le tri suit l’UUID canonique croissant du run. Le curseur reprend après le dernier run renvoyé dans ce projet et cette lignée d’autorité. `next_cursor` vaut `null` lorsqu’aucune autre entrée autorisée ne suit, y compris pour une page vide. Le watermark de la réponse est celui de la transaction qui lit la page. La couverture porte sur les runs visibles à cette lecture, avec la pagination indiquée. Chaque nouvelle page peut observer des écritures plus récentes. Pour rafraîchir le début de la liste, repartir sans curseur.
+
+Un curseur mal formé ou associé à un autre projet ou à une autre opération rend `InvalidArgument`. Un curseur de la même portée dont la lignée n’est plus servie rend `ResyncRequired/CURSOR_EXPIRED` avec `retry_class=after_refresh`. Le client repart alors de la première page. Le serveur réapplique l’autorisation à chaque page. Aucun total de runs cachés ni effet externe ne découle de la lecture.
+
+Voir les fixtures de [requête](../../examples/ipc-list-runs-query.json) et de [réponse](../../examples/ipc-list-runs-response.json). Ces exemples décrivent le contrat wire. Le raccord au daemon et les parcours clients restent à vérifier.
+
 ### Persistance d'une activation de tâche
 
 `ActivateWorkflowTask` est un port interne du Store. Le reducer

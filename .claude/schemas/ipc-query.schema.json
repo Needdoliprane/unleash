@@ -43,6 +43,19 @@
       "type": "object"
     }
   },
+  "$defs": {
+    "run_list_project_id": {
+      "type": "string",
+      "format": "uuid",
+      "not": { "const": "00000000-0000-0000-0000-000000000000" }
+    },
+    "run_page_cursor": {
+      "type": ["string", "null"],
+      "minLength": 1,
+      "maxLength": 512,
+      "not": { "type": "string", "pattern": "[^A-Za-z0-9_-]" }
+    }
+  },
   "allOf": [
     {
       "if": { "properties": { "query_type": { "const": "ListProviderProfiles" } } },
@@ -58,6 +71,22 @@
                 "not": { "const": "00000000-0000-0000-0000-000000000000" }
               },
               "limit": { "type": "integer", "minimum": 1, "maximum": 100, "default": 50 }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "query_type": { "const": "ListRuns" } } },
+      "then": {
+        "properties": {
+          "project_id": { "$ref": "#/$defs/run_list_project_id" },
+          "payload": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "page_size": { "type": "integer", "minimum": 1, "maximum": 100, "default": 50 },
+              "opaque_cursor": { "$ref": "#/$defs/run_page_cursor" }
             }
           }
         }

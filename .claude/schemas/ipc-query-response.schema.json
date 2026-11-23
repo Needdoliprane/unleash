@@ -112,6 +112,48 @@
         }
       }
     },
+    "workflow_run_list_entry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["run_id", "mission_id", "workflow_version_id", "state", "revision", "purpose"],
+      "properties": {
+        "run_id": { "$ref": "#/$defs/workflow_run_projection_response/properties/run_id" },
+        "mission_id": { "$ref": "#/$defs/workflow_run_projection_response/properties/mission_id" },
+        "workflow_version_id": { "$ref": "#/$defs/workflow_run_projection_response/properties/workflow_version_id" },
+        "state": { "$ref": "#/$defs/workflow_run_projection_response/properties/state" },
+        "revision": { "$ref": "#/$defs/workflow_run_projection_response/properties/revision" },
+        "purpose": { "$ref": "#/$defs/workflow_run_projection_response/properties/purpose" }
+      }
+    },
+    "workflow_run_list_response": {
+      "$ref": "#",
+      "required": ["watermark"],
+      "properties": {
+        "watermark": { "type": "object" },
+        "result": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["project_id", "items", "next_cursor", "coverage"],
+          "properties": {
+            "project_id": { "$ref": "urn:ovpt:unleash:ipc-query:1#/$defs/run_list_project_id" },
+            "items": {
+              "type": "array",
+              "maxItems": 100,
+              "items": { "$ref": "#/$defs/workflow_run_list_entry" }
+            },
+            "next_cursor": { "$ref": "urn:ovpt:unleash:ipc-query:1#/$defs/run_page_cursor" },
+            "coverage": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["status"],
+              "properties": { "status": { "const": "complete" } }
+            }
+          },
+          "if": { "properties": { "items": { "maxItems": 0 } } },
+          "then": { "properties": { "next_cursor": { "type": "null" } } }
+        }
+      }
+    },
     "uuid": { "type": "string", "format": "uuid" },
     "wire_uint": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
     "optional_uuid": { "type": ["string", "null"], "format": "uuid" },
