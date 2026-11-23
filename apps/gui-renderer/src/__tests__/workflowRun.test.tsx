@@ -14,6 +14,7 @@ const projectId = "00000000-0000-4000-8000-000000000009";
 const runId = "00000000-0000-4000-8000-000000000010";
 const definition = `sha256:${"ab".repeat(32)}`;
 const bundle = `sha256:${"cd".repeat(32)}`;
+const scope = `sha256:${"ef".repeat(32)}`;
 
 const run = {
     project_id: projectId,
@@ -52,8 +53,229 @@ async function consultRun(user: ReturnType<typeof userEvent.setup>) {
     await user.keyboard("{Enter}");
 }
 
+async function fillRunPreparation(user: ReturnType<typeof userEvent.setup>) {
+    await user.click(screen.getByText("Préparer un run", { exact: true }));
+    await user.type(
+        screen.getByRole("textbox", { name: "Identifiant du workflow" }),
+        "workflow.feature",
+    );
+    await user.type(screen.getByRole("spinbutton", { name: "Numéro de version" }), "1");
+    await user.type(
+        screen.getByRole("textbox", { name: "Empreinte de la définition" }),
+        definition,
+    );
+    await user.type(
+        screen.getByRole("textbox", { name: "Identifiant de la mission" }),
+        run.mission_id,
+    );
+    await user.type(
+        screen.getByRole("textbox", { name: "Empreinte du manifeste de portée" }),
+        scope,
+    );
+    await user.type(screen.getByRole("textbox", { name: "Motif de sélection" }), "Revue Atlas");
+}
+
 afterEach(() => {
     vi.unstubAllGlobals();
+});
+
+it("T-F005-001 (renderer) — prépare une version publiée et relit le run créé", async () => {
+    let submittedRun: string | undefined;
+    const invoke = vi.fn(
+        (command: string, { input }: { input: GuiQueryInput | GuiCommandInput }) => {
+            switch (command) {
+                case "op_list_projects":
+                    return Promise.resolve(response([{ project_id: projectId, name: "Atlas" }]));
+                case "op_create_run": {
+                    if (!("command_id" in input)) throw new Error("Commande de création attendue.");
+                    const { command_id, aggregate_id, ...request } = input;
+                    expect(command_id).toMatch(/^[0-9a-f-]{36}$/u);
+                    expect(aggregate_id).toMatch(/^[0-9a-f-]{36}$/u);
+                    expect(command_id).not.toBe(aggregate_id);
+                    expect(request).toEqual({
+                        project_id: projectId,
+                        expected_revision: 0,
+                        payload: {
+                            mission_id: run.mission_id,
+                            source: {
+                                kind: "workflow_version",
+                                id: "workflow.feature",
+                                version: 1,
+                                digest: definition,
+                            },
+                            purpose: "operational",
+                            selection_reason: "Revue Atlas",
+                            scope_ref: scope,
+                        },
+                    });
+                    submittedRun = aggregate_id;
+                    return Promise.resolve({
+                        receipt_id: "00000000-0000-4000-8000-000000000030",
+                        command_id,
+                        aggregate_id,
+                        accepted_at: "2026-11-23T12:00:00Z",
+                        new_revision: 1,
+                        operation_id: null,
+                        state: "completed",
+                        event_cursor: {
+                            stream_id: "00000000-0000-4000-8000-000000000002",
+                            sequence: 13,
+                        },
+                        result_ref: `workflow-run:${aggregate_id}`,
+                    } satisfies CommandReceipt);
+                }
+                case "op_get_run":
+                    expect(submittedRun).toBeDefined();
+                    expect(input).toEqual({
+                        project_id: projectId,
+                        payload: { run_id: submittedRun },
+                    });
+                    return Promise.resolve(response({ ...prepared, run_id: submittedRun }));
+                default:
+                    throw new Error(`Opération inattendue : ${command}`);
+            }
+        },
+    );
+    vi.stubGlobal("__TAURI_INTERNALS__", { invoke });
+    const user = userEvent.setup();
+    render(<App agentCount={4} eventTotalCount={12} diffLineCount={20} />);
+
+    await user.click(screen.getByRole("tab", { name: /^Workflows/u }));
+    await screen.findByRole("option", { name: /^Atlas · /u });
+    await user.selectOptions(screen.getByRole("combobox", { name: "Projet" }), projectId);
+    await fillRunPreparation(user);
+    await user.click(screen.getByRole("button", { name: "Préparer le run" }));
+
+    const observed = within(await screen.findByRole("region", { name: "Run créé" }));
+    expect(observed.getByText(submittedRun ?? "Identifiant absent")).toBeVisible();
+    expect(observed.getByText("workflow.feature@1")).toBeVisible();
+    expect(screen.getByRole("group", { name: "Suivi de la préparation" })).toHaveFocus();
+    await user.tab();
+    expect(screen.getByRole("button", { name: "Consulter le run créé" })).toHaveFocus();
+    expect(invoke.mock.calls.map(([command]) => command)).toEqual([
+        "op_list_projects",
+        "op_create_run",
+        "op_get_run",
+    ]);
+});
+
+it("T-F005-009 (renderer) — isole une préparation incertaine et relit le même run", async () => {
+    const otherProject = "00000000-0000-4000-8000-000000000020";
+    let requestedId: string | undefined;
+    let committed = false;
+    const invoke = vi.fn(
+        (command: string, { input }: { input: GuiQueryInput | GuiCommandInput }) => {
+            switch (command) {
+                case "op_list_projects":
+                    return Promise.resolve(
+                        response([
+                            { project_id: projectId, name: "Atlas" },
+                            { project_id: otherProject, name: "Nova" },
+                        ]),
+                    );
+                case "op_create_run":
+                    if (!("command_id" in input)) throw new Error("Commande de création attendue.");
+                    requestedId = input.aggregate_id;
+                    return Promise.reject(
+                        Object.assign(new Error("Reçu perdu"), {
+                            code: "OutcomeUnknown",
+                            retry_class: "after_reconciliation",
+                        }),
+                    );
+                case "op_get_run":
+                    expect(input).toEqual({
+                        project_id: projectId,
+                        payload: { run_id: requestedId },
+                    });
+                    return Promise.resolve(
+                        response({
+                            ...prepared,
+                            run_id: requestedId,
+                            definition_hash: committed ? definition : bundle,
+                        }),
+                    );
+                default:
+                    throw new Error(`Opération inattendue : ${command}`);
+            }
+        },
+    );
+    vi.stubGlobal("__TAURI_INTERNALS__", { invoke });
+    const user = userEvent.setup();
+    render(<App agentCount={4} eventTotalCount={12} diffLineCount={20} />);
+
+    await user.click(screen.getByRole("tab", { name: /^Workflows/u }));
+    const project = await screen.findByRole("combobox", { name: "Projet" });
+    await user.selectOptions(project, projectId);
+    await fillRunPreparation(user);
+    await user.click(screen.getByRole("button", { name: "Préparer le run" }));
+
+    const unknown = await screen.findByRole("alert");
+    expect(unknown).toHaveTextContent("Préparation non confirmée.");
+    expect(unknown).toHaveTextContent(requestedId ?? "Identifiant absent");
+    expect(screen.queryByRole("region", { name: "Run créé" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Préparer le run" })).not.toBeInTheDocument();
+
+    await user.selectOptions(project, otherProject);
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    expect(screen.getByRole("textbox", { name: "Identifiant du workflow" })).toHaveValue("");
+    await user.selectOptions(project, projectId);
+    const reread = await screen.findByRole("button", { name: "Relire le run demandé" });
+    committed = true;
+    await user.click(reread);
+
+    const observed = within(await screen.findByRole("region", { name: "Run créé" }));
+    expect(observed.getByText(requestedId ?? "Identifiant absent")).toBeVisible();
+    expect(invoke.mock.calls.map(([command]) => command)).toEqual([
+        "op_list_projects",
+        "op_create_run",
+        "op_get_run",
+        "op_get_run",
+        "op_get_run",
+    ]);
+});
+
+it("T-F005-008 (renderer) — transmet le prédécesseur et rend le refus explicite", async () => {
+    const invoke = vi.fn(
+        (command: string, { input }: { input: GuiQueryInput | GuiCommandInput }) => {
+            switch (command) {
+                case "op_list_projects":
+                    return Promise.resolve(response([{ project_id: projectId, name: "Atlas" }]));
+                case "op_create_run":
+                    expect(input.payload).toMatchObject({ predecessor_run_id: runId });
+                    return Promise.reject(
+                        Object.assign(new Error("Le prédécesseur est en cours."), {
+                            code: "ResourceBusy",
+                            reason_code: "PREDECESSOR_NOT_TERMINAL",
+                            retry_class: "after_refresh",
+                        }),
+                    );
+                default:
+                    throw new Error(`Opération inattendue : ${command}`);
+            }
+        },
+    );
+    vi.stubGlobal("__TAURI_INTERNALS__", { invoke });
+    const user = userEvent.setup();
+    render(<App agentCount={4} eventTotalCount={12} diffLineCount={20} />);
+
+    await user.click(screen.getByRole("tab", { name: /^Workflows/u }));
+    const project = await screen.findByRole("combobox", { name: "Projet" });
+    await user.selectOptions(project, projectId);
+    await fillRunPreparation(user);
+    const predecessor = screen.getByRole("textbox", { name: "Run prédécesseur (facultatif)" });
+    await user.type(predecessor, runId);
+    await user.click(screen.getByRole("button", { name: "Préparer le run" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+        "Le run prédécesseur doit être terminé.",
+    );
+    expect(predecessor).toHaveValue(runId);
+    expect(screen.getByRole("button", { name: "Préparer le run" })).toBeEnabled();
+    expect(screen.queryByRole("region", { name: "Run créé" })).not.toBeInTheDocument();
+    expect(invoke.mock.calls.map(([command]) => command)).toEqual([
+        "op_list_projects",
+        "op_create_run",
+    ]);
 });
 
 it("T-F005-001 (renderer) — lit la version engagée et l’état du run demandé", async () => {
