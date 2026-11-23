@@ -289,14 +289,15 @@ body,
   font-size: 12px;
 }
 
-.workspace-grid[data-space="settings"] {
+.workspace-grid:is([data-space="settings"], [data-space="workflows"]) {
   grid-template-columns: 240px minmax(0, 1fr);
   width: 100%;
   max-width: 1800px;
   margin-inline: auto;
 }
 
-.provider-settings {
+.provider-settings,
+.workflow-run-panel {
   min-width: 0;
   padding: clamp(16px, 3.2vw, 32px);
   border: 1px solid var(--color-border);
@@ -321,10 +322,74 @@ body,
   justify-content: space-between;
 }
 
-.provider-settings-header h2 {
+.provider-settings-header h2,
+.workflow-run-panel h2 {
   margin: 0;
   font-size: clamp(24px, 3vw, 36px);
   line-height: 1.15;
+}
+
+[data-theme="dark"] .workflow-run-panel {
+  color-scheme: dark;
+}
+
+.workflow-run-form {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 20rem), 1fr));
+  gap: var(--space-4);
+  max-width: 48rem;
+  margin-block-start: var(--space-5);
+}
+
+.workflow-run-field {
+  display: grid;
+  min-width: 0;
+  gap: var(--space-1);
+}
+
+.workflow-run-field .control-input {
+  width: 100%;
+  min-width: 0;
+  border-color: var(--color-text-secondary);
+  font: inherit;
+}
+
+.workflow-run-form button {
+  justify-self: start;
+  min-height: 2.5rem;
+  font-size: 1rem;
+}
+
+.workflow-run-detail {
+  margin-block-start: var(--space-5);
+  padding-block-start: var(--space-4);
+  border-block-start: 1px solid var(--color-border);
+}
+
+.workflow-run-detail h3 {
+  margin: 0 0 var(--space-3);
+}
+
+.workflow-run-detail dl {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--space-1) var(--space-4);
+  margin: 0;
+}
+
+.workflow-run-detail dt {
+  color: var(--color-text-secondary);
+}
+
+.workflow-run-detail dd {
+  margin: 0 0 var(--space-2);
+  font-weight: 600;
+}
+
+@media (min-width: 641px) {
+  .workflow-run-detail dl {
+    grid-template-columns: minmax(0, 13rem) minmax(0, 1fr);
+  }
 }
 
 .provider-scope {
@@ -556,7 +621,7 @@ body,
   .workspace-grid {
     grid-template-columns: 200px minmax(0, 1fr);
   }
-  .workspace-grid[data-space="settings"] {
+  .workspace-grid:is([data-space="settings"], [data-space="workflows"]) {
     grid-template-columns: 200px minmax(0, 1fr);
   }
   .inspector-card {
@@ -573,7 +638,7 @@ body,
   .workspace-grid {
     grid-template-columns: minmax(0, 1fr);
   }
-  .workspace-grid[data-space="settings"] {
+  .workspace-grid:is([data-space="settings"], [data-space="workflows"]) {
     grid-template-columns: minmax(0, 1fr);
   }
   .nav-list {

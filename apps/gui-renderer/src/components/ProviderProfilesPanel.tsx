@@ -1,74 +1,19 @@
-import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
+import { useCallback, useId, useMemo, useRef, useState } from "react";
 import { Button } from "react-aria-components";
+import { PROJECTS_REQUEST, projectChoices } from "../ipc/projections";
 import {
     profileDetail,
     profilePage,
-    projectChoices,
     transportProbeMandates,
     type InventoryModel,
     type ProviderProfileRow,
     type TransportProbePhase,
 } from "../ipc/providerProfileViews";
-import type { GuiCommandInput, GuiQueryInput, OperationName, TransportAdapter } from "../ipc/types";
+import type { GuiCommandInput, GuiQueryInput, TransportAdapter } from "../ipc/types";
+import { type Reading, useIpcRead } from "../ipc/useIpcRead";
 import { newUuid } from "../ipc/uuid";
 import { LocalProviderProfileForm } from "./LocalProviderProfileForm";
 
-type Reading<T> = { state: "loading" } | { state: "error" } | { state: "ready"; data: T };
-
-function useSettingsRead<T>(
-    transport: TransportAdapter,
-    operation: OperationName,
-    request: GuiQueryInput | null,
-    read: (value: unknown) => T,
-    attempt: number,
-): Reading<T> {
-    const [settled, setSettled] = useState<{
-        request: GuiQueryInput;
-        transport: TransportAdapter;
-        attempt: number;
-        result: Reading<T>;
-    } | null>(null);
-
-    useEffect(() => {
-        if (request === null) {
-            return;
-        }
-        const requested = request;
-        let current = true;
-        function finish(result: Reading<T>) {
-            if (current) {
-                setSettled({ request: requested, transport, attempt, result });
-            }
-        }
-        void transport.executeQuery(operation, request).then(
-            ({ result }) => {
-                try {
-                    finish({ state: "ready", data: read(result) });
-                } catch {
-                    finish({ state: "error" });
-                }
-            },
-            () => {
-                finish({ state: "error" });
-            },
-        );
-        return () => {
-            current = false;
-        };
-    }, [attempt, operation, read, request, transport]);
-
-    if (
-        settled === null ||
-        settled.request !== request ||
-        settled.transport !== transport ||
-        settled.attempt !== attempt
-    ) {
-        return { state: "loading" };
-    }
-    return settled.result;
-}
-
-const PROJECTS_REQUEST: GuiQueryInput = { project_id: null, payload: {} };
 const PROVIDER_LABELS = new Map([
     ["openai", "OpenAI"],
     ["anthropic", "Anthropic"],
@@ -318,7 +263,7 @@ function TransportProbeControls({
         (value: unknown) => transportProbeMandates(value, phase),
         [phase],
     );
-    const mandates = useSettingsRead(
+    const mandates = useIpcRead(
         transport,
         "ReadPolicySummary",
         opened ? request : null,
@@ -440,13 +385,7 @@ function SelectedProfile({
         }),
         [profile.id, profile.version, scope],
     );
-    const detail = useSettingsRead(
-        transport,
-        "GetProviderProfile",
-        request,
-        profileDetail,
-        attempt,
-    );
+    const detail = useIpcRead(transport, "GetProviderProfile", request, profileDetail, attempt);
     const read: Reading<ProfileDetail> =
         detail.state === "ready" &&
         (detail.data.id !== profile.id ||
@@ -573,14 +512,14 @@ export function ProviderProfilesPanel({ transport }: { transport: TransportAdapt
         () => ({ project_id: scope, payload: { limit: 50, after_profile_id: cursor } }),
         [scope, cursor],
     );
-    const projects = useSettingsRead(
+    const projects = useIpcRead(
         transport,
         "ListProjects",
         PROJECTS_REQUEST,
         projectChoices,
         attempt,
     );
-    const profiles = useSettingsRead(
+    const profiles = useIpcRead(
         transport,
         "ListProviderProfiles",
         listRequest,
