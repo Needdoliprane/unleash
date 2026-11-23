@@ -3,9 +3,9 @@ import { Button } from "react-aria-components";
 import { number, PROJECTS_REQUEST, projectChoices, record, text } from "../ipc/projections";
 import type { GuiCommandInput, GuiQueryInput, TransportAdapter } from "../ipc/types";
 import { type Reading, useIpcRead } from "../ipc/useIpcRead";
-import { newUuid } from "../ipc/uuid";
+import { newUuid, UUID_PATTERN } from "../ipc/uuid";
+import { WorkflowRunCreateForm } from "./WorkflowRunCreateForm";
 
-const UUID_PATTERN = "[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}";
 const RUN_STATES = new Map([
     ["prepared", "Préparé"],
     ["running", "En cours"],
@@ -338,6 +338,16 @@ export function WorkflowRunPanel({ transport }: { transport: TransportAdapter })
                         ? "Run introuvable ou inaccessible dans ce projet."
                         : "Impossible de lire ce run."}
                 </p>
+            ) : null}
+            {hasProjects ? (
+                <WorkflowRunCreateForm
+                    projectId={projectId}
+                    transport={transport}
+                    onConsult={(createdRunId) => {
+                        setRunId(createdRunId);
+                        setTarget({ projectId, runId: createdRunId });
+                    }}
+                />
             ) : null}
         </section>
     );
