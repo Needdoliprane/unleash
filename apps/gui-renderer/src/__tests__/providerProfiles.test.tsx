@@ -1,4 +1,4 @@
-import { act, render, screen } from "@testing-library/react";
+import { act, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import listResponse from "../../../../.claude/examples/ipc-provider-profile-list-response.json";
@@ -686,7 +686,14 @@ describe("T-F012-018 — lecture des profils dans Settings", () => {
 describe("T-F012-018 — lecture de l’inventaire observé", () => {
     const ollamaProfile = { ...initialProfile, provider_kind: "ollama" };
 
-    function settingsInventory(models: string[] | null, version = ollamaProfile.profile_version) {
+    function inventoryModel(name: string, details: Record<string, string | null> | null = null) {
+        return { name, model: null, modified_at: null, size: null, digest: null, details };
+    }
+
+    function settingsInventory(
+        models: ReturnType<typeof inventoryModel>[] | null,
+        version = ollamaProfile.profile_version,
+    ) {
         const probeId = "00000000-0000-4000-8000-000000000041";
         return fixture((operation) => {
             switch (operation) {
@@ -715,15 +722,7 @@ describe("T-F012-018 — lecture de l’inventaire observé", () => {
                                             object_hash: "cd".repeat(32),
                                         },
                                         inventory_digest: "ef".repeat(32),
-                                        models:
-                                            models?.map((name) => ({
-                                                name,
-                                                model: null,
-                                                modified_at: null,
-                                                size: null,
-                                                digest: null,
-                                                details: null,
-                                            })) ?? null,
+                                        models,
                                     },
                                 },
                             ],
@@ -738,11 +737,13 @@ describe("T-F012-018 — lecture de l’inventaire observé", () => {
     it("affiche les modèles de la version projet et les parcourt sans nouvel appel IPC", async () => {
         const first = "<modele-observe:1>";
         const last = "dernier-modèle:26";
-        const { invoke, user } = settingsInventory([
-            first,
-            ...Array.from({ length: 24 }, (_, index) => `modèle:${String(index + 2)}`),
-            last,
-        ]);
+        const { invoke, user } = settingsInventory(
+            [
+                first,
+                ...Array.from({ length: 24 }, (_, index) => `modèle:${String(index + 2)}`),
+                last,
+            ].map((name) => inventoryModel(name)),
+        );
         await user.click(screen.getByRole("tab", { name: /Settings/ }));
         await screen.findByRole("option", { name: /Atlas/ });
         await user.selectOptions(
@@ -775,6 +776,34 @@ describe("T-F012-018 — lecture de l’inventaire observé", () => {
         expect(invoke).toHaveBeenCalledTimes(reads);
     });
 
+    it("présente le format et la quantification uniquement pour le modèle qui les déclare", async () => {
+        const { invoke, user } = settingsInventory([
+            inventoryModel("qwen3:8b", {
+                format: "gguf",
+                family: null,
+                parameter_size: null,
+                quantization_level: "Q4_K_M",
+            }),
+            inventoryModel("modèle-sans-métadonnées"),
+        ]);
+        await user.click(screen.getByRole("tab", { name: /Settings/ }));
+        await user.click(await screen.findByRole("button", { name: /first-v2/ }));
+        const models = await screen.findByRole("list", { name: "Modèles observés" });
+        const [withDetails, withoutDetails] = within(models).getAllByRole("listitem");
+        expect(withDetails).toBeDefined();
+        expect(withoutDetails).toBeDefined();
+        expect(withDetails).toHaveTextContent("qwen3:8b");
+        expect(withDetails).toHaveTextContent("Format gguf");
+        expect(withDetails).toHaveTextContent("Quantification Q4_K_M");
+        expect(withoutDetails).toHaveTextContent(/^modèle-sans-métadonnées$/u);
+        expect(screen.getAllByText("Qualification requise")).toHaveLength(2);
+        expect(invoke.mock.calls.map(([operation]) => operation)).toEqual([
+            "op_list_projects",
+            "op_list_provider_profiles",
+            "op_get_provider_profile",
+        ]);
+    });
+
     it("affiche une liste vide constatée par le daemon", async () => {
         const { user } = settingsInventory([]);
         await user.click(screen.getByRole("tab", { name: /Settings/ }));
@@ -789,7 +818,7 @@ describe("T-F012-018 — lecture de l’inventaire observé", () => {
             const { user } =
                 variant === "illisible"
                     ? settingsInventory(null)
-                    : settingsInventory([model], ollamaProfile.profile_version + 1);
+                    : settingsInventory([inventoryModel(model)], ollamaProfile.profile_version + 1);
             await user.click(screen.getByRole("tab", { name: /Settings/ }));
             await user.click(await screen.findByRole("button", { name: /first-v2/ }));
             expect(await screen.findByRole("alert")).toHaveTextContent(
