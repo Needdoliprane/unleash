@@ -1,8 +1,9 @@
-import { type SubmitEvent, useCallback, useId, useMemo, useState } from "react";
+import { type SubmitEvent, useCallback, useId, useMemo, useRef, useState } from "react";
 import { Button } from "react-aria-components";
 import { number, PROJECTS_REQUEST, projectChoices, record, text } from "../ipc/projections";
-import type { GuiQueryInput, TransportAdapter } from "../ipc/types";
-import { useIpcRead } from "../ipc/useIpcRead";
+import type { GuiCommandInput, GuiQueryInput, TransportAdapter } from "../ipc/types";
+import { type Reading, useIpcRead } from "../ipc/useIpcRead";
+import { newUuid } from "../ipc/uuid";
 
 const UUID_PATTERN = "[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}";
 const RUN_STATES = new Map([
@@ -41,7 +42,174 @@ function runDetails(value: unknown, target: RunTarget | null) {
         workflowVersion: text(fields.workflow_version_id),
         definitionHash: text(fields.definition_hash),
         bundleHash: text(fields.effective_bundle_hash),
+        offersStart:
+            state === "prepared" &&
+            purpose === "operational" &&
+            typeof fields.plan === "object" &&
+            fields.plan !== null &&
+            !Array.isArray(fields.plan),
     };
+}
+
+type StartFeedback =
+    | { kind: "submitting" }
+    | { kind: "observing"; previousRevision: number }
+    | { kind: "retryable"; command: GuiCommandInput }
+    | { kind: "conflict" | "refreshing" }
+    | { kind: "refused"; explanation: string | null };
+
+function RunDetail({
+    headingId,
+    read,
+    target,
+    refresh,
+    transport,
+}: {
+    headingId: string;
+    read: Reading<ReturnType<typeof runDetails>>;
+    target: RunTarget;
+    refresh: () => void;
+    transport: TransportAdapter;
+}) {
+    const [feedback, setFeedback] = useState<StartFeedback | null>(null);
+    const sending = useRef(false);
+    const detail = read.state === "ready" ? read.data : null;
+    const waiting =
+        feedback?.kind === "observing" &&
+        (detail === null || detail.revision <= feedback.previousRevision);
+    const canStart = detail?.offersStart === true && !waiting && feedback?.kind !== "refused";
+    const retry =
+        feedback?.kind === "retryable" && feedback.command.expected_revision === detail?.revision
+            ? feedback.command
+            : null;
+    const submitting = feedback?.kind === "submitting";
+
+    async function start() {
+        if (!canStart || sending.current) return;
+        const command = retry ?? {
+            command_id: newUuid(),
+            project_id: target.projectId,
+            aggregate_id: target.runId,
+            expected_revision: detail.revision,
+            payload: {},
+        };
+        sending.current = true;
+        setFeedback({ kind: "submitting" });
+        try {
+            const receipt = await transport.submitCommand("StartRun", command);
+            if (
+                receipt.command_id === command.command_id &&
+                receipt.aggregate_id === command.aggregate_id &&
+                (receipt.state === "blocked" || receipt.state === "rejected")
+            ) {
+                setFeedback({ kind: "refused", explanation: null });
+                return;
+            }
+        } catch (error) {
+            if (typeof error === "object" && error !== null) {
+                const code = "code" in error ? error.code : null;
+                const retryClass = "retry_class" in error ? error.retry_class : null;
+                if (code === "RevisionConflict") {
+                    setFeedback({ kind: "conflict" });
+                    refresh();
+                    return;
+                }
+                if (retryClass === "after_backoff") {
+                    setFeedback({ kind: "retryable", command });
+                    return;
+                }
+                if (retryClass === "never" || retryClass === "after_human_decision") {
+                    const explanation =
+                        code === "BudgetExceeded"
+                            ? "Budget d’activation épuisé."
+                            : retryClass === "after_human_decision"
+                              ? "Une décision est requise."
+                              : null;
+                    setFeedback({ kind: "refused", explanation });
+                    return;
+                }
+            }
+        } finally {
+            sending.current = false;
+        }
+        setFeedback({ kind: "observing", previousRevision: detail.revision });
+        refresh();
+    }
+
+    if (detail === null && feedback === null) return null;
+    const startingAction = canStart || submitting;
+    const label = waiting
+        ? "Relire le résultat du démarrage"
+        : startingAction
+          ? retry === null
+              ? "Démarrer le run"
+              : "Reprendre le démarrage"
+          : "Actualiser le run";
+
+    return (
+        <section className="workflow-run-detail" aria-labelledby={headingId}>
+            <h3 id={headingId}>Détail du run</h3>
+            {detail === null ? null : (
+                <dl>
+                    <dt>Identifiant</dt>
+                    <dd>
+                        <code>{target.runId}</code>
+                    </dd>
+                    <dt>État enregistré</dt>
+                    <dd>{detail.state}</dd>
+                    <dt>Version engagée</dt>
+                    <dd>
+                        <code>{detail.workflowVersion}</code>
+                    </dd>
+                    <dt>Révision du run</dt>
+                    <dd>{detail.revision}</dd>
+                    <dt>Usage</dt>
+                    <dd>{detail.purpose}</dd>
+                    <dt>Mission</dt>
+                    <dd>
+                        <code>{detail.missionId}</code>
+                    </dd>
+                    <dt>Empreinte de la définition</dt>
+                    <dd>
+                        <code>{detail.definitionHash}</code>
+                    </dd>
+                    <dt>Empreinte du plan effectif</dt>
+                    <dd>
+                        <code>{detail.bundleHash}</code>
+                    </dd>
+                </dl>
+            )}
+            {canStart || feedback !== null ? (
+                <Button
+                    className={
+                        startingAction ? "control-button control-button-primary" : "control-button"
+                    }
+                    isPending={submitting || read.state === "loading"}
+                    onPress={() => {
+                        if (canStart) {
+                            void start();
+                        } else {
+                            if (feedback?.kind === "refused") setFeedback({ kind: "refreshing" });
+                            refresh();
+                        }
+                    }}
+                >
+                    {label}
+                </Button>
+            ) : null}
+            {submitting ? <p role="status">Demande de démarrage en cours…</p> : null}
+            {waiting && read.state !== "loading" ? (
+                <p role="alert">Démarrage non confirmé.</p>
+            ) : null}
+            {feedback?.kind === "conflict" ? (
+                <p role="alert">Les données du run ont changé. Vérifiez la version relue.</p>
+            ) : null}
+            {feedback?.kind === "refused" ? (
+                <p role="alert">Démarrage refusé. {feedback.explanation}</p>
+            ) : null}
+            {retry !== null ? <p role="alert">Démarrage temporairement indisponible.</p> : null}
+        </section>
+    );
 }
 
 export function WorkflowRunPanel({ transport }: { transport: TransportAdapter }) {
@@ -146,38 +314,22 @@ export function WorkflowRunPanel({ transport }: { transport: TransportAdapter })
             ) : null}
             <div aria-live="polite">
                 {readingRun ? <p>Lecture du run…</p> : null}
-                {target !== null && read.state === "ready" ? (
-                    <section className="workflow-run-detail" aria-labelledby={`${formId}-detail`}>
-                        <h3 id={`${formId}-detail`}>Détail du run</h3>
-                        <dl>
-                            <dt>Identifiant</dt>
-                            <dd>
-                                <code>{target.runId}</code>
-                            </dd>
-                            <dt>État enregistré</dt>
-                            <dd>{read.data.state}</dd>
-                            <dt>Version engagée</dt>
-                            <dd>
-                                <code>{read.data.workflowVersion}</code>
-                            </dd>
-                            <dt>Révision du run</dt>
-                            <dd>{read.data.revision}</dd>
-                            <dt>Usage</dt>
-                            <dd>{read.data.purpose}</dd>
-                            <dt>Mission</dt>
-                            <dd>
-                                <code>{read.data.missionId}</code>
-                            </dd>
-                            <dt>Empreinte de la définition</dt>
-                            <dd>
-                                <code>{read.data.definitionHash}</code>
-                            </dd>
-                            <dt>Empreinte du plan effectif</dt>
-                            <dd>
-                                <code>{read.data.bundleHash}</code>
-                            </dd>
-                        </dl>
-                    </section>
+                {target !== null ? (
+                    <RunDetail
+                        key={`${target.projectId}/${target.runId}`}
+                        headingId={`${formId}-detail`}
+                        read={read}
+                        target={target}
+                        transport={transport}
+                        refresh={() => {
+                            setTarget((current) =>
+                                current?.projectId === target.projectId &&
+                                current.runId === target.runId
+                                    ? { ...current }
+                                    : current,
+                            );
+                        }}
+                    />
                 ) : null}
             </div>
             {target !== null && read.state === "error" ? (
