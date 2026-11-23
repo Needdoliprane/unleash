@@ -41,7 +41,7 @@ Error = code, reason_code (clé toujours présente, null sans raison), message, 
 | Goals/missions | CreateGoal, ReviseGoal, AssignMission, ReviseMission, PauseMission, ResumeMission, CancelMission | GetOverview, ListGoals, GetMission |
 | Démarrage guidé | CreateGuidedSetupDraft, SaveGuidedSetupDraft, ValidateGuidedSetup, ApplyGuidedSetup | ListGuidedTemplates, GetGuidedSetupDraft, GetGuidedSetupValidation, GetSetupPreview |
 | Agents/messages | CreateAgent, AssignTask, SendHumanMessage, RequestInterruption | ListAgents, GetAgent, GetConversation |
-| Workflows et runs communs | CreateWorkflowDraft, DraftWorkflowFromIntent, SaveWorkflowDraft, ValidateWorkflowDraft, NormalizeWorkflowDraft, SimulateWorkflow, PublishWorkflowVersion, CreateRun, StartRun, PauseRun, ResumeRun, CancelRun, AcceptStep, RequestCorrection, BindRole | GetWorkflowVersion, GetRun |
+| Workflows et runs communs | CreateWorkflowDraft, DraftWorkflowFromIntent, SaveWorkflowDraft, ValidateWorkflowDraft, NormalizeWorkflowDraft, SimulateWorkflow, PublishWorkflowVersion, CreateRun, StartRun, PauseRun, ResumeRun, CancelRun, AcceptStep, RequestCorrection, BindRole | GetWorkflowVersion, GetRun, ListRuns |
 | Automatisations F019 | CreateAutomationDraft, SaveAutomationDraft, LearnAutomation, ValidateAutomationDraft, EvaluateAutomationDraft, PublishAutomationVersion, ImportAutomationData, ValidateAutomationData, RepairAutomation, DeprecateAutomationVersion, RevokeAutomationVersion | SearchAutomations, GetAutomationDraft, GetAutomationVersion, GetAutomationDataRevision, GetAutomationEvaluation |
 | Skills/rôles | CreateSkillDraft, ValidateSkill, PublishSkillVersion, CreateRoleDraft, ValidateRole, PublishRoleVersion, DeprecateSkillVersion, DeprecateRoleVersion, RevokeSkillVersion, RevokeRoleVersion | SearchSkills, GetSkillVersion, SearchRoles, GetRoleVersion, GetVersionDiff, ListVersionUsages |
 | Discovery | DiscoverResources, RecordDiscoveryDecision, AttachDiscoveryReceipt, DeclareWorkIntent, RequestDependency | SearchKnowledge, GetSnapshot, GetDiscoveryReceipt |
@@ -52,6 +52,8 @@ Error = code, reason_code (clé toujours présente, null sans raison), message, 
 | Maintenance | RequestBackup, ValidateBackup, RestoreBackup, RebuildIndex, PurgeHistory, ReconcileAction, ResolveActionOutcome, ResumeRecoveredInvocation | GetHealth, InspectRecovery, GetBackupManifest |
 
 Les lectures initiales de M1 ont des payloads fermés. `ListProjects` et `InspectRecovery` prennent un objet vide. `GetProject` prend un objet vide et le `project_id` de l’enveloppe. `ReadPolicySummary` prend un objet vide et accepte le filtre `project_id` de l’enveloppe. `ReadSettings` prend `scope_kind` et `scope_id` et vérifie leur concordance avec le scope authentifié. Les projections SQLite et le curseur renvoyé sont lus dans une seule transaction. La lecture du manifeste de maintenance externe indique sa propre provenance.
+
+`ListRuns` utilise le [contrat F005](../features/F005-workflow-engine/interfaces.md#liste-des-runs-par-projet). La requête pagine les résumés durables d’un projet explicite. Le détail du run exact se lit par `GetRun`.
 
 Les mutations de configuration de cette tranche utilisent des objets fermés et le décideur résolu par le daemon.
 

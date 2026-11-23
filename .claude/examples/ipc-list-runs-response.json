@@ -1,0 +1,24 @@
+{
+  "request_id": "00000000-0000-4000-8000-000000000001",
+  "watermark": {
+    "stream_id": "00000000-0000-4000-8000-000000000006",
+    "sequence": 42
+  },
+  "result": {
+    "project_id": "00000000-0000-4000-8000-000000000010",
+    "items": [
+      {
+        "run_id": "00000000-0000-4000-8000-000000000021",
+        "mission_id": "00000000-0000-4000-8000-000000000031",
+        "workflow_version_id": "demo.reconcile.csv:1",
+        "state": "prepared",
+        "revision": 1,
+        "purpose": "operational"
+      }
+    ],
+    "next_cursor": "fixture-next-page",
+    "coverage": {
+      "status": "complete"
+    }
+  }
+}

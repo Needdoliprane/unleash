@@ -2204,10 +2204,10 @@
       ],
       "status": "proposed",
       "contract_stage": "documented",
-      "description": "Source/AST, diagnostics, usages et limites ; manifeste d’automatisation, modes, données/mapping, évaluation exacte et qualification. Rapports de validation accessibles par les références de résultat communes, sans nouvelle requête propre inventée.",
+      "description": "Liste paginée des résumés durables et de la version engagée des runs visibles du projet demandé.",
       "contract_source": {
-        "path": "architecture/client-operation-catalog.md",
-        "subject": "Workflows 01–05 + AUTOMATION-01–04"
+        "path": "features/F005-workflow-engine/interfaces.md",
+        "subject": "Liste des runs par projet"
       },
       "payload_schema_ref": null,
       "runtime_executable": false,
@@ -4441,7 +4441,7 @@
     {
       "id": "PAR-WORKFLOWS-05",
       "status": "required_not_tested",
-      "statement": "Publier ; créer/démarrer/pause/reprise/annuler un run ; inspecter/adopter version éligible, lier rôle autorisé, accepter étape/demander correction.",
+      "statement": "Publier un workflow. Créer, démarrer, mettre en pause, reprendre ou annuler un run. Lister les runs du projet, ouvrir leur détail, inspecter et adopter une version éligible, lier un rôle autorisé, accepter une étape ou demander une correction.",
       "operation_names": [
         "PublishWorkflowVersion",
         "CreateRun",
