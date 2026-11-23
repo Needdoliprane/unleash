@@ -6,6 +6,7 @@ import { InspectorPanel } from "./components/InspectorPanel";
 import { ProviderProfilesPanel } from "./components/ProviderProfilesPanel";
 import { TerminalPanel } from "./components/TerminalPanel";
 import { TimelinePanel } from "./components/TimelinePanel";
+import { WorkflowRunPanel } from "./components/WorkflowRunPanel";
 import {
     buildAgentTree,
     buildInitialReportAst,
@@ -62,6 +63,8 @@ export function App({
     const [theme, setTheme] = useState<ThemeMode>(initialTheme);
     const [activeSpace, setActiveSpace] = useState<SpaceId>("overview");
     const isSettings = activeSpace === "settings";
+    const isWorkflows = activeSpace === "workflows";
+    const showsMissionFixture = !isSettings && !isWorkflows;
     const [connectionState] = useState<ConnectionState>("connected");
     const [reportAst, setReportAst] = useState<MarkdownDocumentAst>(
         () => initialReportAst ?? buildInitialReportAst(),
@@ -85,18 +88,18 @@ export function App({
             <header className="top-header">
                 <div className="brand-group">
                     <h1 className="brand-title">OVPT Unleash</h1>
-                    {isSettings ? null : (
+                    {showsMissionFixture ? (
                         <>
                             <span className="badge badge-success">
                                 IPC unleash.ipc.v2 · {connectionState}
                             </span>
                             <span className="badge">Mode : {M0_MISSION_SUMMARY.mode}</span>
                         </>
-                    )}
+                    ) : null}
                 </div>
 
                 <div className="header-meta">
-                    {isSettings ? null : (
+                    {showsMissionFixture ? (
                         <>
                             <span className="mono" role="status" aria-live="polite">
                                 {liveStatus}
@@ -110,7 +113,7 @@ export function App({
                                 Rafraîchir AST Rust
                             </Button>
                         </>
-                    )}
+                    ) : null}
                     <Button
                         className="control-button"
                         data-testid="theme-toggle"
@@ -142,9 +145,9 @@ export function App({
                                     }}
                                 >
                                     <span>{space.label}</span>
-                                    {isSettings ? null : (
+                                    {showsMissionFixture ? (
                                         <span className="mono">{space.groupCount}</span>
-                                    )}
+                                    ) : null}
                                 </button>
                             );
                         })}
@@ -154,6 +157,10 @@ export function App({
                 {isSettings ? (
                     <main className="main-column" aria-label="Paramètres des modèles">
                         <ProviderProfilesPanel transport={transport} />
+                    </main>
+                ) : isWorkflows ? (
+                    <main className="main-column" aria-label="Workflows">
+                        <WorkflowRunPanel transport={transport} />
                     </main>
                 ) : (
                     <main className="main-column" aria-label="Zone de travail Mission et Overview">
@@ -225,12 +232,12 @@ export function App({
                     </main>
                 )}
 
-                {isSettings ? null : (
+                {showsMissionFixture ? (
                     <InspectorPanel selectedAgent={selectedAgent} selectedEvent={selectedEvent} />
-                )}
+                ) : null}
             </div>
 
-            {isSettings ? null : (
+            {showsMissionFixture ? (
                 <footer className="footer-bar">
                     <span>
                         OVPT Unleash — Tranche verticale M0 (Tauri 2 + React 19 + TS strict)
@@ -239,7 +246,7 @@ export function App({
                         58 groupes PAR · 0 règle métier dans le renderer · WCAG 2.2 AA cible
                     </span>
                 </footer>
-            )}
+            ) : null}
         </div>
     );
 }
