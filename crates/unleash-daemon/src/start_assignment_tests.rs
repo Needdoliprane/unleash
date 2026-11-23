@@ -33,8 +33,10 @@ const WORKER: AgentId = AgentId::from_u128(0x5980);
 const MISSION: MissionId = MissionId::from_u128(0x5981);
 const PROFILE: Uuid = Uuid::from_u128(0x5982);
 const MANIFEST: Uuid = Uuid::from_u128(0x5983);
+const ROLE_WITH_POLICY: &str = "role.pinned-model-policy";
+const ROLE_WITH_POLICY_VERSION: &str = "role-pinned-model-policy-v1";
 
-fn seed(data: &Path) -> (CommandEnvelope, CallerAuthority) {
+fn seed(data: &Path, policy_id: Option<&str>) -> (CommandEnvelope, CallerAuthority) {
     let mut config = StoreConfig::new(data);
     config.owner_uid = effective_uid();
     current_boot_identity()
@@ -42,8 +44,45 @@ fn seed(data: &Path) -> (CommandEnvelope, CallerAuthority) {
         .as_str()
         .clone_into(&mut config.boot_identity);
     let actor = ActorId::new(format!("uid:{}", effective_uid())).unwrap();
-    let (fixture, mut command, caller) =
-        workflow_run::prepare(config, actor, unleash_domain::AgentLevel::N, |_, _, _| {});
+    let (fixture, mut command, caller) = workflow_run::prepare(
+        config,
+        actor,
+        unleash_domain::AgentLevel::N,
+        |workflow, _, _| {
+            if policy_id.is_some() {
+                *workflow
+                    .pointer_mut("/bindings/developer/role/id")
+                    .unwrap() = json!(ROLE_WITH_POLICY);
+            }
+        },
+    );
+    if let Some(policy_id) = policy_id {
+        let scope = json!({"kind":"project", "owner_id":command.project_id.unwrap()});
+        let entry_skill = json!({"id":"skill.fixture", "version":1, "scope":scope});
+        let contract = json!({"id":"contract.fixture", "version":1, "scope":scope});
+        workflow_run::publish_fixture_version(
+            &fixture,
+            caller.actor_id.as_str(),
+            "role",
+            ROLE_WITH_POLICY,
+            ROLE_WITH_POLICY_VERSION,
+            &json!({
+                "schema_version":"unleash.role.v1",
+                "role_id":ROLE_WITH_POLICY,
+                "version":1,
+                "level":"N",
+                "scope":scope,
+                "entry_skill":entry_skill,
+                "skills":[entry_skill],
+                "contracts":[contract],
+                "model_policy":{
+                    "policy_ref":{"id":policy_id, "version":1},
+                    "required_capabilities":["text"],
+                    "fallback_allowed":false
+                }
+            }),
+        );
+    }
     let definition: String = fixture
         .store
         .read_snapshot(|db, _| {
@@ -149,6 +188,10 @@ struct Route {
 }
 
 async fn route() -> Route {
+    route_with_role_policy(None).await
+}
+
+async fn route_with_role_policy(policy_id: Option<&'static str>) -> Route {
     let data = unleash_testkit::local_test_dir("f003-bundle-data").unwrap();
     let rendezvous = unleash_testkit::local_test_dir("f003-bundle-rdv").unwrap();
     std::fs::set_permissions(rendezvous.path(), PermissionsExt::from_mode(0o700)).unwrap();
@@ -158,7 +201,7 @@ async fn route() -> Route {
         ..DaemonConfig::default()
     };
     let seed_dir = data.path().to_owned();
-    let (mut create, caller) = tokio::task::spawn_blocking(move || seed(&seed_dir))
+    let (mut create, caller) = tokio::task::spawn_blocking(move || seed(&seed_dir, policy_id))
         .await
         .unwrap();
     let (daemon, mut client) = start(config.clone()).await;
@@ -601,6 +644,166 @@ async fn publishes_a_role_model_policy_through_settings() {
     drop(client);
     daemon
         .shutdown_graceful("finish model policy fixture")
+        .await
+        .unwrap();
+}
+
+async fn publish_policy_for_assignment(
+    route: &mut Route,
+    id: u128,
+    revision: u64,
+    policy_id: &str,
+    profile: &Value,
+) -> String {
+    let project = route.assign.project_id.unwrap();
+    let publish = command(
+        &route.assign,
+        id,
+        "SetSettings",
+        project.as_uuid(),
+        revision,
+        json!({
+            "scope_kind":"project",
+            "scope_id":project,
+            "patch":{"model_policy_version":{
+                "operation":"publish",
+                "policy_id":policy_id,
+                "allowed_profiles":[profile],
+                "allowed_capabilities":["text"],
+                "fallback_profiles":[],
+                "limits":{
+                    "max_llm_calls":1,
+                    "max_output_tokens":128,
+                    "max_cost_microusd":10000,
+                    "max_duration_seconds":60
+                }
+            }}
+        }),
+    );
+    let receipt = route.client.send_command(&publish).await.unwrap();
+    assert_eq!(receipt.state, ReceiptState::Accepted);
+    assert_eq!(receipt.new_revision, Revision::new(revision + 1));
+    receipt.result_ref.unwrap()
+}
+
+async fn assert_materialized_bundle(route: &Route, observed: &Value, preferred: &Value) {
+    let bundle_hash: Sha256Digest = observed
+        .get("effective_bundle_hash")
+        .and_then(Value::as_str)
+        .unwrap()
+        .parse()
+        .unwrap();
+    let store = Arc::clone(&route.daemon.test_runtime_state().store);
+    let bundle: Value = tokio::task::spawn_blocking(move || {
+        let document = store.read_verified_object_bytes(bundle_hash).unwrap();
+        serde_json::from_slice(&document).unwrap()
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        bundle.get("role_version_id"),
+        Some(&json!(ROLE_WITH_POLICY_VERSION))
+    );
+    assert_eq!(
+        bundle.get("requested_model_profile_digest"),
+        Some(preferred.get("digest").unwrap())
+    );
+    let context = observed
+        .get("context_manifest_id")
+        .and_then(Value::as_str)
+        .unwrap();
+    assert!(!context.parse::<Uuid>().unwrap().is_nil());
+    assert_eq!(bundle.get("initial_context_manifest_id"), Some(&json!(context)));
+}
+
+// T-F003-002 / REQ-AGENT-002. Le daemon matérialise le bundle et le contexte de l'affectation.
+#[tokio::test]
+async fn assign_task_materializes_a_bundle_from_the_pinned_role_policy() {
+    const POLICY: &str = "policy.first-task";
+    const OTHER_PROFILE: Uuid = Uuid::from_u128(0x5a00);
+    let mut route = route_with_role_policy(Some(POLICY)).await;
+    let project = route.assign.project_id.unwrap();
+    let preferred = configured_profile_reference(&mut route.client, &route.assign, PROFILE).await;
+    let scope = json!({"kind":"project","owner_id":project});
+    let select = command(
+        &route.assign,
+        0x5a01,
+        "SetSettings",
+        project.as_uuid(),
+        0,
+        json!({
+            "scope_kind":"project",
+            "scope_id":project,
+            "patch":{"model_selection_binding":{
+                "operation":"upsert",
+                "configuration_scope":scope,
+                "skill_ref":{"skill_id":"skill.fixture","skill_version":1,"skill_scope":scope},
+                "preferred_profile_ref":preferred
+            }}
+        }),
+    );
+    let preference = route.client.send_command(&select).await.unwrap();
+    assert_eq!(preference.new_revision, Revision::new(1));
+
+    let mut missing_policy = route.assign.clone();
+    missing_policy.request_id = RequestId::from_u128(0x5a02);
+    missing_policy.command_id = CommandId::from_u128(0x5a02);
+    let denied = route.client.send_command(&missing_policy).await;
+    assert!(
+        matches!(&denied, Err(ClientError::Remote(error))
+            if error.code == ErrorCode::ContractViolation
+                && error.reason_code == Some(ReasonCode::ModelConfigurationConflict)),
+        "la politique absente doit bloquer l'affectation : {denied:?}"
+    );
+
+    let v1 = publish_policy_for_assignment(&mut route, 0x5a03, 1, POLICY, &preferred).await;
+    assert!(v1.starts_with("model-policy:policy.first-task:1:sha256:"));
+    configure_profile(&mut route.client, &route.assign, OTHER_PROFILE, 0).await;
+    let other = configured_profile_reference(&mut route.client, &route.assign, OTHER_PROFILE).await;
+    let v2 = publish_policy_for_assignment(&mut route, 0x5a04, 2, POLICY, &other).await;
+    assert!(v2.starts_with("model-policy:policy.first-task:2:sha256:"));
+
+    // Le test n'écrit ni contexte initial, ni bundle, ni preuve d'admission.
+    let receipt = route.client.send_command(&route.assign).await.unwrap();
+    assert_eq!(receipt.state, ReceiptState::Accepted);
+    assert_eq!(receipt.new_revision, Revision::new(2));
+    let invocation = receipt
+        .result_ref
+        .as_deref()
+        .unwrap()
+        .strip_prefix("invocation:")
+        .unwrap();
+    let query = QueryEnvelope {
+        protocol_version: ProtocolVersion,
+        request_id: RequestId::from_u128(0x5a05),
+        query_type: "GetInvocation".to_owned(),
+        project_id: Some(project),
+        payload: serde_json::from_value(json!({"invocation_id":invocation})).unwrap(),
+    };
+    let observed = route.client.query(&query).await.unwrap().result;
+    assert_eq!(observed.get("invocation_id"), Some(&json!(invocation)));
+    assert_eq!(observed.get("agent_id"), Some(&json!(WORKER)));
+    assert_materialized_bundle(&route, &observed, &preferred).await;
+
+    let first_epoch = route.daemon.daemon_epoch();
+    drop(route.client);
+    route
+        .daemon
+        .shutdown_graceful("restart policy-bound assignment fixture")
+        .await
+        .unwrap();
+    drop(route.daemon);
+    let (daemon, mut client) = start(route.config).await;
+    assert!(daemon.daemon_epoch().as_u64() > first_epoch.as_u64());
+    route.assign.request_id = RequestId::from_u128(0x5a06);
+    assert_eq!(client.send_command(&route.assign).await.unwrap(), receipt);
+    let recovered = client.query(&query).await.unwrap().result;
+    for field in ["invocation_id", "effective_bundle_hash", "context_manifest_id"] {
+        assert_eq!(recovered.get(field), observed.get(field), "{field}");
+    }
+    drop(client);
+    daemon
+        .shutdown_graceful("finish policy-bound assignment fixture")
         .await
         .unwrap();
 }
