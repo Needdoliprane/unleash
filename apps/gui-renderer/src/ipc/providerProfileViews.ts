@@ -63,6 +63,33 @@ export function profilePage(value: unknown) {
 
 export type ProviderProfileRow = ReturnType<typeof profilePage>["profiles"][number];
 
+export function inventoryMandates(value: unknown) {
+    return list(record(value).provider_probe_mandates).flatMap((item) => {
+        const fields = record(item);
+        if (fields.phase !== "inventory" || fields.status !== "active") return [];
+
+        const locality = fields.locality;
+        const timeoutMs = number(record(fields.limits).timeout_ms);
+        if ((locality !== "local_only" && locality !== "approved_remote") || timeoutMs === 0) {
+            throw new Error("Mandat d’inventaire IPC illisible");
+        }
+
+        return [
+            {
+                reference: text(fields.mandate_ref),
+                principal: text(fields.principal_id),
+                scopeKind: text(fields.scope_kind),
+                scopeId: text(fields.scope_id),
+                profileId: text(fields.profile_id),
+                profileVersion: number(fields.profile_version),
+                configurationDigest: text(fields.configuration_digest),
+                locality,
+                timeoutMs,
+            } as const,
+        ];
+    });
+}
+
 function observedText(value: unknown): string | null {
     if (value === null || value === undefined) return null;
     if (typeof value !== "string") {
@@ -92,6 +119,7 @@ export function profileDetail(value: unknown) {
     const fields = record(value);
     return {
         ...profileIdentity(fields),
+        configurationDigest: observedText(fields.configuration_digest),
         configurationReceiptId: text(fields.configuration_receipt_id),
         qualification: text(fields.qualification),
         observations: list(fields.observations).map((item) => {

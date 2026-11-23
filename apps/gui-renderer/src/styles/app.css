@@ -481,6 +481,23 @@ body,
   margin: 0;
 }
 
+.provider-mandate-choice {
+  display: grid;
+  gap: var(--space-1);
+  min-width: 0;
+  max-width: min(100%, 28rem);
+}
+
+.provider-mandate-choice select {
+  min-width: 0;
+  width: 100%;
+}
+
+.provider-validation .control-button:disabled {
+  color: var(--color-text-secondary);
+  cursor: default;
+}
+
 .provider-observations > li {
   display: flex;
   align-items: baseline;

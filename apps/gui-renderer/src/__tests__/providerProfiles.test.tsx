@@ -811,6 +811,154 @@ describe("T-F012-018 — lecture de l’inventaire observé", () => {
         expect(await screen.findByText("Aucun modèle dans cet inventaire.")).toBeVisible();
     });
 
+    it.each(["accepté", "perdu"])("retrouve l’inventaire avec un reçu %s", async (mode) => {
+        const mandateRef = "00000000-0000-4000-8000-000000000071";
+        const configurationDigest = "ab".repeat(32);
+        const mandate = {
+            mandate_ref: mandateRef,
+            scope_kind: "project",
+            scope_id: project.project_id,
+            authority_generation: "00000000-0000-4000-8000-000000000072",
+            principal_id: "fixture-local-admin",
+            profile_id: ollamaProfile.profile_id,
+            profile_version: ollamaProfile.profile_version,
+            configuration_digest: configurationDigest,
+            phase: "inventory",
+            locality: "local_only",
+            capability_set: ["text"],
+            limits: {
+                timeout_ms: 1750,
+                max_calls: 0,
+                max_output_tokens: 0,
+                max_cost_usd_micros: 0,
+            },
+            expires_at_ms: 1800000000000,
+            mandate_digest: "bc".repeat(32),
+            status: "active",
+            revocation_receipt_id: null,
+        };
+        let showResult = mode === "accepté";
+        let observationForProbe: Record<string, unknown> | null = null;
+        const { invoke, user } = fixture((operation, { input }) => {
+            switch (operation) {
+                case "op_list_projects":
+                    return Promise.resolve(response([project]));
+                case "op_list_provider_profiles":
+                    return Promise.resolve(
+                        response({ profiles: [ollamaProfile], next_after_profile_id: null }),
+                    );
+                case "op_get_provider_profile":
+                    return Promise.resolve(
+                        response({
+                            ...ollamaProfile,
+                            configuration_receipt_id: configurationReceiptId,
+                            configuration_digest: configurationDigest,
+                            observations:
+                                observationForProbe === null || !showResult
+                                    ? []
+                                    : [observationForProbe],
+                        }),
+                    );
+                case "op_read_policy_summary":
+                    return Promise.resolve(
+                        response({
+                            provider_probe_mandates: [
+                                {
+                                    ...mandate,
+                                    mandate_ref: configurationReceiptId,
+                                    phase: "connect",
+                                },
+                                mandate,
+                            ],
+                        }),
+                    );
+                case "op_test_provider_profile": {
+                    const command = submittedInput(input);
+                    const resultRef = `provider-probe:${command.aggregate_id}`;
+                    observationForProbe = {
+                        phase: "inventory",
+                        status: "inventory_observed",
+                        observed_at_ms: 1795348800000,
+                        probe_id: command.aggregate_id,
+                        result_ref: resultRef,
+                        inventory: { models: [inventoryModel("modèle-du-probe:8b")] },
+                    };
+                    return mode === "perdu"
+                        ? Promise.reject(
+                              Object.assign(new Error("Reçu indisponible"), {
+                                  retry_class: "after_reconciliation",
+                              }),
+                          )
+                        : Promise.resolve({
+                              ...completedReceipt(command),
+                              state: "accepted",
+                              result_ref: resultRef,
+                          });
+                }
+                default:
+                    throw new Error(`Appel inattendu à ${operation}`);
+            }
+        });
+
+        await user.click(screen.getByRole("tab", { name: /Settings/ }));
+        await screen.findByRole("option", { name: /Atlas/ });
+        await user.selectOptions(
+            screen.getByRole("combobox", { name: "Portée" }),
+            project.project_id,
+        );
+        await user.click(await screen.findByRole("button", { name: /first-v2/ }));
+        await screen.findByText("Référence de version");
+        expect(invoke.mock.calls.map(([operation]) => operation)).not.toContain(
+            "op_read_policy_summary",
+        );
+        await user.click(screen.getByRole("button", { name: "Choisir un mandat d’inventaire" }));
+        const choice = await screen.findByRole("combobox", { name: "Mandat d’inventaire" });
+        expect(within(choice).getAllByRole("option")).toHaveLength(2);
+        expect(invoke).toHaveBeenLastCalledWith("op_read_policy_summary", {
+            input: { project_id: project.project_id, payload: {} },
+        });
+        expect(screen.getByRole("button", { name: "Lancer l’inventaire" })).toBeDisabled();
+        await user.selectOptions(choice, mandateRef);
+        await user.click(screen.getByRole("button", { name: "Lancer l’inventaire" }));
+
+        if (mode === "perdu") {
+            expect(
+                await screen.findByText("Résultat de cet inventaire indisponible."),
+            ).toBeVisible();
+            expect(screen.queryByText("modèle-du-probe:8b")).not.toBeInTheDocument();
+            showResult = true;
+            await user.click(
+                screen.getByRole("button", { name: "Relire le résultat de l’inventaire" }),
+            );
+        }
+
+        expect(await screen.findByText("modèle-du-probe:8b")).toBeVisible();
+        expect(screen.getByText("Inventaire enregistré.")).toBeVisible();
+        expect(screen.getAllByText("Qualification requise")).toHaveLength(2);
+        const commands = invoke.mock.calls.filter(([operation]) => operation.startsWith("op_test"));
+        expect(commands).toHaveLength(1);
+        expect(commands[0]).toEqual([
+            "op_test_provider_profile",
+            {
+                input: {
+                    project_id: project.project_id,
+                    aggregate_id: expect.stringMatching(freshUuid),
+                    command_id: expect.stringMatching(freshUuid),
+                    expected_revision: 0,
+                    payload: {
+                        profile_id: ollamaProfile.profile_id,
+                        profile_version: 2,
+                        phase: "inventory",
+                        capability_set: [],
+                        locality: "local_only",
+                        limits: mandate.limits,
+                        mandate_ref: mandateRef,
+                    },
+                } satisfies Record<string, unknown>,
+            },
+        ]);
+    });
+
     it.each(["illisible", "d’une autre version"])(
         "refuse un inventaire %s sans le présenter comme vide",
         async (variant) => {
