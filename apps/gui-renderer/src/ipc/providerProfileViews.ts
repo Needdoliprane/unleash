@@ -63,15 +63,17 @@ export function profilePage(value: unknown) {
 
 export type ProviderProfileRow = ReturnType<typeof profilePage>["profiles"][number];
 
-export function inventoryMandates(value: unknown) {
+export type TransportProbePhase = "connect" | "inventory";
+
+export function transportProbeMandates(value: unknown, phase: TransportProbePhase) {
     return list(record(value).provider_probe_mandates).flatMap((item) => {
         const fields = record(item);
-        if (fields.phase !== "inventory" || fields.status !== "active") return [];
+        if (fields.phase !== phase || fields.status !== "active") return [];
 
         const locality = fields.locality;
         const timeoutMs = number(record(fields.limits).timeout_ms);
         if ((locality !== "local_only" && locality !== "approved_remote") || timeoutMs === 0) {
-            throw new Error("Mandat d’inventaire IPC illisible");
+            throw new Error("Mandat de transport IPC illisible");
         }
 
         return [

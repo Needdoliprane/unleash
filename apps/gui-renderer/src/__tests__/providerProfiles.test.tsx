@@ -80,6 +80,157 @@ afterEach(() => {
     vi.unstubAllGlobals();
 });
 
+describe("T-F012-013 / T-F012-018 — test de connexion depuis Settings", () => {
+    it("retrouve la connexion LM Studio du projet après la perte du reçu", async () => {
+        const profile = {
+            ...initialProfile,
+            model: "lm-studio-fixture",
+            provider_kind: "lmstudio",
+        };
+        const configurationDigest = "ab".repeat(32);
+        const mandateRef = "00000000-0000-4000-8000-000000000081";
+        const limits = {
+            timeout_ms: 1750,
+            max_calls: 0,
+            max_output_tokens: 0,
+            max_cost_usd_micros: 0,
+        };
+        const mandate = {
+            mandate_ref: mandateRef,
+            scope_kind: "project",
+            scope_id: project.project_id,
+            authority_generation: "00000000-0000-4000-8000-000000000082",
+            principal_id: "fixture-local-admin",
+            profile_id: profile.profile_id,
+            profile_version: profile.profile_version,
+            configuration_digest: configurationDigest,
+            phase: "connect",
+            locality: "local_only",
+            capability_set: [],
+            limits,
+            expires_at_ms: 1800000000000,
+            mandate_digest: "bc".repeat(32),
+            status: "active",
+            revocation_receipt_id: null,
+        };
+        let connectedProbeId: string | null = null;
+        let showResult = false;
+        const { invoke, user } = fixture((operation, { input }) => {
+            switch (operation) {
+                case "op_list_projects":
+                    return Promise.resolve(response([project]));
+                case "op_list_provider_profiles":
+                    return Promise.resolve(
+                        response({
+                            profiles: input.project_id === project.project_id ? [profile] : [],
+                            next_after_profile_id: null,
+                        }),
+                    );
+                case "op_get_provider_profile":
+                    return Promise.resolve(
+                        response({
+                            ...profile,
+                            configuration_receipt_id: configurationReceiptId,
+                            configuration_digest: configurationDigest,
+                            observations: [
+                                {
+                                    ...observation(
+                                        (showResult ? connectedProbeId : null) ??
+                                            configurationReceiptId,
+                                    ),
+                                    phase: "connect",
+                                    status: "connected",
+                                },
+                            ],
+                        }),
+                    );
+                case "op_read_policy_summary":
+                    return Promise.resolve(
+                        response({
+                            provider_probe_mandates: [
+                                {
+                                    ...mandate,
+                                    mandate_ref: configurationReceiptId,
+                                    phase: "inventory",
+                                },
+                                {
+                                    ...mandate,
+                                    mandate_ref: "00000000-0000-4000-8000-000000000083",
+                                    configuration_digest: "ac".repeat(32),
+                                },
+                                mandate,
+                            ],
+                        }),
+                    );
+                case "op_test_provider_profile":
+                    connectedProbeId = submittedInput(input).aggregate_id;
+                    return Promise.reject(
+                        Object.assign(new Error("Reçu indisponible"), {
+                            retry_class: "after_reconciliation",
+                        }),
+                    );
+                default:
+                    throw new Error(`Appel inattendu à ${operation}`);
+            }
+        });
+
+        await user.click(screen.getByRole("tab", { name: /Settings/ }));
+        await screen.findByRole("option", { name: /Atlas/ });
+        await user.selectOptions(
+            screen.getByRole("combobox", { name: "Portée" }),
+            project.project_id,
+        );
+        await user.click(await screen.findByRole("button", { name: /lm-studio-fixture/ }));
+        await screen.findByText("Référence de version");
+        expect(invoke.mock.calls.map(([operation]) => operation)).not.toContain(
+            "op_read_policy_summary",
+        );
+        await user.click(screen.getByRole("button", { name: "Choisir un mandat de connexion" }));
+        const choice = await screen.findByRole("combobox", { name: "Mandat de connexion" });
+        expect(within(choice).getAllByRole("option")).toHaveLength(2);
+        const connect = screen.getByRole("button", { name: "Tester la connexion" });
+        expect(connect).toBeDisabled();
+        await user.selectOptions(choice, mandateRef);
+        await user.click(connect);
+
+        expect(
+            await screen.findByText("Résultat de ce test de connexion indisponible."),
+        ).toBeVisible();
+        expect(screen.queryByText("Connexion enregistrée.")).not.toBeInTheDocument();
+        showResult = true;
+        await user.click(
+            screen.getByRole("button", { name: "Relire le résultat du test de connexion" }),
+        );
+
+        expect(await screen.findByText("Connexion enregistrée.")).toBeVisible();
+        expect(screen.getAllByText("Qualification requise")).toHaveLength(2);
+        expect(
+            invoke.mock.calls.filter(([operation]) => operation === "op_test_provider_profile"),
+        ).toEqual([
+            [
+                "op_test_provider_profile",
+                {
+                    input: {
+                        project_id: project.project_id,
+                        aggregate_id: expect.stringMatching(freshUuid),
+                        command_id: expect.stringMatching(freshUuid),
+                        expected_revision: 0,
+                        payload: {
+                            profile_id: profile.profile_id,
+                            profile_version: profile.profile_version,
+                            phase: "connect",
+                            capability_set: [],
+                            locality: "local_only",
+                            limits,
+                            mandate_ref: mandateRef,
+                        },
+                    } satisfies Record<string, unknown>,
+                },
+            ],
+        ]);
+    });
+});
+
 describe("T-F012-018 — création d’un profil local", () => {
     it.each(["accepté", "perdu", "expiré"])(
         "retrouve le profil Ollama dans la portée projet avec un reçu %s",
