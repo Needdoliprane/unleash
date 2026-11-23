@@ -1,4 +1,4 @@
-import { type FormEvent, useCallback, useId, useMemo, useState } from "react";
+import { type SubmitEvent, useCallback, useId, useMemo, useState } from "react";
 import { Button } from "react-aria-components";
 import { number, PROJECTS_REQUEST, projectChoices, record, text } from "../ipc/projections";
 import type { GuiQueryInput, TransportAdapter } from "../ipc/types";
@@ -69,7 +69,7 @@ export function WorkflowRunPanel({ transport }: { transport: TransportAdapter })
     const readingRun = target !== null && read.state === "loading";
     const hasProjects = projects.state === "ready" && projects.data.length > 0;
 
-    function submit(event: FormEvent<HTMLFormElement>) {
+    function submit(event: SubmitEvent<HTMLFormElement>) {
         event.preventDefault();
         if (projectId && runId && !readingRun) {
             setTarget({ projectId, runId: runId.toLowerCase() });
@@ -85,7 +85,9 @@ export function WorkflowRunPanel({ transport }: { transport: TransportAdapter })
                     <p role="alert">Impossible de lire les projets.</p>
                     <Button
                         className="control-button"
-                        onPress={() => setProjectsAttempt((attempt) => attempt + 1)}
+                        onPress={() => {
+                            setProjectsAttempt((attempt) => attempt + 1);
+                        }}
                     >
                         Relire les projets
                     </Button>

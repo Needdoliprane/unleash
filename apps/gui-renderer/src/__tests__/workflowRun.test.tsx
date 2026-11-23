@@ -34,7 +34,7 @@ afterEach(() => {
     vi.unstubAllGlobals();
 });
 
-it("lit la version engagée et l’état durable du run demandé dans Workflows", async () => {
+it("T-F005-001 (renderer) — lit la version engagée et l’état du run demandé", async () => {
     const invoke = vi.fn((command: string, { input }: { input: GuiQueryInput }) => {
         if (command === "op_list_projects") {
             return Promise.resolve(response([{ project_id: projectId, name: "Atlas" }]));
@@ -68,7 +68,7 @@ it("lit la version engagée et l’état durable du run demandé dans Workflows"
     ]);
 });
 
-it("ignore la réponse tardive d’un autre projet après la lecture du nouveau run", async () => {
+it("T-F005-001 (renderer) — ignore la réponse tardive après le changement de projet", async () => {
     const otherProject = "00000000-0000-4000-8000-000000000020";
     const otherRun = "00000000-0000-4000-8000-000000000021";
     let resolveFirst: ((result: QueryResponse) => void) | undefined;
