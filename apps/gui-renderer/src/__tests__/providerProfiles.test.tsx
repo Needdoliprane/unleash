@@ -942,8 +942,8 @@ describe("T-F012-018 — lecture de l’inventaire observé", () => {
             {
                 input: {
                     project_id: project.project_id,
-                    aggregate_id: expect.stringMatching(freshUuid) as unknown as string,
-                    command_id: expect.stringMatching(freshUuid) as unknown as string,
+                    aggregate_id: expect.stringMatching(freshUuid),
+                    command_id: expect.stringMatching(freshUuid),
                     expected_revision: 0,
                     payload: {
                         profile_id: ollamaProfile.profile_id,
