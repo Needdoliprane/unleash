@@ -954,7 +954,7 @@ describe("T-F012-018 — lecture de l’inventaire observé", () => {
                         limits: mandate.limits,
                         mandate_ref: mandateRef,
                     },
-                },
+                } satisfies Record<string, unknown>,
             },
         ]);
     });
