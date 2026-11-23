@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Button } from "react-aria-components";
 import {
+    inventoryMandates,
     profileDetail,
     profilePage,
     projectChoices,
@@ -151,10 +152,244 @@ function InventoryModels({ models }: { models: InventoryModel[] }) {
     );
 }
 
-type Verification =
+type ProfileDetail = ReturnType<typeof profileDetail>;
+type ProbePhase = "validate_config" | "inventory";
+type ProbeState =
     | { state: "submitting" | "refused" }
     | { state: "retryable"; command: GuiCommandInput }
     | { state: "observing"; probeId: string; resultRef: string | null };
+
+function useProfileProbe(
+    transport: TransportAdapter,
+    phase: ProbePhase,
+    read: Reading<ProfileDetail>,
+    refresh: () => void,
+) {
+    const [probe, setProbe] = useState<ProbeState | null>(null);
+    const submitting = useRef(false);
+    const observed =
+        probe?.state === "observing" &&
+        read.state === "ready" &&
+        read.data.observations.some(
+            (item) =>
+                item.id === probe.probeId &&
+                item.phase === phase &&
+                item.status === (phase === "inventory" ? "inventory_observed" : "validated") &&
+                (probe.resultRef === null || item.resultRef === probe.resultRef),
+        );
+    const needsRead = probe?.state === "observing" && !observed;
+    const checking = probe?.state === "submitting" || (needsRead && read.state === "loading");
+
+    function observe(probeId: string, resultRef: string | null) {
+        setProbe({ state: "observing", probeId, resultRef });
+        refresh();
+    }
+
+    async function run(create: (profile: ProfileDetail) => GuiCommandInput | null) {
+        if (checking || submitting.current) return;
+        if (needsRead) {
+            refresh();
+            return;
+        }
+        if (read.state !== "ready") return;
+        const command = probe?.state === "retryable" ? probe.command : create(read.data);
+        if (command === null) return;
+
+        submitting.current = true;
+        setProbe({ state: "submitting" });
+        try {
+            const receipt = await transport.submitCommand("TestProviderProfile", command);
+            const matches =
+                receipt.command_id === command.command_id &&
+                receipt.aggregate_id === command.aggregate_id;
+            if (matches && (receipt.state === "blocked" || receipt.state === "rejected")) {
+                setProbe({ state: "refused" });
+            } else {
+                observe(
+                    command.aggregate_id,
+                    matches && (phase === "inventory" || receipt.state === "completed")
+                        ? (receipt.result_ref ?? null)
+                        : null,
+                );
+            }
+        } catch (error) {
+            const retryClass =
+                typeof error === "object" && error !== null && "retry_class" in error
+                    ? error.retry_class
+                    : null;
+            if (retryClass === "after_backoff") {
+                setProbe({ state: "retryable", command });
+            } else if (retryClass === "never") {
+                setProbe({ state: "refused" });
+            } else {
+                observe(command.aggregate_id, null);
+            }
+        } finally {
+            submitting.current = false;
+        }
+    }
+    return { state: probe?.state, needsRead, checking, observed, run };
+}
+
+function profileProbeCommand(
+    scope: string | null,
+    profile: ProfileDetail,
+    options: {
+        phase: ProbePhase;
+        mandateRef: string;
+        timeoutMs: number;
+        locality: "local_only" | "approved_remote";
+    },
+): GuiCommandInput {
+    return {
+        project_id: scope,
+        aggregate_id: newUuid(),
+        command_id: newUuid(),
+        expected_revision: 0,
+        payload: {
+            profile_id: profile.id,
+            profile_version: profile.version,
+            phase: options.phase,
+            capability_set: [],
+            limits: {
+                timeout_ms: options.timeoutMs,
+                max_calls: 0,
+                max_output_tokens: 0,
+                max_cost_usd_micros: 0,
+            },
+            locality: options.locality,
+            mandate_ref: options.mandateRef,
+        },
+    };
+}
+
+function InventoryProbeControls({
+    scope,
+    transport,
+    read,
+    refresh,
+}: {
+    scope: string | null;
+    transport: TransportAdapter;
+    read: Reading<ProfileDetail>;
+    refresh: () => void;
+}) {
+    const [attempt, setAttempt] = useState(0);
+    const [reference, setReference] = useState("");
+    const opened = attempt > 0;
+    const request = useMemo<GuiQueryInput>(() => ({ project_id: scope, payload: {} }), [scope]);
+    const mandates = useSettingsRead(
+        transport,
+        "ReadPolicySummary",
+        opened ? request : null,
+        inventoryMandates,
+        attempt,
+    );
+    const probe = useProfileProbe(transport, "inventory", read, refresh);
+    const profile = read.state === "ready" ? read.data : null;
+    const available =
+        mandates.state === "ready" && profile !== null
+            ? mandates.data.filter(
+                  (mandate) =>
+                      mandate.scopeKind === (scope === null ? "global" : "project") &&
+                      mandate.scopeId === (scope ?? "global") &&
+                      mandate.profileId === profile.id &&
+                      mandate.profileVersion === profile.version &&
+                      mandate.configurationDigest === profile.configurationDigest,
+              )
+            : [];
+    const selected = available.find((mandate) => mandate.reference === reference);
+    const canRetry = probe.state === "retryable";
+
+    return (
+        <div className="provider-validation">
+            <Button
+                className="control-button"
+                isDisabled={
+                    profile?.configurationDigest == null ||
+                    probe.checking ||
+                    probe.needsRead ||
+                    canRetry
+                }
+                isPending={opened && mandates.state === "loading"}
+                onPress={() => {
+                    setReference("");
+                    setAttempt((value) => value + 1);
+                }}
+            >
+                {opened ? "Actualiser les mandats d’inventaire" : "Choisir un mandat d’inventaire"}
+            </Button>
+            {opened && mandates.state === "loading" ? (
+                <p role="status">Lecture des mandats…</p>
+            ) : null}
+            {opened && mandates.state === "error" ? (
+                <p role="alert">Impossible de lire les mandats d’inventaire.</p>
+            ) : null}
+            {mandates.state === "ready" && profile && available.length === 0 ? (
+                <p>Aucun mandat d’inventaire disponible pour cette version.</p>
+            ) : null}
+            {opened && mandates.state === "ready" ? (
+                <div className="provider-mandate-choice">
+                    <label htmlFor="provider-mandate">Mandat d’inventaire</label>
+                    <select
+                        id="provider-mandate"
+                        className="control-input"
+                        value={selected?.reference ?? ""}
+                        disabled={
+                            available.length === 0 || probe.checking || probe.needsRead || canRetry
+                        }
+                        onChange={(event) => {
+                            setReference(event.currentTarget.value);
+                        }}
+                    >
+                        <option value="">Sélectionner un mandat</option>
+                        {available.map((mandate) => (
+                            <option key={mandate.reference} value={mandate.reference}>
+                                {mandate.principal} · {mandate.reference}
+                            </option>
+                        ))}
+                    </select>
+                </div>
+            ) : null}
+            {opened ? (
+                <Button
+                    className="control-button"
+                    isDisabled={
+                        !probe.needsRead && !canRetry && selected === undefined && !probe.checking
+                    }
+                    isPending={probe.checking}
+                    onPress={() => {
+                        void probe.run((detail) =>
+                            selected === undefined
+                                ? null
+                                : profileProbeCommand(scope, detail, {
+                                      phase: "inventory",
+                                      mandateRef: selected.reference,
+                                      timeoutMs: Math.min(selected.timeoutMs, 60_000),
+                                      locality: selected.locality,
+                                  }),
+                        );
+                    }}
+                >
+                    {probe.needsRead
+                        ? "Relire le résultat de l’inventaire"
+                        : canRetry
+                          ? "Reprendre l’inventaire"
+                          : "Lancer l’inventaire"}
+                </Button>
+            ) : null}
+            {probe.state === "submitting" ? (
+                <p role="status">Demande d’inventaire en cours…</p>
+            ) : null}
+            {canRetry ? <p role="alert">Demande d’inventaire non confirmée.</p> : null}
+            {probe.state === "refused" ? <p role="alert">Inventaire refusé.</p> : null}
+            {probe.needsRead && !probe.checking ? (
+                <p role="alert">Résultat de cet inventaire indisponible.</p>
+            ) : null}
+            {probe.observed ? <p role="status">Inventaire enregistré.</p> : null}
+        </div>
+    );
+}
 
 function SelectedProfile({
     profile,
@@ -166,8 +401,6 @@ function SelectedProfile({
     transport: TransportAdapter;
 }) {
     const [attempt, setAttempt] = useState(0);
-    const [verification, setVerification] = useState<Verification | null>(null);
-    const submitting = useRef(false);
     const request = useMemo<GuiQueryInput>(
         () => ({
             project_id: scope,
@@ -182,100 +415,22 @@ function SelectedProfile({
         profileDetail,
         attempt,
     );
-    const read: Reading<ReturnType<typeof profileDetail>> =
+    const read: Reading<ProfileDetail> =
         detail.state === "ready" &&
         (detail.data.id !== profile.id ||
             detail.data.version !== profile.version ||
             detail.data.reference !== profile.reference)
             ? { state: "error" }
             : detail;
-
-    const observed =
-        verification?.state === "observing" &&
-        read.state === "ready" &&
-        read.data.observations.some(
-            (item) =>
-                item.id === verification.probeId &&
-                item.phase === "validate_config" &&
-                item.status === "validated" &&
-                (verification.resultRef === null || item.resultRef === verification.resultRef),
-        );
-    const needsRead = verification?.state === "observing" && !observed;
-    const checking =
-        verification?.state === "submitting" || (needsRead && read.state === "loading");
-
-    function observe(probeId: string, resultRef: string | null) {
-        setVerification({ state: "observing", probeId, resultRef });
+    const refresh = () => {
         setAttempt((value) => value + 1);
-    }
-
-    async function verifyConfiguration() {
-        if (checking || submitting.current) return;
-        if (needsRead) {
-            setAttempt((value) => value + 1);
-            return;
-        }
-        if (read.state !== "ready") return;
-
-        const command: GuiCommandInput =
-            verification?.state === "retryable"
-                ? verification.command
-                : {
-                      project_id: scope,
-                      aggregate_id: newUuid(),
-                      command_id: newUuid(),
-                      expected_revision: 0,
-                      payload: {
-                          profile_id: read.data.id,
-                          profile_version: read.data.version,
-                          phase: "validate_config",
-                          capability_set: [],
-                          limits: {
-                              timeout_ms: 1000,
-                              max_calls: 0,
-                              max_output_tokens: 0,
-                              max_cost_usd_micros: 0,
-                          },
-                          locality: "local_only",
-                          mandate_ref: read.data.configurationReceiptId,
-                      },
-                  };
-
-        submitting.current = true;
-        setVerification({ state: "submitting" });
-        try {
-            const receipt = await transport.submitCommand("TestProviderProfile", command);
-            const matches =
-                receipt.command_id === command.command_id &&
-                receipt.aggregate_id === command.aggregate_id;
-            if (matches && (receipt.state === "blocked" || receipt.state === "rejected")) {
-                setVerification({ state: "refused" });
-            } else {
-                observe(
-                    command.aggregate_id,
-                    matches && receipt.state === "completed" ? (receipt.result_ref ?? null) : null,
-                );
-            }
-        } catch (error) {
-            const retryClass =
-                typeof error === "object" && error !== null && "retry_class" in error
-                    ? error.retry_class
-                    : null;
-            if (retryClass === "after_backoff") {
-                setVerification({ state: "retryable", command });
-            } else if (retryClass === "never") {
-                setVerification({ state: "refused" });
-            } else {
-                observe(command.aggregate_id, null);
-            }
-        } finally {
-            submitting.current = false;
-        }
-    }
+    };
+    const verification = useProfileProbe(transport, "validate_config", read, refresh);
+    const { needsRead, checking, observed } = verification;
 
     const actionLabel = needsRead
         ? "Relire le résultat"
-        : verification?.state === "retryable"
+        : verification.state === "retryable"
           ? "Reprendre la vérification"
           : "Vérifier la configuration";
 
@@ -302,18 +457,25 @@ function SelectedProfile({
                     isDisabled={!needsRead && read.state !== "ready"}
                     isPending={checking}
                     onPress={() => {
-                        void verifyConfiguration();
+                        void verification.run((detail) =>
+                            profileProbeCommand(scope, detail, {
+                                phase: "validate_config",
+                                mandateRef: detail.configurationReceiptId,
+                                timeoutMs: 1000,
+                                locality: "local_only",
+                            }),
+                        );
                     }}
                 >
                     {actionLabel}
                 </Button>
-                {verification?.state === "submitting" ? (
+                {verification.state === "submitting" ? (
                     <p role="status">Vérification en cours…</p>
                 ) : null}
-                {verification?.state === "retryable" ? (
+                {verification.state === "retryable" ? (
                     <p role="alert">Vérification non confirmée.</p>
                 ) : null}
-                {verification?.state === "refused" ? (
+                {verification.state === "refused" ? (
                     <p role="alert">Vérification refusée.</p>
                 ) : null}
                 {needsRead && !checking ? (
@@ -321,6 +483,14 @@ function SelectedProfile({
                 ) : null}
                 {observed ? <p role="status">Vérification enregistrée.</p> : null}
             </div>
+            {profile.provider === "ollama" ? (
+                <InventoryProbeControls
+                    scope={scope}
+                    transport={transport}
+                    read={read}
+                    refresh={refresh}
+                />
+            ) : null}
             {read.state === "ready" ? (
                 <>
                     <h4>Observations enregistrées</h4>
