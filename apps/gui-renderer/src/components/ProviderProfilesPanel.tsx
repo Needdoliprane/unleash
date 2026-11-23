@@ -1,12 +1,13 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import { Button } from "react-aria-components";
 import {
-    inventoryMandates,
     profileDetail,
     profilePage,
     projectChoices,
+    transportProbeMandates,
     type InventoryModel,
     type ProviderProfileRow,
+    type TransportProbePhase,
 } from "../ipc/providerProfileViews";
 import type { GuiCommandInput, GuiQueryInput, OperationName, TransportAdapter } from "../ipc/types";
 import { newUuid } from "../ipc/uuid";
@@ -89,6 +90,7 @@ function qualificationLabel(value: string) {
 }
 
 function observationLabel(phase: string, status: string) {
+    if (phase === "connect" && status === "connected") return "Connexion observée";
     return status === "validated"
         ? "Configuration validée"
         : `${PHASE_LABELS.get(phase) ?? phase} · ${status}`;
@@ -153,7 +155,12 @@ function InventoryModels({ models }: { models: InventoryModel[] }) {
 }
 
 type ProfileDetail = ReturnType<typeof profileDetail>;
-type ProbePhase = "validate_config" | "inventory";
+type ProbePhase = "validate_config" | TransportProbePhase;
+const OBSERVED_STATUS: Record<ProbePhase, string> = {
+    validate_config: "validated",
+    connect: "connected",
+    inventory: "inventory_observed",
+};
 type ProbeState =
     | { state: "submitting" | "refused" }
     | { state: "retryable"; command: GuiCommandInput }
@@ -174,7 +181,7 @@ function useProfileProbe(
             (item) =>
                 item.id === probe.probeId &&
                 item.phase === phase &&
-                item.status === (phase === "inventory" ? "inventory_observed" : "validated") &&
+                item.status === OBSERVED_STATUS[phase] &&
                 (probe.resultRef === null || item.resultRef === probe.resultRef),
         );
     const needsRead = probe?.state === "observing" && !observed;
@@ -207,7 +214,7 @@ function useProfileProbe(
             } else {
                 observe(
                     command.aggregate_id,
-                    matches && (phase === "inventory" || receipt.state === "completed")
+                    matches && (phase !== "validate_config" || receipt.state === "completed")
                         ? (receipt.result_ref ?? null)
                         : null,
                 );
@@ -263,12 +270,39 @@ function profileProbeCommand(
     };
 }
 
-function InventoryProbeControls({
+const TRANSPORT_PROBE_LABELS = {
+    connect: {
+        mandate: "de connexion",
+        start: "Tester la connexion",
+        resume: "Reprendre le test de connexion",
+        readResult: "Relire le résultat du test de connexion",
+        pending: "Test de connexion en cours…",
+        unconfirmed: "Demande de connexion non confirmée.",
+        refused: "Connexion refusée.",
+        missing: "Résultat de ce test de connexion indisponible.",
+        observed: "Connexion enregistrée.",
+    },
+    inventory: {
+        mandate: "d’inventaire",
+        start: "Lancer l’inventaire",
+        resume: "Reprendre l’inventaire",
+        readResult: "Relire le résultat de l’inventaire",
+        pending: "Demande d’inventaire en cours…",
+        unconfirmed: "Demande d’inventaire non confirmée.",
+        refused: "Inventaire refusé.",
+        missing: "Résultat de cet inventaire indisponible.",
+        observed: "Inventaire enregistré.",
+    },
+};
+
+function TransportProbeControls({
+    phase,
     scope,
     transport,
     read,
     refresh,
 }: {
+    phase: TransportProbePhase;
     scope: string | null;
     transport: TransportAdapter;
     read: Reading<ProfileDetail>;
@@ -276,16 +310,22 @@ function InventoryProbeControls({
 }) {
     const [attempt, setAttempt] = useState(0);
     const [reference, setReference] = useState("");
+    const fieldId = useId();
+    const labels = TRANSPORT_PROBE_LABELS[phase];
     const opened = attempt > 0;
     const request = useMemo<GuiQueryInput>(() => ({ project_id: scope, payload: {} }), [scope]);
+    const decodeMandates = useCallback(
+        (value: unknown) => transportProbeMandates(value, phase),
+        [phase],
+    );
     const mandates = useSettingsRead(
         transport,
         "ReadPolicySummary",
         opened ? request : null,
-        inventoryMandates,
+        decodeMandates,
         attempt,
     );
-    const probe = useProfileProbe(transport, "inventory", read, refresh);
+    const probe = useProfileProbe(transport, phase, read, refresh);
     const profile = read.state === "ready" ? read.data : null;
     const available =
         mandates.state === "ready" && profile !== null
@@ -317,22 +357,22 @@ function InventoryProbeControls({
                     setAttempt((value) => value + 1);
                 }}
             >
-                {opened ? "Actualiser les mandats d’inventaire" : "Choisir un mandat d’inventaire"}
+                {opened ? "Actualiser les mandats" : "Choisir un mandat"} {labels.mandate}
             </Button>
             {opened && mandates.state === "loading" ? (
                 <p role="status">Lecture des mandats…</p>
             ) : null}
             {opened && mandates.state === "error" ? (
-                <p role="alert">Impossible de lire les mandats d’inventaire.</p>
+                <p role="alert">Impossible de lire les mandats {labels.mandate}.</p>
             ) : null}
             {mandates.state === "ready" && profile && available.length === 0 ? (
-                <p>Aucun mandat d’inventaire disponible pour cette version.</p>
+                <p>Aucun mandat {labels.mandate} disponible pour cette version.</p>
             ) : null}
             {opened && mandates.state === "ready" ? (
                 <div className="provider-mandate-choice">
-                    <label htmlFor="provider-mandate">Mandat d’inventaire</label>
+                    <label htmlFor={fieldId}>Mandat {labels.mandate}</label>
                     <select
-                        id="provider-mandate"
+                        id={fieldId}
                         className="control-input"
                         value={selected?.reference ?? ""}
                         disabled={
@@ -363,7 +403,7 @@ function InventoryProbeControls({
                             selected === undefined
                                 ? null
                                 : profileProbeCommand(scope, detail, {
-                                      phase: "inventory",
+                                      phase,
                                       mandateRef: selected.reference,
                                       timeoutMs: Math.min(selected.timeoutMs, 60_000),
                                       locality: selected.locality,
@@ -371,22 +411,14 @@ function InventoryProbeControls({
                         );
                     }}
                 >
-                    {probe.needsRead
-                        ? "Relire le résultat de l’inventaire"
-                        : canRetry
-                          ? "Reprendre l’inventaire"
-                          : "Lancer l’inventaire"}
+                    {probe.needsRead ? labels.readResult : canRetry ? labels.resume : labels.start}
                 </Button>
             ) : null}
-            {probe.state === "submitting" ? (
-                <p role="status">Demande d’inventaire en cours…</p>
-            ) : null}
-            {canRetry ? <p role="alert">Demande d’inventaire non confirmée.</p> : null}
-            {probe.state === "refused" ? <p role="alert">Inventaire refusé.</p> : null}
-            {probe.needsRead && !probe.checking ? (
-                <p role="alert">Résultat de cet inventaire indisponible.</p>
-            ) : null}
-            {probe.observed ? <p role="status">Inventaire enregistré.</p> : null}
+            {probe.state === "submitting" ? <p role="status">{labels.pending}</p> : null}
+            {canRetry ? <p role="alert">{labels.unconfirmed}</p> : null}
+            {probe.state === "refused" ? <p role="alert">{labels.refused}</p> : null}
+            {probe.needsRead && !probe.checking ? <p role="alert">{labels.missing}</p> : null}
+            {probe.observed ? <p role="status">{labels.observed}</p> : null}
         </div>
     );
 }
@@ -483,8 +515,16 @@ function SelectedProfile({
                 ) : null}
                 {observed ? <p role="status">Vérification enregistrée.</p> : null}
             </div>
+            <TransportProbeControls
+                phase="connect"
+                scope={scope}
+                transport={transport}
+                read={read}
+                refresh={refresh}
+            />
             {profile.provider === "ollama" ? (
-                <InventoryProbeControls
+                <TransportProbeControls
+                    phase="inventory"
                     scope={scope}
                     transport={transport}
                     read={read}
