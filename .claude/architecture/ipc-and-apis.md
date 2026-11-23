@@ -55,6 +55,8 @@ Les lectures initiales de M1 ont des payloads fermés. `ListProjects` et `Inspec
 
 `ListRuns` utilise le [contrat F005](../features/F005-workflow-engine/interfaces.md#liste-des-runs-par-projet). La requête pagine les résumés durables d’un projet explicite. Le détail du run exact se lit par `GetRun`.
 
+`PublishWorkflowVersion` utilise le [contrat de publication F006](../features/F006-workflow-compiler/interfaces.md#publication-dune-version). La commande vise la révision exacte du brouillon et indique le rapport, l’empreinte normalisée et la version précédente attendue. Le serveur attribue la version publiée.
+
 Les mutations de configuration de cette tranche utilisent des objets fermés et le décideur résolu par le daemon.
 
 | Opération | Champs du payload | Agrégat et scope |

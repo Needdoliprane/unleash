@@ -139,7 +139,8 @@ try:
             c = s.get("properties", {}).get(key, {}).get("const")
             if c is not None:
                 bykey[(key, c)] = rel
-    typed_query_fixtures = {
+    typed_ipc_fixtures = {
+        "examples/ipc-publish-workflow-version.json": ("schemas/ipc-command.schema.json", None),
         "examples/ipc-list-runs-query.json": ("schemas/ipc-query.schema.json", None),
         "examples/ipc-list-runs-response.json": (
             "schemas/ipc-query-response.schema.json", "workflow_run_list_response",
@@ -152,7 +153,7 @@ try:
     for rel, d in jsons.items():
         if rel.startswith("schemas/"):
             continue
-        if (typed_fixture := typed_query_fixtures.get(rel)) is not None:
+        if (typed_fixture := typed_ipc_fixtures.get(rel)) is not None:
             target, definition = typed_fixture
             selected = schemas.get(target)
             if selected is None:

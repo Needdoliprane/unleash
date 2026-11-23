@@ -19,7 +19,13 @@ Exemple de diagnostic interne :
 }
 ```
 
-`PublishWorkflowVersion` utilise l'enveloppe commune et contient draft_id, draft_revision, validation_report_id, normalized_digest, workflow_id et expected_previous_version. Le reçu retourne version, digest et événement. Le service vérifie que le rapport correspond toujours aux mêmes octets et aux dépendances applicables. Il ne démarre pas de run et ne remplace pas les bindings courants.
+## Publication d’une version
+
+`PublishWorkflowVersion` cible le brouillon par `aggregate_id` et `expected_revision`. Son [payload fermé](../../schemas/ipc-command.schema.json) porte `draft_id` et `draft_revision` pour ce même brouillon, l’UUID `validation_report_id`, `normalized_digest` au format `sha256:<hex>`, l’identifiant logique `workflow_id` et `expected_previous_version`. Ce dernier vaut 0 pour une première publication ou le dernier numéro attribué attendu, même si la version correspondante est dépréciée ou révoquée. La [commande de fixture](../../examples/ipc-publish-workflow-version.json) référence la [définition merge-only](../../examples/merge-only-workflow.json).
+
+Le serveur vérifie les coordonnées du brouillon, le rattachement du rapport à cette révision et à ces octets ainsi que les dépendances applicables. Le document normalisé doit porter le même `workflow_id` que la commande et `version = expected_previous_version + 1`. Le serveur refuse une divergence ou un numéro hors de la borne de `CreateRun` opérationnel avant toute publication. Le writer compare le dernier numéro et attribue le suivant dans la même transaction. Il publie exactement les octets validés et leur digest.
+
+La référence de résultat du reçu permet de relire la version et son digest. La plage d’événements du reçu couvre la publication. La nouvelle version est immuable et les runs et bindings déjà engagés conservent leurs références.
 
 Les erreurs de publication sont distinguées des diagnostics de compilation. Un client reçoit `PublicationConflict` s'il publie depuis une base ancienne ; il peut comparer et créer un nouveau draft. Le même command_id avec payload identique retourne le même reçu ; un payload différent produit IdempotencyConflict. Les API sont proposées pour le backend partagé, sans présumer un SDK fournisseur ni un protocole AI-Guard existant.
 
