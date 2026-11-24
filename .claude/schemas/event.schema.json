@@ -102,6 +102,29 @@
       }
     },
     {
+      "if": { "properties": { "event_type": { "const": "ActionDispatchCommitted" } } },
+      "then": {
+        "properties": {
+          "payload": {
+            "properties": {
+              "managed_generation": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["action_id", "transport_digest", "admission_digest", "placement_digest", "body_digest"],
+                "properties": {
+                  "action_id": { "type": "string", "format": "uuid" },
+                  "transport_digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+                  "admission_digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+                  "placement_digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+                  "body_digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
       "if": { "properties": { "event_type": { "const": "ActionObserved" } } },
       "then": {
         "properties": {
@@ -128,7 +151,27 @@
                   "lease_expires_at": { "type": "integer" }
                 }
               },
-              "terminal_release": { "$ref": "#/$defs/terminal_release_result" }
+              "terminal_release": { "$ref": "#/$defs/terminal_release_result" },
+              "provider_service_launch": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["context_digest", "environment_digest", "confinement_digest", "host", "child"],
+                "properties": {
+                  "context_digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+                  "environment_digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+                  "confinement_digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+                  "host": { "$ref": "#/$defs/provider_service_process_identity" },
+                  "child": { "$ref": "#/$defs/provider_service_process_identity" }
+                }
+              }
+            },
+            "if": { "required": ["provider_service_launch"] },
+            "then": {
+              "required": ["state", "output_digest"],
+              "properties": {
+                "state": { "const": "observed_success" },
+                "output_digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" }
+              }
             }
           }
         }
@@ -300,6 +343,18 @@
     }
   },
   "$defs": {
+    "provider_service_process_identity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["pid", "pgid", "owner_uid", "boot_identity", "start_identity"],
+      "properties": {
+        "pid": { "type": "integer", "minimum": 1, "maximum": 4294967295 },
+        "pgid": { "type": "integer", "minimum": 1, "maximum": 4294967295 },
+        "owner_uid": { "type": "integer", "minimum": 0, "maximum": 4294967295 },
+        "boot_identity": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "start_identity": { "type": "string", "minLength": 1, "maxLength": 256 }
+      }
+    },
     "terminal_release_result": {
       "type": "object",
       "additionalProperties": false,
