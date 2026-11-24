@@ -307,27 +307,12 @@ fn inspect_process_identity_os(pid: u32) -> Result<OsProcessIdentity, PlatformEr
 
     let proc_dir = format!("/proc/{pid}");
     let stat_path = format!("{proc_dir}/stat");
-    let stat_content = match std::fs::read_to_string(&stat_path) {
-        Ok(content) => content,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            return Err(PlatformError::ProcessNotFound { pid });
-        }
-        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
-            return Err(PlatformError::PermissionDenied {
-                context: format!("read({stat_path})"),
-            });
-        }
-        Err(e) => return Err(PlatformError::Io(e)),
-    };
+    let stat_content = std::fs::read_to_string(&stat_path)
+        .map_err(|error| procfs_read_error(pid, &stat_path, error))?;
 
     let (process_group_id, start_ticks) = parse_linux_proc_stat(&stat_content, pid)?;
-    let proc_meta = match std::fs::metadata(&proc_dir) {
-        Ok(meta) => meta,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            return Err(PlatformError::ProcessNotFound { pid });
-        }
-        Err(e) => return Err(PlatformError::Io(e)),
-    };
+    let proc_meta = std::fs::metadata(&proc_dir)
+        .map_err(|error| procfs_read_error(pid, &proc_dir, error))?;
 
     let boot_identity = current_boot_identity_os()?;
     let start_identity = StartIdentity::new(format!("linux-proc:{pid}:{start_ticks}"))?;
@@ -340,6 +325,23 @@ fn inspect_process_identity_os(pid: u32) -> Result<OsProcessIdentity, PlatformEr
         start_identity,
         backend: IdentityBackend::LinuxProcfs,
     })
+}
+
+/// Classe l'échec d'une lecture procfs du processus `pid` (REQ-TERM-002).
+///
+/// Une tâche peut disparaître entre la résolution de `/proc/<pid>/stat` et sa lecture :
+/// le noyau rend alors `ESRCH` et non `ENOENT`. Les deux expriment la même disparition
+/// observée, `ProcessNotFound`, qu'un appelant distingue d'une erreur d'E/S.
+#[cfg(any(target_os = "linux", test))]
+fn procfs_read_error(pid: u32, path: &str, error: std::io::Error) -> PlatformError {
+    match error.kind() {
+        std::io::ErrorKind::NotFound => PlatformError::ProcessNotFound { pid },
+        std::io::ErrorKind::PermissionDenied => PlatformError::PermissionDenied {
+            context: format!("read({path})"),
+        },
+        _ if error.raw_os_error() == Some(libc::ESRCH) => PlatformError::ProcessNotFound { pid },
+        _ => PlatformError::Io(error),
+    }
 }
 
 #[cfg(any(target_os = "linux", test))]
@@ -404,7 +406,8 @@ fn inspect_process_identity_os(_pid: u32) -> Result<OsProcessIdentity, PlatformE
 
 #[cfg(test)]
 mod tests {
-    use super::parse_linux_proc_stat;
+    use super::{parse_linux_proc_stat, procfs_read_error};
+    use crate::errors::PlatformError;
 
     #[test]
     fn linux_proc_stat_handles_parens_and_spaces_in_comm() {
@@ -412,5 +415,41 @@ mod tests {
         let (pgid, starttime) = parse_linux_proc_stat(sample, 4210).unwrap();
         assert_eq!(pgid, 4200);
         assert_eq!(starttime, 987_654_321);
+    }
+
+    // T-F011-002 / AC-F011-002 / REQ-TERM-002
+    // Linux rend ESRCH, et non ENOENT, pour une tâche disparue entre la résolution de
+    // `/proc/<pid>/stat` et sa lecture : c'est une disparition observée, pas une erreur d'E/S.
+    #[test]
+    fn t_f011_002_linux_vanished_task_is_process_not_found() {
+        for raw in [libc::ENOENT, libc::ESRCH] {
+            assert!(
+                matches!(
+                    procfs_read_error(
+                        4210,
+                        "/proc/4210/stat",
+                        std::io::Error::from_raw_os_error(raw)
+                    ),
+                    PlatformError::ProcessNotFound { pid: 4210 }
+                ),
+                "errno {raw} must report a vanished process"
+            );
+        }
+        assert!(matches!(
+            procfs_read_error(
+                4210,
+                "/proc/4210/stat",
+                std::io::Error::from_raw_os_error(libc::EACCES)
+            ),
+            PlatformError::PermissionDenied { .. }
+        ));
+        assert!(matches!(
+            procfs_read_error(
+                4210,
+                "/proc/4210/stat",
+                std::io::Error::from_raw_os_error(libc::EIO)
+            ),
+            PlatformError::Io(_)
+        ));
     }
 }
