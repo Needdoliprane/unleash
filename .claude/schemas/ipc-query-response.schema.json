@@ -41,6 +41,47 @@
     }
   },
   "$defs": {
+    "discovery_receipt_response": {
+      "$ref": "#",
+      "required": ["watermark"],
+      "properties": {
+        "watermark": { "type": "object" },
+        "result": {
+          "type": "object", "additionalProperties": false,
+          "required": ["project_id", "receipt", "current_freshness", "use_state", "history"],
+          "properties": {
+            "project_id": { "$ref": "urn:ovpt:unleash:ipc-query:1#/$defs/run_list_project_id" },
+            "receipt": { "$ref": "urn:ovpt:unleash:discovery-receipt:1" },
+            "current_freshness": { "enum": ["valid", "stale", "unknown"] },
+            "use_state": { "enum": ["unused", "authorized", "consumed", "outcome_unknown"] },
+            "history": {
+              "type": "object", "additionalProperties": false,
+              "required": ["items", "coverage", "next_cursor"],
+              "properties": {
+                "items": {
+                  "type": "array", "maxItems": 100,
+                  "items": {
+                    "type": "object", "additionalProperties": false,
+                    "required": ["event_id", "event_type", "stream_id", "sequence"],
+                    "properties": {
+                      "event_id": { "$ref": "urn:ovpt:unleash:event:1#/properties/event_id" },
+                      "event_type": { "enum": ["DiscoveryReceiptInvalidated", "DiscoveryValidationObserved"] },
+                      "stream_id": { "$ref": "urn:ovpt:unleash:event:1#/properties/stream_id" },
+                      "sequence": { "$ref": "urn:ovpt:unleash:event:1#/properties/sequence" }
+                    }
+                  }
+                },
+                "coverage": {
+                  "type": "object", "additionalProperties": false, "required": ["status"],
+                  "properties": { "status": { "enum": ["complete", "incomplete"] } }
+                },
+                "next_cursor": { "$ref": "urn:ovpt:unleash:ipc-query:1#/$defs/run_page_cursor" }
+              }
+            }
+          }
+        }
+      }
+    },
     "worktree_branch_ref": {"type": "string", "pattern": "^refs/heads/.+", "not": {"pattern": "[\\u0000-\\u001f\\u007f-\\u009f]"}},
     "worktree_list_response": {
       "$ref": "#",
