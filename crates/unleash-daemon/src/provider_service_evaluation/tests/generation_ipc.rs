@@ -62,7 +62,9 @@ async fn t_f012_generation_active_mandate_persists_one_result_and_replays_after_
     };
     let daemon = start(config.clone()).await?;
     let first = submit_generation(&daemon, service.path(), &host_binary).await;
-    daemon.shutdown_graceful("generation-fixture-restart").await?;
+    daemon
+        .shutdown_graceful("generation-fixture-restart")
+        .await?;
     let (command, completed, requests) = first?;
     assert_eq!(
         fs::read(&requests)?.as_slice(),
@@ -76,7 +78,9 @@ async fn t_f012_generation_active_mandate_persists_one_result_and_replays_after_
         verify_replay(&mut client, &command, &completed).await
     }
     .await;
-    restarted.shutdown_graceful("generation-fixture-complete").await?;
+    restarted
+        .shutdown_graceful("generation-fixture-complete")
+        .await?;
     replay?;
     assert_eq!(
         fs::read(requests)?.as_slice(),
@@ -124,7 +128,11 @@ async fn submit_generation(
     let command = prepare_nominal_generation(store, &caller, caller.actor_id.clone(), 8)?;
     let (launch, bootstrap) = prepare_service_fixture(store, &caller, service_dir, |spec| {
         spec.program = program;
-        spec.arguments = vec![CHILD_TEST.into(), "--exact".into(), "--include-ignored".into()];
+        spec.arguments = vec![
+            CHILD_TEST.into(),
+            "--exact".into(),
+            "--include-ignored".into(),
+        ];
     })?;
     let child_dir = bootstrap.cwd.clone();
     fs::write(child_dir.join("listener-port"), endpoint.port().to_string())?;
@@ -153,8 +161,14 @@ async fn submit_generation(
     };
     drop(reserved);
     let first: TestResult<_> = async {
-        let launched =
-            controller.launch_with_binary(store, &launch, &caller, bootstrap, permit, host_binary)?;
+        let launched = controller.launch_with_binary(
+            store,
+            &launch,
+            &caller,
+            bootstrap,
+            permit,
+            host_binary,
+        )?;
         if launched.state != ActionState::ObservedSuccess {
             return Err("the fixture service launch was not attested".into());
         }
@@ -197,7 +211,9 @@ async fn observe_and_replay(
             .map_err(|_| "no successful generation was published before the deadline")??;
     let (profile_observation, _) = profile_observation(client, observed_at).await?;
     if profile_observation.get("probe_id") != Some(&json!(command.aggregate_id))
-        || profile_observation.get("result_ref").and_then(Value::as_str)
+        || profile_observation
+            .get("result_ref")
+            .and_then(Value::as_str)
             != receipt.result_ref.as_deref()
         || receipt.result_ref.is_none()
     {
@@ -213,7 +229,10 @@ async fn observe_and_replay(
     Ok(completed)
 }
 
-async fn subscribe_after(client: &UnleashClient, cursor: EventCursor) -> TestResult<EventStreamReader> {
+async fn subscribe_after(
+    client: &UnleashClient,
+    cursor: EventCursor,
+) -> TestResult<EventStreamReader> {
     Ok(client
         .subscribe_events(&SubscribeEventsRequest {
             stream_id: cursor.stream_id,
