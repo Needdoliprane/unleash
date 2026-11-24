@@ -66,6 +66,8 @@ La réponse comporte report_id, schema_version, as_of_cursor {stream_id, sequenc
 
 `EvidenceRef` contient id, kind, source_snapshot_id optionnel, digest, size_bytes, completeness, access_policy_ref, retention_class et availability. `ExportReport` est une commande qui reçoit report_id, format, périmètre et destination.kind=client_stream. Elle prépare un artefact autorisé et retourne le reçu commun ; ReadArtifact en lit ensuite les octets. Le chemin de fichier choisi est traité par l’adaptateur client de confiance, pas comme chemin arbitraire du daemon. L'export inclut un manifeste de fichiers et leurs digests ; les sources absentes ou masquées sont listées avec motif. Un export n'obtient pas plus d'accès que l'utilisateur qui le demande.
 
+La première variante de lecture par blocs couvre le [texte d’une révision de brouillon dérivé](../F006-workflow-compiler/interfaces.md#brouillon-dérivé-dune-version-publiée). Le daemon applique la politique d’accès de la source correspondante à chaque bloc.
+
 | Nom de domaine | Interprétation | Comportement attendu |
 |---|---|---|
 | `evidence_missing` | Référence inconnue ou octets supprimés | Rapport avec lacune ; pas de preuve simulée |

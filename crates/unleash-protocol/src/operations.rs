@@ -1057,6 +1057,7 @@ impl OperationName {
             Self::PublishWorkflowVersion => &["PAR-WORKFLOWS-05"],
             Self::PurgeHistory => &["PAR-SETTINGS-05"],
             Self::ReadArtifact => &[
+                "PAR-WORKFLOWS-02",
                 "PAR-KNOWLEDGE-03",
                 "PAR-REPORTS-04",
                 "PAR-REPORTS-05",
