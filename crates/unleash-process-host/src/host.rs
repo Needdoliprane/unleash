@@ -60,7 +60,10 @@ mod release;
 #[path = "host_strict_service.rs"]
 mod strict_service;
 
-pub use strict_service::{StrictServiceLaunchObservation, attest_strict_service_launch};
+pub use strict_service::{
+    StrictServiceLaunchDigests, StrictServiceLaunchObservation, attest_strict_service_launch,
+    inspect_strict_service_launch_plan, probe_strict_service_confinement,
+};
 
 const IO_CHUNK_BYTES: usize = 8192;
 const SOCKET_IO_TIMEOUT: Duration = Duration::from_secs(15);
