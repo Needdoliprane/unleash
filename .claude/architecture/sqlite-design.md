@@ -307,6 +307,21 @@ de l'époque du retrait. Un ACK ancien ne peut activer un bail ancien. Une
 réacquisition explicite lie le retrait qualifié comme source, réserve un nouveau
 bail/fence et engage son activation uniquement avec sa nouvelle observation.
 
+Une [disposition après attestation](../features/F011-terminal-pool/interfaces.md#disposition-du-contrôle-dont-le-retrait-est-attesté)
+utilise les coordonnées du fait historique scellé et de sa liaison au reçu.
+Le writer revalide l’autorité, la révision et les liens d’objet. La transition
+engage l’intention `disposed`, le fait de disposition, l’action
+`observed_success`, le seul bail source `released`, la révision de contrôle,
+le reçu et l’outbox dans la même transaction. Les événements des autres
+agrégats suivent [le modèle événementiel](event-model.md).
+
+Cette transition requiert une migration additive qui reconnaît la preuve F011
+actuelle. Le préfixe V018 et les preuves historiques restent lisibles. La garde
+vérifie le même dispatch, la lignée active et le même objet de preuve. Le writer
+conserve la barrière tant que la disposition qualifiée n’est pas engagée. Une
+réacquisition ne peut adopter un retrait `disposed` qu’après contrôle de cette
+preuve de disposition et de ses liens, avec son propre bail et son propre fence.
+
 ## Catalogue de modèles R7
 
 Les versions établies par `SetProviderProfile` portent la paire unique `(profile_id, profile_version)` dans `provider_profiles`, la référence du contenu canonique et son digest, la portée autorisée, le principal et le reçu de configuration. La clé technique `profile_version_ref` reste la référence des probes et des appels. Le writer résout la paire exacte et contrôle le lien entre les métadonnées et le contenu. Il attribue la nouvelle version et engage le reçu dans la même transaction. Les lignes historiques dépourvues de cette liaison restent accessibles selon leurs références existantes. Elles ne peuvent servir de versions configurées sans preuve de provenance et de contenu.

@@ -113,8 +113,9 @@ fait historique, la liaison causale et le nouveau reçu `Completed`.
 `TerminalReleaseHistoryObserved` garde pour cause le reçu de
 `ReleaseTerminal`. `TerminalReleaseHistoryReferenced` lie le reçu de
 `ReconcileProcess` au premier fait, y compris si une autre commande l’a déjà
-scellé. L’action source reste `OutcomeUnknown`. Le bail, les réservations,
-la révision de contrôle et la barrière de concurrence sont conservés.
+scellé. L’attestation seule laisse l’action source en `OutcomeUnknown`. Le
+bail, les réservations, la révision de contrôle et la barrière de concurrence
+sont conservés jusqu’à une éventuelle transition distincte de disposition.
 
 Le reçu porte `terminal-release-history:<action_id>:<dispatch_id>`. Le rejeu
 exact restitue le même reçu depuis SQLite. Une commande divergente sous la
@@ -127,6 +128,162 @@ l’événement de liaison. Le `watermark` appartient au snapshot de lecture.
 Les deux versions du reçu et les coordonnées du retrait sont des faits
 consultables. L’attestation laisse une éventuelle disposition à sa propre
 transition.
+
+### Disposition du contrôle dont le retrait est attesté
+
+La variante distincte `dispose_terminal_release` de `ReconcileProcess` est une
+route spécialisée de réconciliation factuelle [F018](../F018-reliability-recovery/interfaces.md).
+Elle constate au ledger le retrait déjà attesté comme `confirmed_success`, selon
+la [machine d’action](../../architecture/failure-recovery.md#machine-détat-daction).
+Elle ne prépare ni ne résout un dispatch, ne contacte aucun host et ne produit
+aucun permis d’effet. Aucun repli ne réémet le retrait, une entrée, une rotation
+de secret, un arrêt ou une activation. Elle n’accorde pas `accept_risk_retry`.
+Le daemon produit l’attestation. Une preuve synthétique est réservée à une
+fixture.
+
+L’enveloppe v2 porte le projet exact, le terminal dans `aggregate_id` et la
+lignée active. `expected_revision` est la révision actuelle du contrôle et doit
+encore égaler la révision source du retrait attesté. Le payload fermé exige
+tous les champs du tableau.
+
+| Champ | Valeur et liaison requises |
+|---|---|
+| `kind` | Constante `dispose_terminal_release`. |
+| `terminal_id`, `process_run_uuid` | UUID non nuls de la génération physique source. `terminal_id` égale l’agrégat. |
+| `source_action_id`, `source_dispatch_id`, `source_receipt_id` | UUID non nuls de l’action `ReleaseTerminal`, de son unique dispatch consommé et de son reçu d’acceptation original. |
+| `history_command_id`, `history_receipt_id` | UUID non nuls de la commande d’attestation et de son reçu `Completed`. |
+| `history_result_ref` | Référence exacte `terminal-release-history:<source_action_id>:<source_dispatch_id>` portée par ce reçu. |
+| `observation_object_hash` | Digest `sha256:` suivi de 64 chiffres hexadécimaux minuscules, égal à l’objet du premier fait scellé. |
+
+Le writer résout l’acteur, le principal actif et le rôle effectif depuis la
+session authentifiée. Il vérifie l’habilitation et le mandat de réconciliation
+sur ce projet et cet effet selon la [chaîne d’autorité](../../architecture/security-boundaries.md#chaîne-dautorité),
+les permissions du broker et F018, avec les liens de propriété de la source.
+Un nom de rôle, une commande cliente ou une référence à une preuve ne confère
+aucun mandat. Le [coordinateur Rust interne](../F018-reliability-recovery/technical-design.md#coordinateur-de-reprise)
+agit dans le périmètre de son plan F018 qualifié et de son autorité existante.
+Les politiques, portées et révocations effectives sont revalidées par le writer.
+Les [modes du daemon](../../architecture/runtime-lifecycle.md#machine-détat-du-daemon)
+restent opposables. Le daemon refuse cette écriture en `read_only_recovery`.
+En `recovering`, seules les écritures internes prévues par le plan sont admises.
+
+La chaîne scellée doit lier exactement reçu source, contexte immuable, action,
+unique marqueur de dispatch, fait `TerminalReleaseHistoryObserved`, liaison du
+reçu d’attestation et objet publié disponible et vérifié. Elle conserve projet,
+lignée, terminal, génération physique, allocation initiale et son digest, host,
+identité OS complète, bail/fence/révision sources et header natif entier. Le
+reçu d’attestation et la source appartiennent à la lignée active. L’époque du
+retrait peut précéder celle du daemon. Le boot, le digest de l’ACK et l’époque
+d’inspection décrivent l’observation historique du retrait.
+
+Pour une première application, action et intention sources sont
+`outcome_unknown`. Le ledger pointe encore vers la génération et le bail
+sources, avec le fence courant égal au fence source et sans révision ultérieure.
+Le bail exact est `reconciling` ou `suspect`. Le writer applique les mêmes
+gardes de preuve et conserve l’échéance, y compris si elle est passée.
+Bail `held`, `released` ou `revoked`, contrôleur successeur,
+intention incompatible concurrente ou identité divergente ferment la première
+application. Aucun état de fin du terminal ou du processus n’est réécrit.
+
+Le writer engage les écritures suivantes dans une seule transaction.
+
+- la référence au fait déjà scellé et la réconciliation de l’action source en
+  `observed_success`, avec `ActionReconciled` sur l’agrégat action à sa propre
+  révision suivante et avec le même dispatch.
+- l’intention de retrait en `disposed`, sa révision suivante et sa preuve de
+  disposition (`observation_object_hash`, `disposition_event_id`), distincte de
+  la voie native `retire_resolved` vers `observed`.
+- le seul bail de contrôle source en `released`, une seule incrémentation de la
+  révision de contrôle et la clôture de la seule barrière portée par ce retrait.
+- `TerminalReleaseDispositionRecorded` sur l’agrégat terminal à cette nouvelle
+  révision de contrôle, avec reçu/action/dispatch sources, reçu d’attestation et
+  hash scellé exacts. Le [schéma d’événement](../../schemas/event.schema.json)
+  ferme son payload de disposition.
+- `EffectOutcomeResolved` sur chaque Run effectivement bloqué par cette action
+  selon un lien persistant F018. Le reducer conserve les autres barrières et applique les gardes
+  de [ResolveBlock](../../architecture/state-machines.md#progression-de-diagnostic-sous-blocage-deffet--r6),
+  avant toute reprise.
+- le reçu de disposition `Completed` et l’outbox de ces événements.
+
+Selon le [modèle d’événements](../../architecture/event-model.md#enveloppe-dévénement),
+`ActionReconciled` a pour cause `{kind:"command", id:<receipt_id de disposition>}`.
+La trace terminal et les événements des Runs ont pour cause cet événement
+`ActionReconciled`, et portent le même `command_id`. La chaîne référence aussi
+les reçus source et d’attestation, sans réécrire leurs événements. Le nouveau
+reçu vise l’agrégat terminal. `new_revision` vaut la révision de contrôle source
+plus un et `event_cursor` désigne `TerminalReleaseDispositionRecorded`, même si
+d’autres événements de la transaction ont une séquence supérieure. Il porte
+`terminal-release-disposition:<source_action_id>:<source_dispatch_id>`.
+La lecture ordinaire par `GetCommandReceipt` renvoie le reçu. La relecture
+causale référence l’événement terminal au curseur du reçu.
+Lorsque `GetStateSnapshot` projette le terminal selon ses gardes de portée,
+d’identité et de ressources, la vue et son watermark exposent le bail
+`released` et la nouvelle `control_revision`, avec les états du terminal et
+du processus conservés.
+
+Le [sens de `detached`](../../specs/terminal-management.md#états-et-commandes)
+est l’absence de client UI. La transaction conserve `terminal_sessions.state`.
+Le pointeur vers le bail historique peut rester présent sans capacité active.
+Le writer conserve l’échéance, le fence monotone, le processus, le host, le PTY,
+les séquences d’entrée, les trois réservations et les slots éventuels.
+La fin d’une ressource exige son observation et sa transition propres. Toute réacquisition reste une
+nouvelle commande, un nouveau bail/fence et une observation d’activation.
+
+L’ordre de contrôle et la rétention suivent le
+[contrat IPC](../../architecture/ipc-and-apis.md#commandenvelope). Le writer
+vérifie la lignée avant la recherche idempotente. Pour le même acteur, la même
+clé et le même digest rendent le reçu initial. Une même clé divergente donne
+`IdempotencyConflict`. Après la fenêtre
+complète, le tombstone impose `ContractViolation/IDEMPOTENCY_WINDOW_EXPIRED`.
+Une nouvelle clé n’est pas un rejeu et échoue sur la révision source après
+disposition, sans nouvel événement, révision ou dispatch.
+
+| Condition de refus | Erreur IPC |
+|---|---|
+| Forme ouverte ou mal typée | `InvalidArgument` |
+| Source ou reçu étranger | `NotFoundOrHidden` |
+| Autorité effective insuffisante | `CapabilityDenied/OPERATION_NOT_AUTHORIZED` |
+| Lignée obsolète | `StaleFence/STALE_AUTHORITY_GENERATION` |
+| Révision différente | `RevisionConflict` |
+| Bail, fence ou génération remplacés | `StaleFence` |
+| Objet absent ou invérifiable | `ContractViolation/EVIDENCE_UNAVAILABLE` |
+| Chaîne contradictoire | `ContractViolation` |
+| Opération incompatible non disposée | `ResourceBusy` |
+
+Chaque refus préserve l’action, le bail, les ressources et la barrière.
+
+Les reçus et faits historiques conservent octets, curseurs et provenance après
+disposition. Leur lecture autorisée ne dépend pas de l’éligibilité
+`outcome_unknown` à une nouvelle mutation. Un reçu d’ancienne lignée reste
+`historical` sans droit d’agir. La lecture conserve les curseurs du fait et de
+sa liaison, avec le watermark du snapshot. Aucune lecture ne rétablit le contrôle.
+Les liens et tombstones suivent
+[la rétention Q-12](../../architecture/storage-model.md).
+
+Le raccord versionné est une précondition de cette route. V018 conserve sa voie
+normale `retire_resolved` vers `observed`. Sa garde historique vers `disposed` attend une
+référence `terminal_release_observation`, `TerminalReleaseHistoricalAttested`
+sous reçu source et une action encore `outcome_unknown`. Les faits actuels
+`TerminalReleaseHistoryObserved`/`Referenced` ne satisfont pas cette ancienne
+forme. Une migration additive après V018 doit qualifier la preuve et la
+transaction F018 décrites ici. Le préfixe conserve ses octets.
+Le consommateur `AcquireTerminal` qualifie actuellement seulement l’intention
+`observed`, l’action `observed_success` et la preuve normale. La reconnaissance
+d’une disposition factuelle `disposed` exige la preuve de la nouvelle
+transaction et l’action source `observed_success`. Le lecteur conserve la
+provenance et les formats historiques des anciennes dispositions.
+
+L’oracle reste une fixture SQLite synthétique utilisant les ports Store de
+preuve, d’attestation et de commande, du décodage de `ReconcileProcess` au reçu.
+Il vérifie ensemble intention `disposed`, action réconciliée, seul bail libéré,
+révision/curseur causaux et réservations intactes, avec états UI distincts
+conservés. Il distingue un Run lié, un Run sans lien et d’autres barrières.
+Les refus couvrent autorité/mandat et mode, projet/lignée, source/reçu/dispatch/hash,
+révision et bail remplacés, preuve absente, expiration et `suspect` sans preuve.
+Coupure avant commit, reçu perdu après commit, rejeu et lectures historiques
+vérifient atomicité et absence de seconde application. Les ports natifs et
+outils sont des sentinelles à zéro appel ; aucun UPDATE SQL isolé ou test de
+retraite d’allocation physique ne remplace cet oracle.
 
 Une nouvelle commande enregistrée `AcquireTerminal` peut reprendre le même PTY
 après un retrait qualifié. Cette branche est distincte du renouvellement : elle

@@ -1,0 +1,18 @@
+{
+  "protocol_version": "unleash.ipc.v2",
+  "request_id": "20000000-0000-4000-8000-000000000012",
+  "command_id": "20000000-0000-4000-8000-000000000010",
+  "authority_generation": "20000000-0000-4000-8000-000000000003",
+  "actor_ref": null,
+  "project_id": "20000000-0000-4000-8000-000000000004",
+  "aggregate_id": "20000000-0000-4000-8000-000000000005",
+  "expected_revision": 2,
+  "command_type": "ReconcileProcess",
+  "payload": {
+    "kind": "attest_terminal_release",
+    "terminal_id": "20000000-0000-4000-8000-000000000005",
+    "process_run_uuid": "20000000-0000-4000-8000-000000000006",
+    "source_action_id": "20000000-0000-4000-8000-000000000007",
+    "source_dispatch_id": "20000000-0000-4000-8000-000000000008"
+  }
+}

@@ -139,20 +139,29 @@ try:
             c = s.get("properties", {}).get(key, {}).get("const")
             if c is not None:
                 bykey[(key, c)] = rel
-    typed_query_responses = {
-        "examples/ipc-read-settings-model-policies-response.json": "read_settings_model_policies_response",
+    typed_ipc_fixtures = {
+        "examples/event-terminal-release-disposition.json": ("schemas/event.schema.json", None),
+        "examples/ipc-reconcile-terminal-release-attestation.json": ("schemas/ipc-command.schema.json", None),
+        "examples/ipc-reconcile-terminal-release-disposition.json": ("schemas/ipc-command.schema.json", None),
+        "examples/ipc-read-settings-model-policies-response.json": (
+            "schemas/ipc-query-response.schema.json", "read_settings_model_policies_response",
+        ),
     }
     ok = 0
     for rel, d in jsons.items():
         if rel.startswith("schemas/"):
             continue
-        if (definition := typed_query_responses.get(rel)) is not None:
-            target = "schemas/ipc-query-response.schema.json"
-            query_response = schemas.get(target, {})
-            if definition not in query_response.get("$defs", {}):
+        if (typed_fixture := typed_ipc_fixtures.get(rel)) is not None:
+            target, definition = typed_fixture
+            selected = schemas.get(target)
+            if selected is None:
+                err(f"{rel}: missing schema {target}")
+                continue
+            if definition is not None and definition not in selected.get("$defs", {}):
                 err(f"{rel}: missing {target} definition {definition}")
                 continue
-            selected = {"$ref": f"{query_response['$id']}#/$defs/{definition}"}
+            if definition is not None:
+                selected = {"$ref": f"{selected['$id']}#/$defs/{definition}"}
         else:
             if not isinstance(d, dict):
                 continue

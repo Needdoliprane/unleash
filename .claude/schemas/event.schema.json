@@ -135,6 +135,41 @@
       }
     },
     {
+      "if": { "properties": { "event_type": { "const": "TerminalReleaseDispositionRecorded" } } },
+      "then": {
+        "properties": {
+          "project_id": { "type": "string" },
+          "command_id": { "type": "string" },
+          "causation": {
+            "properties": {
+              "kind": { "const": "event" },
+              "id": { "format": "uuid" }
+            }
+          },
+          "payload": {
+            "oneOf": [
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "source_action_id", "source_dispatch_id", "source_receipt_id", "history_receipt_id",
+                  "observation_object_hash"
+                ],
+                "properties": {
+                  "source_action_id": { "type": "string", "format": "uuid" },
+                  "source_dispatch_id": { "type": "string", "format": "uuid" },
+                  "source_receipt_id": { "type": "string", "format": "uuid" },
+                  "history_receipt_id": { "type": "string", "format": "uuid" },
+                  "observation_object_hash": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" }
+                }
+              },
+              { "const": { "tombstoned": true } }
+            ]
+          }
+        }
+      }
+    },
+    {
       "if": { "properties": { "event_type": { "const": "TerminalControlDispatchRefused" } } },
       "then": {
         "properties": {

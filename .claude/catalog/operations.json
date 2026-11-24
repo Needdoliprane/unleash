@@ -32,7 +32,7 @@
       ],
       "status": "proposed",
       "contract_stage": "documented",
-      "description": "AcquireTerminal a deux formes fermées pour la création et le contrôle d’une génération enregistrée. SendTerminalInput exige la cible, la génération, le bail, le fence, la séquence d’entrée et 1 à 65 536 octets. ResizeTerminal porte rows/cols bornés, cible et lease/fence. Détacher une vue conserve le processus.",
+      "description": "AcquireTerminal a deux formes fermées pour la création et le contrôle d’une génération enregistrée. SendTerminalInput exige la cible, la génération, le bail, le fence, la séquence d’entrée et 1 à 65 536 octets. ResizeTerminal porte rows/cols bornés, cible et lease/fence. Détacher une vue conserve le processus. ReconcileProcess distingue l’attestation historique et la [disposition du contrôle](../features/F011-terminal-pool/interfaces.md#disposition-du-contrôle-dont-le-retrait-est-attesté) sur preuve scellée.",
       "contract_source": {
         "path": "architecture/client-operation-catalog.md",
         "subject": "Processus / F011"
@@ -702,7 +702,7 @@
       ],
       "status": "proposed",
       "contract_stage": "documented",
-      "description": "Causalité, séquence, génération, propriétaire et offsets ; run mécanique/supervisé, checkpoints, lignes, effets, appels permis/refusés et décisions. Les logs ne remplacent pas le verdict d’assertion.",
+      "description": "Causalité, séquence, génération, propriétaire et offsets ; run mécanique/supervisé, checkpoints, lignes, effets, appels permis/refusés et décisions. Avec `result_ref`, GetCommandReceipt relit l’acquisition exacte ou l’attestation historique F011 selon la [référence du reçu](ipc-and-apis.md#receipt-et-erreurs). Le reçu de disposition se lit sans `result_ref`. Les logs ne remplacent pas le verdict d’assertion.",
       "contract_source": {
         "path": "architecture/client-operation-catalog.md",
         "subject": "Activity 01–05 + AUTOMATION-05"
@@ -822,7 +822,7 @@
       ],
       "status": "proposed",
       "contract_stage": "documented",
-      "description": "Causalité, séquence, génération, propriétaire et offsets ; run mécanique/supervisé, checkpoints, lignes, effets, appels permis/refusés et décisions. Les logs ne remplacent pas le verdict d’assertion.",
+      "description": "Causalité, séquence, génération, propriétaire et offsets ; run mécanique/supervisé, checkpoints, lignes, effets, appels permis/refusés et décisions. Avec `result_ref`, GetCommandReceipt relit l’acquisition exacte ou l’attestation historique F011 selon la [référence du reçu](ipc-and-apis.md#receipt-et-erreurs). Le reçu de disposition se lit sans `result_ref`. Les logs ne remplacent pas le verdict d’assertion.",
       "contract_source": {
         "path": "architecture/client-operation-catalog.md",
         "subject": "Activity 01–05 + AUTOMATION-05"
@@ -2127,7 +2127,7 @@
       ],
       "status": "proposed",
       "contract_stage": "documented",
-      "description": "Causalité, séquence, génération, propriétaire et offsets ; run mécanique/supervisé, checkpoints, lignes, effets, appels permis/refusés et décisions. Les logs ne remplacent pas le verdict d’assertion.",
+      "description": "Causalité, séquence, génération, propriétaire et offsets ; run mécanique/supervisé, checkpoints, lignes, effets, appels permis/refusés et décisions. Avec `result_ref`, GetCommandReceipt relit l’acquisition exacte ou l’attestation historique F011 selon la [référence du reçu](ipc-and-apis.md#receipt-et-erreurs). Le reçu de disposition se lit sans `result_ref`. Les logs ne remplacent pas le verdict d’assertion.",
       "contract_source": {
         "path": "architecture/client-operation-catalog.md",
         "subject": "Activity 01–05 + AUTOMATION-05"
@@ -2619,7 +2619,7 @@
       ],
       "status": "proposed",
       "contract_stage": "documented",
-      "description": "Causalité, séquence, génération, propriétaire et offsets ; run mécanique/supervisé, checkpoints, lignes, effets, appels permis/refusés et décisions. Les logs ne remplacent pas le verdict d’assertion.",
+      "description": "Causalité, séquence, génération, propriétaire et offsets ; run mécanique/supervisé, checkpoints, lignes, effets, appels permis/refusés et décisions. Avec `result_ref`, GetCommandReceipt relit l’acquisition exacte ou l’attestation historique F011 selon la [référence du reçu](ipc-and-apis.md#receipt-et-erreurs). Le reçu de disposition se lit sans `result_ref`. Les logs ne remplacent pas le verdict d’assertion.",
       "contract_source": {
         "path": "architecture/client-operation-catalog.md",
         "subject": "Activity 01–05 + AUTOMATION-05"
@@ -2681,7 +2681,7 @@
       ],
       "status": "proposed",
       "contract_stage": "documented",
-      "description": "AcquireTerminal a deux formes fermées pour la création et le contrôle d’une génération enregistrée. SendTerminalInput exige la cible, la génération, le bail, le fence, la séquence d’entrée et 1 à 65 536 octets. ResizeTerminal porte rows/cols bornés, cible et lease/fence. Détacher une vue conserve le processus.",
+      "description": "AcquireTerminal a deux formes fermées pour la création et le contrôle d’une génération enregistrée. SendTerminalInput exige la cible, la génération, le bail, le fence, la séquence d’entrée et 1 à 65 536 octets. ResizeTerminal porte rows/cols bornés, cible et lease/fence. Détacher une vue conserve le processus. ReconcileProcess distingue l’attestation historique et la [disposition du contrôle](../features/F011-terminal-pool/interfaces.md#disposition-du-contrôle-dont-le-retrait-est-attesté) sur preuve scellée.",
       "contract_source": {
         "path": "architecture/client-operation-catalog.md",
         "subject": "Processus / F011"
@@ -2854,7 +2854,7 @@
       ],
       "status": "proposed",
       "contract_stage": "documented",
-      "description": "AcquireTerminal a deux formes fermées pour la création et le contrôle d’une génération enregistrée. SendTerminalInput exige la cible, la génération, le bail, le fence, la séquence d’entrée et 1 à 65 536 octets. ResizeTerminal porte rows/cols bornés, cible et lease/fence. Détacher une vue conserve le processus.",
+      "description": "AcquireTerminal a deux formes fermées pour la création et le contrôle d’une génération enregistrée. SendTerminalInput exige la cible, la génération, le bail, le fence, la séquence d’entrée et 1 à 65 536 octets. ResizeTerminal porte rows/cols bornés, cible et lease/fence. Détacher une vue conserve le processus. ReconcileProcess distingue l’attestation historique et la [disposition du contrôle](../features/F011-terminal-pool/interfaces.md#disposition-du-contrôle-dont-le-retrait-est-attesté) sur preuve scellée.",
       "contract_source": {
         "path": "architecture/client-operation-catalog.md",
         "subject": "Processus / F011"
@@ -3052,7 +3052,7 @@
       ],
       "status": "proposed",
       "contract_stage": "documented",
-      "description": "AcquireTerminal a deux formes fermées pour la création et le contrôle d’une génération enregistrée. SendTerminalInput exige la cible, la génération, le bail, le fence, la séquence d’entrée et 1 à 65 536 octets. ResizeTerminal porte rows/cols bornés, cible et lease/fence. Détacher une vue conserve le processus.",
+      "description": "AcquireTerminal a deux formes fermées pour la création et le contrôle d’une génération enregistrée. SendTerminalInput exige la cible, la génération, le bail, le fence, la séquence d’entrée et 1 à 65 536 octets. ResizeTerminal porte rows/cols bornés, cible et lease/fence. Détacher une vue conserve le processus. ReconcileProcess distingue l’attestation historique et la [disposition du contrôle](../features/F011-terminal-pool/interfaces.md#disposition-du-contrôle-dont-le-retrait-est-attesté) sur preuve scellée.",
       "contract_source": {
         "path": "architecture/client-operation-catalog.md",
         "subject": "Processus / F011"
@@ -3520,7 +3520,7 @@
       ],
       "status": "proposed",
       "contract_stage": "documented",
-      "description": "Causalité, séquence, génération, propriétaire et offsets ; run mécanique/supervisé, checkpoints, lignes, effets, appels permis/refusés et décisions. Les logs ne remplacent pas le verdict d’assertion.",
+      "description": "Causalité, séquence, génération, propriétaire et offsets ; run mécanique/supervisé, checkpoints, lignes, effets, appels permis/refusés et décisions. Avec `result_ref`, GetCommandReceipt relit l’acquisition exacte ou l’attestation historique F011 selon la [référence du reçu](ipc-and-apis.md#receipt-et-erreurs). Le reçu de disposition se lit sans `result_ref`. Les logs ne remplacent pas le verdict d’assertion.",
       "contract_source": {
         "path": "architecture/client-operation-catalog.md",
         "subject": "Activity 01–05 + AUTOMATION-05"
@@ -3640,7 +3640,7 @@
       ],
       "status": "proposed",
       "contract_stage": "documented",
-      "description": "AcquireTerminal a deux formes fermées pour la création et le contrôle d’une génération enregistrée. SendTerminalInput exige la cible, la génération, le bail, le fence, la séquence d’entrée et 1 à 65 536 octets. ResizeTerminal porte rows/cols bornés, cible et lease/fence. Détacher une vue conserve le processus.",
+      "description": "AcquireTerminal a deux formes fermées pour la création et le contrôle d’une génération enregistrée. SendTerminalInput exige la cible, la génération, le bail, le fence, la séquence d’entrée et 1 à 65 536 octets. ResizeTerminal porte rows/cols bornés, cible et lease/fence. Détacher une vue conserve le processus. ReconcileProcess distingue l’attestation historique et la [disposition du contrôle](../features/F011-terminal-pool/interfaces.md#disposition-du-contrôle-dont-le-retrait-est-attesté) sur preuve scellée.",
       "contract_source": {
         "path": "architecture/client-operation-catalog.md",
         "subject": "Processus / F011"
@@ -3799,7 +3799,7 @@
       ],
       "status": "proposed",
       "contract_stage": "documented",
-      "description": "AcquireTerminal a deux formes fermées pour la création et le contrôle d’une génération enregistrée. SendTerminalInput exige la cible, la génération, le bail, le fence, la séquence d’entrée et 1 à 65 536 octets. ResizeTerminal porte rows/cols bornés, cible et lease/fence. Détacher une vue conserve le processus.",
+      "description": "AcquireTerminal a deux formes fermées pour la création et le contrôle d’une génération enregistrée. SendTerminalInput exige la cible, la génération, le bail, le fence, la séquence d’entrée et 1 à 65 536 octets. ResizeTerminal porte rows/cols bornés, cible et lease/fence. Détacher une vue conserve le processus. ReconcileProcess distingue l’attestation historique et la [disposition du contrôle](../features/F011-terminal-pool/interfaces.md#disposition-du-contrôle-dont-le-retrait-est-attesté) sur preuve scellée.",
       "contract_source": {
         "path": "architecture/client-operation-catalog.md",
         "subject": "Processus / F011"
@@ -3818,7 +3818,7 @@
       ],
       "status": "proposed",
       "contract_stage": "documented",
-      "description": "Causalité, séquence, génération, propriétaire et offsets ; run mécanique/supervisé, checkpoints, lignes, effets, appels permis/refusés et décisions. Les logs ne remplacent pas le verdict d’assertion.",
+      "description": "Causalité, séquence, génération, propriétaire et offsets ; run mécanique/supervisé, checkpoints, lignes, effets, appels permis/refusés et décisions. Avec `result_ref`, GetCommandReceipt relit l’acquisition exacte ou l’attestation historique F011 selon la [référence du reçu](ipc-and-apis.md#receipt-et-erreurs). Le reçu de disposition se lit sans `result_ref`. Les logs ne remplacent pas le verdict d’assertion.",
       "contract_source": {
         "path": "architecture/client-operation-catalog.md",
         "subject": "Activity 01–05 + AUTOMATION-05"

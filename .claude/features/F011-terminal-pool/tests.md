@@ -61,3 +61,15 @@ Exiger au redémarrage un seul refus causal `not_dispatched` avec le contexte
 original, zéro dispatch et l’intégrité du PTY et des ressources. Rejouer le
 reçu et redémarrer une deuxième fois. Vérifier le refus d’un marqueur tardif
 et l’absence de toute nouvelle rotation ou observation native.
+
+Pour la disposition post-attestation de T-F011-010, vérifier les deux formes
+fermées de `ReconcileProcess` avec les fixtures de
+[l’attestation](../../examples/ipc-reconcile-terminal-release-attestation.json) et de
+[la disposition](../../examples/ipc-reconcile-terminal-release-disposition.json).
+La [fixture d’événement](../../examples/event-terminal-release-disposition.json)
+lie la révision de contrôle suivante aux références de la commande.
+Le cas produit utilise un état SQLite synthétique et les ports de preuve et
+d’attestation existants. Les sentinelles natif et outil observent zéro appel.
+Le test vérifie le commit et son rejeu, les refus après changement de
+génération ou d’autorité, l’accès aux faits historiques et la conservation
+des réservations physiques avant, après et lors d’un rollback injecté.

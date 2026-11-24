@@ -259,6 +259,34 @@
         }
       }
     },
+    "terminal_release_disposition_uuid": {
+      "type": "string",
+      "format": "uuid",
+      "not": { "const": "00000000-0000-0000-0000-000000000000" }
+    },
+    "terminal_release_disposition": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind", "terminal_id", "process_run_uuid", "source_action_id", "source_dispatch_id",
+        "source_receipt_id", "history_command_id", "history_receipt_id", "history_result_ref",
+        "observation_object_hash"
+      ],
+      "properties": {
+        "kind": { "const": "dispose_terminal_release" },
+        "terminal_id": { "$ref": "#/$defs/terminal_release_disposition_uuid" },
+        "process_run_uuid": { "$ref": "#/$defs/terminal_release_disposition_uuid" },
+        "source_action_id": { "$ref": "#/$defs/terminal_release_disposition_uuid" },
+        "source_dispatch_id": { "$ref": "#/$defs/terminal_release_disposition_uuid" },
+        "source_receipt_id": { "$ref": "#/$defs/terminal_release_disposition_uuid" },
+        "history_command_id": { "$ref": "#/$defs/terminal_release_disposition_uuid" },
+        "history_receipt_id": { "$ref": "#/$defs/terminal_release_disposition_uuid" },
+        "history_result_ref": {
+          "$ref": "urn:ovpt:unleash:ipc-query-response:1#/$defs/terminal_release_history_result/properties/result_ref"
+        },
+        "observation_object_hash": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" }
+      }
+    },
     "terminal_release": {
       "type": "object",
       "additionalProperties": false,
@@ -789,7 +817,10 @@
             "format": "uuid"
           },
           "payload": {
-            "$ref": "#/$defs/terminal_release_reconcile"
+            "oneOf": [
+              { "$ref": "#/$defs/terminal_release_reconcile" },
+              { "$ref": "#/$defs/terminal_release_disposition" }
+            ]
           }
         }
       }

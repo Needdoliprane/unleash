@@ -14,7 +14,7 @@
     "cache/"
   ],
   "hash_algorithm": "sha256",
-  "source_tree_digest": "217f14717e5d1e15131f078069a3a70ca119246a773a5f96478214b8e85b62b7",
+  "source_tree_digest": "210f1c52ba58ddd5aea473c217bdc356a859ffa017be8380d7476851719c6b5a",
   "files": [
     {
       "path": "INDEX.md",
@@ -312,8 +312,8 @@
     },
     {
       "path": "architecture/client-operation-catalog.md",
-      "sha256": "211d28a2551da5858d09014fd6dc11d20fe9226732b2909911bd383b35a1cd06",
-      "bytes": 39531,
+      "sha256": "db6fa524a35b6972d9daa483a68a8551ce2b1bf5f722986758b91f20d681d244",
+      "bytes": 39771,
       "media_type": "text/markdown"
     },
     {
@@ -336,8 +336,8 @@
     },
     {
       "path": "architecture/failure-recovery.md",
-      "sha256": "1f7cb90cd8328349d78b736ac7b7a9ffab47b8305df9b4fb82a4f272a6daf2ac",
-      "bytes": 22084,
+      "sha256": "da0dd70406244ef6b19a007acd5effbbf53a099b06ec086ef02f3904e9fb1a78",
+      "bytes": 22538,
       "media_type": "text/markdown"
     },
     {
@@ -348,8 +348,8 @@
     },
     {
       "path": "architecture/ipc-and-apis.md",
-      "sha256": "3affa0173680200da66a1b94b15fbf4a8ebf3ae5305d0cbd3e850c2159dae5b0",
-      "bytes": 33120,
+      "sha256": "911f91c9173c52ffc4b0a756f58fa6c92d31508d53a6eeb4f33845cc5339cfb7",
+      "bytes": 33764,
       "media_type": "text/markdown"
     },
     {
@@ -396,14 +396,14 @@
     },
     {
       "path": "architecture/sqlite-design.md",
-      "sha256": "e5a82049e94bb33dc06fdacdd863d7e5c90e6bd28abb0b6542d1eb31353ee444",
-      "bytes": 78735,
+      "sha256": "8ccc514ab316fea02c316d5452fa3a1621152a961994ec3d4966c9b34b86b1e9",
+      "bytes": 79819,
       "media_type": "text/markdown"
     },
     {
       "path": "architecture/state-machines.md",
-      "sha256": "45676028a5669b3021240c649576ecb1d81d7a03196b1ad07389c36faf76d854",
-      "bytes": 15309,
+      "sha256": "90665900e81cc76ba1a516227c4331278b0e0b50aafdefc8c8d1923552506b3e",
+      "bytes": 15501,
       "media_type": "text/markdown"
     },
     {
@@ -738,8 +738,8 @@
     },
     {
       "path": "catalog/operations.json",
-      "sha256": "bcdc9be2f4559a4d743d08307d710c818606896b4c59f55cb831b01539ddd3d7",
-      "bytes": 209490,
+      "sha256": "2e64d001bc3725f6f4416879a8df1df15d122dcfb551b11dcee95acf4d929964",
+      "bytes": 212058,
       "media_type": "application/json"
     },
     {
@@ -965,6 +965,12 @@
       "media_type": "application/json"
     },
     {
+      "path": "examples/event-terminal-release-disposition.json",
+      "sha256": "2bf0c967f3e06184dfa1b8746aeb2fabcf42417c7fbe6c8d66864e1a86360ade",
+      "bytes": 1176,
+      "media_type": "application/json"
+    },
+    {
       "path": "examples/expected-execution-binding.json",
       "sha256": "6c42a729afd51c4316c1423c17c5c53092f289244a8e079e6b94b33e47412217",
       "bytes": 1097,
@@ -1010,6 +1016,18 @@
       "path": "examples/ipc-read-settings-model-policies-response.json",
       "sha256": "2f69a82b85aa58a75b692ba2811e8568a3b51bc669f28723992c13cb84420fa5",
       "bytes": 2408,
+      "media_type": "application/json"
+    },
+    {
+      "path": "examples/ipc-reconcile-terminal-release-attestation.json",
+      "sha256": "23f40988bf2e519f43c21196335d71783331c3dc17a485005aefbcb8e11786ec",
+      "bytes": 731,
+      "media_type": "application/json"
+    },
+    {
+      "path": "examples/ipc-reconcile-terminal-release-disposition.json",
+      "sha256": "72a5ca562e0c5406935163979e698ef9bf52bf17b90e25f78e331c2af5772677",
+      "bytes": 1163,
       "media_type": "application/json"
     },
     {
@@ -1530,8 +1548,8 @@
     },
     {
       "path": "features/F011-terminal-pool/interfaces.md",
-      "sha256": "f0633eba34a72e47ca98e741f1411f628c5c98f492a14480bd4ac44d8f26ac2f",
-      "bytes": 22773,
+      "sha256": "7da6d79efc5baf9e85f0de006fccadcd32996f666ba9b3770bab5528e4e03321",
+      "bytes": 33505,
       "media_type": "text/markdown"
     },
     {
@@ -1548,8 +1566,8 @@
     },
     {
       "path": "features/F011-terminal-pool/tests.md",
-      "sha256": "03afb9ae2ccbe8bf255404a6b85778761343d18a205b3798325deb37d72dffe3",
-      "bytes": 9239,
+      "sha256": "7168ecb02b5ed1f148f0c13a76d348fcf0c6a9d8f2e0478075d7133b2160e0c5",
+      "bytes": 10087,
       "media_type": "text/markdown"
     },
     {
@@ -2076,8 +2094,8 @@
     },
     {
       "path": "schemas/event.schema.json",
-      "sha256": "edce6c09345b7cd58ffc3ea7e92f9275be3f4b7d445ce6a874d3961cdd881e15",
-      "bytes": 11934,
+      "sha256": "0382014023bad77b88950b92aae0a93506d1ad592650bca5522b9a7d5fd5a26b",
+      "bytes": 13262,
       "media_type": "application/json"
     },
     {
@@ -2100,8 +2118,8 @@
     },
     {
       "path": "schemas/ipc-command.schema.json",
-      "sha256": "0c1fea0bfc8f9749c35d0649c9f72812ec71d4f3489e914a3bc0b90694cd56ec",
-      "bytes": 36577,
+      "sha256": "e9d888d3a82e93ef8d7f919e580d96061aebb3df45bd54ad890dc30ba48ddff8",
+      "bytes": 38144,
       "media_type": "application/json"
     },
     {

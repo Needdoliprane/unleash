@@ -1,0 +1,28 @@
+{
+  "event_id": "20000000-0000-4000-8000-000000000013",
+  "stream_id": "20000000-0000-4000-8000-000000000014",
+  "sequence": 13,
+  "event_type": "TerminalReleaseDispositionRecorded",
+  "schema_version": 1,
+  "occurred_at": "2026-11-24T07:00:00Z",
+  "recorded_at": "2026-11-24T07:00:00Z",
+  "project_id": "20000000-0000-4000-8000-000000000004",
+  "aggregate_id": "20000000-0000-4000-8000-000000000005",
+  "aggregate_revision": 3,
+  "actor_ref": "user:fixture",
+  "correlation_id": "20000000-0000-4000-8000-000000000005",
+  "causation": {
+    "kind": "event",
+    "id": "20000000-0000-4000-8000-000000000015"
+  },
+  "command_id": "20000000-0000-4000-8000-000000000002",
+  "payload_hash": "sha256:b386cf46bab9c698220b79261ec7dc991da25e044bde3565a0c2d33a67ad2fee",
+  "payload": {
+    "source_action_id": "20000000-0000-4000-8000-000000000007",
+    "source_dispatch_id": "20000000-0000-4000-8000-000000000008",
+    "source_receipt_id": "20000000-0000-4000-8000-000000000009",
+    "history_receipt_id": "20000000-0000-4000-8000-000000000011",
+    "observation_object_hash": "sha256:0202020202020202020202020202020202020202020202020202020202020202"
+  },
+  "sensitivity": "project"
+}
