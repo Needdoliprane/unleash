@@ -378,3 +378,39 @@ async fn t_f005_004_refuses_the_entry_above_the_activation_budget() {
         .await
         .unwrap();
 }
+
+#[tokio::test]
+async fn t_f012_018_forbidden_run_refuses_agent_task_activation() {
+    let data = unleash_testkit::local_test_dir("f012-model-policy-data").unwrap();
+    let rendezvous = unleash_testkit::local_test_dir("f012-model-policy-rdv").unwrap();
+    let (store, config, mut create) =
+        fixture(data.path(), rendezvous.path(), AgentLevel::N, |workflow| {
+            let definition = workflow.as_object_mut().unwrap();
+            definition.insert("schema_version".to_owned(), json!("unleash.workflow.v1.1"));
+            // An inconsistent version imported before semantic validation.
+            definition.insert("model_policy".to_owned(), json!("forbidden"));
+        })
+        .await;
+    let (daemon, mut client) = start(config).await;
+    publish_mandate(&mut client, &mut create).await;
+    client.send_command(&create).await.unwrap();
+
+    let result = client.send_command(&start_command(&create)).await;
+    let snapshot = client.query(&scoped_run_query(&create)).await.unwrap();
+    drop(client);
+    daemon
+        .shutdown_graceful("inspect run without model authorization")
+        .await
+        .unwrap();
+    drop(daemon);
+
+    let error = result.expect_err("a no-model workflow cannot activate an agent task");
+    assert!(matches!(error, ClientError::Remote(error)
+        if error.code == ErrorCode::CapabilityDenied
+            && error.reason_code == Some(ReasonCode::ModelCallsForbidden)));
+    assert_eq!(snapshot.result.get("state"), Some(&json!("prepared")));
+    assert_eq!(snapshot.result.get("revision"), Some(&json!(1)));
+    tokio::task::spawn_blocking(move || assert_start_effects(store, None))
+        .await
+        .unwrap();
+}

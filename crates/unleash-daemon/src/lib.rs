@@ -36,6 +36,7 @@ mod provider_probe_connect_service;
 mod provider_probe_generation_service;
 mod provider_profile_service;
 mod provider_profile_validation_service;
+pub mod provider_service_evaluation;
 pub mod recovery;
 pub mod subscriptions;
 pub mod terminal_host_launcher;
