@@ -58,6 +58,22 @@
   },
   "allOf": [
     {
+      "if": { "properties": { "query_type": { "const": "GetDiscoveryReceipt" } } },
+      "then": {
+        "properties": {
+          "project_id": { "$ref": "#/$defs/run_list_project_id" },
+          "payload": {
+            "type": "object", "additionalProperties": false, "required": ["receipt_id"],
+            "properties": {
+              "receipt_id": { "$ref": "urn:ovpt:unleash:discovery-receipt:1#/properties/receipt_id" },
+              "page_size": { "type": "integer", "minimum": 1, "maximum": 100, "default": 50 },
+              "opaque_cursor": { "$ref": "#/$defs/run_page_cursor" }
+            }
+          }
+        }
+      }
+    },
+    {
       "if": { "properties": { "query_type": { "const": "GetWorkflowDraft" } } },
       "then": {
         "properties": {

@@ -140,6 +140,13 @@ try:
             if c is not None:
                 bykey[(key, c)] = rel
     typed_ipc_fixtures = {
+        "examples/ipc-get-discovery-receipt-query.json": ("schemas/ipc-query.schema.json", None),
+        "examples/ipc-get-discovery-receipt-valid-response.json": (
+            "schemas/ipc-query-response.schema.json", "discovery_receipt_response",
+        ),
+        "examples/ipc-get-discovery-receipt-stale-response.json": (
+            "schemas/ipc-query-response.schema.json", "discovery_receipt_response",
+        ),
         "examples/ipc-create-workflow-text-draft.json": ("schemas/ipc-command.schema.json", None),
         "examples/ipc-create-workflow-version-draft.json": ("schemas/ipc-command.schema.json", None),
         "examples/ipc-get-workflow-draft-query.json": ("schemas/ipc-query.schema.json", None),

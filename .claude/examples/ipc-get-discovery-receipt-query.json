@@ -1,0 +1,10 @@
+{
+  "protocol_version": "unleash.ipc.v2",
+  "request_id": "00000000-0000-4000-8000-000000000002",
+  "query_type": "GetDiscoveryReceipt",
+  "project_id": "00000000-0000-4000-8000-000000000001",
+  "payload": {
+    "receipt_id": "discovery-human-01",
+    "page_size": 50
+  }
+}
