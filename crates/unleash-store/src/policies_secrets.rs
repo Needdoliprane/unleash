@@ -861,6 +861,24 @@ pub(crate) fn compute_policy_digest(
     canonical_sha256(&payload).map_err(StoreError::from)
 }
 
+/// Empreinte canonique de la politique engagée pour une portée, calculée depuis un résumé
+/// lu dans une seule transaction lectrice. Forme unique, partagée par les écritures du
+/// magasin et par les courtiers réservés du démon.
+///
+/// # Errors
+/// Retourne les erreurs de sérialisation canonique.
+pub fn engaged_policy_digest(summary: &PolicySummary) -> Result<Sha256Digest, StoreError> {
+    canonical_sha256(
+        &serde_json::json!({
+            "schema_version": 1,
+            "global_policy": summary.global_policy,
+            "project_policy": summary.project_policy,
+            "guard_config": summary.guard_config,
+        }),
+    )
+    .map_err(StoreError::from)
+}
+
 #[expect(
     clippy::too_many_arguments,
     reason = "Mutation transactionnelle atomique SetPolicy avec contrôle d'autorité et digest canonique"

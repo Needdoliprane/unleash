@@ -6,8 +6,8 @@ use std::time::Duration;
 use unleash_action_broker::{
     ActionBroker, ActionExecutionFailure, ActionExecutionResult, ActionExecutorPort, ActionIntent,
     ActionProvenance, ActionSubject, AuthorityLayer, AuthorizationDecision, AuthorizationOutcome,
-    BoxFuture, BrokerConfig, EffectsClass, HostIsolationProbe, IsolationMode,
-    IsolationRequirements, LocalAuthorityFallbackPolicy, NormalizedResourceRef,
+    BoxFuture, BrokerConfig, EffectsClass, GuardMode, HostIsolationProbe, InitialEffectivePolicy,
+    IsolationMode, IsolationRequirements, LocalAuthorityFallbackPolicy, NormalizedResourceRef,
     PlatformKeyringSecretStore, ResolvedSecret, ScopeKind, StrictNoneAcceptedObligationChecker,
     SystemClockAndTimer, compute_effective_authority,
 };
@@ -18,7 +18,7 @@ use unleash_platform::UnavailableOsKeyring;
 use unleash_protocol::canonical_sha256;
 use unleash_store::{
     BackupBlockReason, BackupRequestRecord, ExecuteReservedBackupRequest, GuardPolicyMode,
-    PolicyIsolationMode, REQUEST_BACKUP_VERB,
+    PolicyIsolationMode, REQUEST_BACKUP_VERB, policies_secrets::engaged_policy_digest,
 };
 
 use crate::broker_activity::BrokerActivityGuard;
@@ -260,7 +260,9 @@ async fn run(
         provenance: ActionProvenance::EngineInternal,
     };
     let timer = Arc::new(SystemClockAndTimer::new());
-    let broker = ActionBroker::new(
+    // Le courtier réservé est lié à la politique engagée par la demande (REQ-SEC-007) :
+    // à la révision initiale, toute politique posée vaudrait `PolicyDenied`.
+    let broker = ActionBroker::new_with_policy_snapshot(
         state.store.config().clock.clone(),
         timer.clone(),
         timer,
@@ -277,7 +279,17 @@ async fn run(
             canaries_to_redact: Vec::new(),
         },
         Arc::new(SqliteBrokerJournal::new(&state)),
-    );
+        InitialEffectivePolicy {
+            project_id: None,
+            policy_revision: record.policy_revision,
+            scope_revision: record.scope_revision,
+            policy_digest: engaged_policy_digest(&policy).map_err(|_| ())?,
+            isolation_mode: IsolationMode::Standard,
+            guard_mode: GuardMode::BrokerOnly,
+            lineage_fence: record.lineage_fence,
+        },
+    )
+    .map_err(|_| ())?;
     let decision = match broker.authorize_action(intent, &authority).await {
         Ok(AuthorizationOutcome::Authorized(decision)) => decision,
         Ok(AuthorizationOutcome::ApprovalRequired { .. }) => return Err(()),

@@ -1463,12 +1463,7 @@ fn policy(
                 .as_ref()
                 .map_or(Revision::INITIAL, |p| p.revision),
         );
-    Ok((
-        rev,
-        canonical_sha256(
-            &json!({"schema_version":1,"global_policy":s.global_policy,"project_policy":s.project_policy,"guard_config":s.guard_config}),
-        )?,
-    ))
+    Ok((rev, crate::policies_secrets::engaged_policy_digest(&s)?))
 }
 fn validate_preparation(
     tx: &Transaction<'_>,
