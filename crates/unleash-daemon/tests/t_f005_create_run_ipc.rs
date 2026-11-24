@@ -15,6 +15,9 @@ mod start_run;
 #[path = "support/workflow_agent.rs"]
 mod create_agent;
 
+#[path = "support/workflow_run_list.rs"]
+mod list_runs;
+
 use serde_json::{Map, Value, json};
 use std::{os::unix::fs::PermissionsExt, path::Path};
 use unleash_client::{ClientConfig, UnleashClient};
@@ -49,6 +52,16 @@ fn wire_command_with_workflow(
     role_level: AgentLevel,
     customize: impl FnOnce(&mut Value),
 ) -> (CommandEnvelope, Sha256Digest) {
+    let (fixture, envelope, hash) = wire_run_fixture(config, role_level, customize);
+    fixture.store.shutdown().unwrap();
+    (envelope, hash)
+}
+
+fn wire_run_fixture(
+    config: StoreConfig,
+    role_level: AgentLevel,
+    customize: impl FnOnce(&mut Value),
+) -> (workflow_run::Fixture, CommandEnvelope, Sha256Digest) {
     let actor = ActorId::new(format!("uid:{}", effective_uid())).unwrap();
     let (fixture, mut envelope, _) =
         workflow_run::prepare(config, actor, role_level, |workflow, _, _| {
@@ -74,8 +87,7 @@ fn wire_command_with_workflow(
         "selection_reason": "fixture workflow selected",
     }))
     .unwrap();
-    fixture.store.shutdown().unwrap();
-    (envelope, hash)
+    (fixture, envelope, hash)
 }
 
 async fn start(config: DaemonConfig) -> (DaemonHandle, UnleashClient) {
