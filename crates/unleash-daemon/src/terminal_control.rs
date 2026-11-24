@@ -407,7 +407,7 @@ fn transfer_and_observe(
     if std::fs::symlink_metadata(&next_path).is_ok() {
         return Err("terminal transfer capability already exists; inspect".into());
     }
-    let next = super::fresh_control_secret(state.store.config().id_generator.as_ref())?;
+    let next = super::fresh_control_secret();
     store_control_secret(&next_path, &next)?;
     let mut client = HostClient::connect(
         &runtime.join(HOST_SOCKET_FILENAME),
