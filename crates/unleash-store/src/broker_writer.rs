@@ -106,6 +106,19 @@ pub(crate) fn inspect_action_conn(
     .transpose()
 }
 
+fn read_intent(conn: &Connection, action: ActionId) -> Result<BrokerIntent, StoreError> {
+    let encoded: String = conn
+        .query_row(
+            "SELECT intent_json FROM broker_intents WHERE action_id=?1",
+            [action.to_string()],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(StoreError::from_rusqlite)?
+        .ok_or_else(|| invalid("intention broker non engagée"))?;
+    serde_json::from_str(&encoded).map_err(|_| invalid("intention broker durable illisible"))
+}
+
 #[expect(
     clippy::too_many_lines,
     reason = "Validation du manifeste complet et de ses champs d’autorité sans dépendance vers le broker"
@@ -222,17 +235,31 @@ fn validate_live_intent(
     now: TimestampMs,
     intent: &BrokerIntent,
 ) -> Result<(), StoreError> {
-    validate_live_intent_with_connect(tx, daemon, now, intent, false)
+    validate_live_intent_for_phase(tx, daemon, now, intent, false, None)
 }
 
-fn validate_live_intent_with_connect(
+fn validate_service_intent(
+    tx: &Transaction<'_>,
+    daemon: &DaemonStateRow,
+    intent: &BrokerIntent,
+    service_launch: Option<&crate::provider_service_launch::ServiceLaunchPhaseAccess>,
+) -> Result<(), StoreError> {
+    if let Some(service_launch) = service_launch {
+        service_launch.validate_intent(intent)
+    } else {
+        crate::provider_service_launch::reject_unqualified_intent(tx, daemon, intent)
+    }
+}
+
+fn validate_live_intent_for_phase(
     tx: &Transaction<'_>,
     daemon: &DaemonStateRow,
     now: TimestampMs,
     intent: &BrokerIntent,
     connect_authorized: bool,
+    service_launch: Option<&crate::provider_service_launch::ServiceLaunchPhaseAccess>,
 ) -> Result<(), StoreError> {
-    crate::provider_service_launch::reject_unqualified_intent(tx, daemon, intent)?;
+    validate_service_intent(tx, daemon, intent, service_launch)?;
     crate::backup_requests::validate_backup_intent_tx(tx, daemon, intent)?;
     if !connect_authorized && !crate::provider_probe_connect::validate_intent(tx, daemon, intent)? {
         crate::provider_probes::validate_intent(tx, daemon, intent)?;
@@ -406,14 +433,141 @@ fn check_expected(
     Ok(Revision::new(next))
 }
 
+#[derive(Default)]
+struct PhaseAccess<'a> {
+    terminal_proof: Option<&'a crate::terminal_allocations::TerminalObservationProof>,
+    connect_access: Option<crate::provider_probe_connect::ConnectPhaseAccess<'a>>,
+    transport_observation: Option<TransportObservation<'a>>,
+    service_launch: Option<&'a crate::provider_service_launch::ServiceLaunchPhaseAccess>,
+    service_launch_attestation: Option<&'a crate::ProviderServiceLaunchAttestation>,
+    managed_generation:
+        Option<&'a crate::provider_probe_generation::dispatch::ManagedGenerationDispatchBinding>,
+}
+
 pub(crate) fn commit_phase_tx(
     tx: &Transaction<'_>,
     config: &StoreConfig,
     now: TimestampMs,
     request: &BrokerPhaseRequest,
 ) -> Result<BrokerPhaseCommit, StoreError> {
-    commit_phase_tx_inner(tx, config, now, request, None, None, None)
+    commit_phase_tx_inner(tx, config, now, request, PhaseAccess::default())
 }
+
+pub(crate) fn commit_managed_generation_dispatch_tx(
+    tx: &Transaction<'_>,
+    config: &StoreConfig,
+    now: TimestampMs,
+    request: &BrokerPhaseRequest,
+    binding: &crate::provider_probe_generation::dispatch::ManagedGenerationDispatchBinding,
+) -> Result<BrokerPhaseCommit, StoreError> {
+    if !matches!(&request.phase, BrokerPhase::Dispatch { action_id, decision, .. }
+        if *action_id == binding.action_id && decision.fallback_policy_ref.is_none())
+    {
+        return Err(invalid("dispatch génération hors autorité locale"));
+    }
+    commit_phase_tx_inner(
+        tx,
+        config,
+        now,
+        request,
+        PhaseAccess {
+            managed_generation: Some(binding),
+            ..PhaseAccess::default()
+        },
+    )
+}
+
+pub(crate) fn commit_service_launch_phase_tx(
+    tx: &Transaction<'_>,
+    config: &StoreConfig,
+    now: TimestampMs,
+    request: &BrokerPhaseRequest,
+    service_launch: &crate::provider_service_launch::ServiceLaunchPhaseAccess,
+) -> Result<BrokerPhaseCommit, StoreError> {
+    let initial_evaluation = match &request.phase {
+        BrokerPhase::Authorizing { .. } => request.expected_revision == Revision::INITIAL,
+        BrokerPhase::Authorization {
+            cause: BrokerAuthorizationCause::Evaluation,
+            ..
+        } => request.expected_revision == Revision::new(1),
+        _ => false,
+    };
+    if !initial_evaluation || request.evaluation.previous_evaluation_id.is_some() {
+        return Err(invalid(
+            "phase de l'évaluation initiale du service invalide",
+        ));
+    }
+    commit_phase_tx_inner(
+        tx,
+        config,
+        now,
+        request,
+        PhaseAccess {
+            service_launch: Some(service_launch),
+            ..PhaseAccess::default()
+        },
+    )
+}
+
+pub(crate) fn commit_service_launch_dispatch_tx(
+    tx: &Transaction<'_>,
+    config: &StoreConfig,
+    now: TimestampMs,
+    request: &BrokerPhaseRequest,
+    service_launch: &crate::provider_service_launch::ServiceLaunchPhaseAccess,
+) -> Result<BrokerPhaseCommit, StoreError> {
+    if !matches!(request.phase, BrokerPhase::Dispatch { .. })
+        || request.expected_revision != Revision::new(2)
+        || request.evaluation.previous_evaluation_id.is_some()
+    {
+        return Err(invalid("marqueur de lancement du service invalide"));
+    }
+    commit_phase_tx_inner(
+        tx,
+        config,
+        now,
+        request,
+        PhaseAccess {
+            service_launch: Some(service_launch),
+            ..PhaseAccess::default()
+        },
+    )
+}
+
+pub(crate) fn commit_service_launch_observation_tx(
+    tx: &Transaction<'_>,
+    config: &StoreConfig,
+    now: TimestampMs,
+    request: &BrokerPhaseRequest,
+    service_launch: &crate::provider_service_launch::ServiceLaunchPhaseAccess,
+    proof: Option<&crate::ProviderServiceLaunchAttestation>,
+) -> Result<BrokerPhaseCommit, StoreError> {
+    let BrokerPhase::Observation { receipt, .. } = &request.phase else {
+        return Err(invalid("observation de lancement attendue"));
+    };
+    let expected = if proof.is_some() {
+        ActionState::ObservedSuccess
+    } else {
+        ActionState::OutcomeUnknown
+    };
+    if receipt.state != expected
+        || proof.map(canonical_sha256).transpose()? != receipt.output_digest
+    {
+        return Err(invalid("observation de lancement divergente"));
+    }
+    commit_phase_tx_inner(
+        tx,
+        config,
+        now,
+        request,
+        PhaseAccess {
+            service_launch: Some(service_launch),
+            service_launch_attestation: proof,
+            ..PhaseAccess::default()
+        },
+    )
+}
+
 pub(crate) fn commit_terminal_observation_tx(
     tx: &Transaction<'_>,
     config: &StoreConfig,
@@ -421,7 +575,16 @@ pub(crate) fn commit_terminal_observation_tx(
     request: &BrokerPhaseRequest,
     proof: &crate::terminal_allocations::TerminalObservationProof,
 ) -> Result<BrokerPhaseCommit, StoreError> {
-    commit_phase_tx_inner(tx, config, now, request, Some(proof), None, None)
+    commit_phase_tx_inner(
+        tx,
+        config,
+        now,
+        request,
+        PhaseAccess {
+            terminal_proof: Some(proof),
+            ..PhaseAccess::default()
+        },
+    )
 }
 
 pub(crate) fn commit_connect_phase_tx(
@@ -436,11 +599,12 @@ pub(crate) fn commit_connect_phase_tx(
         config,
         now,
         request,
-        None,
-        Some(crate::provider_probe_connect::ConnectPhaseAccess::Live(
-            permission,
-        )),
-        None,
+        PhaseAccess {
+            connect_access: Some(crate::provider_probe_connect::ConnectPhaseAccess::Live(
+                permission,
+            )),
+            ..PhaseAccess::default()
+        },
     )
 }
 
@@ -456,9 +620,12 @@ pub(crate) fn commit_inventory_phase_tx(
         config,
         now,
         request,
-        None,
-        Some(crate::provider_probe_connect::ConnectPhaseAccess::InventoryLive(permission)),
-        None,
+        PhaseAccess {
+            connect_access: Some(
+                crate::provider_probe_connect::ConnectPhaseAccess::InventoryLive(permission),
+            ),
+            ..PhaseAccess::default()
+        },
     )
 }
 
@@ -487,9 +654,11 @@ pub(crate) fn commit_transport_observation_tx(
         config,
         now,
         request,
-        None,
-        Some(access),
-        Some(observation),
+        PhaseAccess {
+            connect_access: Some(access),
+            transport_observation: Some(observation),
+            ..PhaseAccess::default()
+        },
     )
 }
 
@@ -538,10 +707,16 @@ fn commit_phase_tx_inner(
     config: &StoreConfig,
     now: TimestampMs,
     request: &BrokerPhaseRequest,
-    terminal_proof: Option<&crate::terminal_allocations::TerminalObservationProof>,
-    connect_access: Option<crate::provider_probe_connect::ConnectPhaseAccess<'_>>,
-    transport_observation: Option<TransportObservation<'_>>,
+    access: PhaseAccess<'_>,
 ) -> Result<BrokerPhaseCommit, StoreError> {
+    let PhaseAccess {
+        terminal_proof,
+        connect_access,
+        transport_observation,
+        service_launch,
+        service_launch_attestation,
+        managed_generation,
+    } = access;
     let daemon = read_daemon_state_tx(tx)?;
     if daemon.authority_generation != request.authority_generation {
         return Err(StoreError::StaleAuthorityGeneration {
@@ -578,6 +753,9 @@ fn commit_phase_tx_inner(
     )?;
     crate::provider_probes::validate_incarnation(tx, &daemon, action)?;
     crate::terminal_allocations::validate_incarnation(tx, &daemon, action)?;
+    if matches!(request.phase, BrokerPhase::Observation { .. }) {
+        crate::provider_probe_generation::dispatch::reject_generic_observation(tx, action)?;
+    }
     if matches!(request.phase, BrokerPhase::Dispatch { .. }) {
         let markers: i64 = tx
             .query_row(
@@ -596,8 +774,15 @@ fn commit_phase_tx_inner(
     let exact = json!({"schema_version":BROKER_PHASE_SCHEMA_VERSION,"evaluation":request.evaluation,"phase":request.phase});
     let digest = canonical_sha256(&exact)?;
     if let Some(replayed) = lookup_phase_record(tx, &daemon, request)? {
-        if let BrokerPhase::Authorizing { intent } = &request.phase {
-            crate::provider_service_launch::reject_unqualified_intent(tx, &daemon, intent)?;
+        match &request.phase {
+            BrokerPhase::Authorizing { intent } => {
+                validate_service_intent(tx, &daemon, intent, service_launch)?;
+            }
+            BrokerPhase::Authorization { .. } | BrokerPhase::Observation { .. } => {
+                let intent = read_intent(tx, action)?;
+                validate_service_intent(tx, &daemon, &intent, service_launch)?;
+            }
+            BrokerPhase::Dispatch { .. } => {}
         }
         return Ok(replayed);
     }
@@ -607,16 +792,7 @@ fn commit_phase_tx_inner(
     let intent = if let BrokerPhase::Authorizing { intent } = &request.phase {
         intent.clone()
     } else {
-        let encoded: String = tx
-            .query_row(
-                "SELECT intent_json FROM broker_intents WHERE action_id=?1",
-                [action.to_string()],
-                |r| r.get(0),
-            )
-            .optional()
-            .map_err(StoreError::from_rusqlite)?
-            .ok_or_else(|| invalid("intention broker non engagée"))?;
-        serde_json::from_str(&encoded).map_err(|_| invalid("intention broker durable illisible"))?
+        read_intent(tx, action)?
     };
     validate_manifest(&intent)?;
     if intent_digest(&request.phase) != intent.intent_digest {
@@ -625,7 +801,14 @@ fn commit_phase_tx_inner(
     let mut transport_completion = None;
     let (state, event_name, extra) = match &request.phase {
         BrokerPhase::Authorizing { .. } => {
-            validate_live_intent_with_connect(tx, &daemon, now, &intent, connect_authorized)?;
+            validate_live_intent_for_phase(
+                tx,
+                &daemon,
+                now,
+                &intent,
+                connect_authorized,
+                service_launch,
+            )?;
             let (snapshot, policy_hash) = policy_snapshot(tx, &intent)?;
             let ordinal = if let Some(prior) = current.as_ref() {
                 if prior.intent_digest != intent.intent_digest
@@ -661,7 +844,14 @@ fn commit_phase_tx_inner(
                 .as_ref()
                 .ok_or_else(|| invalid("action broker absente"))?;
             require_current_evaluation(tx, current, request.evaluation)?;
-            validate_live_intent_with_connect(tx, &daemon, now, &intent, connect_authorized)?;
+            validate_live_intent_for_phase(
+                tx,
+                &daemon,
+                now,
+                &intent,
+                connect_authorized,
+                service_launch,
+            )?;
             require_policy_unchanged(tx, &intent, request.evaluation)?;
             if !matches!(cause, BrokerAuthorizationCause::Evaluation) {
                 return Err(invalid(
@@ -747,7 +937,9 @@ fn commit_phase_tx_inner(
             fence,
             ..
         } => {
-            crate::provider_probes::reject_unqualified_dispatch(tx, action)?;
+            if managed_generation.is_none() {
+                crate::provider_probes::reject_unqualified_dispatch(tx, action)?;
+            }
             let current = current
                 .as_ref()
                 .ok_or_else(|| invalid("action broker absente"))?;
@@ -758,7 +950,14 @@ fn commit_phase_tx_inner(
             {
                 return Err(invalid("dispatch sans état autorisé/fence exact"));
             }
-            validate_live_intent_with_connect(tx, &daemon, now, &intent, connect_authorized)?;
+            validate_live_intent_for_phase(
+                tx,
+                &daemon,
+                now,
+                &intent,
+                connect_authorized,
+                service_launch,
+            )?;
             require_policy_unchanged(tx, &intent, request.evaluation)?;
             validate_decision(&intent, request.evaluation, now, decision)?;
             let encoded:String=tx.query_row("SELECT phase_json FROM broker_phase_records WHERE action_id=?1 AND evaluation_id=?2 AND phase_key='authorization'",params![action.to_string(),request.evaluation.evaluation_id.to_string()],|r|r.get(0)).map_err(StoreError::from_rusqlite)?;
@@ -768,14 +967,27 @@ fn commit_phase_tx_inner(
             {
                 return Err(invalid("décision dispatch différente du résultat durable"));
             }
-            validate_executor_profile(tx, &intent, decision)?;
-            let request_hash = normalized_dispatch_request_hash(
+            if let Some(service_launch) = service_launch {
+                service_launch.validate_dispatch_executor(tx, &intent, decision)?;
+            } else {
+                validate_executor_profile(tx, &intent, decision)?;
+            }
+            let broker_request_hash = normalized_dispatch_request_hash(
                 &intent,
                 request.evaluation,
                 decision,
                 *dispatch_id,
                 *fence,
             )?;
+            let request_hash = if let Some(binding) = managed_generation {
+                canonical_sha256(&json!({
+                    "schema_version":1,
+                    "broker_request_digest":broker_request_hash,
+                    "managed_generation":binding,
+                }))?
+            } else {
+                broker_request_hash
+            };
             crate::recovery_ops::record_action_dispatch_tx(
                 tx,
                 now,
@@ -783,9 +995,13 @@ fn commit_phase_tx_inner(
                     dispatch_id: dispatch_id.to_string(),
                     action_id: action,
                     ordinal: 1,
-                    adapter_id: match decision.executor {
-                        BrokerExecutor::Unleash => "unleash",
-                        BrokerExecutor::Guard => "guard",
+                    adapter_id: if managed_generation.is_some() {
+                        crate::provider_probe_generation::dispatch::MANAGED_GENERATION_ADAPTER
+                    } else {
+                        match decision.executor {
+                            BrokerExecutor::Unleash => "unleash",
+                            BrokerExecutor::Guard => "guard",
+                        }
                     }
                     .to_owned(),
                     request_hash,
@@ -807,6 +1023,7 @@ fn commit_phase_tx_inner(
             cause,
             ..
         } => {
+            validate_service_intent(tx, &daemon, &intent, service_launch)?;
             let current = current
                 .as_ref()
                 .ok_or_else(|| invalid("action broker absente"))?;
@@ -858,7 +1075,7 @@ fn commit_phase_tx_inner(
                     |r| r.get(0),
                 )
                 .map_err(StoreError::from_rusqlite)?;
-            let unknown_clock = transport_observation.is_some()
+            let unknown_clock = (transport_observation.is_some() || service_launch.is_some())
                 && receipt.state == ActionState::OutcomeUnknown
                 && config
                     .clock_uncertain
@@ -912,6 +1129,15 @@ fn commit_phase_tx_inner(
     }
     if let Some(result) = terminal_proof.and_then(|proof| proof.resize_result.as_ref()) {
         payload.insert("terminal_resize".into(), serde_json::to_value(result)?);
+    }
+    if let Some(binding) = managed_generation {
+        payload.insert("managed_generation".into(), serde_json::to_value(binding)?);
+    }
+    if let Some(proof) = service_launch_attestation {
+        payload.insert(
+            "provider_service_launch".into(),
+            serde_json::to_value(proof)?,
+        );
     }
     if state == ActionState::ObservedSuccess
         && let Some(result) =

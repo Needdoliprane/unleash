@@ -1,31 +1,48 @@
 //! Trusted observer ingress and the writer's admission check for generation probes.
 
-use std::sync::atomic::Ordering;
+use std::{collections::BTreeMap, sync::atomic::Ordering};
 
 use rusqlite::{OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
-use unleash_domain::{ActionId, DataLocality, ProviderProbeId, Sha256Digest, TimestampMs};
+use unleash_domain::{
+    ActionId, ActionState, AttemptId, DataLocality, Fence, LeaseId, ProviderProbeId, ReservationId,
+    Sha256Digest, TimestampMs,
+};
 use unleash_protocol::{
-    CommandEnvelope, ProviderServerManagement, ProviderTestLimits, ProviderTestPhase,
-    TestProviderProfilePayload, canonical_sha256, canonicalize_to_vec,
+    CommandEnvelope, ProviderDialectKind, ProviderServerManagement, ProviderTestLimits,
+    ProviderTestPhase, TestProviderProfilePayload, canonical_sha256, canonicalize_to_vec,
+    from_json_str_strict,
+    provider_probe::{OllamaChatPlacement, ollama_chat_body},
 };
 use uuid::Uuid;
 
 use crate::commands::{DaemonStateRow, read_daemon_state_conn};
-use crate::objects::{OwnedReferenceAdoption, PublishedObjectReference, tx_adopt_owned_reference};
+use crate::objects::{
+    OwnedReferenceAdoption, PublishedObjectReference, read_verified_evidence_bytes_bounded,
+    tx_adopt_owned_reference,
+};
 use crate::{
-    AdmissionEligibilityObservation, AdmissionUnit, AdmissionUrgency, CallerAuthority,
-    ConfiguredProviderProfile, PreparedProviderProbe, StoreConfig, StoreError, UnleashStore,
-    WriteCriticality,
+    AdmissionCommit, AdmissionEligibilityObservation, AdmissionUnit, AdmissionUrgency,
+    CallerAuthority, ConfiguredProviderProfile, PreparedProviderProbe, StoreConfig, StoreError,
+    UnleashStore, WriteCriticality,
 };
 
-use super::authorizing::{read_bound_record, verify_live_generation};
-use super::unavailable;
+mod admission_handoff;
+mod managed;
+pub use admission_handoff::ManagedGenerationAdmission;
+pub use managed::ManagedProviderListener;
 
-const OBSERVER: &str = "system:provider-generation-placement";
+use super::authorizing::{read_bound_record, verify_live_generation};
+use super::{FIXTURE_PROMPT, unavailable};
+
+/// Internal principal for managed provider placement observations.
+pub const PLACEMENT_OBSERVER_PRINCIPAL: &str = "system:provider-generation-placement";
+use PLACEMENT_OBSERVER_PRINCIPAL as OBSERVER;
 const OWNER: &str = "provider_generation_placement_preparation";
 const FIELD: &str = "placement";
 const PREFIX: &str = "provider-generation-placement:v1:";
+const MAX_PLACEMENT_BYTES: usize = 16_384;
+const MAX_CHAT_BODY_BYTES: usize = 65_536;
 
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -67,8 +84,33 @@ struct Observation {
     model_id: String,
     destination: String,
     server: ServerInstance,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    managed_launch: Option<managed::LaunchBinding>,
     observed_at_ms: TimestampMs,
     valid_until_ms: TimestampMs,
+}
+
+/// Corps canonique et placement observé pour une admission Ollama précise.
+pub struct AdmittedOllamaChatInputs {
+    /// Contexte de préparation durable dont le corps est issu.
+    pub probe: PreparedProviderProbe,
+    /// Octets canoniques du corps Ollama Chat v1.
+    pub body: Vec<u8>,
+    /// Octets canoniques du fait de placement retenu lors de l'admission.
+    pub placement: Vec<u8>,
+    /// Coordonnées et preuves sélectionnées qui bornent la préparation du transport.
+    pub transport_placement: OllamaChatPlacement,
+    /// Native binding for a placement backed by a managed launch observation.
+    pub managed_transport: Option<super::dispatch::ManagedOllamaTransport>,
+}
+
+impl std::fmt::Debug for AdmittedOllamaChatInputs {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("AdmittedOllamaChatInputs")
+            .field("probe", &self.probe)
+            .finish_non_exhaustive()
+    }
 }
 
 fn verify_observation(
@@ -79,6 +121,27 @@ fn verify_observation(
     profile: &ConfiguredProviderProfile,
     fact: &Observation,
 ) -> Result<(), StoreError> {
+    verify_observation_at_state(
+        tx,
+        daemon,
+        now,
+        record,
+        profile,
+        fact,
+        ActionState::Authorizing,
+    )
+    .map(|_| ())
+}
+
+fn verify_observation_at_state(
+    tx: &Transaction<'_>,
+    daemon: &DaemonStateRow,
+    now: TimestampMs,
+    record: &PreparedProviderProbe,
+    profile: &ConfiguredProviderProfile,
+    fact: &Observation,
+    state: ActionState,
+) -> Result<Option<crate::AttestedProviderServiceLaunch>, StoreError> {
     let context = &record.context;
     let payload = &profile.configuration.payload;
     let destination = payload
@@ -91,7 +154,7 @@ fn verify_observation(
          JOIN broker_phase_records b ON b.action_id=a.action_id AND b.event_id=e.event_id
          JOIN model_call_manifests m ON m.model_call_id=c.model_call_id
          WHERE c.model_call_id=?1 AND c.action_id=?2 AND c.provider_probe_id=?3
-           AND c.state='prepared' AND a.state='authorizing' AND a.fence=0
+           AND c.state='prepared' AND a.state=?6 AND a.fence=0
            AND e.event_type='ActionAuthorizationRequested'
            AND m.manifest_id=?4 AND m.content_object_hash=?5",
             params![
@@ -99,7 +162,8 @@ fn verify_observation(
                 context.action_id.to_string(),
                 context.probe_id.to_string(),
                 context.manifest_id.to_string(),
-                fact.request_manifest_hash.to_string()
+                fact.request_manifest_hash.to_string(),
+                state.to_string(),
             ],
             |row| row.get(0),
         )
@@ -134,7 +198,22 @@ fn verify_observation(
             "placement natif de génération divergent ou expiré",
         ));
     }
-    Ok(())
+    fact.managed_launch
+        .as_ref()
+        .map(|binding| managed::verify_launch_binding(tx, record, profile, fact, binding))
+        .transpose()
+}
+
+#[derive(Clone, Copy)]
+enum PlacementDisposition {
+    Staged,
+    Schedulable,
+}
+
+#[derive(Clone, Copy)]
+struct PlacementAdoption<'a> {
+    candidate: &'a PublishedObjectReference,
+    disposition: PlacementDisposition,
 }
 
 fn record_placement(
@@ -144,8 +223,12 @@ fn record_placement(
     now: TimestampMs,
     profile: &ConfiguredProviderProfile,
     fact: &Observation,
-    candidate: &PublishedObjectReference,
+    adoption: PlacementAdoption<'_>,
 ) -> Result<Uuid, StoreError> {
+    let PlacementAdoption {
+        candidate,
+        disposition,
+    } = adoption;
     let action = fact.action_id.to_string();
     let probe = fact.probe_id.to_string();
     let hash = candidate.object_hash();
@@ -198,6 +281,15 @@ fn record_placement(
         },
     )?;
     if fresh {
+        let waiting: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM provider_probes WHERE probe_id=?1
+             AND state='queued' AND wait_reason=?2 AND fence=0)",
+            params![probe, crate::provider_probes::WAIT_FOR_PLACEMENT],
+            |row| row.get(0),
+        )?;
+        if !waiting {
+            return Err(unavailable("le probe n'attend plus son placement"));
+        }
         tx.execute(
             "INSERT INTO evidence(evidence_id,kind,action_id,snapshot_ref,object_hash,producer_id,
              observed_at_ms,schema_version,availability)
@@ -211,17 +303,23 @@ fn record_placement(
                 fact.observed_at_ms.as_i64()
             ],
         )?;
-        let changed = tx.execute(
-            "UPDATE provider_probes SET wait_reason=NULL,revision=revision+1
-             WHERE probe_id=?1 AND state='queued' AND wait_reason=?2 AND fence=0",
-            params![probe, crate::provider_probes::WAIT_FOR_PLACEMENT],
-        )?;
-        if changed != 1 {
-            return Err(unavailable("le probe n'attend plus son placement"));
-        }
     }
-    observe_eligibility(tx, config, now, profile, server, fact, hash)?;
+    if matches!(disposition, PlacementDisposition::Schedulable) {
+        clear_placement_wait(tx, fact.probe_id)?;
+        observe_eligibility(tx, config, now, profile, server, fact, hash)?;
+    }
     Ok(evidence)
+}
+
+fn clear_placement_wait(tx: &Transaction<'_>, probe: ProviderProbeId) -> Result<usize, StoreError> {
+    Ok(tx.execute(
+        "UPDATE provider_probes SET wait_reason=NULL,revision=revision+1
+         WHERE probe_id=?1 AND state='queued' AND wait_reason=?2 AND fence=0",
+        params![
+            probe.to_string(),
+            crate::provider_probes::WAIT_FOR_PLACEMENT
+        ],
+    )?)
 }
 
 fn observe_eligibility(
@@ -248,7 +346,7 @@ fn observe_eligibility(
         Err(error) => return Err(error),
     }
     if let Some(id) = candidate.eligibility_evidence
-        && verified_server_key(
+        && verified_placement(
             tx,
             fact.action_id,
             fact.probe_id,
@@ -278,17 +376,23 @@ fn observe_eligibility(
     )
 }
 
-fn verified_server_key(
+struct VerifiedPlacement {
+    server_key: Sha256Digest,
+    object_hash: Sha256Digest,
+    expires_at_ms: i64,
+}
+
+fn verified_placement(
     tx: &Transaction<'_>,
     action: ActionId,
     probe: ProviderProbeId,
     context_digest: Sha256Digest,
     eligibility: Uuid,
     now: TimestampMs,
-) -> Result<Option<Sha256Digest>, StoreError> {
+) -> Result<Option<VerifiedPlacement>, StoreError> {
     let prefix = format!("{PREFIX}{context_digest}/");
-    let observed: Option<(String, i64)> = tx.query_row(
-        "SELECT e.snapshot_ref,a.valid_until_ms FROM evidence e
+    let observed: Option<(String, i64, String)> = tx.query_row(
+        "SELECT e.snapshot_ref,a.valid_until_ms,e.object_hash FROM evidence e
          JOIN principals p ON p.principal_id=e.producer_id
          JOIN object_records o ON o.object_hash=e.object_hash
          JOIN evidence q ON q.object_hash=e.object_hash AND q.producer_id=e.producer_id
@@ -302,16 +406,22 @@ fn verified_server_key(
                AND r.owner_kind='provider_probe' AND r.owner_id=?6 AND r.source_field=?7 AND r.state='live')",
         params![action.to_string(), OBSERVER, eligibility.to_string(), now.as_i64(),
             prefix, probe.to_string(), FIELD],
-        |row| Ok((row.get(0)?, row.get(1)?)),
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
     ).optional()?;
-    let Some((binding, valid_until)) = observed else {
+    let Some((binding, valid_until, object_hash)) = observed else {
         return Ok(None);
     };
     binding
         .strip_prefix(&prefix)
         .and_then(|rest| rest.split_once('/'))
         .filter(|(_, expiry)| expiry.parse::<i64>() == Ok(valid_until))
-        .map(|(key, _)| key.parse().map_err(StoreError::from))
+        .map(|(key, _)| {
+            Ok(VerifiedPlacement {
+                server_key: key.parse()?,
+                object_hash: object_hash.parse()?,
+                expires_at_ms: valid_until,
+            })
+        })
         .transpose()
 }
 
@@ -324,7 +434,7 @@ pub(crate) fn validate_admission(
 ) -> Result<(), StoreError> {
     let unavailable = || unavailable("placement natif du probe génération indisponible");
     let c = &record.context;
-    let key = verified_server_key(
+    let placement = verified_placement(
         tx,
         c.action_id,
         c.probe_id,
@@ -333,6 +443,18 @@ pub(crate) fn validate_admission(
         now,
     )?
     .ok_or_else(unavailable)?;
+    let profile = verify_live_grant(tx, daemon, now, record)?;
+    validate_capacity(tx, placement.server_key, &profile)
+}
+
+fn verify_live_grant(
+    tx: &Transaction<'_>,
+    daemon: &DaemonStateRow,
+    now: TimestampMs,
+    record: &PreparedProviderProbe,
+) -> Result<ConfiguredProviderProfile, StoreError> {
+    let unavailable = || unavailable("mandat actif du probe génération indisponible");
+    let c = &record.context;
     let prep = &c.preparation;
     let profile = crate::provider_profiles::resolve(
         tx,
@@ -370,7 +492,7 @@ pub(crate) fn validate_admission(
     if grant.principal_id != c.principal_id || grant.expires_at_ms < c.deadline {
         return Err(unavailable());
     }
-    validate_capacity(tx, key, &profile)
+    Ok(profile)
 }
 
 fn validate_capacity(
@@ -411,7 +533,251 @@ pub(crate) fn occupied_slots(
     )?)
 }
 
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AdmissionEvent {
+    reservation_id: ReservationId,
+    attempt_id: Option<AttemptId>,
+    lease_id: LeaseId,
+    fence: Fence,
+    eligibility_evidence_id: Uuid,
+}
+
+fn selected_eligibility(
+    tx: &Transaction<'_>,
+    daemon: &DaemonStateRow,
+    now: TimestampMs,
+    probe: ProviderProbeId,
+    admission: &AdmissionCommit,
+) -> Result<(Uuid, Sha256Digest), StoreError> {
+    let unavailable = || unavailable("admission native Ollama divergente ou périmée");
+    let lease = &admission.lease;
+    let owner_id = probe.to_string();
+    if admission.event_cursor.stream_id != daemon.stream_id
+        || admission.attempt_id.is_some()
+        || lease.boot_identity != daemon.boot_identity
+        || lease.authority_generation != daemon.authority_generation
+        || lease.daemon_epoch != daemon.daemon_epoch
+        || lease.fence == Fence::ZERO
+        || lease.resource_kind != "execution"
+        || lease.resource_key != format!("provider_probe:{owner_id}")
+        || lease.owner_type != "provider_probe"
+        || lease.owner_id != owner_id
+        || lease.state != crate::LeaseState::Held
+    {
+        return Err(unavailable());
+    }
+    let integer = |value| i64::try_from(value).map_err(|_| unavailable());
+    let persisted: Option<(String, String)> = tx
+        .query_row(
+            "SELECT e.payload_json,e.payload_hash FROM events e
+         JOIN provider_probes p ON p.probe_id=e.aggregate_id AND p.revision=e.aggregate_revision
+         JOIN execution_reservation_owners o ON o.provider_probe_id=p.probe_id
+         JOIN capacity_reservations r ON r.reservation_id=o.reservation_id
+         JOIN capacity_pools pool ON pool.pool_id=r.pool_id
+         JOIN resource_leases l ON l.owner_type='provider_probe' AND l.owner_id=p.probe_id
+         JOIN resource_fences f ON f.authority_generation=l.authority_generation
+              AND f.resource_kind=l.resource_kind AND f.resource_key=l.resource_key
+         WHERE e.stream_id=:stream AND e.sequence=:sequence
+           AND e.aggregate_type='provider_probe' AND e.event_type='ProviderProbeAdmitted'
+           AND e.actor_id='system:scheduler' AND e.payload_state='full'
+           AND p.probe_id=:probe AND p.phase='generation_probe' AND p.state='admitted'
+           AND p.revision=:revision AND p.fence=:fence
+           AND p.authority_generation=:authority AND p.daemon_epoch=:epoch
+           AND r.reservation_id=:reservation AND r.state='held' AND r.amount=1
+           AND r.owner_type='provider_probe' AND r.owner_id=p.probe_id
+           AND r.authority_generation=:authority AND r.daemon_epoch=:epoch
+           AND pool.pool_kind='execution' AND pool.scope_key='global'
+           AND l.lease_id=:lease AND l.resource_kind='execution'
+           AND l.resource_key='provider_probe:'||p.probe_id AND l.state='held'
+           AND l.authority_generation=:authority AND l.daemon_epoch=:epoch
+           AND l.fence=:fence AND f.last_fence=l.fence AND l.boot_identity=:boot
+           AND l.expires_at_ms=:expires AND l.expires_at_ms>:now",
+            rusqlite::named_params! {
+                ":stream": daemon.stream_id.to_string(),
+                ":sequence": integer(admission.event_cursor.sequence.as_u64())?,
+                ":probe": owner_id,
+                ":revision": integer(admission.revision.as_u64())?,
+                ":fence": integer(lease.fence.as_u64())?,
+                ":authority": daemon.authority_generation.to_string(),
+                ":epoch": integer(daemon.daemon_epoch.as_u64())?,
+                ":reservation": admission.reservation_id.to_string(),
+                ":lease": lease.lease_id.to_string(),
+                ":boot": daemon.boot_identity,
+                ":expires": lease.expires_at_ms.as_i64(),
+                ":now": now.as_i64(),
+            },
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?;
+    let (json, hash) = persisted.ok_or_else(unavailable)?;
+    let event: AdmissionEvent = from_json_str_strict(&json).map_err(|_| unavailable())?;
+    let event_digest = canonical_sha256(&event)?;
+    if event.reservation_id != admission.reservation_id
+        || event.lease_id != lease.lease_id
+        || event.fence != lease.fence
+        || event.attempt_id.is_some()
+        || event_digest.to_string() != hash
+    {
+        return Err(unavailable());
+    }
+    Ok((event.eligibility_evidence_id, event_digest))
+}
+
+fn admitted_chat_inputs(
+    tx: &Transaction<'_>,
+    config: &StoreConfig,
+    now: TimestampMs,
+    admission: &AdmissionCommit,
+    require_launch: bool,
+) -> Result<AdmittedOllamaChatInputs, StoreError> {
+    admitted_chat_inputs_at_state(
+        tx,
+        config,
+        now,
+        admission,
+        require_launch,
+        ActionState::Authorizing,
+    )
+}
+
+pub(super) fn admitted_chat_inputs_at_state(
+    tx: &Transaction<'_>,
+    config: &StoreConfig,
+    now: TimestampMs,
+    admission: &AdmissionCommit,
+    require_launch: bool,
+    state: ActionState,
+) -> Result<AdmittedOllamaChatInputs, StoreError> {
+    let unavailable = || unavailable("préparation native Ollama indisponible");
+    let AdmissionUnit::Probe(probe_id) = admission.unit else {
+        return Err(unavailable());
+    };
+    let daemon = read_daemon_state_conn(tx)?;
+    if config.clock_uncertain.load(Ordering::Acquire)
+        || daemon.mode != unleash_domain::DaemonMode::Ready
+    {
+        return Err(unavailable());
+    }
+    let (eligible, admission_digest) = selected_eligibility(tx, &daemon, now, probe_id, admission)?;
+    let probe = crate::provider_probes::read_context(tx, probe_id)?.ok_or_else(unavailable)?;
+    let context = &probe.context;
+    if context.authority_generation != daemon.authority_generation
+        || context.daemon_epoch != daemon.daemon_epoch
+        || now >= context.deadline
+        || !context.preparation.secret_refs.is_empty()
+    {
+        return Err(unavailable());
+    }
+    crate::provider_probes::verify_frozen_inputs(tx, &probe)?;
+    let profile = verify_live_grant(tx, &daemon, now, &probe)?;
+    let dialect = profile.configuration.payload.dialect();
+    if dialect.kind != ProviderDialectKind::OllamaChat || dialect.version != 1 {
+        return Err(unavailable());
+    }
+    let proof = verified_placement(
+        tx,
+        context.action_id,
+        probe_id,
+        probe.context_digest,
+        eligible,
+        now,
+    )?
+    .ok_or_else(unavailable)?;
+    let placement =
+        read_verified_evidence_bytes_bounded(tx, config, proof.object_hash, MAX_PLACEMENT_BYTES)?;
+    let fact: Observation = serde_json::from_slice(&placement)?;
+    if fact.server.key()? != proof.server_key
+        || fact.valid_until_ms.as_i64() != proof.expires_at_ms
+        || canonicalize_to_vec(&fact)? != placement
+        || (require_launch && fact.managed_launch.is_none())
+    {
+        return Err(unavailable());
+    }
+    let managed_launch =
+        verify_observation_at_state(tx, &daemon, now, &probe, &profile, &fact, state)?;
+    let body_hash = probe.payload_digest();
+    let owns_body: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM object_references WHERE object_hash=?1 AND
+           owner_kind='provider_probe' AND owner_id=?2 AND source_field='request_payload' AND state='live')",
+        params![body_hash.to_string(), probe_id.to_string()],
+        |row| row.get(0),
+    )?;
+    if !owns_body {
+        return Err(unavailable());
+    }
+    let body = read_verified_evidence_bytes_bounded(tx, config, body_hash, MAX_CHAT_BODY_BYTES)?;
+    let expected = ollama_chat_body(
+        &context.preparation.resolved_model_id,
+        FIXTURE_PROMPT,
+        context.preparation.limits.max_output_tokens,
+        &BTreeMap::new(),
+    );
+    if canonicalize_to_vec(&expected)? != body {
+        return Err(unavailable());
+    }
+    let valid_until_ms = context
+        .deadline
+        .min(fact.valid_until_ms)
+        .min(admission.lease.expires_at_ms);
+    let transport_placement = OllamaChatPlacement {
+        endpoint: fact.destination,
+        boot_identity: fact.server.boot_identity,
+        process_id: fact.server.process_id,
+        process_start_identity: fact.server.process_start_identity,
+        evidence_digest: proof.object_hash,
+        admission_digest,
+        valid_until_ms,
+    };
+    let (transport_placement, managed_transport) = if let Some(launch) = &managed_launch {
+        let (placement, transport) =
+            super::dispatch::derive_transport(&probe, &profile, transport_placement, launch)?;
+        (placement, Some(transport))
+    } else {
+        (transport_placement, None)
+    };
+    Ok(AdmittedOllamaChatInputs {
+        probe,
+        body,
+        placement,
+        transport_placement,
+        managed_transport,
+    })
+}
+
 impl UnleashStore {
+    /// Relit les artefacts de l'admission Ollama dans un même snapshot du writer.
+    ///
+    /// Le consommateur doit obtenir sa propre permission de dispatch.
+    ///
+    /// # Errors
+    /// Refuse les admissions ou les preuves indisponibles.
+    pub fn read_admitted_ollama_chat(
+        &self,
+        admission: &AdmissionCommit,
+    ) -> Result<AdmittedOllamaChatInputs, StoreError> {
+        let admission = admission.clone();
+        let config = self.config().clone();
+        self.execute_in_writer_tx(WriteCriticality::Normal, move |tx, now| {
+            admitted_chat_inputs(tx, &config, now, &admission, false)
+        })
+    }
+
+    /// Read generation inputs with a durable launch binding for the managed Ollama runtime.
+    ///
+    /// # Errors
+    /// Refuses an older placement without an authenticated launch or a stale admission.
+    pub fn read_admitted_managed_ollama_chat(
+        &self,
+        admission: &AdmissionCommit,
+    ) -> Result<AdmittedOllamaChatInputs, StoreError> {
+        let admission = admission.clone();
+        let config = self.config().clone();
+        self.execute_in_writer_tx(WriteCriticality::Normal, move |tx, now| {
+            admitted_chat_inputs(tx, &config, now, &admission, true)
+        })
+    }
+
     /// Adopts a bounded placement observation from the trusted in-process observer.
     ///
     /// The observer owns the candidate until adoption. Registration and proof
@@ -425,6 +791,21 @@ impl UnleashStore {
         caller: &CallerAuthority,
         candidate: PublishedObjectReference,
     ) -> Result<Uuid, StoreError> {
+        self.record_provider_generation_placement(
+            command,
+            caller,
+            candidate,
+            PlacementDisposition::Schedulable,
+        )
+    }
+
+    fn record_provider_generation_placement(
+        &self,
+        command: &CommandEnvelope,
+        caller: &CallerAuthority,
+        candidate: PublishedObjectReference,
+        disposition: PlacementDisposition,
+    ) -> Result<Uuid, StoreError> {
         crate::provider_profile_validation::validate_envelope_identity(command, caller)?;
         let hash = candidate.object_hash();
         let pin = self.acquire_read_pin(
@@ -434,7 +815,7 @@ impl UnleashStore {
         )?;
         let config = self.config().clone();
         let bytes = self.read_snapshot(move |conn, _| {
-            crate::objects::read_verified_evidence_bytes_bounded(conn, &config, hash, 16_384)
+            read_verified_evidence_bytes_bounded(conn, &config, hash, MAX_PLACEMENT_BYTES)
         });
         let released = self.release_pin(&pin);
         let bytes = bytes?;
@@ -462,7 +843,10 @@ impl UnleashStore {
                 now,
                 &resolved.profile,
                 &fact,
-                &candidate,
+                PlacementAdoption {
+                    candidate: &candidate,
+                    disposition,
+                },
             )
         })
     }

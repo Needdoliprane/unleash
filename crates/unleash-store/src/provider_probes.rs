@@ -23,7 +23,10 @@ use unleash_domain::{
     Fence, InvocationId, LineageFence, ManifestId, MicrosAmount, ModelCallId, ModelPolicy,
     ProjectId, ProviderProbeId, ReceiptId, Revision, RunId, SecretRef, Sha256Digest, TimestampMs,
 };
-use unleash_protocol::{EventCausationKind, Sensitivity, canonical_sha256};
+use unleash_protocol::{
+    EventCausationKind, ProviderDialectKind, ProviderServerManagement, Sensitivity,
+    canonical_sha256,
+};
 
 /// Verbe du producteur de probe ; aucune autre source ne peut s'y substituer.
 pub const PROVIDER_PROBE_VERB: &str = "model.provider_probe";
@@ -199,6 +202,8 @@ pub struct ProviderProbeContext {
     pub preparation: ProviderProbePreparation,
     /// Profil durable exact observé.
     pub profile: ProbeProfileSnapshot,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    ollama_endpoint: Option<OllamaProbeEndpoint>,
     /// Révision du scope.
     pub scope_revision: Revision,
     /// Révision de politique de sécurité.
@@ -209,6 +214,14 @@ pub struct ProviderProbeContext {
     pub deadline: TimestampMs,
     /// Mode imposé par le service.
     pub context_mode: String,
+}
+
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct OllamaProbeEndpoint {
+    normalized_url: String,
+    host: String,
+    port: u16,
 }
 
 /// Projection interne, dont le digest ne dépend jamais d'une lecture client.
@@ -263,7 +276,17 @@ impl PreparedProviderProbe {
     /// Ressources exactes du manifeste natif du broker.
     #[must_use]
     pub fn resource_refs(&self) -> Value {
-        json!([{"kind":"model_target","value":{"provider":self.context.profile.provider_id,"model_id":self.context.preparation.resolved_model_id,"locality":self.context.profile.declared_locality}}])
+        let mut resources = vec![json!({
+            "kind":"model_target","value":{"provider":self.context.profile.provider_id,
+                "model_id":self.context.preparation.resolved_model_id,"locality":self.context.profile.declared_locality}
+        })];
+        if let Some(endpoint) = &self.context.ollama_endpoint {
+            resources.push(json!({
+                "kind":"network_endpoint","value":{"host":endpoint.host,
+                    "port":endpoint.port,"is_private_or_loopback":true}
+            }));
+        }
+        Value::Array(resources)
     }
 }
 
@@ -386,6 +409,40 @@ fn profile(conn: &Connection, reference: &str) -> Result<ProbeProfileSnapshot, S
         pricing_version: pricing,
         price_valid_until_ms: until.map(TimestampMs::new),
     })
+}
+
+fn ollama_endpoint(
+    tx: &Transaction<'_>,
+    preparation: &ProviderProbePreparation,
+) -> Result<Option<OllamaProbeEndpoint>, StoreError> {
+    let identity = preparation
+        .requested_profile_id
+        .parse()
+        .map_err(|_| invalid("identité de profil Ollama invalide"))?;
+    let profile =
+        crate::provider_profiles::resolve(tx, identity, preparation.requested_profile_version)?
+            .ok_or_else(|| invalid("profil Ollama exact absent"))?;
+    let payload = &profile.configuration.payload;
+    if payload.dialect().kind != ProviderDialectKind::OllamaChat
+        || payload.dialect().version != 1
+        || payload.server_management() != ProviderServerManagement::UnleashManaged
+        || payload.locality() != DataLocality::LocalOnly
+        || preparation.locality != DataLocality::LocalOnly
+        || !preparation.secret_refs.is_empty()
+    {
+        return Ok(None);
+    }
+    let destination = payload
+        .endpoint_destination()
+        .map_err(|_| invalid("destination Ollama invalide"))?;
+    if destination.scheme() != "http" || !destination.is_loopback_literal() {
+        return Ok(None);
+    }
+    Ok(Some(OllamaProbeEndpoint {
+        normalized_url: destination.normalized_endpoint().to_owned(),
+        host: destination.host().to_owned(),
+        port: destination.port(),
+    }))
 }
 
 fn verify_objects(
@@ -550,8 +607,13 @@ pub(crate) fn prepare_tx(
     };
     let (policy_revision, security_policy_digest) =
         crate::provider_probe_connect::policy(tx, project)?;
+    let ollama_endpoint = if grant.is_some() && profile.provider_id == "ollama" {
+        ollama_endpoint(tx, preparation)?
+    } else {
+        None
+    };
     let context = ProviderProbeContext {
-        schema_version: 1,
+        schema_version: if ollama_endpoint.is_some() { 2 } else { 1 },
         probe_id: probe,
         command_receipt_id: receipt,
         actor_id: actor.clone(),
@@ -564,6 +626,7 @@ pub(crate) fn prepare_tx(
         manifest_id: ManifestId::from_uuid(config.id_generator.new_uuid()),
         preparation: preparation.clone(),
         profile,
+        ollama_endpoint,
         scope_revision: Revision::new(
             u64::try_from(scope).map_err(|_| invalid("scope probe corrompu"))?,
         ),
@@ -598,7 +661,15 @@ pub(crate) fn read_context(
     row.map(|(json, digest)| {
         let context: ProviderProbeContext = serde_json::from_str(&json)?;
         let digest: Sha256Digest = digest.parse()?;
-        if context.probe_id != probe || canonical_sha256(&context)? != digest {
+        let expected_version = if context.ollama_endpoint.is_some() {
+            2
+        } else {
+            1
+        };
+        if context.probe_id != probe
+            || context.schema_version != expected_version
+            || canonical_sha256(&context)? != digest
+        {
             return Err(invalid("contexte probe durable divergent"));
         }
         Ok(PreparedProviderProbe {
@@ -716,6 +787,11 @@ pub(crate) fn verify_frozen_inputs(
     let schema_version = read_daemon_state_conn(tx)?.schema_version;
     if schema_version >= 11 {
         crate::provider_profiles::validate_probe_use(tx, &context.preparation, context.project_id)?;
+    }
+    if let Some(expected) = &context.ollama_endpoint
+        && ollama_endpoint(tx, &context.preparation)?.as_ref() != Some(expected)
+    {
+        return Err(invalid("destination Ollama différente du profil figé"));
     }
     for subject in [context.principal_id.as_str(), context.actor_id.as_str()] {
         ensure_subject_not_blocked_tx(tx, SubjectKind::Actor, subject, context.project_id)
