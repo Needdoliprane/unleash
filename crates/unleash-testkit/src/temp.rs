@@ -82,6 +82,24 @@ pub fn local_test_dir(prefix: &str) -> Result<TempDir, TempDirError> {
     Ok(dir)
 }
 
+/// Répertoire temporaire local privé au compte du test, pour un rendez-vous de démon.
+///
+/// Même garanties que [`local_test_dir`], avec des droits limités au compte : mode `0700`
+/// sous Unix, droits hérités du répertoire temporaire ailleurs. Un test qui démarre le
+/// démon n'appelle ainsi aucune interface propre à un OS.
+///
+/// # Errors
+/// - [`TempDirError::Io`] si la création, la canonisation ou la restriction des droits échoue.
+pub fn private_test_dir(prefix: &str) -> Result<TempDir, TempDirError> {
+    let dir = local_test_dir(prefix)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700))?;
+    }
+    Ok(dir)
+}
+
 /// Construit et valide un chemin de socket Unix à l'intérieur de `dir`, en garantissant
 /// que ni le chemin brut ni le chemin canonique ne dépassent [`MAX_UNIX_SOCKET_PATH_BYTES`] (103 octets).
 ///

@@ -41,5 +41,5 @@ pub use live_guard::{
 };
 pub use temp::{
     MACOS_SUN_LEN, MAX_TEMP_DIR_PATH_BYTES, MAX_UNIX_SOCKET_PATH_BYTES, TempDirError,
-    local_test_dir, socket_path_in,
+    local_test_dir, private_test_dir, socket_path_in,
 };
