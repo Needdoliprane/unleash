@@ -217,7 +217,22 @@ fn resolved_work_is_queued_once_without_an_admission() {
     let receipt = committed.receipt();
     assert_eq!(receipt.state, ReceiptState::Accepted);
     assert_eq!(receipt.result_ref, Some(format!("invocation:{INVOCATION}")));
-    assert_eq!(counts(&store), (1, 0, 0, 1, 2));
+
+    // T-F003-002 / AC-F003-002 / REQ-AGENT-002 — Même audience que l'événement
+    // `InvocationQueued` d'`AssignTask` (`task_assignment`) : le harnais seul. L'événement est
+    // `Restricted` ; son audience n'est pas élargie aux clients sans décision du dossier.
+    let destinations: Vec<String> = store
+        .read_snapshot(|conn, _| {
+            let mut statement = conn.prepare(
+                "SELECT o.destination FROM outbox o JOIN events e ON e.event_id=o.event_id
+                 WHERE e.event_type='InvocationQueued' ORDER BY o.destination",
+            )?;
+            let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
+            Ok(rows.collect::<Result<Vec<_>, _>>()?)
+        })
+        .unwrap();
+    assert_eq!(destinations, ["harness"]);
+    assert_eq!(counts(&store), (1, 0, 0, 1, 1));
 
     let invocation = store
         .get_invocation_snapshot(INVOCATION, Some(PROJECT), None, 0, 25)
@@ -253,7 +268,7 @@ fn resolved_work_is_queued_once_without_an_admission() {
         store.queue_invocation(competing),
         Err(StoreError::CapacityBlocked(_))
     ));
-    assert_eq!(counts(&store), (1, 0, 0, 1, 2));
+    assert_eq!(counts(&store), (1, 0, 0, 1, 1));
 }
 
 struct RejectCommit(AtomicBool);
@@ -304,5 +319,5 @@ fn queue_cutpoint_and_stale_session_leave_no_partial_work() {
         store.queue_invocation(wire),
         Ok(CommitOutcome::Committed(_))
     ));
-    assert_eq!(counts(&store), (1, 0, 0, 1, 2));
+    assert_eq!(counts(&store), (1, 0, 0, 1, 1));
 }

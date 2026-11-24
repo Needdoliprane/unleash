@@ -185,7 +185,10 @@ pub(crate) fn queue_tx(
         causation_id: Some(trigger),
         payload,
         sensitivity: Sensitivity::Restricted,
-        outbox_destinations: vec!["clients".to_owned(), "harness".to_owned()],
+        // REQ-AGENT-002: same audience as the `InvocationQueued` of `AssignTask`
+        // (`task_assignment`). A restricted event reaches the harness only; widening
+        // its audience to clients requires a decision of the event model.
+        outbox_destinations: vec!["harness".to_owned()],
     });
     Ok(revision)
 }
