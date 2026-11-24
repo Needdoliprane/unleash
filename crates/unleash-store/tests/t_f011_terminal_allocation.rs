@@ -1249,3 +1249,598 @@ fn publish_disposition_fixture(
 
 #[path = "support/terminal_release_migration_scenarios.rs"]
 mod release_migration_scenarios;
+
+// REQ-TERM-010: one Store-only tracer for the sealed factual disposition.
+// All process identities and the ACK below are synthetic fixture data. No host,
+// native inspector, executable, socket or effect adapter is constructed here.
+type DispositionRows = Vec<Vec<rusqlite::types::Value>>;
+
+fn disposition_rows(store: &UnleashStore, sql: &str) -> DispositionRows {
+    let sql = sql.to_owned();
+    store
+        .read_snapshot(move |conn, _| {
+            let mut statement = conn.prepare(&sql)?;
+            let width = statement.column_count();
+            let records = statement
+                .query_map([], |row| {
+                    (0..width)
+                        .map(|column| row.get::<_, rusqlite::types::Value>(column))
+                        .collect::<rusqlite::Result<Vec<_>>>()
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            Ok(records)
+        })
+        .unwrap()
+}
+
+fn disposition_conserved_rows(store: &UnleashStore) -> Vec<(&'static str, DispositionRows)> {
+    [
+        (
+            "allocation",
+            "SELECT * FROM terminal_allocations ORDER BY terminal_id",
+        ),
+        ("process", "SELECT * FROM processes ORDER BY process_id"),
+        (
+            "terminal attachment and PTY facts",
+            "SELECT terminal_id,process_id,owner_agent_id,mission_id,purpose_key,rows,cols,lease_id,input_seq,durable_log_seq,state FROM terminal_sessions ORDER BY terminal_id",
+        ),
+        (
+            "lease identity, deadline and fence",
+            "SELECT lease_id,authority_generation,resource_kind,resource_key,owner_type,owner_id,daemon_epoch,fence,boot_identity,expires_at_ms FROM resource_leases ORDER BY lease_id",
+        ),
+        (
+            "physical reservations",
+            "SELECT * FROM capacity_reservations ORDER BY reservation_id",
+        ),
+        (
+            "monotone resource fences",
+            "SELECT * FROM resource_fences ORDER BY resource_kind,resource_key",
+        ),
+        (
+            "native action identities",
+            "SELECT action_id,action_type FROM actions ORDER BY action_id",
+        ),
+        (
+            "execution dispatch identities",
+            "SELECT action_id,dispatch_id FROM action_dispatches ORDER BY action_id,dispatch_id",
+        ),
+        (
+            "broker dispatch identities",
+            "SELECT action_id,dispatch_id FROM broker_dispatches ORDER BY action_id,dispatch_id",
+        ),
+        (
+            "consumed dispatch phases",
+            "SELECT action_id,phase_key FROM broker_phase_records WHERE phase_key='dispatch' ORDER BY action_id",
+        ),
+    ]
+    .into_iter()
+    .map(|(label, sql)| (label, disposition_rows(store, sql)))
+    .collect()
+}
+
+fn disposition_envelope(
+    store: &UnleashStore,
+    caller: &CallerAuthority,
+    terminal: TerminalId,
+    revision: Revision,
+    command: unleash_domain::CommandId,
+    command_type: &str,
+    payload: serde_json::Value,
+) -> CommandEnvelope {
+    CommandEnvelope {
+        protocol_version: ProtocolVersion,
+        request_id: RequestId::from_uuid(command.as_uuid()),
+        command_id: command,
+        authority_generation: store.active_authority_generation().unwrap(),
+        actor_ref: Some(caller.actor_id.to_string()),
+        project_id: Some(PROJECT),
+        aggregate_id: terminal.as_uuid(),
+        expected_revision: revision,
+        command_type: command_type.to_owned(),
+        payload: match payload {
+            serde_json::Value::Object(payload) => payload,
+            _ => unreachable!("synthetic terminal command payload must be an object"),
+        },
+    }
+}
+
+fn disposition_release_record(
+    store: &UnleashStore,
+    caller: &CallerAuthority,
+    command: unleash_domain::CommandId,
+) -> terminal_allocations::terminal_release_types::TerminalReleaseRecord {
+    store
+        .inspect_terminal_release_request(&caller.actor_id, command)
+        .unwrap()
+        .value
+        .unwrap()
+}
+
+fn disposition_release_authorizing(record: &terminal_allocations::terminal_release_types::TerminalReleaseRecord) -> BrokerPhaseRequest {
+    let c = &record.context;
+    let fence = LineageFence::new(c.authority_generation, c.daemon_epoch, Fence::new(0));
+    let manifest = json!({
+        "action_id": c.action_id,
+        "subject": {
+            "kind": "control_plane",
+            "principal_id": c.principal_id,
+            "cause_ref": format!("receipt:{}", c.receipt_id),
+            "invocation_id": null,
+            "attempt_id": null,
+            "replay_worker_id": null,
+            "agent_id": null,
+            "mission_id": null,
+            "role_version": null
+        },
+        "project_id": c.project_id,
+        "verb": terminal_allocations::terminal_release_types::TERMINAL_RELEASE_VERB,
+        "resource_refs": [{"kind": "terminal", "value": c.terminal_id}],
+        "payload_digest": record.context_digest,
+        "reconcile_strategy": "observe_then_decide",
+        "effects_class": "process_exec",
+        "scope_revision": c.scope_revision,
+        "policy_revision": c.policy_revision,
+        "lineage_fence": fence,
+        "action_deadline": c.source_expires_at_ms,
+        "isolation_requirements": {
+            "mode": "standard",
+            "require_process_confinement": false,
+            "required_capabilities": []
+        },
+        "secret_refs": [],
+        "provenance": {"origin": "engine_internal"}
+    })
+    .as_object()
+    .unwrap()
+    .clone();
+    BrokerPhaseRequest {
+        authority_generation: c.authority_generation,
+        expected_revision: Revision::INITIAL,
+        evaluation: BrokerEvaluation {
+            evaluation_id: AuthorizationEvaluationId::from_uuid(c.action_id.as_uuid()),
+            previous_evaluation_id: None,
+        },
+        phase: BrokerPhase::Authorizing {
+            intent: BrokerIntent {
+                action_id: c.action_id,
+                origin: ActionOrigin::ControlPlane {
+                    control_principal_id: c.principal_id.clone(),
+                },
+                principal_id: c.principal_id.clone(),
+                cause: BrokerCause::CommandReceipt {
+                    receipt_id: c.receipt_id,
+                },
+                project_id: Some(c.project_id),
+                payload_digest: record.context_digest,
+                scope_revision: c.scope_revision,
+                policy_revision: c.policy_revision,
+                lineage_fence: fence,
+                action_deadline: c.source_expires_at_ms,
+                reconcile_strategy: unleash_domain::ReconcileStrategy::ObserveThenDecide,
+                intent_digest: canonical_sha256(&manifest).unwrap(),
+                manifest,
+            },
+        },
+    }
+}
+
+fn disposition_release_dispatch(
+    store: &UnleashStore,
+    record: &terminal_allocations::terminal_release_types::TerminalReleaseRecord,
+) -> (BrokerPhaseRequest, BrokerIntent, DispatchId) {
+    let first = disposition_release_authorizing(record);
+    let authorizing = store.commit_broker_phase(first.clone()).unwrap();
+    let BrokerPhase::Authorizing { intent } = first.phase.clone() else {
+        unreachable!()
+    };
+    let decision = BrokerAuthorizationDecision {
+        action_id: intent.action_id,
+        evaluation_id: first.evaluation.evaluation_id,
+        source_evaluation_id: None,
+        decision_ref: "synthetic-sqlite-release-allow".to_owned(),
+        policy_revision: intent.policy_revision,
+        scope_revision: intent.scope_revision,
+        payload_digest: intent.payload_digest,
+        expiry: Some(intent.action_deadline),
+        applied_obligations: vec![],
+        fallback_policy_ref: None,
+        from_cache: false,
+        executor: BrokerExecutor::Unleash,
+    };
+    let authorized = store
+        .commit_broker_phase(BrokerPhaseRequest {
+            expected_revision: authorizing.revision,
+            phase: BrokerPhase::Authorization {
+                action_id: intent.action_id,
+                intent_digest: intent.intent_digest,
+                outcome: BrokerAuthorizationOutcome::Authorized {
+                    decision: decision.clone(),
+                },
+                cause: BrokerAuthorizationCause::Evaluation,
+            },
+            ..first.clone()
+        })
+        .unwrap();
+    let dispatch = DispatchId::from_u128(0xf011_d154);
+    store
+        .commit_broker_phase(BrokerPhaseRequest {
+            expected_revision: authorized.revision,
+            phase: BrokerPhase::Dispatch {
+                action_id: intent.action_id,
+                intent_digest: intent.intent_digest,
+                decision,
+                dispatch_id: dispatch,
+                fence: intent.lineage_fence,
+            },
+            ..first.clone()
+        })
+        .unwrap();
+    (first, intent, dispatch)
+}
+
+#[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "After extracting builders, this one ordered witness keeps its sealed prefix and conservation/replay oracles together"
+)]
+fn t_f011_010_dispose_sealed_release_uses_exact_fact_without_native_dispatch() {
+    use terminal_allocations::terminal_release_history::{
+        TerminalReleaseHistoryTarget, qualify_terminal_release_history_source,
+    };
+    use terminal_allocations::terminal_release_types::{
+        ResolveTerminalReleaseRequest, TerminalReleaseNativeAck, TerminalReleaseObservation,
+        TerminalReleaseRequest, TerminalReleaseState,
+    };
+    use unleash_domain::{ActionState, CommandId, TimestampMs};
+
+    let (store, _config, clock, preparation, _directory) =
+        fixture(Arc::new(NoopCutpointObserver));
+    let terminal_number = 0xf011_d001;
+    store
+        .commit_command(request(&store, preparation, terminal_number))
+        .unwrap();
+    let allocation = read(&store, terminal_number);
+    clock.set_utc_ms(100);
+    let launch_dispatch = dispatch(&store, &allocation);
+    store
+        .resolve_terminal_launch(resolution(&allocation, launch_dispatch))
+        .unwrap();
+    let resolved = read(&store, terminal_number);
+    clock.set_utc_ms(105);
+    let (launch, launch_phase) = launch_observation_state_fixture(
+        &store,
+        &resolved,
+        launch_dispatch,
+        101,
+        103,
+        false,
+    );
+    store
+        .commit_terminal_launch_observation(launch, launch_phase)
+        .unwrap();
+
+    let caller = CallerAuthority {
+        actor_id: allocation.context.actor_id.clone(),
+        role: CallerRole::HumanOperator,
+    };
+    let control_revision = store
+        .read_snapshot(|conn, _| {
+            Ok(Revision::new(conn.query_row(
+                "SELECT control_revision FROM terminal_sessions",
+                [],
+                |row| row.get::<_, u64>(0),
+            )?))
+        })
+        .unwrap();
+    let source_command = CommandId::from_u128(0xf011_d101);
+    let release_request = TerminalReleaseRequest {
+        terminal_id: allocation.context.terminal_id,
+        process_run_uuid: allocation.context.process_run_uuid,
+        lease_id: allocation.context.lease_id,
+        fence: allocation.context.resource_fence,
+    };
+    clock.set_utc_ms(200);
+    store
+        .commit_command(CommitCommandRequest {
+            actor_id: caller.actor_id.clone(),
+            envelope: disposition_envelope(
+                &store,
+                &caller,
+                release_request.terminal_id,
+                control_revision,
+                source_command,
+                "ReleaseTerminal",
+                serde_json::to_value(&release_request).unwrap(),
+            ),
+            target_aggregate: AggregateKind::TerminalControl,
+            operation_id: None,
+            receipt_state: ReceiptState::Accepted,
+            result_ref: None,
+            retention_days_override: None,
+            fence_assertion: None,
+            mutation: CommandMutation::PrepareTerminalRelease {
+                caller: caller.clone(),
+                request: release_request,
+            },
+            events: vec![],
+            capacity_reservations: vec![],
+            budget_reservations: vec![],
+        })
+        .unwrap();
+    let prepared = disposition_release_record(&store, &caller, source_command);
+    let (first, intent, source_dispatch) = disposition_release_dispatch(&store, &prepared);
+    // Consume only the durable Store permit. No native consumer is present.
+    store
+        .resolve_terminal_release(ResolveTerminalReleaseRequest {
+            caller: caller.clone(),
+            action_id: prepared.context.action_id,
+            context_digest: prepared.context_digest,
+            expected_revision: prepared.revision,
+            dispatch_id: source_dispatch,
+        })
+        .unwrap();
+    clock.set_utc_ms(205);
+    let dispatched = store
+        .inspect_broker_action(prepared.context.action_id)
+        .unwrap()
+        .unwrap();
+    store
+        .commit_broker_phase(BrokerPhaseRequest {
+            authority_generation: prepared.context.authority_generation,
+            expected_revision: dispatched.revision,
+            evaluation: first.evaluation,
+            phase: BrokerPhase::Observation {
+                action_id: intent.action_id,
+                intent_digest: intent.intent_digest,
+                receipt: BrokerActionReceipt {
+                    action_id: intent.action_id,
+                    evaluation_id: AuthorizationEvaluationId::from_uuid(intent.action_id.as_uuid()),
+                    dispatch_id: source_dispatch,
+                    decision_ref: "synthetic-sqlite-release-allow".to_owned(),
+                    state: ActionState::OutcomeUnknown,
+                    output_digest: None,
+                    enforcement_refs: vec![],
+                    remote_audit_ref: None,
+                    remote_audit_unavailable: false,
+                    observed_at_ms: TimestampMs::new(clock.utc_ms()),
+                },
+                observation_revision: Revision::new(1),
+                cause: BrokerObservationCause::Execution,
+                reason: None,
+            },
+        })
+        .unwrap();
+    let unknown = disposition_release_record(&store, &caller, source_command);
+    assert_eq!(unknown.state, TerminalReleaseState::OutcomeUnknown);
+    assert_eq!(unknown.broker_action_state, Some(ActionState::OutcomeUnknown));
+    let c = &unknown.context;
+    // This tracer has exactly one lease. Concurrent leases need their own case;
+    // conserved_rows omits state only because the sole source lease is asserted
+    // reconciling here and released after the disposition.
+    assert_eq!(
+        disposition_rows(&store, "SELECT lease_id,state FROM resource_leases ORDER BY lease_id"),
+        vec![vec![
+            rusqlite::types::Value::Text(c.lease_id.to_string()),
+            rusqlite::types::Value::Text("reconciling".to_owned()),
+        ]]
+    );
+    let stable = disposition_conserved_rows(&store);
+    let source_receipt = store
+        .inspect_command_receipt(&caller.actor_id, source_command)
+        .unwrap();
+    let target = TerminalReleaseHistoryTarget {
+        project_id: PROJECT,
+        terminal_id: c.terminal_id,
+        process_run_uuid: c.process_run_uuid,
+        action_id: c.action_id,
+        dispatch_id: source_dispatch,
+    };
+    let authority = caller.clone();
+    let source = store
+        .read_snapshot(move |conn, _| {
+            qualify_terminal_release_history_source(conn, &authority, target)
+        })
+        .unwrap();
+    clock.set_utc_ms(210);
+    let observation = TerminalReleaseObservation {
+        schema_version: 1,
+        ack: TerminalReleaseNativeAck {
+            key: source.key.clone(),
+            host_id: c.host_id,
+            process_id: c.process_id,
+            terminal_id: c.terminal_id,
+            os_identity: c.expected_os_identity.clone(),
+            durable_log_seq: 0,
+            last_confirmed_input_seq: 0,
+            unknown_input_seqs: vec![],
+        },
+        manifest_digest: Sha256Digest::from_bytes(b"sqlite-only-release-inspection-not-os-proof"),
+        captured_at_ms: TimestampMs::new(210),
+    };
+    let proof_hash = canonical_sha256(&observation).unwrap();
+    let ack_hash = canonical_sha256(&observation.ack).unwrap();
+    let bytes = canonicalize_to_vec(&observation).unwrap();
+    let proof = store
+        .prepare_object(PrepareObjectRequest {
+            object_hash: proof_hash,
+            byte_length: u64::try_from(bytes.len()).unwrap(),
+            media_type: "application/json".to_owned(),
+            owner_kind: "action".to_owned(),
+            owner_id: c.action_id.to_string(),
+        })
+        .unwrap();
+    store.write_prepared_object_bytes(&proof, &bytes).unwrap();
+    let history_envelope = disposition_envelope(
+        &store,
+        &caller,
+        c.terminal_id,
+        c.control_revision,
+        CommandId::from_u128(0xf011_d102),
+        "ReconcileProcess",
+        json!({
+            "kind": "attest_terminal_release",
+            "terminal_id": c.terminal_id,
+            "process_run_uuid": c.process_run_uuid,
+            "source_action_id": c.action_id,
+            "source_dispatch_id": source_dispatch
+        }),
+    );
+    let history_commit = store
+        .commit_terminal_release_reconciliation(caller.clone(), history_envelope, Some(proof))
+        .unwrap();
+    let history_receipt = history_commit.receipt().clone();
+    assert_eq!(history_receipt.state, ReceiptState::Completed);
+    let history_ref = history_receipt.result_ref.as_deref().unwrap();
+    let history = store
+        .inspect_terminal_release_reconciliation_result(
+            &caller,
+            history_receipt.command_id,
+            history_ref,
+            PROJECT,
+        )
+        .unwrap()
+        .value;
+    assert_eq!(history.observation_object_hash, proof_hash);
+    assert_eq!(history.native_ack_digest, ack_hash);
+    assert_eq!(history.source_receipt_id, c.receipt_id);
+    assert_eq!(history.source_action_id, c.action_id);
+    assert_eq!(history.source_dispatch_id, source_dispatch);
+    assert_eq!(history.source_context_digest, unknown.context_digest);
+    assert_eq!(history.observed_at_ms, TimestampMs::new(210));
+    assert_ne!(history.cursor, history_receipt.event_cursor);
+    assert_eq!(disposition_conserved_rows(&store), stable);
+    let attested = disposition_release_record(&store, &caller, source_command);
+    assert_eq!(attested.state, unknown.state);
+    assert_eq!(attested.broker_action_state, Some(ActionState::OutcomeUnknown));
+
+    let dispose_envelope = disposition_envelope(
+        &store,
+        &caller,
+        c.terminal_id,
+        c.control_revision,
+        CommandId::from_u128(0xf011_d103),
+        "ReconcileProcess",
+        json!({
+            "kind": "dispose_terminal_release",
+            "terminal_id": c.terminal_id,
+            "process_run_uuid": c.process_run_uuid,
+            "source_action_id": history.source_action_id,
+            "source_dispatch_id": history.source_dispatch_id,
+            "source_receipt_id": history.source_receipt_id,
+            "history_command_id": history_receipt.command_id,
+            "history_receipt_id": history_receipt.receipt_id,
+            "history_result_ref": history_ref,
+            "observation_object_hash": history.observation_object_hash
+        }),
+    );
+    // Expected first red on the agreed base: its closed decoder accepts only
+    // attest_terminal_release. Keep the positive prefix and all final oracles.
+    #[expect(
+        clippy::expect_used,
+        reason = "This single success expectation is the intended red boundary after the qualified Store prefix"
+    )]
+    let disposition = store
+        .commit_terminal_release_reconciliation(caller.clone(), dispose_envelope.clone(), None)
+        .expect("a sealed exact Release fact must permit its Store-only ledger disposition");
+    let receipt = disposition.receipt();
+    let expected_revision = Revision::new(c.control_revision.as_u64() + 1);
+    assert_eq!(receipt.state, ReceiptState::Completed);
+    assert_eq!(receipt.new_revision, expected_revision);
+    assert_eq!(
+        receipt.result_ref.as_deref(),
+        Some(format!("terminal-release-disposition:{}:{source_dispatch}", c.action_id).as_str())
+    );
+    let disposed = disposition_release_record(&store, &caller, source_command);
+    assert_eq!(disposed.state, TerminalReleaseState::Disposed);
+    assert_eq!(disposed.context, unknown.context);
+    assert_eq!(disposed.revision, Revision::new(unknown.revision.as_u64() + 1));
+    assert_eq!(disposed.observation_object_hash, Some(proof_hash));
+    assert_eq!(disposed.dispatch_id, Some(source_dispatch));
+    assert_eq!(disposed.broker_action_state, Some(ActionState::ObservedSuccess));
+    assert_eq!(disposition_conserved_rows(&store), stable);
+
+    let action = c.action_id.to_string();
+    let terminal = c.terminal_id.to_string();
+    let lease = c.lease_id.to_string();
+    let receipt_id = receipt.receipt_id.to_string();
+    let command = receipt.command_id.to_string();
+    let cursor = receipt.event_cursor;
+    let revision = i64::try_from(expected_revision.as_u64()).unwrap();
+    let (terminal_event, disposition_link, reconciled_event, run_events) = store
+        .read_snapshot(move |conn, _| {
+            let lease_state: String = conn.query_row(
+                "SELECT state FROM resource_leases WHERE lease_id=?1",
+                [lease],
+                |row| row.get(0),
+            )?;
+            assert_eq!(lease_state, "released");
+            let control: i64 = conn.query_row(
+                "SELECT control_revision FROM terminal_sessions WHERE terminal_id=?1",
+                [&terminal],
+                |row| row.get(0),
+            )?;
+            assert_eq!(control, revision);
+            let event = conn.query_row(
+                "SELECT event_id,causation_kind,causation_id,payload_json FROM events WHERE stream_id=?1 AND sequence=?2 AND event_type='TerminalReleaseDispositionRecorded' AND aggregate_type='terminal_control' AND aggregate_id=?3 AND aggregate_revision=?4 AND command_id=?5",
+                rusqlite::params![cursor.stream_id.to_string(), i64::try_from(cursor.sequence.as_u64()).unwrap(), terminal, revision, command],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?, row.get::<_, String>(3)?)),
+            )?;
+            let link: Option<String> = conn.query_row(
+                "SELECT disposition_event_id FROM terminal_release_intents WHERE action_id=?1",
+                [&action],
+                |row| row.get(0),
+            )?;
+            let reconciled: String = conn.query_row(
+                "SELECT event_id FROM events WHERE event_type='ActionReconciled' AND aggregate_type='action' AND aggregate_id=?1 AND command_id=?2 AND causation_kind='command' AND causation_receipt_id=?3",
+                rusqlite::params![action, command, receipt_id],
+                |row| row.get(0),
+            )?;
+            let runs: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM events WHERE event_type='EffectOutcomeResolved' AND command_id=?1",
+                [command],
+                |row| row.get(0),
+            )?;
+            Ok((event, link, reconciled, runs))
+        })
+        .unwrap();
+    assert_eq!(disposition_link.as_deref(), Some(terminal_event.0.as_str()));
+    assert_eq!(terminal_event.1, "event");
+    assert_eq!(terminal_event.2, reconciled_event);
+    assert_eq!(run_events, 0, "this fixture has no Run linked to the source action");
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&terminal_event.3).unwrap(),
+        json!({
+            "source_action_id": c.action_id,
+            "source_dispatch_id": source_dispatch,
+            "source_receipt_id": c.receipt_id,
+            "history_receipt_id": history_receipt.receipt_id,
+            "observation_object_hash": proof_hash
+        })
+    );
+    assert_eq!(
+        store
+            .inspect_command_receipt(&caller.actor_id, source_command)
+            .unwrap(),
+        source_receipt
+    );
+    assert_eq!(
+        store
+            .inspect_terminal_release_reconciliation_result(
+                &caller,
+                history_receipt.command_id,
+                history_ref,
+                PROJECT,
+            )
+            .unwrap()
+            .value,
+        history
+    );
+    let events = disposition_rows(&store, "SELECT event_id FROM events ORDER BY sequence");
+    let replay = store
+        .commit_terminal_release_reconciliation(caller.clone(), dispose_envelope, None)
+        .unwrap();
+    assert_eq!(replay.receipt(), receipt);
+    assert_eq!(disposition_rows(&store, "SELECT event_id FROM events ORDER BY sequence"), events);
+    assert_eq!(disposition_release_record(&store, &caller, source_command).revision, disposed.revision);
+    assert_eq!(disposition_conserved_rows(&store), stable);
+}
