@@ -58,3 +58,5 @@ pub use subscriptions::SubscriptionHub;
 
 #[cfg(test)]
 mod start_assignment_tests;
+#[cfg(test)]
+mod terminal_control_secret_tests;

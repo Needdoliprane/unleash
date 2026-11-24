@@ -578,6 +578,16 @@ fn resolve_launch_permit(
     Ok(profile)
 }
 
+/// Secret de contrôle neuf d'un hôte de processus.
+pub(crate) fn fresh_control_secret(
+    ids: &dyn unleash_domain::IdGeneratorPort,
+) -> Result<HostControlSecret, TerminalError> {
+    Ok(HostControlSecret::new(format!(
+        "terminal-control:{}",
+        ids.new_uuid()
+    ))?)
+}
+
 fn prepare_host_launch(
     state: &Arc<DaemonRuntimeState>,
     record: &unleash_store::TerminalAllocationRecord,
@@ -590,10 +600,7 @@ fn prepare_host_launch(
     let runtime = base.join(c.host_id.to_string());
     unleash_platform::ensure_private_rendezvous_dir(&runtime)?;
     let runtime = runtime.canonicalize()?;
-    let secret = HostControlSecret::new(format!(
-        "terminal-control:{}",
-        state.store.config().id_generator.new_uuid()
-    ))?;
+    let secret = fresh_control_secret(state.store.config().id_generator.as_ref())?;
     let secret_path = runtime.join(CONTROL_SECRET_FILENAME);
     store_control_secret(&secret_path, &secret)?;
     let effective = explicit_environment_v1(&profile.variables, &runtime.join("child-tmp"))?;
