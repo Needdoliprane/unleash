@@ -135,4 +135,6 @@ L’état `completed` donne accès au manifeste de la sauvegarde créée sous `b
 
 Le [rapport M0](qualification/m0/exit.md) indique les composants testés, les environnements et les limites de l’aperçu. Les commandes de vérification du workspace figurent dans le [workflow CI](.github/workflows/ci.yml). Voir les [règles de contribution](CONTRIBUTING.md) et le [canal de signalement sécurité](SECURITY.md).
 
+Sur un poste où Rust ne s’exécute que dans Docker, le [banc de qualification](tools/bench/README.md) construit une image reproductible et y lance ces mêmes commandes, sur une révision Git, dans un conteneur sans réseau. Chaque contrôle garde son journal. Le banc ne couvre pas les validations propres à macOS et ne remplace pas la CI.
+
 Le dépôt est sous [licence Apache-2.0](LICENSE). Les mentions de licence sont dans [NOTICE](NOTICE).

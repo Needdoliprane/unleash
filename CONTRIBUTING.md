@@ -12,6 +12,7 @@ Merci de votre intérêt. Le dépôt contient le dossier de conception de réfé
 
 - Une branche par changement, commits au format [Conventional Commits](https://www.conventionalcommits.org/fr/) citant les exigences (`REQ-…`).
 - Les gates de la [définition de terminé](.claude/dev/definition-of-done.md) doivent passer : fmt, clippy `-D warnings`, tests, doc, cargo-deny, validation du dossier.
+- Quand le poste n'exécute pas Rust nativement, passer ces contrôles par le [banc Docker](tools/bench/README.md) : image reproductible, conteneur sans réseau, un journal par contrôle. Un contrôle non exécuté est signalé comme tel, jamais annoncé passé.
 - Un changement de contrat met à jour le dossier `.claude/` dans le même changement et passe `python3 tools/design-package/validate.py .`.
 - Les contributions sont acceptées sous la licence Apache-2.0 du projet (section 5 de la licence). Signez vos commits avec `Signed-off-by` (Developer Certificate of Origin).
 

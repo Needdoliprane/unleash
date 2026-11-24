@@ -5,6 +5,8 @@
 # Agents de développement : état local et worktrees (voir .claude/rules/worktrees.md)
 /.claude/worktrees/
 /.claude/cache/
+# Packs de preuves temporaires du développement, jamais commités
+/.claude/evidence/
 /.claude/settings.local.json
 /CLAUDE.local.md
 
