@@ -393,14 +393,20 @@ fn json_response(body: &[u8]) -> Response {
     Response::Bytes(json_reply(body))
 }
 
-#[cfg(target_os = "macos")]
+// The admitted binding, expiry and digest contracts hold on every platform.
+// Only the socket exchange needs the owned-loopback native observation, which
+// `unleash_platform` provides on macOS alone and reports as
+// `UnsupportedPlatform` elsewhere. The items marked below therefore stay
+// macOS-only, together with their imports and fixtures (REQ-MODEL-015).
 mod chat_tests {
     use super::*;
     use crate::connect_transport::OwnedLoopbackPeer;
     use crate::ollama::OllamaOutcome;
+    #[cfg(target_os = "macos")]
+    use crate::ollama_transport::OllamaChatExecution;
     use crate::ollama_transport::{
-        FrozenOllamaChatRequest, OLLAMA_CHAT_VERB, OllamaChatError, OllamaChatExecution,
-        OllamaChatLimits, OllamaChatObservation, OllamaChatObservationPort, execute,
+        FrozenOllamaChatRequest, OLLAMA_CHAT_VERB, OllamaChatError, OllamaChatLimits,
+        OllamaChatObservation, OllamaChatObservationPort, execute,
     };
     use std::collections::BTreeMap;
     use std::net::SocketAddr;
@@ -408,10 +414,12 @@ mod chat_tests {
     use unleash_platform::OsProcessIdentity;
     use unleash_protocol::provider_probe::OllamaChatPlacement;
 
+    #[cfg(target_os = "macos")]
     const PROGRESS: &str = concat!(
         r#"{"model":"synthetic-model","created_at":"2026-11-20T00:00:00Z","message":{"role":"assistant","content":"Answer"},"done":false}"#,
         "\n",
     );
+    #[cfg(target_os = "macos")]
     const END: &str = concat!(
         r#"{"model":"synthetic-model","created_at":"2026-11-20T00:00:01Z","message":{"role":"assistant","content":"!"},"done":true,"done_reason":"stop","eval_count":2}"#,
         "\n",
@@ -592,6 +600,7 @@ mod chat_tests {
         }
     }
 
+    #[cfg(target_os = "macos")]
     async fn exchange(
         body: &str,
         observer: &Observer,
@@ -673,6 +682,7 @@ mod chat_tests {
         ))
     }
 
+    #[cfg(target_os = "macos")]
     #[tokio::test]
     async fn t_f012_ollama_chat_releases_only_the_acknowledged_observation() -> TestResult {
         let observer = Observer {
@@ -779,6 +789,7 @@ mod chat_tests {
         Ok(())
     }
 
+    #[cfg(target_os = "macos")]
     #[tokio::test]
     async fn t_f012_ollama_chat_keeps_an_interrupted_generation_unknown() -> TestResult {
         let observer = Observer {
@@ -798,6 +809,7 @@ mod chat_tests {
         Ok(())
     }
 
+    #[cfg(target_os = "macos")]
     #[tokio::test]
     async fn t_f012_ollama_chat_keeps_an_unacknowledged_observation_unknown() -> TestResult {
         let observer = Observer {

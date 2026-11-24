@@ -74,7 +74,8 @@ impl Fixture {
         )?;
         configure_profile(&store, &caller, endpoint)?;
         before_launch(&store, &caller)?;
-        let (command, bootstrap) = prepare_service_fixture(&store, &caller, directory.path(), adapt)?;
+        let (command, bootstrap) =
+            prepare_service_fixture(&store, &caller, directory.path(), adapt)?;
         Ok(Self {
             store,
             directory,
