@@ -20,6 +20,10 @@ pub mod anthropic_transport;
 pub mod connect_transport;
 /// Internal, one-attempt passive Ollama inventory component; no product route.
 pub mod inventory_transport;
+/// Bounded decoder for the native Ollama Chat response stream.
+pub mod ollama;
+/// One-attempt Ollama Chat transport for the action-broker port.
+pub mod ollama_transport;
 /// Bounded, explicitly restricted OpenAI Responses SSE dialect.
 pub mod openai;
 mod owned_loopback_socket;
@@ -36,6 +40,8 @@ mod connect_transport_tests;
 mod http_fixture_tests;
 #[cfg(test)]
 mod inventory_transport_tests;
+#[cfg(test)]
+mod ollama_tests;
 #[cfg(test)]
 mod openai_tests;
 #[cfg(test)]
@@ -215,7 +221,7 @@ impl SseDecoder {
 }
 
 /// Usage counters are individually optional: absence is not zero.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, serde::Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Usage {
     /// Input tokens, when reported.
@@ -301,27 +307,33 @@ pub struct Assembler {
     failed: bool,
 }
 
+fn compile_tool_contracts(
+    contracts: BTreeMap<String, Value>,
+) -> Result<BTreeMap<String, jsonschema::Validator>, StreamError> {
+    if contracts.len() > MAX_TOOLS {
+        return Err(StreamError::LimitExceeded);
+    }
+    let mut schemas = BTreeMap::new();
+    for (name, schema) in contracts {
+        if name.is_empty() || name.len() > 1024 {
+            return Err(StreamError::InvalidContract);
+        }
+        schemas.insert(
+            name,
+            jsonschema::validator_for(&schema).map_err(|_| StreamError::InvalidContract)?,
+        );
+    }
+    Ok(schemas)
+}
+
 impl Assembler {
     /// Compile the JSON Schema contract for each explicitly named tool.
     ///
     /// # Errors
     /// Returns `InvalidContract` if the schema cannot be compiled.
     pub fn new(contracts: BTreeMap<String, Value>) -> Result<Self, StreamError> {
-        if contracts.len() > MAX_TOOLS {
-            return Err(StreamError::LimitExceeded);
-        }
-        let mut schemas = BTreeMap::new();
-        for (name, schema) in contracts {
-            if name.is_empty() || name.len() > 1024 {
-                return Err(StreamError::InvalidContract);
-            }
-            schemas.insert(
-                name,
-                jsonschema::validator_for(&schema).map_err(|_| StreamError::InvalidContract)?,
-            );
-        }
         Ok(Self {
-            schemas,
+            schemas: compile_tool_contracts(contracts)?,
             tools: BTreeMap::new(),
             terminal: None,
             failed: false,
