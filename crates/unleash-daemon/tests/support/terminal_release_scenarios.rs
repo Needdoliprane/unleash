@@ -384,6 +384,55 @@ async fn t_f011_010_release_disposes_control_and_replays_without_stopping_the_pt
 }
 
 #[tokio::test]
+#[ignore = "requires UNLEASH_TEST_CLI_BIN and the process host built from the same tree"]
+async fn t_f011_cli_release_returns_receipt_and_keeps_the_terminal_open() {
+    let binary = PathBuf::from(std::env::var_os("UNLEASH_TEST_CLI_BIN").unwrap());
+    assert!(binary.is_absolute() && binary.is_file());
+    let mut fixture = LiveFixture::new(true).await;
+    let acquired = acquire(&mut fixture).await;
+    let native = fixture.host_manifest();
+    let before = facts(&fixture, &acquired);
+    let socket = fixture.rendezvous.path().join("daemon.sock");
+    let wire = release_request(&fixture, &acquired, 0xf011_8170);
+    let options = [
+        ("--project-id", fixture.project.to_string()),
+        ("--terminal-id", acquired.terminal_id.to_string()),
+        ("--process-run-uuid", acquired.process_run_uuid.to_string()),
+        ("--lease-id", acquired.lease_id.to_string()),
+        ("--fence", acquired.fence.to_string()),
+        ("--control-revision", acquired.control_revision.as_u64().to_string()),
+        ("--command-id", wire.command_id.to_string()),
+        ("--authority-generation", fixture.authority.to_string()),
+    ];
+    let send = || async {
+        let mut command = tokio::process::Command::new(&binary);
+        command.arg("--socket").arg(&socket).args(["--json", "process", "release"])
+            .stdin(std::process::Stdio::null())
+            .kill_on_drop(true);
+        for (flag, value) in &options {
+            command.arg(flag).arg(value);
+        }
+        let output = tokio::time::timeout(Duration::from_secs(10), command.output())
+            .await.unwrap().unwrap();
+        assert!(output.status.success(), "CLI release: {}", String::from_utf8_lossy(&output.stderr));
+        let response: Value = serde_json::from_slice(&output.stdout).unwrap();
+        serde_json::from_value::<CommandReceipt>(response.get("receipt").unwrap().clone()).unwrap()
+    };
+    let receipt = send().await;
+    assert_eq!(receipt.command_id, wire.command_id);
+    assert_eq!(receipt.state, ReceiptState::Accepted);
+    let (result, _) = disposition(&fixture, &receipt).await;
+    assert_eq!(result.get("disposition"), Some(&json!("released")));
+    assert_eq!(send().await, receipt);
+    drain(&mut fixture).await;
+    let after = facts(&fixture, &acquired);
+    assert_eq!(after.lease_state, "released");
+    assert_eq!(after.dispatches, before.dispatches + 1);
+    assert_eq!(after.active_holds, before.active_holds);
+    same_child(&fixture, &native);
+}
+
+#[tokio::test]
 async fn t_f011_010_released_terminal_can_be_explicitly_reacquired_without_spawn() {
     let mut fixture = LiveFixture::new(true).await;
     let acquired = acquire(&mut fixture).await;
