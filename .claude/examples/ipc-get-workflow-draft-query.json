@@ -1,0 +1,9 @@
+{
+  "protocol_version": "unleash.ipc.v2",
+  "request_id": "10000000-0000-4000-8000-000000000044",
+  "query_type": "GetWorkflowDraft",
+  "project_id": "10000000-0000-4000-8000-000000000004",
+  "payload": {
+    "draft_id": "10000000-0000-4000-8000-000000000041"
+  }
+}
