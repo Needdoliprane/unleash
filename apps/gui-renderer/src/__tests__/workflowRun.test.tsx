@@ -1,4 +1,4 @@
-import { act, render, screen, within } from "@testing-library/react";
+import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, expect, it, vi } from "vitest";
 import { App } from "../App";
@@ -803,4 +803,176 @@ it("T-F005-004 (renderer) — affiche le budget épuisé comme un refus de déma
         "op_start_run",
         "op_get_run",
     ]);
+});
+
+it("T-F005-001 (renderer) — actualise la liste ouverte après confirmation de création et de démarrage", async () => {
+    const atSequence = (result: QueryResponse, sequence: number): QueryResponse => ({
+        ...result,
+        watermark: { stream_id: "00000000-0000-4000-8000-000000000002", sequence },
+    });
+    let submittedRun: string | undefined;
+    let phase: "empty" | "prepared" | "running" = "empty";
+    let getReads = 0;
+    let startRequested = false;
+    let startReadRequested = false;
+    const listPhases: string[] = [];
+    let finishCreation: ((result: QueryResponse) => void) | undefined;
+    let finishStart: ((result: QueryResponse) => void) | undefined;
+    const creationRead = new Promise<QueryResponse>((resolve) => {
+        finishCreation = resolve;
+    });
+    const startRead = new Promise<QueryResponse>((resolve) => {
+        finishStart = resolve;
+    });
+    const invoke = vi.fn(
+        (command: string, { input }: { input: GuiQueryInput | GuiCommandInput }) => {
+            switch (command) {
+                case "op_list_projects":
+                    return Promise.resolve(response([{ project_id: projectId, name: "Atlas" }]));
+                case "op_list_runs": {
+                    expect(input).toEqual({ project_id: projectId, payload: { page_size: 20 } });
+                    listPhases.push(phase);
+                    const rows =
+                        phase === "empty"
+                            ? []
+                            : [
+                                  {
+                                      ...run,
+                                      run_id: submittedRun ?? "",
+                                      state: phase,
+                                      revision: phase === "running" ? 2 : 1,
+                                  },
+                              ];
+                    const sequence = phase === "empty" ? 12 : phase === "prepared" ? 13 : 14;
+                    return Promise.resolve(atSequence(runListPage(projectId, rows, null), sequence));
+                }
+                case "op_create_run": {
+                    if (!("command_id" in input)) throw new Error("Commande de création attendue.");
+                    expect(input.project_id).toBe(projectId);
+                    expect(input.expected_revision).toBe(0);
+                    expect(input.aggregate_id).toMatch(/^[0-9a-f-]{36}$/u);
+                    expect(input.payload).toEqual({
+                        mission_id: run.mission_id,
+                        source: {
+                            kind: "workflow_version",
+                            id: "workflow.feature",
+                            version: 1,
+                            digest: definition,
+                        },
+                        purpose: "operational",
+                        selection_reason: "Revue Atlas",
+                        scope_ref: scope,
+                    });
+                    submittedRun = input.aggregate_id;
+                    return Promise.resolve({
+                        receipt_id: "00000000-0000-4000-8000-000000000030",
+                        command_id: input.command_id,
+                        aggregate_id: input.aggregate_id,
+                        accepted_at: "2026-11-23T12:00:00Z",
+                        new_revision: 1,
+                        operation_id: null,
+                        state: "completed",
+                        event_cursor: {
+                            stream_id: "00000000-0000-4000-8000-000000000002",
+                            sequence: 13,
+                        },
+                        result_ref: `workflow-run:${input.aggregate_id}`,
+                    } satisfies CommandReceipt);
+                }
+                case "op_get_run":
+                    expect(input).toEqual({
+                        project_id: projectId,
+                        payload: { run_id: submittedRun },
+                    });
+                    getReads += 1;
+                    if (getReads === 1) return creationRead;
+                    if (startRequested) {
+                        startReadRequested = true;
+                        return startRead;
+                    }
+                    return Promise.resolve(
+                        atSequence(response({ ...prepared, run_id: submittedRun }), 13),
+                    );
+                case "op_start_run": {
+                    if (!("command_id" in input))
+                        throw new Error("Commande de démarrage attendue.");
+                    expect(input.project_id).toBe(projectId);
+                    expect(input.aggregate_id).toBe(submittedRun);
+                    expect(input.expected_revision).toBe(1);
+                    expect(input.payload).toEqual({});
+                    startRequested = true;
+                    return Promise.resolve({
+                        receipt_id: "00000000-0000-4000-8000-000000000031",
+                        command_id: input.command_id,
+                        aggregate_id: input.aggregate_id,
+                        accepted_at: "2026-11-23T12:00:01Z",
+                        new_revision: 2,
+                        operation_id: null,
+                        state: "completed",
+                        event_cursor: {
+                            stream_id: "00000000-0000-4000-8000-000000000002",
+                            sequence: 14,
+                        },
+                        result_ref: `workflow-run:${input.aggregate_id}`,
+                    } satisfies CommandReceipt);
+                }
+                default:
+                    throw new Error(`Opération inattendue : ${command}`);
+            }
+        },
+    );
+    vi.stubGlobal("__TAURI_INTERNALS__", { invoke });
+    const user = userEvent.setup();
+    render(<App agentCount={4} eventTotalCount={12} diffLineCount={20} />);
+
+    const listing = await browseRuns(user);
+    expect(await listing.findByText("Aucun run sur cette page.")).toBeVisible();
+    await fillRunPreparation(user);
+    await user.click(screen.getByRole("button", { name: "Préparer le run" }));
+    await waitFor(() => expect(getReads).toBe(1));
+    expect(listPhases).toEqual(["empty"]);
+    const createdRun = submittedRun;
+    const resolveCreation = finishCreation;
+    if (createdRun === undefined || resolveCreation === undefined) {
+        throw new Error("Lecture de confirmation de création indisponible.");
+    }
+    await act(async () => {
+        phase = "prepared";
+        resolveCreation(atSequence(response({ ...prepared, run_id: createdRun }), 13));
+        await creationRead;
+    });
+    const created = within(await screen.findByRole("region", { name: "Run créé" }));
+    expect(created.getByText(createdRun)).toBeVisible();
+    const currentList = () => within(screen.getByRole("region", { name: "Runs du projet" }));
+    await waitFor(() => expect(currentList().getByText(createdRun)).toBeVisible());
+    expect(currentList().getByText("Préparé")).toBeVisible();
+    expect(listPhases).toContain("prepared");
+
+    await user.click(created.getByRole("button", { name: "Consulter le run créé" }));
+    const detail = within(await screen.findByRole("region", { name: "Détail du run" }));
+    const startButton = await detail.findByRole("button", { name: "Démarrer le run" });
+    const beforeStartReadCount = listPhases.length;
+    await user.click(startButton);
+    await waitFor(() => expect(startReadRequested).toBe(true));
+    expect(listPhases).toHaveLength(beforeStartReadCount);
+    const resolveStart = finishStart;
+    if (resolveStart === undefined) {
+        throw new Error("Lecture de confirmation de démarrage indisponible.");
+    }
+    await act(async () => {
+        phase = "running";
+        resolveStart(
+            atSequence(
+                response({ ...prepared, run_id: createdRun, state: "running", revision: 2 }),
+                14,
+            ),
+        );
+        await startRead;
+    });
+    expect(await detail.findByText("En cours")).toBeVisible();
+    await waitFor(() => expect(currentList().getByText("En cours")).toBeVisible());
+    expect(currentList().getByText(createdRun)).toBeVisible();
+    expect(listPhases.slice(beforeStartReadCount)).toContain("running");
+    expect(invoke.mock.calls.filter(([command]) => command === "op_create_run")).toHaveLength(1);
+    expect(invoke.mock.calls.filter(([command]) => command === "op_start_run")).toHaveLength(1);
 });
