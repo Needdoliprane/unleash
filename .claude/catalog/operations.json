@@ -861,7 +861,7 @@
       ],
       "status": "proposed",
       "contract_stage": "documented",
-      "description": "Source/AST, diagnostics, usages et limites ; manifeste d’automatisation, modes, données/mapping, évaluation exacte et qualification. Rapports de validation accessibles par les références de résultat communes, sans nouvelle requête propre inventée.",
+      "description": "Source, diagnostics, usages et limites. `GetWorkflowValidation` relit le rapport engagé identifié par la référence de résultat du reçu, dans son projet. Manifestes d’automatisation, modes, données, mapping, évaluation et qualification.",
       "contract_source": {
         "path": "architecture/client-operation-catalog.md",
         "subject": "Workflows 01–05 + AUTOMATION-01–04"
@@ -881,7 +881,7 @@
       ],
       "status": "proposed",
       "contract_stage": "documented",
-      "description": "Source/AST, diagnostics, usages et limites ; manifeste d’automatisation, modes, données/mapping, évaluation exacte et qualification. Rapports de validation accessibles par les références de résultat communes, sans nouvelle requête propre inventée.",
+      "description": "Source, diagnostics, usages et limites. `GetWorkflowValidation` relit le rapport engagé identifié par la référence de résultat du reçu, dans son projet. Manifestes d’automatisation, modes, données, mapping, évaluation et qualification.",
       "contract_source": {
         "path": "architecture/client-operation-catalog.md",
         "subject": "Workflows 01–05 + AUTOMATION-01–04"
@@ -900,7 +900,7 @@
       ],
       "status": "proposed",
       "contract_stage": "documented",
-      "description": "Source/AST, diagnostics, usages et limites ; manifeste d’automatisation, modes, données/mapping, évaluation exacte et qualification. Rapports de validation accessibles par les références de résultat communes, sans nouvelle requête propre inventée.",
+      "description": "Source, diagnostics, usages et limites. `GetWorkflowValidation` relit le rapport engagé identifié par la référence de résultat du reçu, dans son projet. Manifestes d’automatisation, modes, données, mapping, évaluation et qualification.",
       "contract_source": {
         "path": "architecture/client-operation-catalog.md",
         "subject": "Workflows 01–05 + AUTOMATION-01–04"
@@ -920,7 +920,7 @@
       ],
       "status": "proposed",
       "contract_stage": "documented",
-      "description": "Source/AST, diagnostics, usages et limites ; manifeste d’automatisation, modes, données/mapping, évaluation exacte et qualification. Rapports de validation accessibles par les références de résultat communes, sans nouvelle requête propre inventée.",
+      "description": "Source, diagnostics, usages et limites. `GetWorkflowValidation` relit le rapport engagé identifié par la référence de résultat du reçu, dans son projet. Manifestes d’automatisation, modes, données, mapping, évaluation et qualification.",
       "contract_source": {
         "path": "architecture/client-operation-catalog.md",
         "subject": "Workflows 01–05 + AUTOMATION-01–04"
@@ -958,7 +958,7 @@
       ],
       "status": "proposed",
       "contract_stage": "documented",
-      "description": "Source/AST, diagnostics, usages et limites ; manifeste d’automatisation, modes, données/mapping, évaluation exacte et qualification. Rapports de validation accessibles par les références de résultat communes, sans nouvelle requête propre inventée.",
+      "description": "Source, diagnostics, usages et limites. `GetWorkflowValidation` relit le rapport engagé identifié par la référence de résultat du reçu, dans son projet. Manifestes d’automatisation, modes, données, mapping, évaluation et qualification.",
       "contract_source": {
         "path": "architecture/client-operation-catalog.md",
         "subject": "Workflows 01–05 + AUTOMATION-01–04"
@@ -1540,7 +1540,7 @@
       ],
       "status": "proposed",
       "contract_stage": "documented",
-      "description": "Source/AST, diagnostics, usages et limites ; manifeste d’automatisation, modes, données/mapping, évaluation exacte et qualification. Rapports de validation accessibles par les références de résultat communes, sans nouvelle requête propre inventée.",
+      "description": "Source, diagnostics, usages et limites. `GetWorkflowValidation` relit le rapport engagé identifié par la référence de résultat du reçu, dans son projet. Manifestes d’automatisation, modes, données, mapping, évaluation et qualification.",
       "contract_source": {
         "path": "architecture/client-operation-catalog.md",
         "subject": "Workflows 01–05 + AUTOMATION-01–04"
@@ -1684,7 +1684,7 @@
       ],
       "status": "proposed",
       "contract_stage": "documented",
-      "description": "Source/AST, diagnostics, usages et limites ; manifeste d’automatisation, modes, données/mapping, évaluation exacte et qualification. Rapports de validation accessibles par les références de résultat communes, sans nouvelle requête propre inventée.",
+      "description": "Source, diagnostics, usages et limites. `GetWorkflowValidation` relit le rapport engagé identifié par la référence de résultat du reçu, dans son projet. Manifestes d’automatisation, modes, données, mapping, évaluation et qualification.",
       "contract_source": {
         "path": "architecture/client-operation-catalog.md",
         "subject": "Workflows 01–05 + AUTOMATION-01–04"
@@ -1707,7 +1707,7 @@
       ],
       "status": "proposed",
       "contract_stage": "documented",
-      "description": "Source/AST, diagnostics, usages et limites ; manifeste d’automatisation, modes, données/mapping, évaluation exacte et qualification. Rapports de validation accessibles par les références de résultat communes, sans nouvelle requête propre inventée.",
+      "description": "Source, diagnostics, usages et limites. `GetWorkflowValidation` relit le rapport engagé identifié par la référence de résultat du reçu, dans son projet. Manifestes d’automatisation, modes, données, mapping, évaluation et qualification.",
       "contract_source": {
         "path": "architecture/client-operation-catalog.md",
         "subject": "Workflows 01–05 + AUTOMATION-01–04"
@@ -1726,7 +1726,7 @@
       ],
       "status": "proposed",
       "contract_stage": "documented",
-      "description": "Source/AST, diagnostics, usages et limites ; manifeste d’automatisation, modes, données/mapping, évaluation exacte et qualification. Rapports de validation accessibles par les références de résultat communes, sans nouvelle requête propre inventée.",
+      "description": "Source, diagnostics, usages et limites. `GetWorkflowValidation` relit le rapport engagé identifié par la référence de résultat du reçu, dans son projet. Manifestes d’automatisation, modes, données, mapping, évaluation et qualification.",
       "contract_source": {
         "path": "architecture/client-operation-catalog.md",
         "subject": "Workflows 01–05 + AUTOMATION-01–04"
@@ -1745,7 +1745,7 @@
       ],
       "status": "proposed",
       "contract_stage": "documented",
-      "description": "Source/AST, diagnostics, usages et limites ; manifeste d’automatisation, modes, données/mapping, évaluation exacte et qualification. Rapports de validation accessibles par les références de résultat communes, sans nouvelle requête propre inventée.",
+      "description": "Source, diagnostics, usages et limites. `GetWorkflowValidation` relit le rapport engagé identifié par la référence de résultat du reçu, dans son projet. Manifestes d’automatisation, modes, données, mapping, évaluation et qualification.",
       "contract_source": {
         "path": "architecture/client-operation-catalog.md",
         "subject": "Workflows 01–05 + AUTOMATION-01–04"
@@ -1764,7 +1764,7 @@
       ],
       "status": "proposed",
       "contract_stage": "documented",
-      "description": "Source/AST, diagnostics, usages et limites ; manifeste d’automatisation, modes, données/mapping, évaluation exacte et qualification. Rapports de validation accessibles par les références de résultat communes, sans nouvelle requête propre inventée.",
+      "description": "Source, diagnostics, usages et limites. `GetWorkflowValidation` relit le rapport engagé identifié par la référence de résultat du reçu, dans son projet. Manifestes d’automatisation, modes, données, mapping, évaluation et qualification.",
       "contract_source": {
         "path": "architecture/client-operation-catalog.md",
         "subject": "Workflows 01–05 + AUTOMATION-01–04"
@@ -2223,7 +2223,7 @@
       ],
       "status": "proposed",
       "contract_stage": "documented",
-      "description": "Source/AST, diagnostics, usages et limites ; manifeste d’automatisation, modes, données/mapping, évaluation exacte et qualification. Rapports de validation accessibles par les références de résultat communes, sans nouvelle requête propre inventée.",
+      "description": "Source, diagnostics, usages et limites. `GetWorkflowValidation` relit le rapport engagé identifié par la référence de résultat du reçu, dans son projet. Manifestes d’automatisation, modes, données, mapping, évaluation et qualification.",
       "contract_source": {
         "path": "architecture/client-operation-catalog.md",
         "subject": "Workflows 01–05 + AUTOMATION-01–04"
@@ -2245,7 +2245,7 @@
       ],
       "status": "proposed",
       "contract_stage": "documented",
-      "description": "Source/AST, diagnostics, usages et limites ; manifeste d’automatisation, modes, données/mapping, évaluation exacte et qualification. Rapports de validation accessibles par les références de résultat communes, sans nouvelle requête propre inventée.",
+      "description": "Source, diagnostics, usages et limites. `GetWorkflowValidation` relit le rapport engagé identifié par la référence de résultat du reçu, dans son projet. Manifestes d’automatisation, modes, données, mapping, évaluation et qualification.",
       "contract_source": {
         "path": "architecture/client-operation-catalog.md",
         "subject": "Workflows 01–05 + AUTOMATION-01–04"
@@ -2302,7 +2302,7 @@
       ],
       "status": "proposed",
       "contract_stage": "documented",
-      "description": "ID/révision de draft, version compiler, et fixtures/seed pour simulation ; diagnostics localisés. Une simulation ne déclenche ni outils réels ni API modèle implicite. Résultat attaché à l’entrée exacte.",
+      "description": "La validation engage un [rapport](../features/F006-workflow-compiler/interfaces.md#rapport-de-validation) pour un projet, une révision de brouillon, un catalogue figé et une version du compilateur. La simulation utilise des fixtures et une seed, sans outil réel ni API modèle implicite.",
       "contract_source": {
         "path": "architecture/client-operation-catalog.md",
         "subject": "Validation workflow / F006"
@@ -3483,7 +3483,7 @@
       ],
       "status": "proposed",
       "contract_stage": "documented",
-      "description": "Source/AST, diagnostics, usages et limites ; manifeste d’automatisation, modes, données/mapping, évaluation exacte et qualification. Rapports de validation accessibles par les références de résultat communes, sans nouvelle requête propre inventée.",
+      "description": "Source, diagnostics, usages et limites. `GetWorkflowValidation` relit le rapport engagé identifié par la référence de résultat du reçu, dans son projet. Manifestes d’automatisation, modes, données, mapping, évaluation et qualification.",
       "contract_source": {
         "path": "architecture/client-operation-catalog.md",
         "subject": "Workflows 01–05 + AUTOMATION-01–04"
@@ -3741,7 +3741,7 @@
       ],
       "status": "proposed",
       "contract_stage": "documented",
-      "description": "ID/révision de draft, version compiler, et fixtures/seed pour simulation ; diagnostics localisés. Une simulation ne déclenche ni outils réels ni API modèle implicite. Résultat attaché à l’entrée exacte.",
+      "description": "La validation engage un [rapport](../features/F006-workflow-compiler/interfaces.md#rapport-de-validation) pour un projet, une révision de brouillon, un catalogue figé et une version du compilateur. La simulation utilise des fixtures et une seed, sans outil réel ni API modèle implicite.",
       "contract_source": {
         "path": "architecture/client-operation-catalog.md",
         "subject": "Validation workflow / F006"
@@ -4016,7 +4016,7 @@
       ],
       "status": "proposed",
       "contract_stage": "documented",
-      "description": "ID/révision de draft, version compiler, et fixtures/seed pour simulation ; diagnostics localisés. Une simulation ne déclenche ni outils réels ni API modèle implicite. Résultat attaché à l’entrée exacte.",
+      "description": "La validation engage un [rapport](../features/F006-workflow-compiler/interfaces.md#rapport-de-validation) pour un projet, une révision de brouillon, un catalogue figé et une version du compilateur. La simulation utilise des fixtures et une seed, sans outil réel ni API modèle implicite.",
       "contract_source": {
         "path": "architecture/client-operation-catalog.md",
         "subject": "Validation workflow / F006"

@@ -17,6 +17,15 @@
     "payload"
   ],
   "$defs": {
+    "workflow_catalogue_snapshot_ref": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "digest"],
+      "properties": {
+        "schema_version": { "const": 1 },
+        "digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" }
+      }
+    },
     "provider_profile_version_ref": {
       "type": "object",
       "additionalProperties": false,
@@ -758,6 +767,30 @@
                     }
                   },
                   { "$ref": "#/$defs/create_operational_run/properties/source" }
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "command_type": { "const": "ValidateWorkflowDraft" } } },
+      "then": {
+        "properties": {
+          "project_id": { "type": "string", "format": "uuid" },
+          "expected_revision": { "const": 0 },
+          "payload": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["draft_id", "draft_revision", "catalogue_snapshot_ref"],
+            "properties": {
+              "draft_id": { "type": "string", "format": "uuid" },
+              "draft_revision": { "$ref": "#/$defs/wire_unsigned_integer", "minimum": 1 },
+              "catalogue_snapshot_ref": {
+                "oneOf": [
+                  { "type": "null" },
+                  { "$ref": "#/$defs/workflow_catalogue_snapshot_ref" }
                 ]
               }
             }

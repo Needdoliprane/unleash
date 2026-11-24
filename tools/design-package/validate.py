@@ -146,6 +146,14 @@ try:
         "examples/ipc-get-workflow-text-draft-response.json": (
             "schemas/ipc-query-response.schema.json", "workflow_text_draft_response",
         ),
+        "examples/ipc-validate-workflow-draft.json": ("schemas/ipc-command.schema.json", None),
+        "examples/ipc-get-workflow-validation-query.json": ("schemas/ipc-query.schema.json", None),
+        "examples/ipc-get-workflow-validation-valid-response.json": (
+            "schemas/ipc-query-response.schema.json", "workflow_validation_response",
+        ),
+        "examples/ipc-get-workflow-validation-invalid-response.json": (
+            "schemas/ipc-query-response.schema.json", "workflow_validation_response",
+        ),
         "examples/ipc-publish-workflow-version.json": ("schemas/ipc-command.schema.json", None),
         "examples/ipc-list-runs-query.json": ("schemas/ipc-query.schema.json", None),
         "examples/ipc-list-runs-response.json": (

@@ -62,6 +62,126 @@
         }
       }
     },
+    "workflow_validation_diagnostic": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "severity", "pointer", "message"],
+      "properties": {
+        "code": { "type": "string", "pattern": "^[A-Z][A-Za-z0-9]*$" },
+        "severity": { "enum": ["error", "warning", "info"] },
+        "pointer": { "type": "string", "pattern": "^(?:/(?:[^~/]|~[01])*)*$" },
+        "message": { "type": "string", "minLength": 1 },
+        "rule": { "type": "string", "minLength": 1 },
+        "source_span_ref": { "type": "string", "minLength": 1 },
+        "related_node_ids": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "suggestion": { "type": "string", "minLength": 1 }
+      }
+    },
+    "workflow_validation_error_diagnostic": {
+      "properties": { "severity": { "const": "error" } },
+      "required": ["severity"]
+    },
+    "workflow_validation_bounds": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "activation_upper_bound", "max_step_activations", "max_agent_executions",
+        "max_concurrent_action_executions"
+      ],
+      "properties": {
+        "activation_upper_bound": { "type": "integer", "minimum": 1, "maximum": 100000 },
+        "max_step_activations": {
+          "$ref": "urn:ovpt:unleash:workflow:1.2#/properties/budget/properties/max_step_activations"
+        },
+        "max_agent_executions": {
+          "$ref": "urn:ovpt:unleash:workflow:1.2#/properties/budget/properties/max_agent_executions"
+        },
+        "max_concurrent_action_executions": {
+          "$ref": "urn:ovpt:unleash:workflow:1.2#/properties/budget/properties/max_concurrent_action_executions"
+        }
+      }
+    },
+    "workflow_validation_response": {
+      "$ref": "#",
+      "required": ["watermark"],
+      "properties": {
+        "watermark": { "type": "object" },
+        "result": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "schema_version", "project_id", "validation_report_id", "draft_id", "draft_revision",
+            "draft_digest", "catalogue_snapshot_ref", "compiler_version", "workflow_profile", "status",
+            "diagnostics", "diagnostics_truncated", "bounds", "required_capabilities"
+          ],
+          "properties": {
+            "schema_version": { "const": 1 },
+            "project_id": { "$ref": "#/$defs/uuid" },
+            "validation_report_id": { "$ref": "#/$defs/uuid" },
+            "draft_id": { "$ref": "#/$defs/uuid" },
+            "draft_revision": { "$ref": "#/$defs/wire_uint", "minimum": 1 },
+            "draft_digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+            "catalogue_snapshot_ref": {
+              "$ref": "urn:ovpt:unleash:ipc-command:2#/$defs/workflow_catalogue_snapshot_ref"
+            },
+            "compiler_version": { "type": "string", "minLength": 1, "maxLength": 128 },
+            "workflow_profile": {
+              "enum": [null, "unleash.workflow.v1", "unleash.workflow.v1.1", "unleash.workflow.v1.2"]
+            },
+            "status": { "enum": ["valid", "invalid"] },
+            "diagnostics": {
+              "type": "array",
+              "items": { "$ref": "#/$defs/workflow_validation_diagnostic" }
+            },
+            "diagnostics_truncated": { "type": "boolean" },
+            "bounds": {
+              "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/workflow_validation_bounds" }]
+            },
+            "required_capabilities": {
+              "type": ["array", "null"],
+              "uniqueItems": true,
+              "items": { "$ref": "urn:ovpt:unleash:role:1#/properties/requested_capabilities/items" }
+            },
+            "normalized_digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" }
+          },
+          "if": { "properties": { "status": { "const": "valid" } } },
+          "then": {
+            "required": ["normalized_digest"],
+            "properties": {
+              "diagnostics": { "not": { "contains": { "$ref": "#/$defs/workflow_validation_error_diagnostic" } } },
+              "workflow_profile": { "type": "string" },
+              "bounds": { "type": "object" },
+              "required_capabilities": { "type": "array" }
+            }
+          },
+          "else": {
+            "properties": {
+              "normalized_digest": false,
+              "diagnostics": { "contains": { "$ref": "#/$defs/workflow_validation_error_diagnostic" } }
+            }
+          },
+          "allOf": [
+            {
+              "if": { "properties": { "workflow_profile": { "const": "unleash.workflow.v1" } } },
+              "then": {
+                "properties": {
+                  "bounds": {
+                    "properties": {
+                      "max_agent_executions": { "minimum": 1 },
+                      "max_concurrent_action_executions": { "const": 0 }
+                    }
+                  }
+                }
+              }
+            }
+          ]
+        }
+      }
+    },
     "workflow_run_projection_response": {
       "type": "object",
       "additionalProperties": false,

@@ -1,0 +1,19 @@
+{
+  "protocol_version": "unleash.ipc.v2",
+  "request_id": "10000000-0000-4000-8000-000000000053",
+  "command_id": "10000000-0000-4000-8000-000000000054",
+  "authority_generation": "10000000-0000-4000-8000-000000000003",
+  "actor_ref": null,
+  "project_id": "10000000-0000-4000-8000-000000000004",
+  "aggregate_id": "10000000-0000-4000-8000-000000000034",
+  "expected_revision": 0,
+  "command_type": "ValidateWorkflowDraft",
+  "payload": {
+    "draft_id": "10000000-0000-4000-8000-000000000033",
+    "draft_revision": 3,
+    "catalogue_snapshot_ref": {
+      "schema_version": 1,
+      "digest": "sha256:a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2"
+    }
+  }
+}
