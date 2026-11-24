@@ -1,0 +1,34 @@
+{
+  "request_id": "00000000-0000-4000-8000-000000000001",
+  "watermark": {
+    "stream_id": "00000000-0000-4000-8000-000000000006",
+    "sequence": 42
+  },
+  "result": {
+    "project_id": "00000000-0000-4000-8000-000000000010",
+    "repo_id": "repo-01",
+    "object_format": "sha1",
+    "git_profile_digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+    "observed_at": "2026-11-24T12:00:00Z",
+    "items": [
+      {
+        "path": "/fixture/repo",
+        "head_oid": {
+          "format": "sha1",
+          "hex": "2222222222222222222222222222222222222222"
+        },
+        "branch_ref": "refs/heads/main",
+        "dirty": "dirty",
+        "operations": [],
+        "operations_complete": true,
+        "operation_branches": [],
+        "operation_branches_complete": true,
+        "ownership": "external"
+      }
+    ],
+    "coverage": {
+      "status": "complete"
+    },
+    "next_cursor": null
+  }
+}

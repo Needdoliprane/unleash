@@ -103,6 +103,45 @@
       }
     },
     {
+      "if": {
+        "properties": {
+          "query_type": {
+            "const": "ListWorktrees"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "project_id": {
+            "$ref": "#/$defs/run_list_project_id"
+          },
+          "payload": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "repo_id"
+            ],
+            "properties": {
+              "repo_id": {
+                "type": "string",
+                "minLength": 1,
+                "pattern": "\\S"
+              },
+              "page_size": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 100,
+                "default": 50
+              },
+              "opaque_cursor": {
+                "$ref": "#/$defs/run_page_cursor"
+              }
+            }
+          }
+        }
+      }
+    },
+    {
       "if": { "properties": { "query_type": { "const": "ListRuns" } } },
       "then": {
         "properties": {

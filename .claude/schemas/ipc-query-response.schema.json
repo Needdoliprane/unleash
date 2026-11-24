@@ -41,6 +41,241 @@
     }
   },
   "$defs": {
+    "worktree_branch_ref": {"type": "string", "pattern": "^refs/heads/.+", "not": {"pattern": "[\\u0000-\\u001f\\u007f-\\u009f]"}},
+    "worktree_list_response": {
+      "$ref": "#",
+      "properties": {
+        "result": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "project_id",
+            "repo_id",
+            "object_format",
+            "git_profile_digest",
+            "observed_at",
+            "items",
+            "coverage",
+            "next_cursor"
+          ],
+          "properties": {
+            "project_id": {"$ref": "urn:ovpt:unleash:ipc-query:1#/$defs/run_list_project_id"},
+            "repo_id": {"type": "string", "minLength": 1, "pattern": "\\S"},
+            "object_format": {"enum": ["sha1", "sha256"]},
+            "git_profile_digest": {"type": "string", "minLength": 71, "maxLength": 71, "pattern": "^sha256:[0-9a-f]{64}$"},
+            "observed_at": {"type": "string", "format": "date-time"},
+            "items": {
+              "type": "array",
+              "maxItems": 100,
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "not": {
+                  "required": ["head_oid", "branch_ref"],
+                  "properties": {"head_oid": {"type": "null"}, "branch_ref": {"type": "null"}}
+                },
+                "required": [
+                  "path",
+                  "head_oid",
+                  "branch_ref",
+                  "dirty",
+                  "operations",
+                  "operations_complete",
+                  "operation_branches",
+                  "operation_branches_complete",
+                  "ownership"
+                ],
+                "properties": {
+                  "path": {"type": "string", "minLength": 1},
+                  "head_oid": {
+                    "oneOf": [
+                      {"type": "null"},
+                      {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "required": ["format", "hex"],
+                        "properties": {
+                          "format": {"const": "sha1"},
+                          "hex": {"type": "string", "minLength": 40, "maxLength": 40, "pattern": "^[0-9a-f]{40}$"}
+                        }
+                      },
+                      {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "required": ["format", "hex"],
+                        "properties": {
+                          "format": {"const": "sha256"},
+                          "hex": {"type": "string", "minLength": 64, "maxLength": 64, "pattern": "^[0-9a-f]{64}$"}
+                        }
+                      }
+                    ]
+                  },
+                  "branch_ref": {"anyOf": [{"type": "null"}, {"$ref": "#/$defs/worktree_branch_ref"}]},
+                  "dirty": {"enum": ["clean", "dirty", "unknown"]},
+                  "operations": {
+                    "type": "array",
+                    "maxItems": 4,
+                    "uniqueItems": true,
+                    "items": {"enum": ["merge", "rebase", "bisect", "cherry_pick"]}
+                  },
+                  "operations_complete": {"type": "boolean"},
+                  "operation_branches": {
+                    "type": "array",
+                    "maxItems": 2,
+                    "uniqueItems": true,
+                    "items": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "required": ["operation", "branch_ref", "provenance"],
+                      "properties": {
+                        "operation": {"enum": ["rebase", "bisect"]},
+                        "branch_ref": {"$ref": "#/$defs/worktree_branch_ref"},
+                        "provenance": {"enum": ["rebase_metadata", "bisect_metadata"]}
+                      },
+                      "oneOf": [
+                        {
+                          "properties": {"operation": {"const": "rebase"}, "provenance": {"const": "rebase_metadata"}}
+                        },
+                        {
+                          "properties": {"operation": {"const": "bisect"}, "provenance": {"const": "bisect_metadata"}}
+                        }
+                      ]
+                    }
+                  },
+                  "operation_branches_complete": {"type": "boolean"},
+                  "ownership": {"enum": ["managed", "external", "unknown"]}
+                },
+                "allOf": [
+                  {
+                    "if": {
+                      "properties": {
+                        "operations": {"contains": {"const": "rebase"}},
+                        "operation_branches_complete": {"const": true}
+                      }
+                    },
+                    "then": {
+                      "properties": {
+                        "operation_branches": {
+                          "contains": {"properties": {"operation": {"const": "rebase"}}, "required": ["operation"]}
+                        }
+                      }
+                    }
+                  },
+                  {
+                    "if": {
+                      "properties": {
+                        "operation_branches": {
+                          "contains": {"properties": {"operation": {"const": "rebase"}}, "required": ["operation"]}
+                        }
+                      }
+                    },
+                    "then": {"properties": {"operations": {"contains": {"const": "rebase"}}}}
+                  },
+                  {
+                    "if": {
+                      "properties": {
+                        "operations": {"contains": {"const": "bisect"}},
+                        "operation_branches_complete": {"const": true}
+                      }
+                    },
+                    "then": {
+                      "properties": {
+                        "operation_branches": {
+                          "contains": {"properties": {"operation": {"const": "bisect"}}, "required": ["operation"]}
+                        }
+                      }
+                    }
+                  },
+                  {
+                    "if": {
+                      "properties": {
+                        "operation_branches": {
+                          "contains": {"properties": {"operation": {"const": "bisect"}}, "required": ["operation"]}
+                        }
+                      }
+                    },
+                    "then": {"properties": {"operations": {"contains": {"const": "bisect"}}}}
+                  }
+                ]
+              }
+            },
+            "coverage": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["status"],
+              "properties": {"status": {"enum": ["complete", "incomplete"]}}
+            },
+            "next_cursor": {"$ref": "urn:ovpt:unleash:ipc-query:1#/$defs/run_page_cursor"}
+          },
+          "allOf": [
+            {
+              "if": {
+                "properties": {
+                  "items": {
+                    "contains": {
+                      "anyOf": [
+                        {"properties": {"dirty": {"const": "unknown"}}, "required": ["dirty"]},
+                        {
+                          "properties": {"operations_complete": {"const": false}},
+                          "required": ["operations_complete"]
+                        },
+                        {
+                          "properties": {"operation_branches_complete": {"const": false}},
+                          "required": ["operation_branches_complete"]
+                        }
+                      ]
+                    }
+                  }
+                }
+              },
+              "then": {"properties": {"coverage": {"properties": {"status": {"const": "incomplete"}}}}}
+            },
+            {
+              "if": {"properties": {"items": {"maxItems": 0}}},
+              "then": {"properties": {"next_cursor": {"type": "null"}}}
+            },
+            {
+              "if": {"properties": {"object_format": {"const": "sha1"}}},
+              "then": {
+                "properties": {
+                  "items": {
+                    "items": {
+                      "properties": {
+                        "head_oid": {
+                          "anyOf": [
+                            {"type": "null"},
+                            {"properties": {"format": {"const": "sha1"}}, "required": ["format"]}
+                          ]
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            },
+            {
+              "if": {"properties": {"object_format": {"const": "sha256"}}},
+              "then": {
+                "properties": {
+                  "items": {
+                    "items": {
+                      "properties": {
+                        "head_oid": {
+                          "anyOf": [
+                            {"type": "null"},
+                            {"properties": {"format": {"const": "sha256"}}, "required": ["format"]}
+                          ]
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          ]
+        }
+      }
+    },
     "workflow_text_draft_response": {
       "$ref": "#",
       "required": ["watermark"],

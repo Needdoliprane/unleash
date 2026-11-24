@@ -155,6 +155,10 @@ try:
             "schemas/ipc-query-response.schema.json", "workflow_validation_response",
         ),
         "examples/ipc-publish-workflow-version.json": ("schemas/ipc-command.schema.json", None),
+        "examples/ipc-list-worktrees-query.json": ("schemas/ipc-query.schema.json", None),
+        "examples/ipc-list-worktrees-response.json": (
+            "schemas/ipc-query-response.schema.json", "worktree_list_response",
+        ),
         "examples/ipc-list-runs-query.json": ("schemas/ipc-query.schema.json", None),
         "examples/ipc-list-runs-response.json": (
             "schemas/ipc-query-response.schema.json", "workflow_run_list_response",

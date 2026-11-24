@@ -14,7 +14,7 @@
     "cache/"
   ],
   "hash_algorithm": "sha256",
-  "source_tree_digest": "65128d8c00409439f363f73adcbd43fdacf85fbeaffed035b36d387d1268c8d9",
+  "source_tree_digest": "ebb300e8f3d8988cef47ae68fb85742bb755c0e5362fce1024bd84d92f5312e5",
   "files": [
     {
       "path": "INDEX.md",
@@ -1055,6 +1055,18 @@
       "media_type": "application/json"
     },
     {
+      "path": "examples/ipc-list-worktrees-query.json",
+      "sha256": "402b423e576f736e7191f5e6d554e6e8ddeef29c1c04269179fb1a1d93ca95bc",
+      "bytes": 281,
+      "media_type": "application/json"
+    },
+    {
+      "path": "examples/ipc-list-worktrees-response.json",
+      "sha256": "87a9bd186514ea59dfee2fe9758ebc6e9eaaca80f0617465a9afa1be590ff820",
+      "bytes": 942,
+      "media_type": "application/json"
+    },
+    {
       "path": "examples/ipc-provider-profile-list-response.json",
       "sha256": "48a934ec4f92a4198c935f091a00a98043fe96739a4066015f89d26e0ef2bf51",
       "bytes": 550,
@@ -1554,8 +1566,8 @@
     },
     {
       "path": "features/F010-git-coordination/interfaces.md",
-      "sha256": "0632ed8ff80289bc0bd1ebbfd1c2aafcb315fcd2a6bc2f24274fa9054f83da7e",
-      "bytes": 9860,
+      "sha256": "f0adc9686bbfe597e052887d3d09299b22cce6f2b4987c81465dab17486a6286",
+      "bytes": 17136,
       "media_type": "text/markdown"
     },
     {
@@ -2184,14 +2196,14 @@
     },
     {
       "path": "schemas/ipc-query-response.schema.json",
-      "sha256": "70f0540b29d0ba36929316ea491b9fc3e5ab39a6eb92290a4de7a66209086523",
-      "bytes": 23552,
+      "sha256": "c29d7d2339cb9d3e6d86fd5f35587b65f439711f7045464ab2388d61c6365d7f",
+      "bytes": 33020,
       "media_type": "application/json"
     },
     {
       "path": "schemas/ipc-query.schema.json",
-      "sha256": "2e5b4df01fb8594d00bab82693be6c9145c889300ce1494d79d25f5ae1a2214b",
-      "bytes": 5829,
+      "sha256": "c2909b5ad05a3c72cabb000b6157c3008fbdc35b5b83f0c43cdaed3d89821f99",
+      "bytes": 6751,
       "media_type": "application/json"
     },
     {
