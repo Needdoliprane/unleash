@@ -142,7 +142,7 @@ GetOverview expose la collection paginée et autorisée guided_setup_drafts, y c
 
 ### Discovery R6
 
-DiscoverResources/RecordDiscoveryDecision/AttachDiscoveryReceipt utilisent origin et TypedSourceRef du schéma discovery-receipt, dérivés d’une autorité authentifiée. `RecordDiscoveryDecision` rend l’UUID du reçu F009 dans le `result_ref` du reçu de commande. `GetDiscoveryReceipt` retourne le reçu immuable ou sa référence d’artefact ainsi que la projection `current_freshness` et `use_state` sous watermark. DiscoveryUseObservation et completion_revalidation distinguent recherche préalable effective, effet propre et changements extérieurs pertinents. Source sans Git et création sans agent sont des variantes normales, pas des exceptions avec identifiants fictifs.
+Les payloads de `DeclareWorkIntent`, `DiscoverResources` et `RecordDiscoveryDecision` sont fermés par le [schéma de commande IPC](../schemas/ipc-command.schema.json). `DiscoverResources` engage une page de recherche, relue avec `GetCommandReceipt` et sa référence de résultat exacte. L’origine et TypedSourceRef sont dérivés d’une autorité authentifiée. `RecordDiscoveryDecision` rend l’UUID du reçu F009 dans le `result_ref` du reçu de commande. `GetDiscoveryReceipt` retourne le reçu immuable ou sa référence d’artefact ainsi que la projection `current_freshness` et `use_state` sous watermark. DiscoveryUseObservation et completion_revalidation distinguent recherche préalable effective, effet propre et changements extérieurs pertinents. Source sans Git et création sans agent sont des variantes normales, pas des exceptions avec identifiants fictifs.
 
 ## Raccords R7
 

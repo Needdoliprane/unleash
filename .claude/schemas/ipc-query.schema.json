@@ -90,6 +90,10 @@
       "format": "uuid",
       "not": { "const": "00000000-0000-0000-0000-000000000000" }
     },
+    "discovery_query_result_ref": {
+      "type": "string", "minLength": 52, "maxLength": 52,
+      "pattern": "^discovery-query:(?!00000000-0000-0000-0000-000000000000$)[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+    },
     "run_page_cursor": {
       "type": ["string", "null"],
       "minLength": 1,
@@ -345,7 +349,16 @@
           }
         },
         "if": { "properties": { "payload": { "required": ["result_ref"] } } },
-        "then": { "properties": { "project_id": { "type": "string" } } }
+        "then": {
+          "properties": { "project_id": { "type": "string" } },
+          "if": { "properties": { "payload": { "properties": { "result_ref": { "pattern": "^discovery-query:" } } } } },
+          "then": {
+            "properties": {
+              "project_id": { "$ref": "#/$defs/run_list_project_id" },
+              "payload": { "properties": { "result_ref": { "$ref": "#/$defs/discovery_query_result_ref" } } }
+            }
+          }
+        }
       }
     }
   ]

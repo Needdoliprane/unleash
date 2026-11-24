@@ -1,0 +1,28 @@
+{
+  "protocol_version": "unleash.ipc.v2",
+  "request_id": "00000000-0000-4000-8000-000000000204",
+  "command_id": "00000000-0000-4000-8000-000000000224",
+  "authority_generation": "00000000-0000-4000-8000-000000000100",
+  "actor_ref": null,
+  "project_id": "00000000-0000-4000-8000-000000000102",
+  "aggregate_id": "00000000-0000-4000-8000-000000000104",
+  "expected_revision": 0,
+  "command_type": "RecordDiscoveryDecision",
+  "payload": {
+    "intent_id": "00000000-0000-4000-8000-000000000101",
+    "intent_revision": 1,
+    "query_ids": [
+      "00000000-0000-4000-8000-000000000103"
+    ],
+    "purpose": "pre_creation",
+    "decision": "create",
+    "strategy": "new",
+    "candidate_ids": [],
+    "justification": "Aucune ressource pertinente dans le registre du projet.",
+    "target_resource_id": null,
+    "target_version_ref": null,
+    "supersedes_receipt_id": null,
+    "creation_use_id": null,
+    "expected_catalog_revision": 89
+  }
+}

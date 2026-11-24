@@ -1,0 +1,18 @@
+{
+  "protocol_version": "unleash.ipc.v2",
+  "request_id": "00000000-0000-4000-8000-000000000201",
+  "command_id": "00000000-0000-4000-8000-000000000221",
+  "authority_generation": "00000000-0000-4000-8000-000000000100",
+  "actor_ref": null,
+  "project_id": "00000000-0000-4000-8000-000000000102",
+  "aggregate_id": "00000000-0000-4000-8000-000000000101",
+  "expected_revision": 0,
+  "command_type": "DeclareWorkIntent",
+  "payload": {
+    "category": "technical_resource",
+    "objective": "Créer une procédure locale documentée",
+    "mission_id": null,
+    "constraints": [],
+    "deadline_at": null
+  }
+}

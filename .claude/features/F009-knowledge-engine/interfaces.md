@@ -4,17 +4,20 @@
 
 Les commandes utilisent l'[enveloppe IPC v2](../../architecture/ipc-and-apis.md#commandenvelope) : protocol_version, request_id, command_id, authority_generation, actor_ref résolu serveur, project_id, aggregate_id, expected_revision, command_type et payload. `command_id` porte l'idempotence ; dans la lignée active, un même identifiant avec un digest différent donne `IdempotencyConflict`. Les exemples ci-dessous sont des fixtures JSON valides et ne décrivent aucune donnée existante. Le schéma discovery V1 est un contrat cible non publié corrigé en R6 puis resserré en R7 (`stream_id` UUID, `namespace_ref` égal à `scope_owner_key`), sans migration V2 ni objets produit supposés.
 
-`DiscoverResources` est une opération explicite du harness. Sa réponse devient une source durable du reçu ; un appel de recherche UI sans intention de création reste possible sans produire artificiellement une décision métier.
+`DeclareWorkIntent` crée un nouvel agrégat d'intention identifié par l'UUID `aggregate_id` de la commande avec `expected_revision=0`. Son payload fermé contient `category`, `objective`, `mission_id` (UUID ou `null`), `constraints` (tableau de chaînes) et `deadline_at` (date-heure ou `null`). Le serveur dérive et vérifie la portée exacte du projet et de la mission éventuelle depuis l'acteur et son mandat. Un humain peut déclarer une intention sans mission ni dépôt si sa portée l'autorise. Le CommandReceipt retourne l'`aggregate_id` et la `new_revision` engagés. La recherche et la décision ultérieures utilisent cette identité et cette révision.
+
+`DiscoverResources` est une opération explicite du harness. Chaque commande crée un nouvel agrégat de recherche UUID distinct avec `expected_revision=0`, lié à l'intention et à `intent_revision`, sans avancer la révision de l'intention. L'`aggregate_id` engagé identifie la recherche sous `query_id`. Le CommandReceipt porte `result_ref=discovery-query:<UUID>`. L'observation de la page, sa requête et sa couverture sont conservées même si un registre effectivement visité est vide. Un appel de recherche UI sans intention de création reste possible sans produire artificiellement une décision métier.
 
 ```json
 {
   "command_type": "DiscoverResources",
   "payload": {
-    "intent_id": "intent-email-01",
+    "intent_id": "00000000-0000-4000-8000-000000000101",
+    "intent_revision": 1,
     "resource_kinds": ["function", "contract", "test"],
     "query": "normaliser une adresse email pour les comptes clients",
-    "scope": {"project_id": "project-01", "repo_ids": ["repo-01"], "source_binding_ids": [], "registry_scopes": ["global", "project"]},
-    "consumer_context_ref": "consumer-mission-worktree-02",
+    "scope": {"project_id": "00000000-0000-4000-8000-000000000102", "repo_ids": ["repo-01"], "source_binding_ids": [], "registry_scopes": ["global", "project"]},
+    "consumer_context_ref": null,
     "include_unmerged": true,
     "required_freshness": "current_or_explicitly_partial",
     "limit": 20
@@ -22,16 +25,21 @@ Les commandes utilisent l'[enveloppe IPC v2](../../architecture/ipc-and-apis.md#
 }
 ```
 
-La réponse porte `query_id`, `catalog_revision`, `coverage_ref`, `coverage`, `results`, `warnings` et `next_cursor`. `coverage.status` vaut `complete`, `partial`, `stale` ou `unavailable`. Le paramètre `required_freshness` vaut `current` (refus si une source requise est `stale` ou `unknown`) ou `current_or_explicitly_partial` (réponse partielle admise avec limites listées). Un résultat inclut `resource_id`, `kind`, `owner_mission_id` si pertinent, `source_ref: TypedSourceRef`, `consumer_context_ref`, `annotations_observed_at`, méthode/profil/confiance et les états source/code/travail/intégration/fraîcheur/disponibilité. Les annotations suivent [shared-knowledge](../../specs/shared-knowledge.md) ; hors Git, code et intégration valent `not_applicable`. Le serveur filtre les candidats interdits avant calcul du total et ne retourne aucun identifiant de ressource inaccessible. Un projet sans dépôt envoie `repo_ids: []` et les bindings/registres autorisés ; le contexte consommateur désigne ses racines/affectations plutôt qu'un worktree fictif.
+Le `consumer_context_ref` peut être `null` lorsque le serveur résout le contexte depuis l'intention et la portée autorisée. Le curseur `opaque_cursor`, facultatif, demande une nouvelle page sous la même intention et sa révision. Chaque page est une nouvelle commande, un nouvel agrégat et une nouvelle observation durable ; elle ne révise pas l'intention. Le nombre de candidats retournés par page est paramétré par `limit`, compris entre 1 et 100. Dans le payload, le projet du scope doit égaler celui de l'enveloppe. Le curseur est lié au projet, au principal, à l’intention/révision, aux filtres et à la collecte d’origine. Un curseur d’une autre portée ou filtres donne `InvalidArgument`. Une collecte ou lignée de ce curseur qui n’est plus servie donne `ContractViolation/DISCOVERY_CURSOR_EXPIRED` avec `retry_class=after_refresh` avant engagement. Pour reprendre, demander la première page avec une nouvelle commande. Une page réapplique les autorisations actuelles et utilise le même catalogue et la même collecte autorisée.
 
-`coverage_ref` résout une observation durable : requête, catégories, scope/révision, catalogues et sources consultés même sans résultat, versions/générations/ACL, contexte de profils, curseurs, limites et candidats réellement retournés. Cette observation reste vérifiable si l'index est reconstruit. Un curseur de pagination et une révision de catalogue ne remplacent pas cette provenance.
+`GetCommandReceipt`, avec le projet, le `command_id` et ce `result_ref`, relit sous watermark **une page réellement engagée** : `query_id`, `intent_id`, `intent_revision`, `project_id`, `command_id`, `result_ref`, `catalog_revision`, `coverage_ref`, `coverage`, `results`, `warnings` et `next_cursor`. Le serveur vérifie à la résolution et à chaque relecture l'autorisation actuelle du projet, de l'acteur, des causes exactes, de la portée et des sources. La variante fermée `discovery_query_response` rend la page dans le [schéma de réponse IPC](../../schemas/ipc-query-response.schema.json). Il ne réexécute aucune recherche et ne reconstruit pas sa provenance. En l'absence d'engagement ou si la référence est incompatible avec cette commande et ce projet, le premier contrat causal actif retourne `NotFoundOrHidden`. Après tombstone, le suivi peut distinguer les métadonnées de commande d'une observation encore conservée. La disponibilité de la page dépend de sa propre rétention et de son autorisation.
+
+`coverage.status` vaut `complete`, `partial`, `stale` ou `unavailable`. Le paramètre `required_freshness` vaut `current` (refus si une source requise est `stale` ou `unknown`) ou `current_or_explicitly_partial` (réponse partielle admise avec limites listées). Un résultat inclut `resource_id`, `kind`, `owner_mission_id` si pertinent, `source_ref: TypedSourceRef`, `consumer_context_ref`, `annotations_observed_at`, méthode/profil/confiance et les états source/code/travail/intégration/fraîcheur/disponibilité. Les limites de couverture sont exposées dans `coverage.limitations` et les avertissements visibles dans `warnings`. Toute couverture non complète explicite ses limites sans détailler les sources interdites. Les annotations suivent [shared-knowledge](../../specs/shared-knowledge.md) ; hors Git, code et intégration valent `not_applicable`. Le serveur filtre les candidats interdits avant calcul du total et ne retourne aucun identifiant de ressource inaccessible. Un projet sans dépôt envoie `repo_ids: []` et les bindings/registres autorisés ; le contexte consommateur désigne ses racines/affectations plutôt qu'un worktree fictif.
+
+`coverage_ref` résout une observation durable : requête, catégories, scope/révision, catalogues et sources consultés même sans résultat, versions/générations/ACL, contexte de profils, curseurs, limites et candidats réellement retournés. La projection `coverage.scope` désigne la portée autorisée de cette page. `coverage.registry_observations` liste les couples type d’entrée et namespace effectivement consultés, avec leur `scope_owner_key` et la date de la visite. Un registre effectivement consulté peut figurer même s’il ne contient aucun candidat. Le serveur filtre aussi la couverture selon les droits. La réponse entière respecte le budget de trame IPC. Si la couverture durable et la page ne tiennent pas dans ce budget, le daemon retourne une erreur explicite. Cette observation reste vérifiable si l'index est reconstruit. Un curseur de pagination et une révision de catalogue ne remplacent pas cette provenance.
 
 ```json
 {
   "command_type": "RecordDiscoveryDecision",
   "payload": {
-    "intent_id": "intent-email-01",
-    "query_ids": ["query-17"],
+    "intent_id": "00000000-0000-4000-8000-000000000101",
+    "intent_revision": 1,
+    "query_ids": ["00000000-0000-4000-8000-000000000103"],
     "purpose": "pre_creation",
     "decision": "create",
     "strategy": "copy",
@@ -46,7 +54,7 @@ La réponse porte `query_id`, `catalog_revision`, `coverage_ref`, `coverage`, `r
 }
 ```
 
-Le reçu obtenu contient `origin`, les `source_refs` dérivées des recherches, `validation_basis`, la couverture et la relation temporelle `before_creation/observed_after_creation`. Ni origine, ni principal, ni cause, ni générations, ACL ou dates de validation ne sont des assertions d'autorité acceptées du client. Le serveur les résout depuis le canal/mandat et les objets durables. Les candidats/cibles proposés doivent appartenir aux recherches et au scope autorisés ; un identifiant lisible n'accorde pas accès.
+`RecordDiscoveryDecision` crée un nouvel agrégat UUID avec `expected_revision=0` et vérifie, avant engagement, que chaque recherche citée appartient à la même intention, à `intent_revision` et au même projet, que son catalogue correspond à `expected_catalog_revision` et reste applicable, et que les autres gardes d'autorité et de fraîcheur sont satisfaites. La décision n'avance pas la révision de l'intention. Le reçu obtenu contient `origin`, les `source_refs` dérivées des recherches, `validation_basis`, la couverture et la relation temporelle `before_creation/observed_after_creation`. Ni origine, ni principal, ni cause, ni générations, ACL ou dates de validation ne sont des assertions d'autorité acceptées du client. Le serveur les résout depuis le canal/mandat et les objets durables. Les candidats et cibles proposés doivent appartenir aux recherches et au scope autorisés. Une recherche inconnue ou hors de la portée de la commande rend `NotFoundOrHidden` sans divulgation.
 
 Pour une nouvelle décision, `RecordDiscoveryDecision` attribue au commit un UUID `receipt_id` F009. Le `CommandReceipt.result_ref` porte cet UUID ; il est distinct du `receipt_id` propre au CommandReceipt. Dans la fenêtre idempotente, un retry de la même commande engagée restitue le même CommandReceipt et la même référence F009 ; après expiration, les règles communes de tombstone s'appliquent sans nouvelle création. La décision, ses octets immuables et leur référence vivante sont engagés selon le stockage d'objets et la rétention Q-12 : échec de préparation ou d'engagement sans référence durable ne produit pas de succès.
 
@@ -100,6 +108,7 @@ Les fixtures relient la [requête du reçu](../../examples/ipc-get-discovery-rec
 | `profile_unavailable` | Serveur ou contexte de build inutilisable | Profil dégradé déclaré ; configuration (`SetSettings`) ou installation assistée (`AcquireTerminal` catalogué, [Q-13](../../specs/shared-knowledge.md#couverture-des-langages-v1)) |
 | `source_missing` | Source ou version référencée absente, purgée ou non résolue | Réconciliation de la source ou nouvelle sélection ; aucun résultat vide présenté comme complet |
 | `index_stale` | Génération d'index en retard sur la source requise | Attente de publication ou recherche partielle déclarée selon `required_freshness` |
+| `discovery_cursor_expired` | Collecte ou lignée d’un curseur valide qui n’est plus servie | Reprendre depuis la première page avec une nouvelle commande |
 | `source_advanced` | Génération changée avant publication | Nouvelle préparation de l'index |
 | `receipt_stale` | Préconditions pertinentes changées avant effet ou à la clôture | Nouvelle recherche/décision ; l'usage historique reste conservé |
 | `receipt_validation_expired` | Borne écoulée sans préconditions actuelles prouvées | Contrôle mécanique borné et nouvelle observation si références identiques ; sinon nouvelle discovery |
@@ -111,8 +120,10 @@ Les fixtures relient la [requête du reçu](../../examples/ipc-get-discovery-rec
 
 Les événements `SourceSnapshotCaptured`, `IndexGenerationPublished`, `SourceFreshnessChanged`, `DiscoveryReceiptRecorded`, `DiscoveryReceiptInvalidated`, `DiscoveryUseAuthorized`, `DiscoveryUseObserved`, `DiscoveryValidationObserved`, `DiscoveryClosureChecked`, `DependencyAdded` et `DependencySatisfied` portent leurs identifiants et séquences. Invalidated désigne l'éligibilité courante, pas la réécriture d'une preuve passée. Les payloads complets de code/documents ne sont pas diffusés sur le bus général.
 
+Les fixtures IPC lient [intention](../../examples/ipc-declare-work-intent.json), [nouvelle recherche](../../examples/ipc-discover-resources.json), [lecture causale](../../examples/ipc-get-discovery-query-receipt-query.json), [page durable](../../examples/ipc-get-discovery-query-receipt-response.json) et [décision](../../examples/ipc-record-discovery-decision.json) pour un registre de projet vide.
+
 ## Décision de découverte canonique — FINAL-02
 
 La décision reuse|create indique si la ressource logique cible existe déjà. La stratégie indique la manière : pour reuse, use_existing/coordinate/wait/adapt ; pour create, copy/adapt/new. adapt exige candidate_ids ; target_resource_id et target_version_ref sont obligatoires pour reuse et résolvent une identité/version existante autorisée. Pour create/pre_creation ils sont nuls ; l'autorisation réserve l'identité et l'observation relie la version résultante. À la clôture ou en réconciliation tardive, ils désignent la cible effectivement examinée même si la décision historique est create. Une nouvelle identité issue d'adaptation vaut create/adapt ; une nouvelle version de la même ressource peut valoir reuse/adapt. La validation vérifie ces références et ces couples, sans juger l'équivalence métier. Le schéma partagé [discovery-receipt](../../schemas/discovery-receipt.schema.json) fait autorité sur l'enveloppe du reçu.
 
-Les erreurs spécifiques snake_case de ce document sont des reason_code normalisés en UPPER_SNAKE lors de la sérialisation IPC. Le champ code utilise la classe commune : ContractViolation pour DISCOVERY_EVIDENCE_MISSING/RECEIPT_STALE/RECEIPT_VALIDATION_EXPIRED/DISCOVERY_HISTORY_UNKNOWN, ScopeDenied pour ACCESS_DENIED/DISCOVERY_ORIGIN_MISMATCH, ResourceBusy pour SOURCE_ADVANCED, BudgetExceeded pour BUDGET_EXHAUSTED. NotFoundOrHidden porte SOURCE_MISSING ; ResourceBusy porte INDEX_STALE et SNAPSHOT_INCONSISTENT ; CapabilityDenied porte PROFILE_UNAVAILABLE ; ContractViolation porte DEPENDENCY_CYCLE. Aucune raison ne reçoit deux classes, et aucun second format Error n'est créé.
+Les erreurs spécifiques snake_case de ce document sont des reason_code normalisés en UPPER_SNAKE lors de la sérialisation IPC. Le champ code utilise la classe commune : ContractViolation pour DISCOVERY_CURSOR_EXPIRED/DISCOVERY_EVIDENCE_MISSING/RECEIPT_STALE/RECEIPT_VALIDATION_EXPIRED/DISCOVERY_HISTORY_UNKNOWN, ScopeDenied pour ACCESS_DENIED/DISCOVERY_ORIGIN_MISMATCH, ResourceBusy pour SOURCE_ADVANCED, BudgetExceeded pour BUDGET_EXHAUSTED. NotFoundOrHidden porte SOURCE_MISSING ; ResourceBusy porte INDEX_STALE et SNAPSHOT_INCONSISTENT ; CapabilityDenied porte PROFILE_UNAVAILABLE ; ContractViolation porte DEPENDENCY_CYCLE. Aucune raison ne reçoit deux classes, et aucun second format Error n'est créé.

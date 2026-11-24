@@ -41,6 +41,127 @@
     }
   },
   "$defs": {
+    "discovery_query_response": {
+      "$ref": "#",
+      "required": ["watermark"],
+      "properties": {
+        "watermark": { "type": "object" },
+        "result": {
+          "type": "object", "additionalProperties": false,
+          "required": [
+            "project_id", "command_id", "result_ref", "query_id", "intent_id", "intent_revision",
+            "catalog_revision", "coverage_ref", "coverage", "results", "warnings", "next_cursor"
+          ],
+          "properties": {
+            "project_id": { "$ref": "urn:ovpt:unleash:ipc-query:1#/$defs/run_list_project_id" },
+            "command_id": { "$ref": "#/$defs/uuid" },
+            "result_ref": { "$ref": "urn:ovpt:unleash:ipc-query:1#/$defs/discovery_query_result_ref" },
+            "query_id": { "$ref": "urn:ovpt:unleash:ipc-command:2#/$defs/discovery_uuid" },
+            "intent_id": { "$ref": "urn:ovpt:unleash:ipc-command:2#/$defs/discovery_uuid" },
+            "intent_revision": { "$ref": "#/$defs/wire_uint", "minimum": 1 },
+            "catalog_revision": { "$ref": "#/$defs/wire_uint" },
+            "coverage_ref": { "$ref": "urn:ovpt:unleash:discovery-receipt:1#/properties/coverage_ref" },
+            "coverage": {
+              "type": "object", "additionalProperties": false,
+              "required": ["status", "scope", "registry_observations", "limitations"],
+              "properties": {
+                "status": { "enum": ["complete", "partial", "stale", "unavailable"] },
+                "scope": { "$ref": "urn:ovpt:unleash:ipc-command:2#/$defs/discover_resources/properties/scope" },
+                "registry_observations": {
+                  "type": "array", "uniqueItems": true, "items": { "$ref": "#/$defs/discovery_registry_observation" }
+                },
+                "limitations": { "type": "array", "items": { "$ref": "urn:ovpt:unleash:ipc-command:2#/$defs/discovery_text" } }
+              },
+              "if": { "properties": { "status": { "enum": ["partial", "stale", "unavailable"] } } },
+              "then": { "properties": { "limitations": { "minItems": 1 } } }
+            },
+            "results": { "type": "array", "maxItems": 100, "items": { "$ref": "#/$defs/discovery_candidate" } },
+            "warnings": { "type": "array", "items": { "$ref": "urn:ovpt:unleash:ipc-command:2#/$defs/discovery_text" } },
+            "next_cursor": { "$ref": "urn:ovpt:unleash:ipc-query:1#/$defs/run_page_cursor" }
+          }
+        }
+      }
+    },
+    "discovery_registry_observation": {
+      "type": "object", "additionalProperties": false,
+      "required": ["entry_kind", "scope_kind", "scope_owner_key", "observed_at"],
+      "properties": {
+        "entry_kind": { "enum": ["skill", "role", "contract", "automation", "technical_resource"] },
+        "scope_kind": { "enum": ["global", "project", "repository"] },
+        "scope_owner_key": { "$ref": "urn:ovpt:unleash:ipc-command:2#/$defs/discovery_text" },
+        "observed_at": { "type": "string", "format": "date-time" }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "scope_kind": { "const": "global" } } },
+          "then": { "properties": { "scope_owner_key": { "const": "global" } } }
+        },
+        {
+          "if": { "properties": { "scope_kind": { "const": "project" } } },
+          "then": { "properties": { "scope_owner_key": { "$ref": "urn:ovpt:unleash:ipc-command:2#/$defs/discovery_uuid" } } }
+        }
+      ]
+    },
+    "discovery_candidate": {
+      "type": "object", "additionalProperties": false,
+      "required": [
+        "resource_id", "kind", "source_ref", "consumer_context_ref", "annotations_observed_at",
+        "method", "profile_ref", "confidence", "source_state", "code_state", "work_state",
+        "work_state_provenance", "integration_state", "integration_target", "freshness", "availability"
+      ],
+      "properties": {
+        "resource_id": { "$ref": "urn:ovpt:unleash:ipc-command:2#/$defs/discovery_text" },
+        "kind": { "$ref": "urn:ovpt:unleash:ipc-command:2#/$defs/discovery_resource_kind" },
+        "owner_mission_id": { "$ref": "urn:ovpt:unleash:ipc-command:2#/$defs/discovery_uuid" },
+        "source_ref": { "$ref": "urn:ovpt:unleash:discovery-receipt:1#/$defs/typedSourceRef" },
+        "consumer_context_ref": { "$ref": "urn:ovpt:unleash:ipc-command:2#/$defs/discovery_text" },
+        "annotations_observed_at": { "type": "string", "format": "date-time" },
+        "method": { "$ref": "urn:ovpt:unleash:ipc-command:2#/$defs/discovery_text" },
+        "profile_ref": { "oneOf": [{ "$ref": "urn:ovpt:unleash:ipc-command:2#/$defs/discovery_text" }, { "type": "null" }] },
+        "confidence": { "enum": ["semantic_resolved", "syntactic", "lexical", "declared", "unknown"] },
+        "source_state": { "enum": ["present", "deleted", "unavailable"] },
+        "code_state": { "enum": ["committed", "dirty", "deleted", "unborn", "not_applicable"] },
+        "work_state": { "enum": ["in_development", "ready_declared", "blocked", "closed", "not_applicable"] },
+        "work_state_provenance": { "enum": ["declared", "observed", "not_applicable"] },
+        "integration_state": { "enum": ["integrated_target", "feature_commit", "pending_integration", "not_applicable"] },
+        "integration_target": {
+          "type": ["object", "null"], "additionalProperties": false, "required": ["ref", "oid"],
+          "properties": {
+            "ref": { "$ref": "#/$defs/worktree_branch_ref" },
+            "oid": {
+              "type": "object", "additionalProperties": false, "required": ["format", "hex"],
+              "oneOf": [
+                { "properties": { "format": { "const": "sha1" }, "hex": { "type": "string", "minLength": 40, "maxLength": 40, "pattern": "^[0-9a-f]+$" } } },
+                { "properties": { "format": { "const": "sha256" }, "hex": { "type": "string", "minLength": 64, "maxLength": 64, "pattern": "^[0-9a-f]+$" } } }
+              ],
+              "properties": { "format": true, "hex": true }
+            }
+          }
+        },
+        "freshness": { "enum": ["current", "stale", "unknown"] },
+        "availability": { "enum": ["discoverable", "locally_available", "unavailable"] }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "integration_state": { "const": "integrated_target" } } },
+          "then": { "properties": { "integration_target": { "type": "object" } } },
+          "else": { "properties": { "integration_target": { "type": "null" } } }
+        },
+        {
+          "if": { "properties": { "source_ref": { "properties": { "source_kind": { "const": "git_snapshot" } } } } },
+          "else": { "properties": { "code_state": { "const": "not_applicable" }, "integration_state": { "const": "not_applicable" } } }
+        },
+        {
+          "if": { "properties": { "work_state": { "const": "not_applicable" } } },
+          "then": { "properties": { "work_state_provenance": { "const": "not_applicable" } } },
+          "else": { "properties": { "work_state_provenance": { "enum": ["declared", "observed"] } } }
+        },
+        {
+          "if": { "properties": { "work_state": { "const": "ready_declared" } } },
+          "then": { "properties": { "work_state_provenance": { "const": "declared" } } }
+        }
+      ]
+    },
     "discovery_receipt_response": {
       "$ref": "#",
       "required": ["watermark"],
