@@ -868,14 +868,12 @@ pub(crate) fn compute_policy_digest(
 /// # Errors
 /// Retourne les erreurs de sérialisation canonique.
 pub fn engaged_policy_digest(summary: &PolicySummary) -> Result<Sha256Digest, StoreError> {
-    canonical_sha256(
-        &serde_json::json!({
-            "schema_version": 1,
-            "global_policy": summary.global_policy,
-            "project_policy": summary.project_policy,
-            "guard_config": summary.guard_config,
-        }),
-    )
+    canonical_sha256(&serde_json::json!({
+        "schema_version": 1,
+        "global_policy": summary.global_policy,
+        "project_policy": summary.project_policy,
+        "guard_config": summary.guard_config,
+    }))
     .map_err(StoreError::from)
 }
 

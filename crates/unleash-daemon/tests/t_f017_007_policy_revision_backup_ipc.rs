@@ -16,9 +16,7 @@ use std::time::Duration;
 use unleash_client::{ClientConfig, UnleashClient};
 use unleash_daemon::{DaemonConfig, DaemonStartOutcome, UnleashDaemon};
 use unleash_domain::{CommandId, RequestId, Revision};
-use unleash_protocol::{
-    ClientKind, CommandEnvelope, ProtocolVersion, QueryEnvelope, ReceiptState,
-};
+use unleash_protocol::{ClientKind, CommandEnvelope, ProtocolVersion, QueryEnvelope, ReceiptState};
 use unleash_store::{
     AggregateKind, CallerAuthority, CallerRole, CommandMutation, CommitCommandRequest,
     PolicyIsolationMode, PolicyScopeKind, StoreConfig, UnleashStore,
