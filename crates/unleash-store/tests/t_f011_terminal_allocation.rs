@@ -1735,10 +1735,6 @@ fn t_f011_010_dispose_sealed_release_uses_exact_fact_without_native_dispatch() {
     );
     // Expected first red on the agreed base: its closed decoder accepts only
     // attest_terminal_release. Keep the positive prefix and all final oracles.
-    #[expect(
-        clippy::expect_used,
-        reason = "This single success expectation is the intended red boundary after the qualified Store prefix"
-    )]
     let disposition = store
         .commit_terminal_release_reconciliation(caller.clone(), dispose_envelope.clone(), None)
         .expect("a sealed exact Release fact must permit its Store-only ledger disposition");
