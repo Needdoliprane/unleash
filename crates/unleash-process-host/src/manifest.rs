@@ -541,6 +541,17 @@ mod tests {
     use unleash_testkit::local_test_dir;
 
     #[test]
+    fn unavailable_random_source_is_an_error_never_a_fallback() {
+        // Une source d'aléa indisponible ne produit aucun octet : un hachage de pid, de compteur
+        // et d'horloge serait un secret de contrôle calculable.
+        assert!(matches!(
+            random_32_bytes_with(|_| Err(ProcessHostError::RandomSourceUnavailable)),
+            Err(ProcessHostError::RandomSourceUnavailable)
+        ));
+        assert!(random_32_bytes().is_ok_and(|bytes| bytes.len() == 32));
+    }
+
+    #[test]
     fn control_secret_redacted_in_debug_and_display_and_ct_eq() {
         let secret = HostControlSecret::new("super-secret-control-token-42").unwrap();
         let dbg_str = format!("{secret:?}");
