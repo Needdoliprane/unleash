@@ -122,7 +122,7 @@ fd66815a76ace8b136778face8afcfd940d6b6d02d1f2dbe1c2a162d5ef3e666  .claude/brief/
 08e0a0152f290d07fa66453243218c404530afc1dcb92e9fc5d8e24aa366b6eb  .claude/catalog/README.md
 a87fbd5d995747bc222abdef47db8fb9c561b93c0ba0846c08ead13d1a1c6529  .claude/catalog/design-catalog.json
 04859081710c5d91bfedd9d424ba0c8c813d54152d313a7a1675778734153b46  .claude/catalog/operations.json
-e92201ea7620385f04562f7d774be85955d77f41b6a7ba1cbf2bdf7f93407b4c  .claude/catalog/package-manifest.json
+874673b728640752a2923b02e1bf9a852929b764be1097744a091e0aab68f741  .claude/catalog/package-manifest.json
 dc670318f9a2834c72d589fa921567ab3c2da5a6777d6d348697fd54b643f60b  .claude/design/activity-timeline.md
 7e66e407555c2cd16175e2f26c9515ede0d802d8e2bc53b2675d3883dfbfa2a8  .claude/design/agent-tree-and-status.md
 1558c901b73b4ce6ca5963a1b2a1c06864afc92f61b4f9ed1950ff841669c6ed  .claude/design/cli-tui-design.md
@@ -175,6 +175,8 @@ ee33da8173ec72b120f4eb08b9f5a51213dc84812fc7ff64939731d86ca672fe  .claude/exampl
 8806f6cfbebf4897782a3b8f9de111b44f6cf7e1c1d0905f16fbb2bf575f1f77  .claude/examples/ipc-get-workflow-validation-valid-response.json
 c1904ef7d37ab333da6247418aac0715566d680b8727ca1ebe1762de5ca237bc  .claude/examples/ipc-list-runs-query.json
 c20fcb77ee9606292cc1bf1d374a5836df46ad32a4811e67ab2fe76af7b17ee1  .claude/examples/ipc-list-runs-response.json
+402b423e576f736e7191f5e6d554e6e8ddeef29c1c04269179fb1a1d93ca95bc  .claude/examples/ipc-list-worktrees-query.json
+87a9bd186514ea59dfee2fe9758ebc6e9eaaca80f0617465a9afa1be590ff820  .claude/examples/ipc-list-worktrees-response.json
 48a934ec4f92a4198c935f091a00a98043fe96739a4066015f89d26e0ef2bf51  .claude/examples/ipc-provider-profile-list-response.json
 92de9adf1520ff23288e3b6ff52931515d8e943f4a796db2521e0976215ae8fa  .claude/examples/ipc-publish-workflow-version.json
 2f69a82b85aa58a75b692ba2811e8568a3b51bc669f28723992c13cb84420fa5  .claude/examples/ipc-read-settings-model-policies-response.json
@@ -258,7 +260,7 @@ f33538055049b5438f4b330a8ff2f73966359a091f8e353f55f32fbea96111da  .claude/featur
 6d0089cd3d259c81a1e3eff0b527ce7cd46e5d769184450d657c9e3863e96dca  .claude/features/F010-git-coordination/README.md
 068d3d21e05115a8deb35347ee98ea6f4b8117a499a9012b89c02a195525f25d  .claude/features/F010-git-coordination/acceptance.md
 990352a10840f38c38a3a47e3d8923f3ccabb804c92f27abf704e390659f2610  .claude/features/F010-git-coordination/dependencies.md
-0632ed8ff80289bc0bd1ebbfd1c2aafcb315fcd2a6bc2f24274fa9054f83da7e  .claude/features/F010-git-coordination/interfaces.md
+f0adc9686bbfe597e052887d3d09299b22cce6f2b4987c81465dab17486a6286  .claude/features/F010-git-coordination/interfaces.md
 678eaf7bd8fd673f38434f9563352fb387fcd306126bfb596afba597a76d3895  .claude/features/F010-git-coordination/requirements.md
 98d622649d5729d79099976fb6b169edb84c17f9878fb0617cc5a548b0a6969f  .claude/features/F010-git-coordination/technical-design.md
 23e15f21189c9b0a6d8a91273a48f486e53bc267421df096214394278b5bcbe8  .claude/features/F010-git-coordination/tests.md
@@ -363,8 +365,8 @@ aa92d205cdecb94568aba7dd81bc8aff146eb7fdcaed9a0c6c7ec8a72269927b  .claude/schema
 a106a52a35cd0243255af0afa80561a0baada4d1c1618f39b6f9ab2ae847ccd3  .claude/schemas/ipc-command.schema.json
 d3b118d24928142054b108194e3706e221f4d7f18b2b35d2574eca7aa6caaa5f  .claude/schemas/ipc-error.schema.json
 a63ee5b8b43d130fa67e86aeb165b95f84688784d7be5b3d586a095a55038929  .claude/schemas/ipc-hello.schema.json
-70f0540b29d0ba36929316ea491b9fc3e5ab39a6eb92290a4de7a66209086523  .claude/schemas/ipc-query-response.schema.json
-2e5b4df01fb8594d00bab82693be6c9145c889300ce1494d79d25f5ae1a2214b  .claude/schemas/ipc-query.schema.json
+c29d7d2339cb9d3e6d86fd5f35587b65f439711f7045464ab2388d61c6365d7f  .claude/schemas/ipc-query-response.schema.json
+c2909b5ad05a3c72cabb000b6157c3008fbdc35b5b83f0c43cdaed3d89821f99  .claude/schemas/ipc-query.schema.json
 c133138e6f82a8e616e956b4e62f75cc80c6d52330c10f976d89426a61b126c6  .claude/schemas/ipc-receipt.schema.json
 353ef163f338a5fa52415c1c691a572e849ddd8757c1fd6f375a12d7efc4d9e2  .claude/schemas/ipc-subscribe-events.schema.json
 34063a6e8bc70c475994b3c7d068643ab3adc10c0c356b1b6ee48ea7045b8e0c  .claude/schemas/operation-name.schema.json
