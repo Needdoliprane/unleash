@@ -1,0 +1,19 @@
+{
+  "protocol_version": "unleash.ipc.v2",
+  "request_id": "10000000-0000-4000-8000-000000000046",
+  "command_id": "10000000-0000-4000-8000-000000000047",
+  "authority_generation": "10000000-0000-4000-8000-000000000003",
+  "actor_ref": null,
+  "project_id": "10000000-0000-4000-8000-000000000004",
+  "aggregate_id": "10000000-0000-4000-8000-000000000048",
+  "expected_revision": 0,
+  "command_type": "CreateWorkflowDraft",
+  "payload": {
+    "source": {
+      "kind": "workflow_version",
+      "id": "workflow.merge-only",
+      "version": 1,
+      "digest": "sha256:5e0309449c265a65e65653567f52a97dc32ed9851dc79eb85a0ed7ebcc03ae79"
+    }
+  }
+}

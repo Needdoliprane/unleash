@@ -41,6 +41,27 @@
     }
   },
   "$defs": {
+    "workflow_text_draft_response": {
+      "$ref": "#",
+      "required": ["watermark"],
+      "properties": {
+        "watermark": { "type": "object" },
+        "result": {
+          "type": "object", "additionalProperties": false,
+          "required": ["project_id", "draft_id", "revision", "text", "text_hash"],
+          "properties": {
+            "project_id": { "type": "string", "format": "uuid" },
+            "draft_id": { "type": "string", "format": "uuid" },
+            "revision": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
+            "text": {
+              "type": "string", "maxLength": 1048576,
+              "description": "Au plus 1048576 octets UTF-8 après décodage, vérifiés par le daemon."
+            },
+            "text_hash": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" }
+          }
+        }
+      }
+    },
     "workflow_run_projection_response": {
       "type": "object",
       "additionalProperties": false,

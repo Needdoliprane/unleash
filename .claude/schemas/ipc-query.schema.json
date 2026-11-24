@@ -58,6 +58,18 @@
   },
   "allOf": [
     {
+      "if": { "properties": { "query_type": { "const": "GetWorkflowDraft" } } },
+      "then": {
+        "properties": {
+          "project_id": { "type": "string", "format": "uuid" },
+          "payload": {
+            "type": "object", "additionalProperties": false, "required": ["draft_id"],
+            "properties": { "draft_id": { "type": "string", "format": "uuid" } }
+          }
+        }
+      }
+    },
+    {
       "if": { "properties": { "query_type": { "const": "ListProviderProfiles" } } },
       "then": {
         "properties": {

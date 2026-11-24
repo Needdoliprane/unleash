@@ -737,6 +737,35 @@
   },
   "allOf": [
     {
+      "if": { "properties": { "command_type": { "const": "CreateWorkflowDraft" } } },
+      "then": {
+        "properties": {
+          "project_id": { "type": "string", "format": "uuid" },
+          "expected_revision": { "const": 0 },
+          "payload": {
+            "type": "object", "additionalProperties": false, "required": ["source"],
+            "properties": {
+              "source": {
+                "oneOf": [
+                  {
+                    "type": "object", "additionalProperties": false, "required": ["kind", "text"],
+                    "properties": {
+                      "kind": { "const": "text" },
+                      "text": {
+                        "type": "string", "maxLength": 1048576,
+                        "description": "Au plus 1048576 octets UTF-8 après décodage ; le daemon vérifie la borne en octets."
+                      }
+                    }
+                  },
+                  { "$ref": "#/$defs/create_operational_run/properties/source" }
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    {
       "if": { "properties": { "command_type": { "const": "PublishWorkflowVersion" } } },
       "then": { "properties": { "payload": { "$ref": "#/$defs/publish_workflow_version" } } }
     },
