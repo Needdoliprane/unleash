@@ -400,21 +400,33 @@ async fn t_f011_cli_release_returns_receipt_and_keeps_the_terminal_open() {
         ("--process-run-uuid", acquired.process_run_uuid.to_string()),
         ("--lease-id", acquired.lease_id.to_string()),
         ("--fence", acquired.fence.to_string()),
-        ("--control-revision", acquired.control_revision.as_u64().to_string()),
+        (
+            "--control-revision",
+            acquired.control_revision.as_u64().to_string(),
+        ),
         ("--command-id", wire.command_id.to_string()),
         ("--authority-generation", fixture.authority.to_string()),
     ];
     let send = || async {
         let mut command = tokio::process::Command::new(&binary);
-        command.arg("--socket").arg(&socket).args(["--json", "process", "release"])
+        command
+            .arg("--socket")
+            .arg(&socket)
+            .args(["--json", "process", "release"])
             .stdin(std::process::Stdio::null())
             .kill_on_drop(true);
         for (flag, value) in &options {
             command.arg(flag).arg(value);
         }
         let output = tokio::time::timeout(Duration::from_secs(10), command.output())
-            .await.unwrap().unwrap();
-        assert!(output.status.success(), "CLI release: {}", String::from_utf8_lossy(&output.stderr));
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "CLI release: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
         let response: Value = serde_json::from_slice(&output.stdout).unwrap();
         serde_json::from_value::<CommandReceipt>(response.get("receipt").unwrap().clone()).unwrap()
     };
