@@ -1,0 +1,27 @@
+{
+  "request_id": "10000000-0000-4000-8000-000000000060",
+  "watermark": {
+    "stream_id": "10000000-0000-4000-8000-000000000045",
+    "sequence": 2
+  },
+  "result": {
+    "project_id": "10000000-0000-4000-8000-000000000004",
+    "draft_id": "10000000-0000-4000-8000-000000000048",
+    "revision": 1,
+    "text_hash": "sha256:5e0309449c265a65e65653567f52a97dc32ed9851dc79eb85a0ed7ebcc03ae79",
+    "base_version": {
+      "kind": "workflow_version",
+      "id": "workflow.merge-only",
+      "version": 1,
+      "digest": "sha256:5e0309449c265a65e65653567f52a97dc32ed9851dc79eb85a0ed7ebcc03ae79"
+    },
+    "text_artifact": {
+      "kind": "workflow_draft_revision",
+      "draft_id": "10000000-0000-4000-8000-000000000048",
+      "revision": 1,
+      "digest": "sha256:5e0309449c265a65e65653567f52a97dc32ed9851dc79eb85a0ed7ebcc03ae79",
+      "size_bytes": 1263,
+      "media_type": "text/plain; charset=utf-8"
+    }
+  }
+}

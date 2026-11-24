@@ -1,0 +1,34 @@
+{
+  "request_id": "00000000-0000-4000-8000-000000000210",
+  "watermark": {
+    "stream_id": "00000000-0000-4000-8000-000000000201",
+    "sequence": 155
+  },
+  "result": {
+    "project_id": "00000000-0000-4000-8000-000000000001",
+    "receipt_artifact": {
+      "kind": "discovery_receipt",
+      "receipt_id": "00000000-0000-4000-8000-000000000209",
+      "schema_version": "unleash.discovery.v1",
+      "digest": "sha256:eaae9bf40d36b154488a415a13e184116d9067ec53646f365af931678e0ebd0e",
+      "size_bytes": 8805155,
+      "media_type": "application/json"
+    },
+    "current_freshness": "stale",
+    "use_state": "consumed",
+    "history": {
+      "items": [
+        {
+          "event_id": "00000000-0000-4000-8000-000000000203",
+          "event_type": "DiscoveryReceiptInvalidated",
+          "stream_id": "00000000-0000-4000-8000-000000000201",
+          "sequence": 154
+        }
+      ],
+      "coverage": {
+        "status": "complete"
+      },
+      "next_cursor": null
+    }
+  }
+}

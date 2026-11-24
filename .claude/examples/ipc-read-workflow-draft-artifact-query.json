@@ -1,0 +1,18 @@
+{
+  "protocol_version": "unleash.ipc.v2",
+  "request_id": "10000000-0000-4000-8000-000000000061",
+  "query_type": "ReadArtifact",
+  "project_id": "10000000-0000-4000-8000-000000000004",
+  "payload": {
+    "artifact_ref": {
+      "kind": "workflow_draft_revision",
+      "draft_id": "10000000-0000-4000-8000-000000000048",
+      "revision": 1,
+      "digest": "sha256:5e0309449c265a65e65653567f52a97dc32ed9851dc79eb85a0ed7ebcc03ae79",
+      "size_bytes": 1263,
+      "media_type": "text/plain; charset=utf-8"
+    },
+    "offset_bytes": 0,
+    "limit_bytes": 16
+  }
+}

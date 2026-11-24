@@ -861,7 +861,7 @@
       ],
       "status": "proposed",
       "contract_stage": "documented",
-      "description": "Source, diagnostics, usages et limites. `GetWorkflowValidation` relit le rapport engagé identifié par la référence de résultat du reçu, dans son projet. Manifestes d’automatisation, modes, données, mapping, évaluation et qualification.",
+      "description": "Source, diagnostics, usages et limites. `GetWorkflowValidation` relit le rapport engagé identifié par la référence de résultat du reçu, dans son projet. Manifestes d’automatisation, modes, données, mapping, évaluation et qualification. Pour un brouillon dérivé, `GetWorkflowDraft` fournit la filiation et une référence de texte autorisée lisible par `ReadArtifact`.",
       "contract_source": {
         "path": "architecture/client-operation-catalog.md",
         "subject": "Workflows 01–05 + AUTOMATION-01–04"
@@ -881,7 +881,7 @@
       ],
       "status": "proposed",
       "contract_stage": "documented",
-      "description": "Source, diagnostics, usages et limites. `GetWorkflowValidation` relit le rapport engagé identifié par la référence de résultat du reçu, dans son projet. Manifestes d’automatisation, modes, données, mapping, évaluation et qualification.",
+      "description": "Source, diagnostics, usages et limites. `GetWorkflowValidation` relit le rapport engagé identifié par la référence de résultat du reçu, dans son projet. Manifestes d’automatisation, modes, données, mapping, évaluation et qualification. Pour un brouillon dérivé, `GetWorkflowDraft` fournit la filiation et une référence de texte autorisée lisible par `ReadArtifact`.",
       "contract_source": {
         "path": "architecture/client-operation-catalog.md",
         "subject": "Workflows 01–05 + AUTOMATION-01–04"
@@ -900,7 +900,7 @@
       ],
       "status": "proposed",
       "contract_stage": "documented",
-      "description": "Source, diagnostics, usages et limites. `GetWorkflowValidation` relit le rapport engagé identifié par la référence de résultat du reçu, dans son projet. Manifestes d’automatisation, modes, données, mapping, évaluation et qualification.",
+      "description": "Source, diagnostics, usages et limites. `GetWorkflowValidation` relit le rapport engagé identifié par la référence de résultat du reçu, dans son projet. Manifestes d’automatisation, modes, données, mapping, évaluation et qualification. Pour un brouillon dérivé, `GetWorkflowDraft` fournit la filiation et une référence de texte autorisée lisible par `ReadArtifact`.",
       "contract_source": {
         "path": "architecture/client-operation-catalog.md",
         "subject": "Workflows 01–05 + AUTOMATION-01–04"
@@ -920,7 +920,7 @@
       ],
       "status": "proposed",
       "contract_stage": "documented",
-      "description": "Source, diagnostics, usages et limites. `GetWorkflowValidation` relit le rapport engagé identifié par la référence de résultat du reçu, dans son projet. Manifestes d’automatisation, modes, données, mapping, évaluation et qualification.",
+      "description": "Source, diagnostics, usages et limites. `GetWorkflowValidation` relit le rapport engagé identifié par la référence de résultat du reçu, dans son projet. Manifestes d’automatisation, modes, données, mapping, évaluation et qualification. Pour un brouillon dérivé, `GetWorkflowDraft` fournit la filiation et une référence de texte autorisée lisible par `ReadArtifact`.",
       "contract_source": {
         "path": "architecture/client-operation-catalog.md",
         "subject": "Workflows 01–05 + AUTOMATION-01–04"
@@ -958,7 +958,7 @@
       ],
       "status": "proposed",
       "contract_stage": "documented",
-      "description": "Source, diagnostics, usages et limites. `GetWorkflowValidation` relit le rapport engagé identifié par la référence de résultat du reçu, dans son projet. Manifestes d’automatisation, modes, données, mapping, évaluation et qualification.",
+      "description": "Source, diagnostics, usages et limites. `GetWorkflowValidation` relit le rapport engagé identifié par la référence de résultat du reçu, dans son projet. Manifestes d’automatisation, modes, données, mapping, évaluation et qualification. Pour un brouillon dérivé, `GetWorkflowDraft` fournit la filiation et une référence de texte autorisée lisible par `ReadArtifact`.",
       "contract_source": {
         "path": "architecture/client-operation-catalog.md",
         "subject": "Workflows 01–05 + AUTOMATION-01–04"
@@ -1540,7 +1540,7 @@
       ],
       "status": "proposed",
       "contract_stage": "documented",
-      "description": "Source, diagnostics, usages et limites. `GetWorkflowValidation` relit le rapport engagé identifié par la référence de résultat du reçu, dans son projet. Manifestes d’automatisation, modes, données, mapping, évaluation et qualification.",
+      "description": "Source, diagnostics, usages et limites. `GetWorkflowValidation` relit le rapport engagé identifié par la référence de résultat du reçu, dans son projet. Manifestes d’automatisation, modes, données, mapping, évaluation et qualification. Pour un brouillon dérivé, `GetWorkflowDraft` fournit la filiation et une référence de texte autorisée lisible par `ReadArtifact`.",
       "contract_source": {
         "path": "architecture/client-operation-catalog.md",
         "subject": "Workflows 01–05 + AUTOMATION-01–04"
@@ -1684,7 +1684,7 @@
       ],
       "status": "proposed",
       "contract_stage": "documented",
-      "description": "Source, diagnostics, usages et limites. `GetWorkflowValidation` relit le rapport engagé identifié par la référence de résultat du reçu, dans son projet. Manifestes d’automatisation, modes, données, mapping, évaluation et qualification.",
+      "description": "Source, diagnostics, usages et limites. `GetWorkflowValidation` relit le rapport engagé identifié par la référence de résultat du reçu, dans son projet. Manifestes d’automatisation, modes, données, mapping, évaluation et qualification. Pour un brouillon dérivé, `GetWorkflowDraft` fournit la filiation et une référence de texte autorisée lisible par `ReadArtifact`.",
       "contract_source": {
         "path": "architecture/client-operation-catalog.md",
         "subject": "Workflows 01–05 + AUTOMATION-01–04"
@@ -1707,7 +1707,7 @@
       ],
       "status": "proposed",
       "contract_stage": "documented",
-      "description": "Source, diagnostics, usages et limites. `GetWorkflowValidation` relit le rapport engagé identifié par la référence de résultat du reçu, dans son projet. Manifestes d’automatisation, modes, données, mapping, évaluation et qualification.",
+      "description": "Source, diagnostics, usages et limites. `GetWorkflowValidation` relit le rapport engagé identifié par la référence de résultat du reçu, dans son projet. Manifestes d’automatisation, modes, données, mapping, évaluation et qualification. Pour un brouillon dérivé, `GetWorkflowDraft` fournit la filiation et une référence de texte autorisée lisible par `ReadArtifact`.",
       "contract_source": {
         "path": "architecture/client-operation-catalog.md",
         "subject": "Workflows 01–05 + AUTOMATION-01–04"
@@ -1726,7 +1726,7 @@
       ],
       "status": "proposed",
       "contract_stage": "documented",
-      "description": "Source, diagnostics, usages et limites. `GetWorkflowValidation` relit le rapport engagé identifié par la référence de résultat du reçu, dans son projet. Manifestes d’automatisation, modes, données, mapping, évaluation et qualification.",
+      "description": "Source, diagnostics, usages et limites. `GetWorkflowValidation` relit le rapport engagé identifié par la référence de résultat du reçu, dans son projet. Manifestes d’automatisation, modes, données, mapping, évaluation et qualification. Pour un brouillon dérivé, `GetWorkflowDraft` fournit la filiation et une référence de texte autorisée lisible par `ReadArtifact`.",
       "contract_source": {
         "path": "architecture/client-operation-catalog.md",
         "subject": "Workflows 01–05 + AUTOMATION-01–04"
@@ -1745,7 +1745,7 @@
       ],
       "status": "proposed",
       "contract_stage": "documented",
-      "description": "Source, diagnostics, usages et limites. `GetWorkflowValidation` relit le rapport engagé identifié par la référence de résultat du reçu, dans son projet. Manifestes d’automatisation, modes, données, mapping, évaluation et qualification.",
+      "description": "Source, diagnostics, usages et limites. `GetWorkflowValidation` relit le rapport engagé identifié par la référence de résultat du reçu, dans son projet. Manifestes d’automatisation, modes, données, mapping, évaluation et qualification. Pour un brouillon dérivé, `GetWorkflowDraft` fournit la filiation et une référence de texte autorisée lisible par `ReadArtifact`.",
       "contract_source": {
         "path": "architecture/client-operation-catalog.md",
         "subject": "Workflows 01–05 + AUTOMATION-01–04"
@@ -1764,7 +1764,7 @@
       ],
       "status": "proposed",
       "contract_stage": "documented",
-      "description": "Source, diagnostics, usages et limites. `GetWorkflowValidation` relit le rapport engagé identifié par la référence de résultat du reçu, dans son projet. Manifestes d’automatisation, modes, données, mapping, évaluation et qualification.",
+      "description": "Source, diagnostics, usages et limites. `GetWorkflowValidation` relit le rapport engagé identifié par la référence de résultat du reçu, dans son projet. Manifestes d’automatisation, modes, données, mapping, évaluation et qualification. Pour un brouillon dérivé, `GetWorkflowDraft` fournit la filiation et une référence de texte autorisée lisible par `ReadArtifact`.",
       "contract_source": {
         "path": "architecture/client-operation-catalog.md",
         "subject": "Workflows 01–05 + AUTOMATION-01–04"
@@ -2223,7 +2223,7 @@
       ],
       "status": "proposed",
       "contract_stage": "documented",
-      "description": "Source, diagnostics, usages et limites. `GetWorkflowValidation` relit le rapport engagé identifié par la référence de résultat du reçu, dans son projet. Manifestes d’automatisation, modes, données, mapping, évaluation et qualification.",
+      "description": "Source, diagnostics, usages et limites. `GetWorkflowValidation` relit le rapport engagé identifié par la référence de résultat du reçu, dans son projet. Manifestes d’automatisation, modes, données, mapping, évaluation et qualification. Pour un brouillon dérivé, `GetWorkflowDraft` fournit la filiation et une référence de texte autorisée lisible par `ReadArtifact`.",
       "contract_source": {
         "path": "architecture/client-operation-catalog.md",
         "subject": "Workflows 01–05 + AUTOMATION-01–04"
@@ -2245,7 +2245,7 @@
       ],
       "status": "proposed",
       "contract_stage": "documented",
-      "description": "Source, diagnostics, usages et limites. `GetWorkflowValidation` relit le rapport engagé identifié par la référence de résultat du reçu, dans son projet. Manifestes d’automatisation, modes, données, mapping, évaluation et qualification.",
+      "description": "Source, diagnostics, usages et limites. `GetWorkflowValidation` relit le rapport engagé identifié par la référence de résultat du reçu, dans son projet. Manifestes d’automatisation, modes, données, mapping, évaluation et qualification. Pour un brouillon dérivé, `GetWorkflowDraft` fournit la filiation et une référence de texte autorisée lisible par `ReadArtifact`.",
       "contract_source": {
         "path": "architecture/client-operation-catalog.md",
         "subject": "Workflows 01–05 + AUTOMATION-01–04"
@@ -2525,7 +2525,9 @@
       "payload_schema_ref": null,
       "runtime_executable": false,
       "parity_group_ids": [
+        "PAR-WORKFLOWS-02",
         "PAR-KNOWLEDGE-03",
+        "PAR-KNOWLEDGE-05",
         "PAR-REPORTS-04",
         "PAR-REPORTS-05",
         "PAR-AUTOMATION-06"
@@ -3483,7 +3485,7 @@
       ],
       "status": "proposed",
       "contract_stage": "documented",
-      "description": "Source, diagnostics, usages et limites. `GetWorkflowValidation` relit le rapport engagé identifié par la référence de résultat du reçu, dans son projet. Manifestes d’automatisation, modes, données, mapping, évaluation et qualification.",
+      "description": "Source, diagnostics, usages et limites. `GetWorkflowValidation` relit le rapport engagé identifié par la référence de résultat du reçu, dans son projet. Manifestes d’automatisation, modes, données, mapping, évaluation et qualification. Pour un brouillon dérivé, `GetWorkflowDraft` fournit la filiation et une référence de texte autorisée lisible par `ReadArtifact`.",
       "contract_source": {
         "path": "architecture/client-operation-catalog.md",
         "subject": "Workflows 01–05 + AUTOMATION-01–04"
@@ -4397,12 +4399,13 @@
     {
       "id": "PAR-WORKFLOWS-02",
       "status": "required_not_tested",
-      "statement": "Créer un draft depuis intention ou version ; éditer texte, étapes, ordre, branches, boucles, bindings, contrats et done ; sauvegarder.",
+      "statement": "Créer un draft depuis intention ou version ; éditer texte, étapes, ordre, branches, boucles, bindings, contrats et done ; sauvegarder. Relire le texte et la filiation d’un brouillon dérivé.",
       "operation_names": [
         "CreateWorkflowDraft",
         "DraftWorkflowFromIntent",
         "SaveWorkflowDraft",
-        "GetWorkflowDraft"
+        "GetWorkflowDraft",
+        "ReadArtifact"
       ],
       "source": {
         "path": "design/gui-tui-parity.md",
@@ -4684,11 +4687,12 @@
     {
       "id": "PAR-KNOWLEDGE-05",
       "status": "required_not_tested",
-      "statement": "Enregistrer la décision reuse/create avec stratégie explicite, lier DiscoveryReceipt, demander dépendance et comparer contexte source.",
+      "statement": "Enregistrer la décision reuse/create avec stratégie explicite, lier et relire DiscoveryReceipt, demander dépendance et comparer contexte source.",
       "operation_names": [
         "RecordDiscoveryDecision",
         "AttachDiscoveryReceipt",
         "GetDiscoveryReceipt",
+        "ReadArtifact",
         "RequestDependency",
         "CompareContexts",
         "GetContextManifest"

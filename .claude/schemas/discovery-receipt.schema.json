@@ -311,6 +311,22 @@
     }
   ],
   "$defs": {
+    "canonicalReceiptId": {
+      "type": "string",
+      "format": "uuid",
+      "not": { "const": "00000000-0000-0000-0000-000000000000" }
+    },
+    "canonicalReceipt": {
+      "$ref": "#",
+      "properties": { "receipt_id": { "$ref": "#/$defs/canonicalReceiptId" } },
+      "allOf": [{ "$ref": "#/$defs/canonicalIntegerBounds" }]
+    },
+    "canonicalIntegerBounds": {
+      "if": { "type": "integer" },
+      "then": { "minimum": 0, "maximum": 9007199254740991 },
+      "additionalProperties": { "$ref": "#/$defs/canonicalIntegerBounds" },
+      "items": { "$ref": "#/$defs/canonicalIntegerBounds" }
+    },
     "contentDigest": {
       "type": "object",
       "additionalProperties": false,

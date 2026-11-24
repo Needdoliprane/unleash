@@ -34,7 +34,7 @@ Le simulateur déroule des scénarios d'événements, pas des appels réels. Il 
 
 ## Versions et concurrence
 
-Deux éditeurs peuvent dériver un draft de la même version publiée. Ils enregistrent chacun un draft révisionné. Publier utilise version attendue et clé idempotente ; une course ne peut écraser un contenu déjà publié. Une publication ajoute une version et peut déplacer un alias candidat pour les prochains runs. Elle ne modifie aucun manifest engagé.
+Deux éditeurs peuvent dériver un brouillon de la même version publiée. Chaque brouillon engage les octets et la filiation exacte selon le [contrat F006](../features/F006-workflow-compiler/interfaces.md#brouillon-dérivé-dune-version-publiée). Son texte se relit par blocs de la révision demandée. Les éditions font évoluer le digest du texte et conservent l’origine. Publier utilise version attendue et clé idempotente ; une course ne peut écraser un contenu déjà publié. Une publication ajoute une version et peut déplacer un alias candidat pour les prochains runs. Elle ne modifie aucun manifest engagé.
 
 L'AST de workflow reste épinglé pendant son run. La compilation peut définir des slots tardifs pour préserver l'autonomie N+1 : chaque slot déclare niveau, plafond de capacités et contrat minimal. Lier un rôle nouvellement créé est une opération runtime distincte qui prouve sa compatibilité avant première activation. Une révision de rôle sur un slot déjà lié n'est pas un moyen de migrer le workflow.
 

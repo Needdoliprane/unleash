@@ -147,11 +147,27 @@ try:
         "examples/ipc-get-discovery-receipt-stale-response.json": (
             "schemas/ipc-query-response.schema.json", "discovery_receipt_response",
         ),
+        "examples/ipc-get-discovery-receipt-artifact-response.json": (
+            "schemas/ipc-query-response.schema.json", "discovery_receipt_response",
+        ),
+        "examples/ipc-get-discovery-receipt-artifact-query.json": ("schemas/ipc-query.schema.json", None),
+        "examples/ipc-read-discovery-receipt-artifact-query.json": ("schemas/ipc-query.schema.json", None),
+        "examples/ipc-read-discovery-receipt-artifact-response.json": (
+            "schemas/ipc-query-response.schema.json", "discovery_receipt_artifact_response",
+        ),
         "examples/ipc-create-workflow-text-draft.json": ("schemas/ipc-command.schema.json", None),
         "examples/ipc-create-workflow-version-draft.json": ("schemas/ipc-command.schema.json", None),
         "examples/ipc-get-workflow-draft-query.json": ("schemas/ipc-query.schema.json", None),
         "examples/ipc-get-workflow-text-draft-response.json": (
             "schemas/ipc-query-response.schema.json", "workflow_text_draft_response",
+        ),
+        "examples/ipc-get-workflow-version-draft-query.json": ("schemas/ipc-query.schema.json", None),
+        "examples/ipc-get-workflow-version-draft-response.json": (
+            "schemas/ipc-query-response.schema.json", "workflow_draft_response",
+        ),
+        "examples/ipc-read-workflow-draft-artifact-query.json": ("schemas/ipc-query.schema.json", None),
+        "examples/ipc-read-workflow-draft-artifact-response.json": (
+            "schemas/ipc-query-response.schema.json", "workflow_draft_artifact_response",
         ),
         "examples/ipc-validate-workflow-draft.json": ("schemas/ipc-command.schema.json", None),
         "examples/ipc-get-workflow-validation-query.json": ("schemas/ipc-query.schema.json", None),

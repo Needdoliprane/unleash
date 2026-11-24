@@ -1,0 +1,18 @@
+{
+  "protocol_version": "unleash.ipc.v2",
+  "request_id": "00000000-0000-4000-8000-000000000211",
+  "query_type": "ReadArtifact",
+  "project_id": "00000000-0000-4000-8000-000000000001",
+  "payload": {
+    "artifact_ref": {
+      "kind": "discovery_receipt",
+      "receipt_id": "00000000-0000-4000-8000-000000000209",
+      "schema_version": "unleash.discovery.v1",
+      "digest": "sha256:eaae9bf40d36b154488a415a13e184116d9067ec53646f365af931678e0ebd0e",
+      "size_bytes": 8805155,
+      "media_type": "application/json"
+    },
+    "offset_bytes": 211,
+    "limit_bytes": 16
+  }
+}

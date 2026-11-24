@@ -66,6 +66,8 @@ La réponse comporte report_id, schema_version, as_of_cursor {stream_id, sequenc
 
 `EvidenceRef` contient id, kind, source_snapshot_id optionnel, digest, size_bytes, completeness, access_policy_ref, retention_class et availability. `ExportReport` est une commande qui reçoit report_id, format, périmètre et destination.kind=client_stream. Elle prépare un artefact autorisé et retourne le reçu commun ; ReadArtifact en lit ensuite les octets. Le chemin de fichier choisi est traité par l’adaptateur client de confiance, pas comme chemin arbitraire du daemon. L'export inclut un manifeste de fichiers et leurs digests ; les sources absentes ou masquées sont listées avec motif. Un export n'obtient pas plus d'accès que l'utilisateur qui le demande.
 
+La première variante de lecture par blocs couvre le [texte d’une révision de brouillon dérivé](../F006-workflow-compiler/interfaces.md#brouillon-dérivé-dune-version-publiée). Le daemon applique la politique d’accès de la source correspondante à chaque bloc.
+
 | Nom de domaine | Interprétation | Comportement attendu |
 |---|---|---|
 | `evidence_missing` | Référence inconnue ou octets supprimés | Rapport avec lacune ; pas de preuve simulée |
@@ -95,3 +97,5 @@ Les événements `ClaimRecorded`, `ObservationRecorded`, `JudgmentRecorded`, `Ev
 Les rapports exposent séparément DiscoveryReceipt immuable, DiscoveryUseObservation de la création, éventuelle completion_revalidation et fraîcheur courante. Les sources et origines typées suivent [F009](../F009-knowledge-engine/interfaces.md), y compris humain/replay et fichiers/documents sans Git. Une modification ultérieure pertinente réévalue l’applicabilité, sans effacer la preuve d’une recherche antérieure réellement observée. Un simple commit de son propre résultat identique ne transforme pas cette preuve en violation automatique. Les projections restent sous ACL et indiquent absence/inconnu/périmé.
 
 La lecture `GetDiscoveryReceipt` suit la projection paginée et autorisée de [F009](../F009-knowledge-engine/interfaces.md#lecture-bornée-getdiscoveryreceipt) : le rapport distingue le reçu historique, ses états courants au watermark et les références d’invalidations et de validations visibles. Il ne déduit aucune absence globale d’une liste vide ni ne restitue les détails F002 sans autorisation. Une lacune ou une rétention insuffisante reste visible.
+
+Un reçu discovery trop volumineux pour la réponse complète est référencé par son artefact immuable F009 et lu par blocs autorisés `ReadArtifact`. Le rapport conserve son identité et son digest ; il distingue indisponibilité ou accès révoqué de l'absence historique de découverte. L'expiration de la collecte d'historique ne prouve pas la purge Q-12 du reçu, et des métadonnées anciennes seules ne permettent pas de reconstruire ses octets.

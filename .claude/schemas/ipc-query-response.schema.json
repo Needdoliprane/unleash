@@ -48,10 +48,15 @@
         "watermark": { "type": "object" },
         "result": {
           "type": "object", "additionalProperties": false,
-          "required": ["project_id", "receipt", "current_freshness", "use_state", "history"],
+          "required": ["project_id", "current_freshness", "use_state", "history"],
+          "oneOf": [
+            { "required": ["receipt"] },
+            { "required": ["receipt_artifact"] }
+          ],
           "properties": {
             "project_id": { "$ref": "urn:ovpt:unleash:ipc-query:1#/$defs/run_list_project_id" },
             "receipt": { "$ref": "urn:ovpt:unleash:discovery-receipt:1" },
+            "receipt_artifact": { "$ref": "urn:ovpt:unleash:ipc-query:1#/$defs/discovery_receipt_artifact_ref" },
             "current_freshness": { "enum": ["valid", "stale", "unknown"] },
             "use_state": { "enum": ["unused", "authorized", "consumed", "outcome_unknown"] },
             "history": {
@@ -334,6 +339,73 @@
               "description": "Au plus 1048576 octets UTF-8 après décodage, vérifiés par le daemon."
             },
             "text_hash": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" }
+          }
+        }
+      }
+    },
+    "workflow_draft_response": {
+      "oneOf": [
+        { "$ref": "#/$defs/workflow_text_draft_response" },
+        { "$ref": "#/$defs/workflow_version_draft_response" }
+      ]
+    },
+    "workflow_version_draft_response": {
+      "$ref": "#",
+      "required": ["watermark"],
+      "properties": {
+        "watermark": { "type": "object" },
+        "result": {
+          "type": "object", "additionalProperties": false,
+          "required": ["project_id", "draft_id", "revision", "text_hash", "base_version", "text_artifact"],
+          "properties": {
+            "project_id": { "$ref": "#/$defs/uuid" },
+            "draft_id": { "$ref": "#/$defs/uuid" },
+            "revision": { "$ref": "#/$defs/wire_uint", "minimum": 1 },
+            "text_hash": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+            "base_version": { "$ref": "urn:ovpt:unleash:ipc-command:2#/$defs/create_operational_run/properties/source" },
+            "text_artifact": { "$ref": "urn:ovpt:unleash:ipc-query:1#/$defs/workflow_draft_artifact_ref" }
+          }
+        }
+      }
+    },
+    "artifact_block_response": {
+      "$ref": "#",
+      "required": ["watermark"],
+      "properties": {
+        "watermark": { "type": "object" },
+        "result": {
+          "type": "object", "additionalProperties": false,
+          "required": ["project_id", "artifact_ref", "offset_bytes", "data_base64", "next_offset_bytes"],
+          "properties": {
+            "project_id": { "$ref": "#/$defs/uuid" },
+            "artifact_ref": { "type": "object" },
+            "offset_bytes": { "$ref": "#/$defs/wire_uint" },
+            "data_base64": {
+              "type": "string", "contentEncoding": "base64", "maxLength": 1398104,
+              "pattern": "^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$"
+            },
+            "next_offset_bytes": { "oneOf": [{ "$ref": "#/$defs/wire_uint" }, { "type": "null" }] }
+          }
+        }
+      }
+    },
+    "workflow_draft_artifact_response": {
+      "$ref": "#/$defs/artifact_block_response",
+      "properties": {
+        "result": {
+          "properties": {
+            "artifact_ref": { "$ref": "urn:ovpt:unleash:ipc-query:1#/$defs/workflow_draft_artifact_ref" }
+          }
+        }
+      }
+    },
+    "discovery_receipt_artifact_response": {
+      "$ref": "#/$defs/artifact_block_response",
+      "properties": {
+        "result": {
+          "properties": {
+            "project_id": { "$ref": "urn:ovpt:unleash:ipc-query:1#/$defs/run_list_project_id" },
+            "artifact_ref": { "$ref": "urn:ovpt:unleash:ipc-query:1#/$defs/discovery_receipt_artifact_ref" }
           }
         }
       }
