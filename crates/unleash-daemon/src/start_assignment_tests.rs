@@ -1,9 +1,10 @@
 //! IPC qualification of the first task's published context and assignment.
 
+// This module is compiled under `#[cfg(test)]`, so `clippy.toml` already permits
+// `unwrap`, `expect` and `panic` here; expecting those lints would never be fulfilled.
 #![expect(
-    clippy::unwrap_used,
-    clippy::panic,
-    reason = "Assertions on isolated workflow fixtures"
+    clippy::indexing_slicing,
+    reason = "Assertions on isolated workflow fixtures read JSON answers by key"
 )]
 
 use std::{os::unix::fs::PermissionsExt, path::Path, sync::Arc};
@@ -133,7 +134,7 @@ async fn configure_profile(
         "endpoint":"http://127.0.0.1:9/v1","model":format!("workflow-fixture-local-{}", current + 1),"locality":"local_only",
         "server_management":"user_managed","auth":{"kind":"none"},"pricing":{"kind":"none_local"},
         "limits":{"max_inflight":1,"connect_timeout_ms":2000,"queue_timeout_ms":1000,
-            "load_timeout_ms":180000,"first_token_timeout_ms":60000,"generation_timeout_ms":300000},
+            "load_timeout_ms":180_000,"first_token_timeout_ms":60_000,"generation_timeout_ms":300_000},
         "declared_capabilities":["text"]
     }))).await.unwrap();
 }
@@ -493,6 +494,10 @@ async fn persists_and_removes_a_versioned_skill_model_preference() {
 }
 
 // T-F012-002 — Le vrai writer engage une première politique modèle et son reçu.
+#[expect(
+    clippy::too_many_lines,
+    reason = "One model policy lifecycle through IPC and restart"
+)]
 #[tokio::test]
 async fn publishes_a_role_model_policy_through_settings() {
     let mut route = route().await;
