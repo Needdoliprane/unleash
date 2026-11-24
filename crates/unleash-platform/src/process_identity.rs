@@ -311,8 +311,8 @@ fn inspect_process_identity_os(pid: u32) -> Result<OsProcessIdentity, PlatformEr
         .map_err(|error| procfs_read_error(pid, &stat_path, error))?;
 
     let (process_group_id, start_ticks) = parse_linux_proc_stat(&stat_content, pid)?;
-    let proc_meta = std::fs::metadata(&proc_dir)
-        .map_err(|error| procfs_read_error(pid, &proc_dir, error))?;
+    let proc_meta =
+        std::fs::metadata(&proc_dir).map_err(|error| procfs_read_error(pid, &proc_dir, error))?;
 
     let boot_identity = current_boot_identity_os()?;
     let start_identity = StartIdentity::new(format!("linux-proc:{pid}:{start_ticks}"))?;
