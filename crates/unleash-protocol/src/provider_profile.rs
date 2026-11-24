@@ -271,6 +271,22 @@ impl ProviderEndpointDestination {
             .parse::<std::net::IpAddr>()
             .is_ok_and(|address| address.is_loopback())
     }
+
+    /// Dérive la route native Ollama sur l'origine HTTP locale exacte.
+    /// Accepte une URL à la racine ou la route `/api/chat` explicite.
+    #[must_use]
+    pub fn ollama_chat_endpoint(&self) -> Option<String> {
+        if self.scheme != "http" || !self.is_loopback_literal() {
+            return None;
+        }
+        let mut endpoint = Url::parse(&self.normalized_endpoint).ok()?;
+        match endpoint.path() {
+            "/" => endpoint.set_path("/api/chat"),
+            "/api/chat" => {}
+            _ => return None,
+        }
+        Some(endpoint.to_string())
+    }
 }
 
 /// Payload de `SetProviderProfile` ; identité et version viennent de l'enveloppe.

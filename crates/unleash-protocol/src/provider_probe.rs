@@ -1,12 +1,132 @@
 //! Forme IPC de `TestProviderProfile` (F012), sans autorisation ni admission implicite.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
+use std::net::SocketAddr;
 
 use serde::{Deserialize, Serialize};
-use unleash_domain::{DataLocality, MicrosAmount};
+use serde_json::{Value, json};
+use unleash_domain::{DataLocality, MicrosAmount, Sha256Digest, TimestampMs};
+
+use crate::{ProtocolError, canonical_sha256};
 
 // IPC/JCS : au-delà, les clients JavaScript ne préservent plus chaque entier.
 const MAX_EXACT_JSON_INTEGER: u64 = 9_007_199_254_740_991;
+
+/// Coordonnées internes du placement retenu par le writer pour une admission Ollama.
+/// Ce type n'est ni un DTO IPC ni une autorisation de transport.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OllamaChatPlacement {
+    /// URL canonique vérifiée dans le profil et la preuve.
+    pub endpoint: String,
+    /// Boot dans lequel le writer a admis le processus.
+    pub boot_identity: String,
+    /// PID issu de la preuve de placement.
+    pub process_id: u32,
+    /// Identité OS de démarrage du processus.
+    pub process_start_identity: String,
+    /// Empreinte de l'objet de preuve de placement.
+    pub evidence_digest: Sha256Digest,
+    /// Empreinte du fait durable d'admission, bail et réservation compris.
+    pub admission_digest: Sha256Digest,
+    /// Première échéance du contexte, du placement et du bail.
+    pub valid_until_ms: TimestampMs,
+}
+
+/// Maximum decoded response size for the Ollama v1 chat transport.
+pub const OLLAMA_CHAT_MAX_RESPONSE_BYTES: usize = 1_048_576;
+
+/// Exact native request fields shared by the writer and the transport.
+pub struct OllamaChatRequestBinding<'a> {
+    /// Canonical native URL.
+    pub endpoint: &'a str,
+    /// Logical provider profile identifier.
+    pub profile_id: &'a str,
+    /// Exact version of the selected profile.
+    pub profile_version: u64,
+    /// Digest of the immutable profile configuration.
+    pub profile_digest: Sha256Digest,
+    /// Connection timeout in milliseconds.
+    pub connect_ms: u64,
+    /// Exchange timeout in milliseconds.
+    pub total_ms: u64,
+    /// Digest of the exact native request body.
+    pub body_digest: Sha256Digest,
+}
+
+impl OllamaChatRequestBinding<'_> {
+    /// Digest of the native POST before binding it to the owned peer and admission.
+    ///
+    /// # Errors
+    /// Fails if the binding cannot be canonicalized.
+    pub fn digest(&self) -> Result<Sha256Digest, ProtocolError> {
+        canonical_sha256(&json!({
+            "schema":"unleash.ollama_chat.v1","method":"POST","endpoint":self.endpoint,
+            "profile_id":self.profile_id,"profile_version":self.profile_version,"profile_digest":self.profile_digest,
+            "connect_timeout_ms":self.connect_ms,"timeout_ms":self.total_ms,
+            "body_digest":self.body_digest,"response_max_bytes":OLLAMA_CHAT_MAX_RESPONSE_BYTES,
+            "accept":"application/x-ndjson","retries":0,
+        }))
+    }
+}
+
+/// Bind a native request to the numeric loopback socket and its process identity.
+///
+/// # Errors
+/// Fails if the process identity or request binding cannot be canonicalized.
+pub fn owned_loopback_request_digest<T: Serialize>(
+    request: Sha256Digest,
+    endpoint: SocketAddr,
+    identity: &T,
+) -> Result<Sha256Digest, ProtocolError> {
+    let identity = serde_json::to_value(identity)?;
+    canonical_sha256(&json!({
+        "schema": "unleash.owned_loopback_request.v1",
+        "transport_request_digest": request,
+        "endpoint": endpoint,
+        "process_identity": identity,
+    }))
+}
+
+/// Bind the exact owned Ollama request to its durable admission and placement.
+///
+/// # Errors
+/// Fails if the admission binding cannot be canonicalized.
+pub fn admitted_ollama_chat_digest(
+    owned_request: Sha256Digest,
+    placement: &OllamaChatPlacement,
+) -> Result<Sha256Digest, ProtocolError> {
+    canonical_sha256(&json!({
+        "schema": "unleash.admitted_ollama_chat.v1",
+        "transport_request_digest": owned_request,
+        "admission_digest": placement.admission_digest,
+        "placement_digest": placement.evidence_digest,
+        "valid_until_ms": placement.valid_until_ms,
+    }))
+}
+
+/// Construit le corps natif de chat Ollama v1 pour un tour utilisateur.
+///
+/// La préparation persistée et le transport canonisent ce même document
+/// avant calcul de leur empreinte. L'appelant résout et vérifie les entrées,
+/// leur autorité et les bornes applicables.
+#[must_use]
+pub fn ollama_chat_body(
+    model: &str,
+    prompt: &str,
+    output_tokens: u64,
+    tool_schemas: &BTreeMap<String, Value>,
+) -> Value {
+    let tools: Vec<_> = tool_schemas
+        .iter()
+        .map(|(name, schema)| {
+            json!({"type":"function","function":{"name":name,"parameters":schema}})
+        })
+        .collect();
+    json!({
+        "model":model,"messages":[{"role":"user","content":prompt}],
+        "stream":true,"options":{"num_predict":output_tokens},"tools":tools
+    })
+}
 
 /// Erreur de forme ou de borne statique, sans décision d'autorité.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]

@@ -79,3 +79,21 @@ fn endpoint_destination_does_not_relax_endpoint_rejections() {
         assert!(serde_json::from_value::<SetProviderProfilePayload>(wire(endpoint)).is_err());
     }
 }
+
+#[test]
+fn ollama_chat_endpoint_uses_only_the_exact_local_origin() {
+    for (endpoint, expected) in [
+        ("http://127.0.0.1:80/", Some("http://127.0.0.1/api/chat")),
+        ("http://[::1]:11434/", Some("http://[::1]:11434/api/chat")),
+        (
+            "http://127.0.0.1:11434/api/chat",
+            Some("http://127.0.0.1:11434/api/chat"),
+        ),
+        ("http://127.0.0.1:11434/other/api/chat", None),
+        ("http://localhost:11434/", None),
+        ("https://127.0.0.1:11434/", None),
+    ] {
+        let destination = payload(endpoint).endpoint_destination().unwrap();
+        assert_eq!(destination.ollama_chat_endpoint().as_deref(), expected);
+    }
+}
