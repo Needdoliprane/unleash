@@ -237,7 +237,10 @@ impl ManagedProviderServiceHosts {
         Ok(selected)
     }
 
-    #[cfg(test)]
+    // Only the macOS evaluation tests retain the spawned fixture host to reap
+    // it. `validate_launch` refuses the Strict service plan off macOS, so the
+    // accessor stays gated exactly like its callers (REQ-MODEL-015).
+    #[cfg(all(test, target_os = "macos"))]
     pub(super) fn take_fixture_host(
         &self,
         dispatch: DispatchId,
