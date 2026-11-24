@@ -17,6 +17,15 @@
     "payload"
   ],
   "$defs": {
+    "workflow_catalogue_snapshot_ref": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "digest"],
+      "properties": {
+        "schema_version": { "const": 1 },
+        "digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" }
+      }
+    },
     "provider_profile_version_ref": {
       "type": "object",
       "additionalProperties": false,
@@ -736,6 +745,59 @@
     }
   },
   "allOf": [
+    {
+      "if": { "properties": { "command_type": { "const": "CreateWorkflowDraft" } } },
+      "then": {
+        "properties": {
+          "project_id": { "type": "string", "format": "uuid" },
+          "expected_revision": { "const": 0 },
+          "payload": {
+            "type": "object", "additionalProperties": false, "required": ["source"],
+            "properties": {
+              "source": {
+                "oneOf": [
+                  {
+                    "type": "object", "additionalProperties": false, "required": ["kind", "text"],
+                    "properties": {
+                      "kind": { "const": "text" },
+                      "text": {
+                        "type": "string", "maxLength": 1048576,
+                        "description": "Au plus 1048576 octets UTF-8 après décodage ; le daemon vérifie la borne en octets."
+                      }
+                    }
+                  },
+                  { "$ref": "#/$defs/create_operational_run/properties/source" }
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "command_type": { "const": "ValidateWorkflowDraft" } } },
+      "then": {
+        "properties": {
+          "project_id": { "type": "string", "format": "uuid" },
+          "expected_revision": { "const": 0 },
+          "payload": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["draft_id", "draft_revision", "catalogue_snapshot_ref"],
+            "properties": {
+              "draft_id": { "type": "string", "format": "uuid" },
+              "draft_revision": { "$ref": "#/$defs/wire_unsigned_integer", "minimum": 1 },
+              "catalogue_snapshot_ref": {
+                "oneOf": [
+                  { "type": "null" },
+                  { "$ref": "#/$defs/workflow_catalogue_snapshot_ref" }
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
     {
       "if": { "properties": { "command_type": { "const": "PublishWorkflowVersion" } } },
       "then": { "properties": { "payload": { "$ref": "#/$defs/publish_workflow_version" } } }

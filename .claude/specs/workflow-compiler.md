@@ -28,6 +28,8 @@ Pour les slots tardifs, la validation adopte le [profil fermé V1](../architectu
 
 Un diagnostic possède code stable, sévérité, JSON Pointer, extrait d'intention source, règle, contexte et suggestion. `UnknownBinding` distingue rôle absent et rôle non autorisé. `UnboundedLoop` signale une itération dont la borne n'est pas exploitable par l'analyse ; `BoundOverflow` signale une borne calculée supérieure à 100 000 activations ou un débordement arithmétique ; un `max_iterations` absent est une erreur de structure. `IncompatibleOutput` pointe le producteur et le guard consommateur. Le même draft dans le même catalogue snapshot et la même version de compilateur doit produire mêmes diagnostics et mêmes octets normalisés.
 
+Le [contrat du rapport F006](../features/F006-workflow-compiler/interfaces.md#rapport-de-validation) précise les coordonnées figées avec le résultat, la lecture du rapport et les conditions de réutilisation à la publication. L’identité du rapport et le watermark de sa lecture sont des métadonnées IPC distinctes du résultat déterministe du compilateur.
+
 Le simulateur déroule des scénarios d'événements, pas des appels réels. Il peut montrer succès, correction, annulation, budget dépassé et résultat inconnu. Chaque rapport porte `simulation: true`, sa seed de fixture et les branches explorées. Le fait qu'une simulation atteigne un état terminal ne prouve ni l'accessibilité d'une ressource réelle ni la qualité d'une sortie LLM. Les scénarios non explorés restent visibles.
 
 ## Versions et concurrence

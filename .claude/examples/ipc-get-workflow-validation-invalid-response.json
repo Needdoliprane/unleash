@@ -1,0 +1,33 @@
+{
+  "request_id": "10000000-0000-4000-8000-000000000056",
+  "watermark": {
+    "stream_id": "10000000-0000-4000-8000-000000000045",
+    "sequence": 7
+  },
+  "result": {
+    "schema_version": 1,
+    "project_id": "10000000-0000-4000-8000-000000000004",
+    "validation_report_id": "10000000-0000-4000-8000-000000000057",
+    "draft_id": "10000000-0000-4000-8000-000000000041",
+    "draft_revision": 1,
+    "draft_digest": "sha256:d8246e9a4aeaabdf4ed7e6e27182d1f9c62eccba383f5546ae3381995b8ba348",
+    "catalogue_snapshot_ref": {
+      "schema_version": 1,
+      "digest": "sha256:a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2"
+    },
+    "compiler_version": "0.1.0",
+    "workflow_profile": null,
+    "status": "invalid",
+    "diagnostics": [
+      {
+        "code": "InvalidSyntax",
+        "severity": "error",
+        "pointer": "",
+        "message": "Objet JSON incomplet."
+      }
+    ],
+    "diagnostics_truncated": false,
+    "bounds": null,
+    "required_capabilities": null
+  }
+}

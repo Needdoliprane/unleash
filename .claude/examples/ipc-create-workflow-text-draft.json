@@ -1,0 +1,17 @@
+{
+  "protocol_version": "unleash.ipc.v2",
+  "request_id": "10000000-0000-4000-8000-000000000042",
+  "command_id": "10000000-0000-4000-8000-000000000043",
+  "authority_generation": "10000000-0000-4000-8000-000000000003",
+  "actor_ref": null,
+  "project_id": "10000000-0000-4000-8000-000000000004",
+  "aggregate_id": "10000000-0000-4000-8000-000000000041",
+  "expected_revision": 0,
+  "command_type": "CreateWorkflowDraft",
+  "payload": {
+    "source": {
+      "kind": "text",
+      "text": "{\n  \"workflow_id\": \"draft.incomplet\",\n"
+    }
+  }
+}

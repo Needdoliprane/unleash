@@ -1,0 +1,38 @@
+{
+  "request_id": "10000000-0000-4000-8000-000000000055",
+  "watermark": {
+    "stream_id": "10000000-0000-4000-8000-000000000045",
+    "sequence": 6
+  },
+  "result": {
+    "schema_version": 1,
+    "project_id": "10000000-0000-4000-8000-000000000004",
+    "validation_report_id": "10000000-0000-4000-8000-000000000034",
+    "draft_id": "10000000-0000-4000-8000-000000000033",
+    "draft_revision": 3,
+    "draft_digest": "sha256:795d45d3043be9d769f194f8faccc07d56a6ee38c6f65c19e5598a8bddf21df5",
+    "catalogue_snapshot_ref": {
+      "schema_version": 1,
+      "digest": "sha256:a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2"
+    },
+    "compiler_version": "0.1.0",
+    "workflow_profile": "unleash.workflow.v1",
+    "status": "valid",
+    "diagnostics": [],
+    "diagnostics_truncated": false,
+    "bounds": {
+      "activation_upper_bound": 5,
+      "max_step_activations": 100,
+      "max_agent_executions": 5,
+      "max_concurrent_action_executions": 0
+    },
+    "required_capabilities": [
+      "git.inspect",
+      "git.integrate",
+      "registry.search",
+      "workspace.read",
+      "workspace.write"
+    ],
+    "normalized_digest": "sha256:5e0309449c265a65e65653567f52a97dc32ed9851dc79eb85a0ed7ebcc03ae79"
+  }
+}

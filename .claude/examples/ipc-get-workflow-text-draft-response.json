@@ -1,0 +1,14 @@
+{
+  "request_id": "10000000-0000-4000-8000-000000000044",
+  "watermark": {
+    "stream_id": "10000000-0000-4000-8000-000000000045",
+    "sequence": 1
+  },
+  "result": {
+    "project_id": "10000000-0000-4000-8000-000000000004",
+    "draft_id": "10000000-0000-4000-8000-000000000041",
+    "revision": 1,
+    "text": "{\n  \"workflow_id\": \"draft.incomplet\",\n",
+    "text_hash": "sha256:d8246e9a4aeaabdf4ed7e6e27182d1f9c62eccba383f5546ae3381995b8ba348"
+  }
+}
