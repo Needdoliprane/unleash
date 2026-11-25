@@ -412,6 +412,9 @@ fn transfer_and_observe(
         return reacquire_and_observe(state, record, dispatch, control_secrets);
     }
     let c = &record.context;
+    // Le secret suivant est tiré avant toute écriture durable : le permis à usage unique, puis
+    // le fichier de la capacité de transfert (REQ-TERM-003).
+    let next = control_secrets.generate()?;
     // One-use permit. A missing ACK never authorizes another call or spawn.
     state
         .store
@@ -432,7 +435,6 @@ fn transfer_and_observe(
     if std::fs::symlink_metadata(&next_path).is_ok() {
         return Err("terminal transfer capability already exists; inspect".into());
     }
-    let next = control_secrets.generate()?;
     store_control_secret(&next_path, &next)?;
     let mut client = HostClient::connect(
         &runtime.join(HOST_SOCKET_FILENAME),
@@ -511,6 +513,8 @@ fn reacquire_and_observe(
         return Err("terminal reactivation is not the same retired native control".into());
     }
     reactivation_permission(state, c)?;
+    // Le secret suivant est tiré avant le permis à usage unique (REQ-TERM-003).
+    let next = control_secrets.generate()?;
     state
         .store
         .resolve_terminal_control(ResolveTerminalControlRequest {
@@ -525,7 +529,6 @@ fn reacquire_and_observe(
             },
         })?;
     let secret = load_control_secret(&runtime.join(CONTROL_SECRET_FILENAME))?;
-    let next = control_secrets.generate()?;
     reactivation_permission(state, c)?;
     let mut client = HostClient::connect(
         &runtime.join(HOST_SOCKET_FILENAME),

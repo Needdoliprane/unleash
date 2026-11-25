@@ -579,8 +579,11 @@ fn spawn_and_observe(
     dispatch: unleash_domain::DispatchId,
     control_secrets: &dyn ControlSecretSource,
 ) -> Result<unleash_store::terminal_allocations::TerminalLaunchObservation, TerminalError> {
+    // Le secret est tiré avant toute écriture durable : le permis à usage unique, puis les
+    // répertoires et les fichiers de l'hôte (REQ-TERM-003).
+    let secret = control_secrets.generate()?;
     let profile = resolve_launch_permit(state, record, dispatch)?;
-    let launch = prepare_host_launch(state, record, profile, control_secrets)?;
+    let launch = prepare_host_launch(state, record, profile, secret)?;
     let expected_host = spawn_registered_host(state, &launch)?;
     let observation = observe_spawned_host(state, record, dispatch, &launch, &expected_host)?;
     publish_launch_observation(state, &observation)?;
@@ -644,7 +647,7 @@ fn prepare_host_launch(
     state: &Arc<DaemonRuntimeState>,
     record: &unleash_store::TerminalAllocationRecord,
     profile: unleash_store::terminal_allocations::TerminalEnvironmentProfile,
-    control_secrets: &dyn ControlSecretSource,
+    secret: HostControlSecret,
 ) -> Result<HostLaunch, TerminalError> {
     let c = &record.context;
     let process = &c.preparation.process_spec;
@@ -653,7 +656,6 @@ fn prepare_host_launch(
     let runtime = base.join(c.host_id.to_string());
     unleash_platform::ensure_private_rendezvous_dir(&runtime)?;
     let runtime = runtime.canonicalize()?;
-    let secret = control_secrets.generate()?;
     let secret_path = runtime.join(CONTROL_SECRET_FILENAME);
     store_control_secret(&secret_path, &secret)?;
     let effective = explicit_environment_v1(&profile.variables, &runtime.join("child-tmp"))?;

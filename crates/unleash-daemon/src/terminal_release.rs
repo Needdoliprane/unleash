@@ -635,6 +635,8 @@ fn observe_once(
     let c = &record.context;
     let runtime = rendezvous(state, record)?;
     before_effect(state, c)?;
+    // Le secret suivant est tiré avant le permis à usage unique (REQ-TERM-003).
+    let next = control_secrets.generate()?;
     state
         .store
         .resolve_terminal_release(ResolveTerminalReleaseRequest {
@@ -648,7 +650,6 @@ fn observe_once(
             dispatch_id: dispatch,
         })?;
     let secret = load_control_secret(&runtime.join(CONTROL_SECRET_FILENAME))?;
-    let next = control_secrets.generate()?;
     before_effect(state, c)?;
     let mut client = HostClient::connect(
         &runtime.join(HOST_SOCKET_FILENAME),
