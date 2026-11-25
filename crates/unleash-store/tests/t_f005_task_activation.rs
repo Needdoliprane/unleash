@@ -40,13 +40,6 @@ impl CutpointObserver for ActivationCommitCutpoint {
 
 impl Fixture {
     fn new(retain_definition: bool) -> (impl Drop, Self, Arc<ActivationCommitCutpoint>) {
-        Self::with_definition(retain_definition, |_| {})
-    }
-
-    fn with_definition(
-        retain_definition: bool,
-        customize: impl FnOnce(&mut Value),
-    ) -> (Box<dyn Drop>, Self, Arc<ActivationCommitCutpoint>) {
         let directory = local_test_dir("f005-task-activation").unwrap();
         let cutpoint = Arc::new(ActivationCommitCutpoint::default());
         let mut config = StoreConfig::new(directory.path());
@@ -54,7 +47,25 @@ impl Fixture {
         let store = UnleashStore::open(config).unwrap();
         let actor = ActorId::new("user:fixture-owner").unwrap();
         (
-            Box::new(directory),
+            directory,
+            Self::on_store(store, "fixture-owner", actor, retain_definition),
+            cutpoint,
+        )
+    }
+
+    /// Même run en exécution, avec une définition de workflow adaptée par `customize`.
+    fn with_definition(
+        retain_definition: bool,
+        customize: impl FnOnce(&mut Value),
+    ) -> (impl Drop, Self, Arc<ActivationCommitCutpoint>) {
+        let directory = local_test_dir("f005-task-activation").unwrap();
+        let cutpoint = Arc::new(ActivationCommitCutpoint::default());
+        let mut config = StoreConfig::new(directory.path());
+        config.cutpoints = cutpoint.clone();
+        let store = UnleashStore::open(config).unwrap();
+        let actor = ActorId::new("user:fixture-owner").unwrap();
+        (
+            directory,
             Self::on_store_with_definition(
                 store,
                 "fixture-owner",
@@ -282,7 +293,7 @@ fn mechanical_entry_then_tasks(definition: &mut Value, model_policy: &str) {
 #[test]
 fn t_f012_018_forbidden_run_refuses_a_later_agent_task_activation() {
     let (_directory, fixture, _cutpoint) = Fixture::with_definition(true, |definition| {
-        mechanical_entry_then_tasks(definition, "forbidden");
+        mechanical_entry_then_tasks(definition, "forbidden")
     });
     let error = fixture
         .store
@@ -316,14 +327,15 @@ fn t_f012_018_forbidden_run_refuses_a_later_agent_task_activation() {
 #[test]
 fn t_f012_018_bounded_policy_still_activates_agent_tasks() {
     let (_directory, fixture, _cutpoint) = Fixture::with_definition(true, |definition| {
-        mechanical_entry_then_tasks(definition, "allowed_bounded");
+        mechanical_entry_then_tasks(definition, "allowed_bounded")
     });
-    assert!(matches!(
-        fixture
-            .store
-            .activate_workflow_task(fixture.activation(5, 2, &fixture.plan)),
-        Ok(CommitOutcome::Committed(_))
-    ));
+    let activated = fixture
+        .store
+        .activate_workflow_task(fixture.activation(5, 2, &fixture.plan));
+    assert!(
+        matches!(activated, Ok(CommitOutcome::Committed(_))),
+        "{activated:?}"
+    );
 }
 
 #[test]
