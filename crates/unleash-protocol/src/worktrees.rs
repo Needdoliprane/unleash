@@ -375,7 +375,7 @@ impl WorktreeItem {
                 || self
                     .operation_branches
                     .iter()
-                    .any(|association| association.operation == *reserved)
+                    .any(|association| association.operation == reserved)
         });
         if !reservations_known {
             return Err(InconsistentOperationBranch);
@@ -385,10 +385,12 @@ impl WorktreeItem {
 }
 
 fn has_repetition<T: PartialEq>(values: &[T]) -> bool {
-    values
-        .iter()
-        .enumerate()
-        .any(|(index, value)| values.iter().skip(index + 1).contains(&value))
+    values.iter().enumerate().any(|(index, value)| {
+        values
+            .iter()
+            .skip(index + 1)
+            .any(|later| *later == *value)
+    })
 }
 
 /// Couverture d'une collecte.
