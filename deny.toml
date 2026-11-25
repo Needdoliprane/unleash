@@ -5,8 +5,26 @@ all-features = true
 [advisories]
 version = 2
 yanked = "deny"
+# Par défaut, un avis `unmaintained` n'est émis que pour une dépendance directe d'un membre du workspace.
+# RUSTSEC-2024-0370 (proc-macro-error 1.0.4, tiré par glib-macros 0.18.5 / gtk3-macros 0.18.2) est
+# transitif : il n'est pas signalé, son ignore a donc été retiré.
 ignore = [
-  { id = "RUSTSEC-2024-0370", reason = "proc-macro-error 1.0.4 (unmaintained, proc-macro de compilation sans CVE) est tiré transitivement par glib-macros 0.18.5 / gtk3-macros 0.18.2 <- gtk 0.18.2 <- tao/wry/tauri 2.12.6 sans mise à niveau disponible amont." },
+  # RUSTSEC-2026-0594 (nonces de cookies privés répétables après `fork`) : la ligne 0.18 est corrigée par
+  # le verrou (`cookie` 0.18.3). La ligne 0.16.2 n'a pas de version corrigée (l'avis ne corrige que
+  # `>= 0.18.3`) : son unique parent `webdriver` 0.54.0, dernière version publiée, l'exige (`^0.16`), et
+  # `fantoccini` 0.22.2, dernière version publiée, exige `webdriver ^0.54`. Aucune montée par le verrou
+  # n'existe. Exposition réelle dans Unleash :
+  #   - seules `PrivateJar::add` et `PrivateJar::add_original` sont touchées ; elles n'existent qu'avec la
+  #     fonctionnalité `private`, qu'aucun dépendant n'active : l'entrée verrouillée de `cookie` 0.16.2
+  #     n'a que `time` et `version_check`, `PrivateJar` n'y est pas compilée ;
+  #   - `webdriver` 0.54.0 ne déclare la crate que par `extern crate cookie` et n'en appelle aucun chemin ;
+  #   - aucun crate d'Unleash ne dépend de `cookie` et aucun code d'Unleash ne manipule de cookie ;
+  #   - Unleash ne crée de processus que par `std::process::Command`, `tokio::process::Command` et
+  #     `portable-pty`, toujours suivis d'un `exec` : la condition « fork sans exec » ne peut pas être
+  #     remplie.
+  # `allow` borne cet ignore à la seule crate `cookie` dont le parent direct est `webdriver` 0.54.0 ;
+  # `expiry` fait repasser l'avis en erreur si l'ignore n'a pas été réévalué à cette date.
+  { id = "RUSTSEC-2026-0594", allow = ["webdriver@0.54.0"], expiry = "2027-02-28", reason = "cookie 0.16.2 n'a pas de version corrigée et son unique parent webdriver 0.54.0 (dernière version publiée) l'exige sans l'appeler : la seule fonction touchée, PrivateJar, n'y est pas compilée ; Unleash ne dépend pas de cookie et ne forke jamais sans exec. Exposition nulle. Propriétaire de la réévaluation : ROOT, pilotage du goal g0003-m2 ; à l'échéance, monter si un correctif amont existe, sinon renouveler motivé ou remplacer l'adaptateur." },
   { id = "RUSTSEC-2026-0543", reason = "chrono 0.4.45 (avis informatif unmaintained sans CVE ni correctif amont) est requis par ts-rs 12.0.1 (chrono-impl) et le formatage RFC 3339 d'unleash-protocol/unleash-store ; réévaluation prévue lors du support jiff/time par ts-rs." },
 ]
 
@@ -28,7 +46,9 @@ allow = [
   "CC0-1.0",
   "BSL-1.0",
   "Unicode-3.0",
-  "Unicode-DFS-2016",
+  # Unicode-DFS-2016 n'est plus admise : aucune crate du graphe évalué ne la porte. Les deux qui la
+  # déclarent (finl_unicode 1.5.1, wezterm-bidi 0.2.3) ne sont dans le verrou que par la fonctionnalité
+  # facultative `termwiz` de ratatui, qu'Unleash n'active pas ; l'activer exige une dérogation écrite.
   "CDLA-Permissive-2.0",
   "MPL-2.0",
 ]
