@@ -9,7 +9,7 @@ use crate::config::{CutpointObserver, StoreCutpoint};
 use crate::error::StoreError;
 
 /// Version courante maximale du schéma gérée par cette version de `unleash-store`.
-pub const CURRENT_SCHEMA_VERSION: i64 = 21;
+pub const CURRENT_SCHEMA_VERSION: i64 = 22;
 
 /// État persisté d'une migration dans `schema_migrations`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -173,6 +173,11 @@ const MIGRATIONS: &[MigrationDef] = &[
         version: 21,
         name: "v021_settings_model_policy_history",
         sql: include_str!("migrations/v021_settings_model_policy_history.sql"),
+    },
+    MigrationDef {
+        version: 22,
+        name: "v022_workflow_drafts",
+        sql: include_str!("migrations/v022_workflow_drafts.sql"),
     },
 ];
 

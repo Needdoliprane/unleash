@@ -49,6 +49,7 @@ mod task_assignment;
 mod task_bundle;
 pub mod terminal_allocations;
 mod workflow_activation;
+mod workflow_draft;
 mod workflow_run_creation;
 mod workflow_run_plan;
 mod workflow_run_projection;
