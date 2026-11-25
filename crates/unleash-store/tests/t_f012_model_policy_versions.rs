@@ -9,8 +9,8 @@ use std::path::Path;
 use serde_json::{Value, json};
 use unleash_domain::{ActorId, CommandId, ProjectId, ReceiptId, RequestId, Revision, Sha256Digest};
 use unleash_protocol::{
-    CommandEnvelope, CommandReceipt, ProtocolVersion, ReceiptState, SetProviderProfilePayload,
-    canonical_sha256, canonicalize_to_vec,
+    CommandEnvelope, CommandReceipt, ProtocolVersion, ReasonCode, ReceiptState,
+    SetProviderProfilePayload, canonical_sha256, canonicalize_to_vec,
 };
 use unleash_store::{
     AggregateKind, CallerAuthority, CallerRole, CommandMutation, CommitCommandRequest,
@@ -68,11 +68,68 @@ impl Scope {
     }
 }
 
+/// Politique demandée par l'appelant, écrite depuis le contrat IPC.
+#[derive(Clone)]
+struct Policy {
+    profiles: Vec<Value>,
+    capabilities: Vec<&'static str>,
+    fallbacks: Vec<Value>,
+    limits: Value,
+}
+
+impl Policy {
+    fn bounded(profiles: &[Value]) -> Self {
+        Self {
+            profiles: profiles.to_vec(),
+            capabilities: vec!["text"],
+            fallbacks: vec![],
+            limits: json!({"max_llm_calls":1,"max_output_tokens":128,"max_cost_microusd":10000,
+                "max_duration_seconds":60}),
+        }
+    }
+
+    fn patch(&self) -> Value {
+        json!({"operation":"publish","policy_id":POLICY,"allowed_profiles":self.profiles,
+            "allowed_capabilities":self.capabilities,"fallback_profiles":self.fallbacks,
+            "limits":self.limits})
+    }
+
+    fn document(&self, version: u64, receipt: &ReceiptId) -> Value {
+        json!({"policy_id":POLICY,"version":version,"allowed_profiles":self.profiles,
+            "allowed_capabilities":self.capabilities,"fallback_profiles":self.fallbacks,
+            "limits":self.limits,"principal_id":actor(),"command_receipt_id":receipt})
+    }
+
+    /// Version attendue : le digest couvre le document de publication, sans sa référence.
+    fn expected(&self, version: u64, receipt: &ReceiptId, revocation: &Value) -> Expected {
+        let digest = canonical_sha256(&self.document(version, receipt)).unwrap();
+        let reference = format!("model-policy:{POLICY}:{version}:{digest}");
+        let version = serde_json::from_value(json!({
+            "policy_id":POLICY,"version":version,"digest":digest,"policy_version_ref":reference,
+            "allowed_profiles":self.profiles,"allowed_capabilities":self.capabilities,
+            "fallback_profiles":self.fallbacks,"limits":self.limits,"principal_id":actor(),
+            "command_receipt_id":receipt,"revocation":revocation
+        }))
+        .unwrap();
+        Expected { version, reference }
+    }
+}
+
+fn revoke_patch(version: u64) -> Value {
+    json!({"operation":"revoke","policy_id":POLICY,"version":version})
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct Expected {
+    version: ModelPolicyVersion,
+    reference: String,
+}
+
 fn actor() -> ActorId {
     ActorId::new("user:profile").unwrap()
 }
 
-fn caller(role: CallerRole) -> CallerAuthority {
+fn authority(role: CallerRole) -> CallerAuthority {
     CallerAuthority {
         actor_id: actor(),
         role,
@@ -86,7 +143,7 @@ fn envelope(
     aggregate: Uuid,
     expected: Revision,
     command_type: &str,
-    payload: Value,
+    payload: &Value,
 ) -> CommandEnvelope {
     CommandEnvelope {
         protocol_version: ProtocolVersion,
@@ -151,6 +208,34 @@ fn retain(store: &UnleashStore, value: &impl serde::Serialize) -> Sha256Digest {
     hash
 }
 
+fn create_project(store: &UnleashStore, project: ProjectId, command: u128) -> Scope {
+    let scope = Scope::project(project);
+    let payload = json!({"name":"fixture-project","weight":1});
+    let envelope = envelope(
+        store,
+        command,
+        &scope,
+        project.as_uuid(),
+        Revision::INITIAL,
+        "CreateProject",
+        &payload,
+    );
+    store
+        .commit_command(request(
+            &authority(CallerRole::HumanOperator),
+            envelope,
+            AggregateKind::Project,
+            ReceiptState::Completed,
+            CommandMutation::CreateProject {
+                project_id: project,
+                name: "fixture-project".to_owned(),
+                weight: 1,
+            },
+        ))
+        .unwrap();
+    scope
+}
+
 fn configure_profile(store: &UnleashStore, scope: &Scope, version: u64, command: u128) -> Profile {
     let payload: SetProviderProfilePayload = serde_json::from_value(json!({
         "provider_kind":"lmstudio","dialect":{"kind":"openai_chat_completions","version":1},
@@ -172,6 +257,7 @@ fn configure_profile(store: &UnleashStore, scope: &Scope, version: u64, command:
         catalog_binding: None,
     };
     let digest = retain(store, &configuration);
+    let wire = serde_json::to_value(&configuration.payload).unwrap();
     let envelope = envelope(
         store,
         command,
@@ -179,16 +265,16 @@ fn configure_profile(store: &UnleashStore, scope: &Scope, version: u64, command:
         PROFILE,
         Revision::new(version - 1),
         "SetProviderProfile",
-        serde_json::to_value(&configuration.payload).unwrap(),
+        &wire,
     );
     store
         .commit_command(request(
-            &caller(CallerRole::HumanOperator),
+            &authority(CallerRole::HumanOperator),
             envelope,
             AggregateKind::ProviderProfile,
             ReceiptState::Completed,
             CommandMutation::SetProviderProfile {
-                caller: caller(CallerRole::HumanOperator),
+                caller: authority(CallerRole::HumanOperator),
                 preparation: Box::new(ProviderProfilePreparation {
                     configuration,
                     content_object_hash: digest,
@@ -203,57 +289,42 @@ fn configure_profile(store: &UnleashStore, scope: &Scope, version: u64, command:
     }
 }
 
-fn ready(root: &Path) -> (UnleashStore, Profile) {
+/// Un projet, un profil configuré dans sa portée et aucune politique publiée.
+fn ready(root: &Path) -> (UnleashStore, Scope, Profile) {
     let store = UnleashStore::open(StoreConfig::new(root)).unwrap();
     store
         .register_principal("profile-user", "user", actor().as_str())
         .unwrap();
-    let scope = Scope::project(PROJECT);
-    let envelope = envelope(
-        &store,
-        0xf012_0003,
-        &scope,
-        PROJECT.as_uuid(),
-        Revision::INITIAL,
-        "CreateProject",
-        json!({"name":"fixture-project","weight":1}),
-    );
-    store
-        .commit_command(request(
-            &caller(CallerRole::HumanOperator),
-            envelope,
-            AggregateKind::Project,
-            ReceiptState::Completed,
-            CommandMutation::CreateProject {
-                project_id: PROJECT,
-                name: "fixture-project".to_owned(),
-                weight: 1,
-            },
-        ))
-        .unwrap();
+    let scope = create_project(&store, PROJECT, 0xf012_0003);
     let profile = configure_profile(&store, &scope, 1, 0xf012_0004);
-    (store, profile)
+    (store, scope, profile)
 }
 
-fn limits() -> Value {
-    json!({"max_llm_calls":1,"max_output_tokens":128,"max_cost_microusd":10000,
-        "max_duration_seconds":60})
+fn history(store: &UnleashStore, scope: &Scope) -> Vec<ModelPolicyVersion> {
+    store
+        .read_settings(scope.kind, &scope.id)
+        .unwrap()
+        .model_policy_versions
 }
 
-fn publish_patch(profiles: &[Value], fallbacks: &[Value]) -> Value {
-    json!({"operation":"publish","policy_id":POLICY,"allowed_profiles":profiles,
-        "allowed_capabilities":["text"],"fallback_profiles":fallbacks,"limits":limits()})
+fn revision(store: &UnleashStore, scope: &Scope) -> Revision {
+    store
+        .read_settings(scope.kind, &scope.id)
+        .unwrap()
+        .revision
 }
 
-fn commit(
+/// Envoie le patch fermé `model_policy_version` au vrai writer, comme le fait le démon.
+fn commit_policy(
     store: &UnleashStore,
     caller: &CallerAuthority,
     scope: &Scope,
     command: u128,
     expected: Revision,
-    patch: Value,
-    mutation: CommandMutation,
+    policy: &Value,
 ) -> Result<CommandReceipt, StoreError> {
+    let wire = json!({"scope_kind":scope.kind,"scope_id":scope.id,
+        "patch":{"model_policy_version":policy}});
     let envelope = envelope(
         store,
         command,
@@ -261,8 +332,16 @@ fn commit(
         scope.aggregate(store),
         expected,
         "SetSettings",
-        json!({"scope_kind":scope.kind,"scope_id":scope.id,"patch":patch}),
+        &wire,
     );
+    let mutation = CommandMutation::SetSettingsWithModelConfiguration {
+        scope_kind: scope.kind,
+        scope_id: scope.id.clone(),
+        caller: caller.clone(),
+        patch: SettingsPatch::default(),
+        binding: None,
+        policy: Some(Box::new(serde_json::from_value(policy.clone()).unwrap())),
+    };
     store
         .commit_command(request(
             caller,
@@ -274,63 +353,18 @@ fn commit(
         .map(|outcome| outcome.receipt().clone())
 }
 
-fn publish(
-    store: &UnleashStore,
-    caller: &CallerAuthority,
-    scope: &Scope,
-    command: u128,
-    expected: Revision,
-    policy: Value,
-) -> Result<CommandReceipt, StoreError> {
-    commit(
-        store,
-        caller,
-        scope,
-        command,
-        expected,
-        json!({"model_policy_version":policy.clone()}),
-        CommandMutation::SetSettingsWithModelConfiguration {
-            scope_kind: scope.kind,
-            scope_id: scope.id.clone(),
-            caller: caller.clone(),
-            patch: SettingsPatch::default(),
-            binding: None,
-            policy: Some(Box::new(serde_json::from_value(policy).unwrap())),
-        },
+fn is_conflict(result: Result<CommandReceipt, StoreError>) -> bool {
+    matches!(
+        result,
+        Err(StoreError::ContractViolation {
+            reason: Some(ReasonCode::ModelConfigurationConflict),
+            ..
+        })
     )
 }
 
-fn history(store: &UnleashStore, scope: &Scope) -> Vec<ModelPolicyVersion> {
-    store
-        .read_settings(scope.kind, &scope.id)
-        .unwrap()
-        .model_policy_versions
-}
-
-/// Version attendue, écrite depuis le contrat ; le digest couvre le document de publication sans
-/// sa référence ni sa révocation.
-#[derive(Debug, PartialEq, Eq)]
-struct Expected {
-    version: ModelPolicyVersion,
-    reference: String,
-}
-
-fn expected(profiles: &[Value], fallbacks: &[Value], receipt: &ReceiptId, revocation: Value) -> Expected {
-    let digest = canonical_sha256(&json!({
-        "policy_id":POLICY,"version":1,"allowed_profiles":profiles,
-        "allowed_capabilities":["text"],"fallback_profiles":fallbacks,"limits":limits(),
-        "principal_id":actor(),"command_receipt_id":receipt
-    }))
-    .unwrap();
-    let reference = format!("model-policy:{POLICY}:1:{digest}");
-    let version = serde_json::from_value(json!({
-        "policy_id":POLICY,"version":1,"digest":digest,"policy_version_ref":reference,
-        "allowed_profiles":profiles,"allowed_capabilities":["text"],"fallback_profiles":fallbacks,
-        "limits":limits(),"principal_id":actor(),"command_receipt_id":receipt,
-        "revocation":revocation
-    }))
-    .unwrap();
-    Expected { version, reference }
+fn is_invalid(result: Result<CommandReceipt, StoreError>) -> bool {
+    matches!(result, Err(StoreError::InvalidArgument { reason: None, .. }))
 }
 
 // T-F012-002 — Le vrai writer engage une première version, son reçu et son digest ; la relecture
@@ -338,23 +372,16 @@ fn expected(profiles: &[Value], fallbacks: &[Value], receipt: &ReceiptId, revoca
 #[test]
 fn t_f012_002_publishes_a_model_policy_version_and_reads_it_after_reopen() {
     let directory = local_test_dir("f012-model-policy-publish").unwrap();
-    let (store, profile) = ready(directory.path());
-    let scope = Scope::project(PROJECT);
-    let author = caller(CallerRole::HumanOperator);
-    let profiles = [profile.reference()];
+    let (store, scope, profile) = ready(directory.path());
+    let author = authority(CallerRole::HumanOperator);
+    let policy = Policy::bounded(&[profile.reference()]);
     assert!(history(&store, &scope).is_empty());
 
-    let receipt = publish(
-        &store,
-        &author,
-        &scope,
-        0xf012_0010,
-        Revision::INITIAL,
-        publish_patch(&profiles, &[]),
-    )
-    .unwrap();
+    let receipt =
+        commit_policy(&store, &author, &scope, 0xf012_0010, Revision::INITIAL, &policy.patch())
+            .unwrap();
 
-    let expected = expected(&profiles, &[], &receipt.receipt_id, Value::Null);
+    let expected = policy.expected(1, &receipt.receipt_id, &Value::Null);
     assert_eq!(receipt.state, ReceiptState::Accepted);
     assert_eq!(receipt.new_revision, Revision::new(1));
     assert_eq!(receipt.result_ref, Some(expected.reference));
@@ -365,4 +392,222 @@ fn t_f012_002_publishes_a_model_policy_version_and_reads_it_after_reopen() {
     let reopened = UnleashStore::open(StoreConfig::new(directory.path())).unwrap();
     assert_eq!(history(&reopened, &scope), vec![expected.version]);
     reopened.shutdown().unwrap();
+}
+
+// T-F012-002 — Une version suivante n'efface pas la précédente ; la révocation est un fait
+// distinct qui garde le document, son digest et le reçu de publication (REQ-MODEL-002).
+#[test]
+fn t_f012_002_publishes_the_next_version_and_revokes_an_exact_version() {
+    let directory = local_test_dir("f012-model-policy-revoke").unwrap();
+    let (store, scope, profile) = ready(directory.path());
+    let author = authority(CallerRole::HumanOperator);
+    let first = Policy::bounded(&[profile.reference()]);
+    let second = Policy {
+        limits: json!({"max_llm_calls":2,"max_output_tokens":256,"max_cost_microusd":10000,
+            "max_duration_seconds":120}),
+        ..first.clone()
+    };
+
+    let published =
+        commit_policy(&store, &author, &scope, 0xf012_0020, Revision::INITIAL, &first.patch())
+            .unwrap();
+    let expected_first = first.expected(1, &published.receipt_id, &Value::Null);
+    let next = commit_policy(
+        &store,
+        &author,
+        &scope,
+        0xf012_0021,
+        Revision::new(1),
+        &second.patch(),
+    )
+    .unwrap();
+    let expected_second = second.expected(2, &next.receipt_id, &Value::Null);
+    assert_eq!(next.result_ref, Some(expected_second.reference.clone()));
+    let retained = vec![expected_first.version.clone(), expected_second.version.clone()];
+    assert_eq!(history(&store, &scope), retained);
+
+    let revocation = commit_policy(
+        &store,
+        &author,
+        &scope,
+        0xf012_0022,
+        Revision::new(2),
+        &revoke_patch(1),
+    )
+    .unwrap();
+    let revoked_first = first.expected(
+        1,
+        &published.receipt_id,
+        &json!({"principal_id":actor(),"command_receipt_id":revocation.receipt_id}),
+    );
+    assert_eq!(
+        revocation.result_ref,
+        Some(format!("{}:revoked", expected_first.reference))
+    );
+    let resulting = vec![revoked_first.version.clone(), expected_second.version.clone()];
+    assert_eq!(history(&store, &scope), resulting);
+
+    // La révocation répétée et une version absente sont refusées sans rien engager.
+    let repeat = revoke_patch(1);
+    assert!(is_conflict(commit_policy(
+        &store,
+        &author,
+        &scope,
+        0xf012_0023,
+        Revision::new(3),
+        &repeat
+    )));
+    let missing = revoke_patch(3);
+    assert!(is_conflict(commit_policy(
+        &store,
+        &author,
+        &scope,
+        0xf012_0024,
+        Revision::new(3),
+        &missing
+    )));
+    assert_eq!(revision(&store, &scope), Revision::new(3));
+    assert_eq!(history(&store, &scope), resulting);
+
+    store.shutdown().unwrap();
+    let reopened = UnleashStore::open(StoreConfig::new(directory.path())).unwrap();
+    assert_eq!(history(&reopened, &scope), resulting);
+    reopened.shutdown().unwrap();
+}
+
+// T-F012-002 — La configuration n'élargit jamais les droits : profils exacts de la portée de
+// l'éditeur, digest concordant, chaque repli parmi les profils autorisés (REQ-MODEL-002).
+#[test]
+fn t_f012_002_refuses_out_of_scope_profiles_divergent_digests_and_outsides() {
+    let directory = local_test_dir("f012-model-policy-references").unwrap();
+    let (store, scope, profile) = ready(directory.path());
+    let author = authority(CallerRole::HumanOperator);
+    let other = create_project(&store, ProjectId::from_u128(0xf012_0005), 0xf012_0005);
+    let foreign = configure_profile(&store, &other, 1, 0xf012_0006);
+    let shared = configure_profile(&store, &Scope::user(), 1, 0xf012_0007);
+    let divergent = json!({"profile_id":PROFILE,"profile_version":1,
+        "digest":Sha256Digest::from_bytes(b"other fixture version")});
+    let mut widened = Policy::bounded(&[profile.reference()]);
+    widened.fallbacks = vec![foreign.reference()];
+
+    // Profil réservé à un autre projet.
+    let reserved = Policy::bounded(&[foreign.reference()]).patch();
+    assert!(is_conflict(commit_policy(
+        &store,
+        &author,
+        &scope,
+        0xf012_0030,
+        Revision::INITIAL,
+        &reserved
+    )));
+    // Digest divergent de la version configurée.
+    let stale_digest = Policy::bounded(&[divergent]).patch();
+    assert!(is_conflict(commit_policy(
+        &store,
+        &author,
+        &scope,
+        0xf012_0031,
+        Revision::INITIAL,
+        &stale_digest
+    )));
+    // Repli qui ne figure pas parmi les profils autorisés.
+    let outside = widened.patch();
+    assert!(is_conflict(commit_policy(
+        &store,
+        &author,
+        &scope,
+        0xf012_0032,
+        Revision::INITIAL,
+        &outside
+    )));
+    // Profil réservé au projet, publié depuis les réglages utilisateur.
+    let user_scope = Scope::user();
+    let project_patch = Policy::bounded(&[profile.reference()]).patch();
+    assert!(is_conflict(commit_policy(
+        &store,
+        &author,
+        &user_scope,
+        0xf012_0033,
+        Revision::INITIAL,
+        &project_patch
+    )));
+    assert_eq!(revision(&store, &scope), Revision::INITIAL);
+    assert_eq!(revision(&store, &user_scope), Revision::INITIAL);
+    assert!(history(&store, &scope).is_empty());
+    assert!(history(&store, &user_scope).is_empty());
+
+    // Un réglage projet vise les profils globaux ou de ce projet.
+    let mixed = Policy::bounded(&[profile.reference(), shared.reference()]);
+    let receipt =
+        commit_policy(&store, &author, &scope, 0xf012_0034, Revision::INITIAL, &mixed.patch())
+            .unwrap();
+    let expected = mixed.expected(1, &receipt.receipt_id, &Value::Null);
+    assert_eq!(history(&store, &scope), vec![expected.version]);
+    store.shutdown().unwrap();
+}
+
+// T-F012-002 — La forme hors contrat est refusée avant tout fait, et seuls les rôles humains
+// publient une autorité de modèle (REQ-MODEL-002).
+#[test]
+fn t_f012_002_refuses_out_of_contract_limits_and_non_human_authority() {
+    let directory = local_test_dir("f012-model-policy-form").unwrap();
+    let (store, scope, profile) = ready(directory.path());
+    let author = authority(CallerRole::HumanOperator);
+    let mut command = 0xf012_0040u128;
+    let mut refuse = |policy: &Policy| {
+        command += 1;
+        assert!(is_invalid(commit_policy(
+            &store,
+            &author,
+            &scope,
+            command,
+            Revision::INITIAL,
+            &policy.patch()
+        )));
+    };
+    for limits in [
+        json!({"max_llm_calls":0,"max_output_tokens":128,"max_cost_microusd":10000,
+            "max_duration_seconds":0}),
+        json!({"max_llm_calls":0,"max_output_tokens":128,"max_cost_microusd":10000,
+            "max_duration_seconds":2_592_001}),
+        json!({"max_llm_calls":9_007_199_254_740_992u64,"max_output_tokens":128,
+            "max_cost_microusd":10000,"max_duration_seconds":60}),
+    ] {
+        let mut policy = Policy::bounded(&[profile.reference()]);
+        policy.limits = limits;
+        refuse(&policy);
+    }
+    let duplicated = Policy::bounded(&[profile.reference(), profile.reference()]);
+    refuse(&duplicated);
+    for capability in ["", " ", "bad\u{0}capability", "a\u{7f}"] {
+        let mut policy = Policy::bounded(&[profile.reference()]);
+        policy.capabilities = vec![capability];
+        refuse(&policy);
+    }
+    assert_eq!(revision(&store, &scope), Revision::INITIAL);
+    assert!(history(&store, &scope).is_empty());
+
+    let bounded = Policy::bounded(&[profile.reference()]).patch();
+    for role in [
+        CallerRole::Agent,
+        CallerRole::Model,
+        CallerRole::ReconcileCoordinator,
+        CallerRole::SystemMaintenance,
+    ] {
+        command += 1;
+        let outsider = authority(role);
+        assert!(matches!(
+            commit_policy(&store, &outsider, &scope, command, Revision::INITIAL, &bounded),
+            Err(StoreError::Unauthorized(_))
+        ));
+    }
+    assert_eq!(revision(&store, &scope), Revision::INITIAL);
+
+    // Les deux rôles humains publient.
+    let receipt =
+        commit_policy(&store, &authority(CallerRole::PolicyAdmin), &scope, 0xf012_0050, Revision::INITIAL, &bounded)
+            .unwrap();
+    let expected = Policy::bounded(&[profile.reference()]).expected(1, &receipt.receipt_id, &Value::Null);
+    assert_eq!(history(&store, &scope), vec![expected.version]);
+    store.shutdown().unwrap();
 }

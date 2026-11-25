@@ -3,12 +3,15 @@
 
 use std::{collections::BTreeMap, fmt};
 
+use rusqlite::{Transaction, params};
 use serde::{Deserialize, Serialize};
 use unleash_domain::{ActorId, ReceiptId, Sha256Digest};
-use unleash_protocol::{ReasonCode, canonical_sha256};
+use unleash_protocol::{CommandEnvelope, ReasonCode, canonical_sha256};
 
+use crate::SettingsScopeKind;
 use crate::StoreError;
 use crate::model_selection_bindings::PreferredProfileRef;
+use crate::policies_secrets::{CallerAuthority, require_human_decider};
 
 /// Identité stable d'une politique, publiée dans le namespace de son scope.
 ///
@@ -241,4 +244,132 @@ fn project(history: &[Fact]) -> Result<Vec<ModelPolicyVersion>, StoreError> {
 /// Lit et projette l'historique brut `settings.model_policy_history_json` d'un scope.
 pub(crate) fn parse(history_json: &str) -> Result<Vec<ModelPolicyVersion>, StoreError> {
     project(&serde_json::from_str::<Vec<Fact>>(history_json)?)
+}
+
+/// Plus grand entier qui garde sa valeur exacte entre clients JSON (borne du contrat IPC).
+const MAX_WIRE_VERSION: u64 = 9_007_199_254_740_991;
+
+/// Fait de publication ou de révocation, engagé sous l'autorité authentifiée du transport.
+pub(crate) struct PolicyEdit<'a> {
+    /// Enveloppe de la commande `SetSettings` ; son acteur et sa lignée font foi.
+    pub command: &'a CommandEnvelope,
+    /// Autorité authentifiée ; elle fournit le principal, jamais le payload.
+    pub caller: &'a CallerAuthority,
+    /// Reçu engagé dans la même transaction que le fait.
+    pub receipt_id: ReceiptId,
+}
+
+/// Ajoute le fait à l'historique du scope, dans la transaction qui engage la révision des
+/// réglages et le reçu (REQ-MODEL-002, historique V021 du contrat `SQLite`).
+pub(crate) fn append_tx(
+    tx: &Transaction<'_>,
+    settings: (SettingsScopeKind, &str),
+    edit: PolicyEdit<'_>,
+    change: &ModelPolicyVersionChange,
+) -> Result<(), StoreError> {
+    // Une politique de modèle est une autorité : seul un décideur humain la publie ou la révoque,
+    // jamais un agent ni un modèle (F012/interfaces, « autorité humaine sur le scope »).
+    require_human_decider(edit.caller, "publish or revoke a model policy")?;
+    let (scope, scope_id) = settings;
+    let envelope = edit.command;
+    // La portée du patch doit être celle de l'enveloppe : un réglage utilisateur vise la lignée
+    // active, un réglage projet vise le projet exact de la commande.
+    match (scope, envelope.project_id) {
+        (SettingsScopeKind::User, None)
+            if scope_id == "default"
+                && envelope.aggregate_id == envelope.authority_generation.as_uuid() => {}
+        (SettingsScopeKind::Project, Some(project))
+            if scope_id == project.to_string() && envelope.aggregate_id == project.as_uuid() => {}
+        _ => return Err(conflict("model policy is outside the edited settings scope")),
+    }
+    let history = read_history(tx, settings)?;
+    let fact = match &change.0 {
+        Change::Publish {
+            policy_id,
+            allowed_profiles,
+            allowed_capabilities,
+            fallback_profiles,
+            limits,
+        } => {
+            let version = next_version(&history, policy_id)?;
+            let document = PolicyDocument {
+                policy_id: policy_id.clone(),
+                version,
+                allowed_profiles: allowed_profiles.clone(),
+                allowed_capabilities: allowed_capabilities.clone(),
+                fallback_profiles: fallback_profiles.clone(),
+                limits: *limits,
+                principal_id: edit.caller.actor_id.clone(),
+                command_receipt_id: edit.receipt_id,
+            };
+            Fact::Published {
+                digest: document.digest()?,
+                document,
+            }
+        }
+        Change::Revoke { .. } => {
+            return Err(conflict("model policy revocation is not engaged yet"));
+        }
+    };
+    append_fact(tx, settings, &fact)
+}
+
+fn read_history(
+    tx: &Transaction<'_>,
+    (scope, scope_id): (SettingsScopeKind, &str),
+) -> Result<Vec<Fact>, StoreError> {
+    let history: String = tx.query_row(
+        "SELECT model_policy_history_json FROM settings WHERE scope_kind=?1 AND scope_id=?2",
+        params![scope.as_str(), scope_id],
+        |row| row.get(0),
+    )?;
+    Ok(serde_json::from_str(&history)?)
+}
+
+fn next_version(history: &[Fact], policy_id: &ModelPolicyId) -> Result<u64, StoreError> {
+    let latest = history
+        .iter()
+        .filter_map(|fact| match fact {
+            Fact::Published { document, .. } if &document.policy_id == policy_id => {
+                Some(document.version)
+            }
+            _ => None,
+        })
+        .max();
+    match latest {
+        None => Ok(1),
+        Some(version) if version < MAX_WIRE_VERSION => Ok(version + 1),
+        Some(_) => Err(conflict("model policy version limit reached")),
+    }
+}
+
+fn append_fact(
+    tx: &Transaction<'_>,
+    (scope, scope_id): (SettingsScopeKind, &str),
+    fact: &Fact,
+) -> Result<(), StoreError> {
+    tx.execute(
+        "UPDATE settings SET model_policy_history_json =
+            json_insert(model_policy_history_json, '$[#]', json(?3))
+         WHERE scope_kind=?1 AND scope_id=?2",
+        params![scope.as_str(), scope_id, serde_json::to_string(fact)?],
+    )?;
+    Ok(())
+}
+
+/// Référence de résultat du reçu : la version publiée par cette commande exacte.
+pub(crate) fn result_ref_tx(
+    tx: &Transaction<'_>,
+    settings: (SettingsScopeKind, &str),
+    receipt_id: ReceiptId,
+) -> Result<String, StoreError> {
+    let history = read_history(tx, settings)?;
+    match history.last() {
+        Some(Fact::Published { document, digest }) if document.command_receipt_id == receipt_id => {
+            Ok(version_ref(&document.policy_id, document.version, digest))
+        }
+        _ => Err(StoreError::InvariantViolation(
+            "model policy fact and command receipt diverge".to_owned(),
+        )),
+    }
 }

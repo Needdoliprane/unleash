@@ -1330,22 +1330,37 @@ pub(crate) fn tx_commit_command(
     // Une commande composée ne porte qu'une référence de résultat : elle désigne la préférence
     // de skill, comme une préférence seule, car sa résolution contrôle ce reçu. La version de
     // politique publiée dans la même commande reste désignée par son propre reçu dans l'historique.
-    let model_selection_result = if let CommandMutation::SetSettingsWithModelConfiguration {
-        scope_kind,
-        scope_id,
-        binding: Some(_),
-        ..
-    } = &req.mutation
-    {
-        Some(crate::model_selection_bindings::result_ref_tx(
-            tx,
-            *scope_kind,
+    let (model_selection_result, model_policy_result) =
+        if let CommandMutation::SetSettingsWithModelConfiguration {
+            scope_kind,
             scope_id,
-            receipt_id,
-        )?)
-    } else {
-        None
-    };
+            binding,
+            policy,
+        } = &req.mutation
+        {
+            match (binding.is_some(), policy.is_some()) {
+                (true, _) => (
+                    Some(crate::model_selection_bindings::result_ref_tx(
+                        tx,
+                        *scope_kind,
+                        scope_id,
+                        receipt_id,
+                    )?),
+                    None,
+                ),
+                (false, true) => (
+                    None,
+                    Some(crate::model_policy_versions::result_ref_tx(
+                        tx,
+                        (*scope_kind, scope_id),
+                        receipt_id,
+                    )?),
+                ),
+                (false, false) => (None, None),
+            }
+        } else {
+            (None, None)
+        };
     let receipt = CommandReceipt {
         receipt_id,
         command_id: req.envelope.command_id,
@@ -1364,6 +1379,7 @@ pub(crate) fn tx_commit_command(
             .or_else(|| prepared_probe.map(|id| format!("provider-probe:{id}")))
             .or(service_launch_result)
             .or(model_selection_result)
+            .or(model_policy_result)
             .or(release_result)
             .or_else(|| {
                 matches!(req.mutation, CommandMutation::CreateInvocation)
@@ -2439,7 +2455,18 @@ fn apply_command_mutation(
                         config.id_generator.as_ref(),
                     )?;
                 }
-                let _ = policy;
+                if let Some(policy) = policy {
+                    crate::model_policy_versions::append_tx(
+                        tx,
+                        (*scope_kind, scope_id),
+                        crate::model_policy_versions::PolicyEdit {
+                            command: envelope,
+                            caller,
+                            receipt_id,
+                        },
+                        policy,
+                    )?;
+                }
             }
             let mut payload = Map::new();
             payload.insert(
