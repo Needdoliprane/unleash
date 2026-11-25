@@ -503,3 +503,45 @@ async fn policy_changed_after_claim_leaves_the_backup_blocked_before_dispatch() 
     assert_blocked_before_dispatch(&mut fixture, &mut events, None).await;
     fixture.handle.shutdown_graceful("test").await.unwrap();
 }
+
+// T-F017-013 / AC-F017-007 / REQ-SEC-007 : la politique change après la revalidation, avant la phase `Authorizing`.
+#[tokio::test]
+async fn policy_changed_after_revalidation_leaves_the_backup_blocked_before_dispatch() {
+    let (gate, mut fixture, mut events) =
+        claim_waiting_at(StoreCutpoint::C11iAfterBackupRevalidation, "after-revalidation").await;
+    change_policy_while_waiting(&mut fixture, 0xF017_1323, &gate).await;
+    assert_blocked_before_dispatch(&mut fixture, &mut events, None).await;
+    fixture.handle.shutdown_graceful("test").await.unwrap();
+}
+
+// T-F017-013 / AC-F017-007 / REQ-SEC-007 : décision allow, puis la politique change avant le dispatch.
+#[tokio::test]
+async fn policy_changed_after_authorization_never_dispatches_the_backup() {
+    let (gate, mut fixture, mut events) =
+        claim_waiting_at(StoreCutpoint::C11jAfterBackupAuthorization, "after-authorization").await;
+    change_policy_while_waiting(&mut fixture, 0xF017_1333, &gate).await;
+    assert_blocked_before_dispatch(&mut fixture, &mut events, Some("authorized")).await;
+    fixture.handle.shutdown_graceful("test").await.unwrap();
+}
+
+// T-F017-013 / AC-F017-007 / REQ-SEC-007 : contrôle interne du harnais en échec avant tout marqueur d'effet.
+#[tokio::test]
+async fn harness_failure_before_dispatch_leaves_the_backup_blocked() {
+    let gate = Arc::new(HarnessGate::new(StoreCutpoint::C11hAfterBackupClaim, true));
+    let mut fixture = BackupFixture::started(Arc::clone(&gate), "harness-failure").await;
+    let mut events = fixture.subscribe().await;
+    fixture.request_backup().await;
+    tokio::time::timeout(OBSERVATION_DEADLINE, gate.entered.notified())
+        .await
+        .expect("la panne est injectée au point de contrôle");
+    let blocked = fixture.wait_for_blocked().await;
+    assert_eq!(blocked["blocked_reason"], "preflight_failed");
+    assert!(blocked["manifest"].is_null());
+    assert!(blocked["action_state"].is_null());
+    fixture.assert_no_backup_effect("aborted", None).await;
+    assert_eq!(
+        blocked_event(&mut events, fixture.backup_id).await,
+        (json!("preflight_failed"), json!("not_dispatched"))
+    );
+    fixture.handle.shutdown_graceful("test").await.unwrap();
+}

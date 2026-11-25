@@ -26,12 +26,16 @@ use crate::broker_activity::BrokerActivityGuard;
 use crate::broker_journal::SqliteBrokerJournal;
 use crate::ipc::{DaemonRuntimeState, publish_committed_events_ordered};
 
+/// Engage par le writer unique un blocage avant tout marqueur d'effet, puis publie son événement.
+///
+/// Rend vrai si le magasin a attesté le motif, ou l'avait déjà engagé ; faux s'il le refuse,
+/// notamment dès qu'un marqueur de dispatch existe : l'issue exige alors une inspection.
 async fn block_before_dispatch(
     state: &Arc<DaemonRuntimeState>,
     record: &BackupRequestRecord,
     activity: &Arc<BrokerActivityGuard>,
     reason: BackupBlockReason,
-) {
+) -> bool {
     let store = Arc::clone(&state.store);
     let backup_id = record.backup_id;
     let generation = record.authority_generation;
@@ -41,6 +45,7 @@ async fn block_before_dispatch(
         store.block_claimed_backup(backup_id, generation, reason)
     })
     .await;
+    let committed = matches!(outcome, Ok(Ok(_)));
     let cursor = if let Ok(Ok(record)) = outcome {
         Some(record.last_event_cursor)
     } else {
@@ -64,6 +69,44 @@ async fn block_before_dispatch(
         publish_committed_events_ordered(state, cursor.stream_id, cursor.sequence.as_u64(), 1, &[])
             .await;
     }
+    committed
+}
+
+/// Refus du courtier avant tout marqueur d'effet.
+///
+/// Le harnais ne connaît pas toujours la cause du refus : le magasin n'engage que le motif qu'il
+/// atteste lui-même, du plus précis au plus général. `preflight_failed` n'est attesté que par
+/// l'absence de tout marqueur : une demande réclamée sans dispatch ne reste jamais sans issue.
+async fn block_after_broker_refusal(
+    state: &Arc<DaemonRuntimeState>,
+    record: &BackupRequestRecord,
+    activity: &Arc<BrokerActivityGuard>,
+) {
+    for reason in [
+        BackupBlockReason::AuthorizationDenied,
+        BackupBlockReason::PolicyChanged,
+        BackupBlockReason::PreflightFailed,
+    ] {
+        if block_before_dispatch(state, record, activity, reason).await {
+            return;
+        }
+    }
+}
+
+/// Point de contrôle du harnais, atteint hors du thread writer ; inerte avec l'observateur de production.
+async fn harness_checkpoint(
+    state: &Arc<DaemonRuntimeState>,
+    activity: &Arc<BrokerActivityGuard>,
+    checkpoint: StoreCutpoint,
+) -> bool {
+    let observer = Arc::clone(&state.store.config().cutpoints);
+    let task_activity = Arc::clone(activity);
+    tokio::task::spawn_blocking(move || {
+        let _activity = task_activity;
+        observer.hit(checkpoint).is_ok()
+    })
+    .await
+    .unwrap_or(false)
 }
 
 /// Admit a detached orchestration only after the command receipt exists.
@@ -87,7 +130,10 @@ pub(crate) fn start(state: &Arc<DaemonRuntimeState>, backup_id: BackupId) {
             return;
         };
         if run(state, record, activity).await.is_err() {
-            tracing::warn!("Sauvegarde non terminée ; consulter son état durable");
+            tracing::warn!(
+                backup_id = %backup_id,
+                "Sauvegarde non terminée ; consulter son état durable"
+            );
         }
     });
 }
@@ -163,13 +209,26 @@ async fn run(
                 .config()
                 .backups_dir
                 .join(record.backup_id.to_string())
-        || canonical_sha256(&record.action_payload()).map_err(|_| ())? != record.payload_digest
+        || !matches!(
+            canonical_sha256(&record.action_payload()),
+            Ok(digest) if digest == record.payload_digest
+        )
     {
+        // Incohérence interne (invariant défensif) : aucun effet n'est possible. Le magasin
+        // n'engage le blocage que sous l'autorité qui est celle de la demande.
+        block_before_dispatch(
+            &state,
+            &record,
+            &activity,
+            BackupBlockReason::PreflightFailed,
+        )
+        .await;
         return Err(());
     }
     let store = Arc::clone(&state.store);
     let read_activity = Arc::clone(&activity);
-    let policy = tokio::task::spawn_blocking(move || {
+    // Résumé de politique illisible ou harnais interrompu : la revalidation n'a pas eu lieu.
+    let policy = match tokio::task::spawn_blocking(move || {
         let _activity = read_activity;
         // Point de contrôle de la revalidation (REQ-SEC-007) : atteint hors du thread writer,
         // inerte avec l'observateur de production.
@@ -180,9 +239,25 @@ async fn run(
         store.read_policy_summary_snapshot(None)
     })
     .await
-    .map_err(|_| ())?
-    .map_err(|_| ())?
-    .value;
+    {
+        Ok(Ok(read)) => Ok(read.value),
+        Ok(Err(_)) | Err(_) => Err(()),
+    };
+    let policy = match policy {
+        Ok(policy) => policy,
+        Err(()) => {
+            // Le blocage n'est engagé que si le magasin peut encore, dans sa propre transaction,
+            // lire l'état et prouver l'absence de tout marqueur d'effet.
+            block_before_dispatch(
+                &state,
+                &record,
+                &activity,
+                BackupBlockReason::PreflightFailed,
+            )
+            .await;
+            return Err(());
+        }
+    };
     if policy.effective_isolation_mode != PolicyIsolationMode::Standard {
         block_before_dispatch(
             &state,
@@ -213,6 +288,30 @@ async fn run(
         .map_or(unleash_domain::Revision::INITIAL, |policy| policy.revision)
         != record.policy_revision
     {
+        // REQ-SEC-007 : la demande n'est pas exécutée sous une politique qu'elle n'a pas engagée.
+        block_before_dispatch(
+            &state,
+            &record,
+            &activity,
+            BackupBlockReason::PolicyChanged,
+        )
+        .await;
+        return Err(());
+    }
+    if !harness_checkpoint(
+        &state,
+        &activity,
+        StoreCutpoint::C11iAfterBackupRevalidation,
+    )
+    .await
+    {
+        block_before_dispatch(
+            &state,
+            &record,
+            &activity,
+            BackupBlockReason::PreflightFailed,
+        )
+        .await;
         return Err(());
     }
     let authority = compute_effective_authority(
@@ -237,13 +336,33 @@ async fn run(
             allow_cross_repository: false,
         }],
     );
-    let intent = ActionIntent {
-        action_id: record.action_id,
-        subject: ActionSubject::new_control_plane(
+    // Contrôles internes du harnais : aucun n'engage le moindre marqueur d'effet.
+    let preflight = match (
+        ActionSubject::new_control_plane(
             record.principal_id.clone(),
             format!("receipt:{}", record.receipt_id),
-        )
-        .map_err(|_| ())?,
+        ),
+        engaged_policy_digest(&policy),
+    ) {
+        (Ok(subject), Ok(policy_digest)) => Ok((subject, policy_digest)),
+        (Err(_), _) | (_, Err(_)) => Err(()),
+    };
+    let (subject, policy_digest) = match preflight {
+        Ok(preflight) => preflight,
+        Err(()) => {
+            block_before_dispatch(
+                &state,
+                &record,
+                &activity,
+                BackupBlockReason::PreflightFailed,
+            )
+            .await;
+            return Err(());
+        }
+    };
+    let intent = ActionIntent {
+        action_id: record.action_id,
+        subject,
         project_id: None,
         verb: REQUEST_BACKUP_VERB.into(),
         resource_refs: vec![NormalizedResourceRef::Path(record.destination_dir.clone())],
@@ -290,29 +409,55 @@ async fn run(
             project_id: None,
             policy_revision: record.policy_revision,
             scope_revision: record.scope_revision,
-            policy_digest: engaged_policy_digest(&policy).map_err(|_| ())?,
+            policy_digest,
             isolation_mode: IsolationMode::Standard,
             guard_mode: GuardMode::BrokerOnly,
             lineage_fence: record.lineage_fence,
         },
-    )
-    .map_err(|_| ())?;
-    let decision = match broker.authorize_action(intent, &authority).await {
-        Ok(AuthorizationOutcome::Authorized(decision)) => decision,
-        Ok(AuthorizationOutcome::ApprovalRequired { .. }) => return Err(()),
+    );
+    let broker = match broker {
+        Ok(broker) => broker,
         Err(_) => {
-            // Le writer refuse ce blocage si aucun refus terminal n'est engagé,
-            // notamment si l'issue de l'append est seulement incertaine.
             block_before_dispatch(
                 &state,
                 &record,
                 &activity,
-                BackupBlockReason::AuthorizationDenied,
+                BackupBlockReason::PreflightFailed,
             )
             .await;
             return Err(());
         }
     };
+    let decision = match broker.authorize_action(intent, &authority).await {
+        Ok(AuthorizationOutcome::Authorized(decision)) => decision,
+        Ok(AuthorizationOutcome::ApprovalRequired { .. }) => {
+            // Le producteur interne ne prévoit aucune approbation : l'action reste non dispatchée.
+            block_before_dispatch(
+                &state,
+                &record,
+                &activity,
+                BackupBlockReason::PreflightFailed,
+            )
+            .await;
+            return Err(());
+        }
+        Err(_) => {
+            // Le writer refuse un blocage sans motif attesté : le magasin n'engage que
+            // celui qu'il peut prouver.
+            block_after_broker_refusal(&state, &record, &activity).await;
+            return Err(());
+        }
+    };
+    if !harness_checkpoint(
+        &state,
+        &activity,
+        StoreCutpoint::C11jAfterBackupAuthorization,
+    )
+    .await
+    {
+        block_after_broker_refusal(&state, &record, &activity).await;
+        return Err(());
+    }
     let executor = BackupExecutor {
         store: Arc::clone(&state.store),
         record: record.clone(),
@@ -321,7 +466,7 @@ async fn run(
     let secrets = PlatformKeyringSecretStore::new(Arc::new(UnavailableOsKeyring::new(
         "Références secrètes interdites pour sauvegarde",
     )));
-    broker
+    if broker
         .execute_authorized(
             record.action_id,
             &decision.decision_ref,
@@ -331,6 +476,12 @@ async fn run(
             &secrets,
         )
         .await
-        .map_err(|_| ())?;
+        .is_err()
+    {
+        // Sans marqueur de dispatch, la demande ne reste jamais `claimed` : blocage attesté.
+        // Marqueur engagé : le magasin refuse le blocage, l'issue inconnue reste à réconcilier.
+        block_after_broker_refusal(&state, &executor.record, &executor.activity).await;
+        return Err(());
+    }
     Ok(())
 }
