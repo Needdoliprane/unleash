@@ -14,7 +14,7 @@ mod workflow_task;
 
 use serde_json::Value;
 use unleash_domain::{ActorId, RequestId, Revision, Sha256Digest, StepId, TaskId};
-use unleash_protocol::canonicalize_to_vec;
+use unleash_protocol::{ErrorCode, ReasonCode, RetryClass, canonicalize_to_vec};
 use unleash_store::{
     AdmissionUnit, CommitOutcome, CutpointObserver, ExecutionPoolParams, InitialContextPlan,
     PreparedTaskAssignment, StoreConfig, StoreCutpoint, StoreError, UnleashStore, WriteCriticality,
@@ -49,6 +49,30 @@ impl Fixture {
         (
             directory,
             Self::on_store(store, "fixture-owner", actor, retain_definition),
+            cutpoint,
+        )
+    }
+
+    /// Même run en exécution, avec une définition de workflow adaptée par `customize`.
+    fn with_definition(
+        retain_definition: bool,
+        customize: impl FnOnce(&mut Value),
+    ) -> (impl Drop, Self, Arc<ActivationCommitCutpoint>) {
+        let directory = local_test_dir("f005-task-activation").unwrap();
+        let cutpoint = Arc::new(ActivationCommitCutpoint::default());
+        let mut config = StoreConfig::new(directory.path());
+        config.cutpoints = cutpoint.clone();
+        let store = UnleashStore::open(config).unwrap();
+        let actor = ActorId::new("user:fixture-owner").unwrap();
+        (
+            directory,
+            Self::on_store_with_definition(
+                store,
+                "fixture-owner",
+                actor,
+                retain_definition,
+                customize,
+            ),
             cutpoint,
         )
     }
@@ -235,6 +259,80 @@ fn rolls_back_activation_and_retries_the_same_command() {
         fixture.store.activate_workflow_task(request).unwrap(),
         CommitOutcome::Committed(_)
     ));
+}
+
+/// A mechanical action before the agent tasks: `develop` is reached further in
+/// the run, it is not the entry leaf.
+fn mechanical_entry_then_tasks(definition: &mut Value, model_policy: &str) {
+    let delivery = definition.get_mut("body").unwrap().take();
+    let fields = definition.as_object_mut().unwrap();
+    fields.insert(
+        "schema_version".to_owned(),
+        serde_json::json!("unleash.workflow.v1.1"),
+    );
+    // An inconsistent version imported before semantic validation.
+    fields.insert("model_policy".to_owned(), serde_json::json!(model_policy));
+    fields.insert(
+        "body".to_owned(),
+        serde_json::json!({"id": "intake", "kind": "sequence", "steps": [
+            {"id": "collect", "kind": "action",
+             "operation": {"id": "demo.collect", "version": 1},
+             "contract_profile": {"id": "demo.contract", "version": 1},
+             "scope_key": "implementation", "inputs": {},
+             "timeout_seconds": 60, "max_attempts": 1, "retry_policy": "never"},
+            delivery,
+        ]}),
+    );
+}
+
+// T-F012-018 / AC-F012-018 / REQ-MODEL-018 — la règle vaut pour toute activation
+// d'une tâche d'agent du run, pas seulement de celle de l'entrée.
+#[test]
+fn t_f012_018_forbidden_run_refuses_a_later_agent_task_activation() {
+    let (_directory, fixture, _cutpoint) = Fixture::with_definition(true, |definition| {
+        mechanical_entry_then_tasks(definition, "forbidden");
+    });
+    let error = fixture
+        .store
+        .activate_workflow_task(fixture.activation(5, 2, &fixture.plan))
+        .expect_err("a forbidden run cannot activate an agent task");
+    assert!(matches!(
+        error,
+        StoreError::CapabilityDenied {
+            reason: ReasonCode::ModelCallsForbidden,
+            ..
+        }
+    ));
+    assert_eq!(error.error_code(), ErrorCode::CapabilityDenied);
+    assert_eq!(error.retry_class(), RetryClass::Never);
+    fixture.assert_unmaterialized();
+    let debited: i64 = fixture
+        .store
+        .read_snapshot(|conn, _| {
+            Ok(conn.query_row(
+                "SELECT step_activations_used FROM workflow_runs WHERE run_id=?1",
+                [fixture.run.to_string()],
+                |row| row.get(0),
+            )?)
+        })
+        .unwrap();
+    assert_eq!(debited, 0);
+}
+
+// T-F012-018 / AC-F012-018 / REQ-MODEL-018 — seule `forbidden` restreint : une
+// politique déclarée `allowed_bounded` laisse les tâches d'agent s'activer.
+#[test]
+fn t_f012_018_bounded_policy_still_activates_agent_tasks() {
+    let (_directory, fixture, _cutpoint) = Fixture::with_definition(true, |definition| {
+        mechanical_entry_then_tasks(definition, "allowed_bounded");
+    });
+    let activated = fixture
+        .store
+        .activate_workflow_task(fixture.activation(5, 2, &fixture.plan));
+    assert!(
+        matches!(activated, Ok(CommitOutcome::Committed(_))),
+        "{activated:?}"
+    );
 }
 
 #[test]

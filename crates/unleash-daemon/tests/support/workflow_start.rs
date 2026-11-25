@@ -379,6 +379,8 @@ async fn t_f005_004_refuses_the_entry_above_the_activation_budget() {
         .unwrap();
 }
 
+// T-F012-018 / AC-F012-018 / REQ-MODEL-018 — l'entrée d'un run `forbidden` qui active
+// une tâche d'agent est refusée avant tout effet de démarrage.
 #[tokio::test]
 async fn t_f012_018_forbidden_run_refuses_agent_task_activation() {
     let data = unleash_testkit::local_test_dir("f012-model-policy-data").unwrap();
@@ -408,6 +410,62 @@ async fn t_f012_018_forbidden_run_refuses_agent_task_activation() {
     assert!(matches!(error, ClientError::Remote(error)
         if error.code == ErrorCode::CapabilityDenied
             && error.reason_code == Some(ReasonCode::ModelCallsForbidden)));
+    assert_eq!(snapshot.result.get("state"), Some(&json!("prepared")));
+    assert_eq!(snapshot.result.get("revision"), Some(&json!(1)));
+    tokio::task::spawn_blocking(move || assert_start_effects(store, None))
+        .await
+        .unwrap();
+}
+
+// T-F012-018 / AC-F012-018 / REQ-MODEL-018 — la politique interdit l'activation
+// d'une tâche d'agent, pas le démarrage en soi : une entrée mécanique suivie de
+// la tâche d'agent n'est pas refusée au titre du modèle. Le moteur ne matérialise
+// aujourd'hui qu'une entrée résoluble en tâche ; le refus observé est le sien. Ce
+// test doit réclamer le démarrage réel dès que le moteur active une entrée d'action.
+#[tokio::test]
+async fn t_f012_018_forbidden_run_with_a_mechanical_entry_is_not_refused_by_the_model_policy() {
+    let data = unleash_testkit::local_test_dir("f012-mechanical-entry-data").unwrap();
+    let rendezvous = unleash_testkit::local_test_dir("f012-mechanical-entry-rdv").unwrap();
+    let (store, config, mut create) =
+        fixture(data.path(), rendezvous.path(), AgentLevel::N, |workflow| {
+            let task = workflow.get_mut("body").unwrap().take();
+            let definition = workflow.as_object_mut().unwrap();
+            definition.insert("schema_version".to_owned(), json!("unleash.workflow.v1.1"));
+            // An inconsistent version imported before semantic validation.
+            definition.insert("model_policy".to_owned(), json!("forbidden"));
+            definition.insert(
+                "body".to_owned(),
+                json!({"id": "intake", "kind": "sequence", "steps": [
+                    {"id": "collect", "kind": "action",
+                     "operation": {"id": "demo.collect", "version": 1},
+                     "contract_profile": {"id": "demo.contract", "version": 1},
+                     "scope_key": "implementation", "inputs": {},
+                     "timeout_seconds": 60, "max_attempts": 1, "retry_policy": "never"},
+                    task,
+                ]}),
+            );
+        })
+        .await;
+    let (daemon, mut client) = start(config).await;
+    publish_mandate(&mut client, &mut create).await;
+    client.send_command(&create).await.unwrap();
+
+    let result = client.send_command(&start_command(&create)).await;
+    let snapshot = client.query(&scoped_run_query(&create)).await.unwrap();
+    drop(client);
+    daemon
+        .shutdown_graceful("inspect run whose entry is mechanical")
+        .await
+        .unwrap();
+    drop(daemon);
+
+    let error = result.expect_err("the engine resolves no activation for a mechanical entry");
+    assert!(
+        matches!(error, ClientError::Remote(ref remote)
+            if remote.code == ErrorCode::ContractViolation
+                && remote.reason_code == Some(ReasonCode::EvidenceUnavailable)),
+        "the refusal must be the engine's, not the model policy's: {error:?}"
+    );
     assert_eq!(snapshot.result.get("state"), Some(&json!("prepared")));
     assert_eq!(snapshot.result.get("revision"), Some(&json!(1)));
     tokio::task::spawn_blocking(move || assert_start_effects(store, None))
