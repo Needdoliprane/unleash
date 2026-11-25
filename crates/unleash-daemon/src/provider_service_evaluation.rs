@@ -199,6 +199,16 @@ impl OwnedProviderServiceHost {
     }
 }
 
+/// Secret de contrôle neuf d'un service fournisseur managé.
+pub(crate) fn fresh_provider_service_secret(
+    ids: &dyn unleash_domain::IdGeneratorPort,
+) -> Result<HostControlSecret, ProviderServiceLaunchError> {
+    Ok(HostControlSecret::new(format!(
+        "provider-service:{}",
+        ids.new_uuid()
+    ))?)
+}
+
 fn spawn_provider_service_host(
     store: &UnleashStore,
     envelope: &CommandEnvelope,
@@ -231,11 +241,7 @@ fn spawn_provider_service_host(
         return Err(ProviderServiceLaunchError::RuntimeInUse);
     }
     let bootstrap_path = bootstrap.runtime_dir.join("bootstrap.json");
-    let config = store.config();
-    let secret = HostControlSecret::new(format!(
-        "provider-service:{}",
-        config.id_generator.new_uuid()
-    ))?;
+    let secret = fresh_provider_service_secret(store.config().id_generator.as_ref())?;
     let file = OpenOptions::new()
         .write(true)
         .create_new(true)
