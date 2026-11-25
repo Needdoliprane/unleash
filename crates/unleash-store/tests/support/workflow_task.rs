@@ -35,13 +35,25 @@ impl Fixture {
         actor: ActorId,
         retain_definition: bool,
     ) -> Self {
+        Self::on_store_with_definition(store, principal, actor, retain_definition, |_| {})
+    }
+
+    /// Même run en exécution, avec une définition de workflow adaptée par `customize`.
+    pub(crate) fn on_store_with_definition(
+        store: UnleashStore,
+        principal: &str,
+        actor: ActorId,
+        retain_definition: bool,
+        customize: impl FnOnce(&mut Value),
+    ) -> Self {
         store
             .register_principal(principal, "user", actor.as_str())
             .unwrap();
-        let definition: Value = serde_json::from_str(include_str!(
+        let mut definition: Value = serde_json::from_str(include_str!(
             "../../../../.claude/examples/merge-only-workflow.json"
         ))
         .unwrap();
+        customize(&mut definition);
         let bytes = canonicalize_to_vec(&definition).unwrap();
         let definition_hash = Sha256Digest::from_bytes(&bytes);
         let bundle = Sha256Digest::from_bytes(b"effective run plan for the fixture");
