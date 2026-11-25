@@ -463,9 +463,9 @@ async fn t_f012_018_forbidden_run_with_a_mechanical_entry_is_not_refused_by_the_
 
     let error = result.expect_err("the engine resolves no activation for a mechanical entry");
     assert!(
-        matches!(error, ClientError::Remote(error)
-            if error.code == ErrorCode::ContractViolation
-                && error.reason_code == Some(ReasonCode::EvidenceUnavailable)),
+        matches!(error, ClientError::Remote(ref remote)
+            if remote.code == ErrorCode::ContractViolation
+                && remote.reason_code == Some(ReasonCode::EvidenceUnavailable)),
         "the refusal must be the engine's, not the model policy's: {error:?}"
     );
     assert_eq!(snapshot.result.get("state"), Some(&json!("prepared")));

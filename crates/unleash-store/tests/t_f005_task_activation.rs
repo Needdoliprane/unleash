@@ -46,7 +46,7 @@ impl Fixture {
     fn with_definition(
         retain_definition: bool,
         customize: impl FnOnce(&mut Value),
-    ) -> (impl Drop, Self, Arc<ActivationCommitCutpoint>) {
+    ) -> (Box<dyn Drop>, Self, Arc<ActivationCommitCutpoint>) {
         let directory = local_test_dir("f005-task-activation").unwrap();
         let cutpoint = Arc::new(ActivationCommitCutpoint::default());
         let mut config = StoreConfig::new(directory.path());
@@ -54,7 +54,7 @@ impl Fixture {
         let store = UnleashStore::open(config).unwrap();
         let actor = ActorId::new("user:fixture-owner").unwrap();
         (
-            directory,
+            Box::new(directory),
             Self::on_store_with_definition(
                 store,
                 "fixture-owner",
@@ -322,7 +322,7 @@ fn t_f012_018_bounded_policy_still_activates_agent_tasks() {
         fixture
             .store
             .activate_workflow_task(fixture.activation(5, 2, &fixture.plan)),
-        CommitOutcome::Committed(_)
+        Ok(CommitOutcome::Committed(_))
     ));
 }
 
