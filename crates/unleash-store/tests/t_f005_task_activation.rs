@@ -290,7 +290,7 @@ fn mechanical_entry_then_tasks(definition: &mut Value, model_policy: &str) {
 #[test]
 fn t_f012_018_forbidden_run_refuses_a_later_agent_task_activation() {
     let (_directory, fixture, _cutpoint) = Fixture::with_definition(true, |definition| {
-        mechanical_entry_then_tasks(definition, "forbidden")
+        mechanical_entry_then_tasks(definition, "forbidden");
     });
     let error = fixture
         .store
@@ -324,7 +324,7 @@ fn t_f012_018_forbidden_run_refuses_a_later_agent_task_activation() {
 #[test]
 fn t_f012_018_bounded_policy_still_activates_agent_tasks() {
     let (_directory, fixture, _cutpoint) = Fixture::with_definition(true, |definition| {
-        mechanical_entry_then_tasks(definition, "allowed_bounded")
+        mechanical_entry_then_tasks(definition, "allowed_bounded");
     });
     let activated = fixture
         .store
