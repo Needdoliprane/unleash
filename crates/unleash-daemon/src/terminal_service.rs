@@ -5,10 +5,11 @@ use std::collections::BTreeSet;
 use std::os::unix::fs::PermissionsExt;
 use unleash_action_broker::{
     ActionBroker, ActionIntent, ActionProvenance, ActionSubject, AuthorityLayer,
-    AuthorizationOutcome, BrokerConfig, EffectiveAuthority, EffectsClass, HostIsolationProbe,
-    IsolationMode as BrokerIsolationMode, IsolationRequirements, LocalAuthorityFallbackPolicy,
-    NormalizedResourceRef, PlatformKeyringSecretStore, ScopeKind,
-    StrictNoneAcceptedObligationChecker, SystemClockAndTimer, compute_effective_authority,
+    AuthorizationOutcome, BrokerConfig, EffectiveAuthority, EffectsClass, GuardMode,
+    HostIsolationProbe, InitialEffectivePolicy, IsolationMode as BrokerIsolationMode,
+    IsolationRequirements, LocalAuthorityFallbackPolicy, NormalizedResourceRef,
+    PlatformKeyringSecretStore, ScopeKind, StrictNoneAcceptedObligationChecker,
+    SystemClockAndTimer, compute_effective_authority,
 };
 use unleash_domain::{DataLocality, Fence, LineageFence, ModelPolicy, ReconcileStrategy};
 use unleash_process_host::{
@@ -286,10 +287,8 @@ async fn run_allocation(
     activity: Arc<crate::broker_activity::BrokerActivityGuard>,
 ) -> Result<(), ()> {
     let c = &record.context;
-    let unleash_store::TerminalAllocationScope::ProjectConfiguration {
-        project_id,
-        revision,
-    } = c.preparation.scope;
+    let unleash_store::TerminalAllocationScope::ProjectConfiguration { project_id, .. } =
+        c.preparation.scope;
     if c.authority_generation != state.authority_generation || c.daemon_epoch != state.daemon_epoch
     {
         return Err(());
@@ -315,8 +314,7 @@ async fn run_allocation(
         intent,
     } = allocation_authorization(&record)?;
     let slot: ObservationSlot = Arc::new(std::sync::Mutex::new(None));
-    let broker = allocation_broker(&state, slot.clone(), fence);
-    broker.bump_scope_revision(Some(project_id), revision);
+    let broker = allocation_broker(&state, &record, slot.clone(), fence)?;
     let decision = match broker
         .authorize_action(intent, &authority)
         .await
@@ -423,11 +421,20 @@ fn allocation_authorization(
 
 fn allocation_broker(
     state: &Arc<DaemonRuntimeState>,
+    record: &unleash_store::TerminalAllocationRecord,
     slot: ObservationSlot,
     fence: LineageFence,
-) -> ActionBroker {
+) -> Result<ActionBroker, ()> {
+    let c = &record.context;
+    let unleash_store::TerminalAllocationScope::ProjectConfiguration {
+        project_id,
+        revision,
+    } = c.preparation.scope;
     let timer = Arc::new(SystemClockAndTimer::new());
-    ActionBroker::new(
+    // Le courtier du lancement est lié à la politique engagée par l'allocation (REQ-SEC-007) :
+    // construit à la révision initiale, il répond `PolicyDenied` dès qu'une politique, même
+    // standard, est posée.
+    ActionBroker::new_with_policy_snapshot(
         state.store.config().clock.clone(),
         timer.clone(),
         timer,
@@ -446,7 +453,17 @@ fn allocation_broker(
         Arc::new(
             crate::broker_journal::SqliteBrokerJournal::with_terminal_observation(state, slot),
         ),
+        InitialEffectivePolicy {
+            project_id: Some(project_id),
+            policy_revision: c.policy_revision,
+            scope_revision: revision,
+            policy_digest: c.security_policy_digest,
+            isolation_mode: BrokerIsolationMode::Standard,
+            guard_mode: GuardMode::BrokerOnly,
+            lineage_fence: fence,
+        },
     )
+    .map_err(|_| ())
 }
 
 struct TerminalExecutor {
