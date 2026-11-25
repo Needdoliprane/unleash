@@ -18,7 +18,7 @@ use unleash_domain::{
 };
 use unleash_process_host::{
     CONTROL_SECRET_FILENAME, ControlTransferRequest, ControlTransferResponse,
-    HOST_MANIFEST_FILENAME, HOST_SOCKET_FILENAME, HostClient, HostControlSecret, HostManifest,
+    HOST_MANIFEST_FILENAME, HOST_SOCKET_FILENAME, HostClient, HostManifest,
     effective_environment_digest_v1, explicit_environment_v1, load_control_secret,
     store_control_secret,
 };
@@ -36,6 +36,26 @@ type ObservationSlot = Arc<Mutex<Option<TerminalControlObservation>>>;
 type ControlError = Box<dyn std::error::Error + Send + Sync>;
 
 pub(super) fn start(state: &Arc<DaemonRuntimeState>, actor: ActorId, command: CommandId) {
+    start_with(
+        state,
+        actor,
+        command,
+        Arc::new(super::SystemControlSecretSource),
+    );
+}
+
+/// Transfert ou réactivation du contrôle avec la source de secret de contrôle donnée.
+///
+/// Seul [`start`] est appelé par l'IPC, avec la source d'aléa du système. Ce point d'entrée est la
+/// couture d'injection des tests de la crate (REQ-TERM-003) : le module n'est pas exporté, rien
+/// hors de la crate ne peut fournir une autre source, et aucun drapeau ni variable d'environnement
+/// ne la sélectionne.
+pub(crate) fn start_with(
+    state: &Arc<DaemonRuntimeState>,
+    actor: ActorId,
+    command: CommandId,
+    control_secrets: Arc<dyn super::ControlSecretSource>,
+) {
     let Some(activity) = state.broker_activity.admit() else {
         return;
     };
@@ -74,7 +94,7 @@ pub(super) fn start(state: &Arc<DaemonRuntimeState>, actor: ActorId, command: Co
         {
             return;
         }
-        if run(state, record, activity).await.is_err() {
+        if run(state, record, activity, control_secrets).await.is_err() {
             tracing::warn!("Terminal control has no confirmed observation; inspect recovery");
         }
     });
@@ -138,6 +158,7 @@ async fn run(
     state: Arc<DaemonRuntimeState>,
     record: TerminalControlRecord,
     activity: Arc<crate::broker_activity::BrokerActivityGuard>,
+    control_secrets: Arc<dyn super::ControlSecretSource>,
 ) -> Result<(), ()> {
     let c = &record.context;
     if c.authority_generation != state.authority_generation || c.daemon_epoch != state.daemon_epoch
@@ -212,6 +233,7 @@ async fn run(
         record,
         slot,
         activity,
+        control_secrets,
     };
     let secrets = PlatformKeyringSecretStore::new(Arc::new(
         unleash_platform::UnavailableOsKeyring::new("No terminal control SecretRefs in this path"),
@@ -238,6 +260,7 @@ struct ControlExecutor {
     record: TerminalControlRecord,
     slot: ObservationSlot,
     activity: Arc<crate::broker_activity::BrokerActivityGuard>,
+    control_secrets: Arc<dyn super::ControlSecretSource>,
 }
 impl ActionExecutorPort for ControlExecutor {
     fn execute_action<'a>(
@@ -262,9 +285,10 @@ impl ActionExecutorPort for ControlExecutor {
             let state = Arc::clone(&self.state);
             let record = self.record.clone();
             let activity = Arc::clone(&self.activity);
+            let control_secrets = Arc::clone(&self.control_secrets);
             let observation = tokio::task::spawn_blocking(move || {
                 let _activity = activity;
-                transfer_and_observe(&state, &record, dispatch)
+                transfer_and_observe(&state, &record, dispatch, control_secrets.as_ref())
             })
             .await
             .map_err(|_| unknown())?
@@ -382,9 +406,10 @@ fn transfer_and_observe(
     state: &DaemonRuntimeState,
     record: &TerminalControlRecord,
     dispatch: DispatchId,
+    control_secrets: &dyn super::ControlSecretSource,
 ) -> Result<TerminalControlObservation, ControlError> {
     if record.context.release_source.is_some() {
-        return reacquire_and_observe(state, record, dispatch);
+        return reacquire_and_observe(state, record, dispatch, control_secrets);
     }
     let c = &record.context;
     // One-use permit. A missing ACK never authorizes another call or spawn.
@@ -407,7 +432,7 @@ fn transfer_and_observe(
     if std::fs::symlink_metadata(&next_path).is_ok() {
         return Err("terminal transfer capability already exists; inspect".into());
     }
-    let next = super::fresh_control_secret()?;
+    let next = control_secrets.generate()?;
     store_control_secret(&next_path, &next)?;
     let mut client = HostClient::connect(
         &runtime.join(HOST_SOCKET_FILENAME),
@@ -469,6 +494,7 @@ fn reacquire_and_observe(
     state: &DaemonRuntimeState,
     record: &TerminalControlRecord,
     dispatch: DispatchId,
+    control_secrets: &dyn super::ControlSecretSource,
 ) -> Result<TerminalControlObservation, ControlError> {
     let c = &record.context;
     let source = c
@@ -499,7 +525,7 @@ fn reacquire_and_observe(
             },
         })?;
     let secret = load_control_secret(&runtime.join(CONTROL_SECRET_FILENAME))?;
-    let next = HostControlSecret::generate()?;
+    let next = control_secrets.generate()?;
     reactivation_permission(state, c)?;
     let mut client = HostClient::connect(
         &runtime.join(HOST_SOCKET_FILENAME),

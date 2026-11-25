@@ -15,8 +15,9 @@ use unleash_domain::{DataLocality, Fence, LineageFence, ModelPolicy, ReconcileSt
 use unleash_process_host::{
     CONTROL_SECRET_FILENAME, EnvironmentMode, HOST_MANIFEST_FILENAME, HOST_SOCKET_FILENAME,
     HostBootstrapSpec, HostClient, HostControlSecret, HostManifest, HostRequest, HostResponse,
-    IsolationMode as HostIsolationMode, ResourceKind, effective_environment_digest_v1,
-    explicit_environment_v1, load_control_secret, store_control_secret,
+    IsolationMode as HostIsolationMode, ProcessHostError, ResourceKind,
+    effective_environment_digest_v1, explicit_environment_v1, load_control_secret,
+    store_control_secret,
 };
 use unleash_store::{
     CallerAuthority, CallerRole, FenceAssertion, PrepareObjectRequest,
@@ -255,6 +256,20 @@ fn read_host_log(
 }
 
 pub(crate) fn start(state: &Arc<DaemonRuntimeState>, terminal: unleash_domain::TerminalId) {
+    start_with(state, terminal, Arc::new(SystemControlSecretSource));
+}
+
+/// Lance l'allocation avec la source de secret de contrôle donnée.
+///
+/// Seul [`start`] est appelé par l'IPC, avec la source d'aléa du système. Ce point d'entrée est la
+/// couture d'injection des tests de la crate (REQ-TERM-003) : le module n'est pas exporté, rien
+/// hors de la crate ne peut fournir une autre source, et aucun drapeau ni variable d'environnement
+/// ne la sélectionne.
+pub(crate) fn start_with(
+    state: &Arc<DaemonRuntimeState>,
+    terminal: unleash_domain::TerminalId,
+    control_secrets: Arc<dyn ControlSecretSource>,
+) {
     let Some(activity) = state.broker_activity.admit() else {
         return;
     };
@@ -275,7 +290,10 @@ pub(crate) fn start(state: &Arc<DaemonRuntimeState>, terminal: unleash_domain::T
         if record.state != unleash_store::TerminalAllocationState::Allocated {
             return;
         }
-        if run_allocation(state, record, activity).await.is_err() {
+        if run_allocation(state, record, activity, control_secrets)
+            .await
+            .is_err()
+        {
             tracing::warn!("Terminal acquisition has no confirmed observation; inspect recovery");
         }
     });
@@ -285,6 +303,7 @@ async fn run_allocation(
     state: Arc<DaemonRuntimeState>,
     record: unleash_store::TerminalAllocationRecord,
     activity: Arc<crate::broker_activity::BrokerActivityGuard>,
+    control_secrets: Arc<dyn ControlSecretSource>,
 ) -> Result<(), ()> {
     let c = &record.context;
     let unleash_store::TerminalAllocationScope::ProjectConfiguration { project_id, .. } =
@@ -329,6 +348,7 @@ async fn run_allocation(
         record,
         slot,
         activity,
+        control_secrets,
     };
     let secrets = PlatformKeyringSecretStore::new(Arc::new(
         unleash_platform::UnavailableOsKeyring::new("No terminal secrets in this qualified path"),
@@ -471,6 +491,7 @@ struct TerminalExecutor {
     record: unleash_store::TerminalAllocationRecord,
     slot: ObservationSlot,
     activity: Arc<crate::broker_activity::BrokerActivityGuard>,
+    control_secrets: Arc<dyn ControlSecretSource>,
 }
 impl unleash_action_broker::ActionExecutorPort for TerminalExecutor {
     fn execute_action<'a>(
@@ -501,9 +522,10 @@ impl unleash_action_broker::ActionExecutorPort for TerminalExecutor {
             let state = self.state.clone();
             let record = self.record.clone();
             let activity = self.activity.clone();
+            let control_secrets = Arc::clone(&self.control_secrets);
             let observation = tokio::task::spawn_blocking(move || {
                 let _activity = activity;
-                spawn_and_observe(&state, &record, dispatch)
+                spawn_and_observe(&state, &record, dispatch, control_secrets.as_ref())
             })
             .await
             .map_err(|_| unknown())?
@@ -523,6 +545,28 @@ impl unleash_action_broker::ActionExecutorPort for TerminalExecutor {
 
 type TerminalError = Box<dyn std::error::Error + Send + Sync>;
 
+/// Source du secret de contrôle d'un hôte de processus (REQ-TERM-003).
+///
+/// Tirer un secret est une opération pure : aucune écriture. Chaque site du démon qui en tire un
+/// le fait avant toute écriture durable, pour qu'une source indisponible ne laisse aucune mutation.
+pub(crate) trait ControlSecretSource: Send + Sync {
+    /// Génère un secret de contrôle neuf de 256 bits.
+    ///
+    /// # Errors
+    /// [`ProcessHostError::RandomSourceUnavailable`] si la source d'aléa du système est
+    /// indisponible : aucun repli déterministe n'est produit.
+    fn generate(&self) -> Result<HostControlSecret, ProcessHostError>;
+}
+
+/// Source de production : la source d'aléa du système, par [`HostControlSecret::generate`].
+pub(crate) struct SystemControlSecretSource;
+
+impl ControlSecretSource for SystemControlSecretSource {
+    fn generate(&self) -> Result<HostControlSecret, ProcessHostError> {
+        HostControlSecret::generate()
+    }
+}
+
 struct HostLaunch {
     spec: HostBootstrapSpec,
     secret: HostControlSecret,
@@ -533,9 +577,10 @@ fn spawn_and_observe(
     state: &Arc<DaemonRuntimeState>,
     record: &unleash_store::TerminalAllocationRecord,
     dispatch: unleash_domain::DispatchId,
+    control_secrets: &dyn ControlSecretSource,
 ) -> Result<unleash_store::terminal_allocations::TerminalLaunchObservation, TerminalError> {
     let profile = resolve_launch_permit(state, record, dispatch)?;
-    let launch = prepare_host_launch(state, record, profile)?;
+    let launch = prepare_host_launch(state, record, profile, control_secrets)?;
     let expected_host = spawn_registered_host(state, &launch)?;
     let observation = observe_spawned_host(state, record, dispatch, &launch, &expected_host)?;
     publish_launch_observation(state, &observation)?;
@@ -595,16 +640,11 @@ fn resolve_launch_permit(
     Ok(profile)
 }
 
-/// Secret de contrôle neuf d'un hôte de processus : 256 bits de la source d'aléa du système,
-/// jamais dérivés du générateur d'identifiants du démon, dont la séquence est reproductible.
-pub(crate) fn fresh_control_secret() -> Result<HostControlSecret, TerminalError> {
-    Ok(HostControlSecret::generate()?)
-}
-
 fn prepare_host_launch(
     state: &Arc<DaemonRuntimeState>,
     record: &unleash_store::TerminalAllocationRecord,
     profile: unleash_store::terminal_allocations::TerminalEnvironmentProfile,
+    control_secrets: &dyn ControlSecretSource,
 ) -> Result<HostLaunch, TerminalError> {
     let c = &record.context;
     let process = &c.preparation.process_spec;
@@ -613,7 +653,7 @@ fn prepare_host_launch(
     let runtime = base.join(c.host_id.to_string());
     unleash_platform::ensure_private_rendezvous_dir(&runtime)?;
     let runtime = runtime.canonicalize()?;
-    let secret = fresh_control_secret()?;
+    let secret = control_secrets.generate()?;
     let secret_path = runtime.join(CONTROL_SECRET_FILENAME);
     store_control_secret(&secret_path, &secret)?;
     let effective = explicit_environment_v1(&profile.variables, &runtime.join("child-tmp"))?;

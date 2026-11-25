@@ -19,8 +19,8 @@ use unleash_domain::{
 };
 use unleash_process_host::{
     CONTROL_SECRET_FILENAME, ControlReleaseKey, ControlReleaseRequest, ControlReleaseResponse,
-    HOST_MANIFEST_FILENAME, HOST_SOCKET_FILENAME, HostClient, HostControlSecret, HostControlState,
-    HostManifest, load_control_secret,
+    HOST_MANIFEST_FILENAME, HOST_SOCKET_FILENAME, HostClient, HostControlState, HostManifest,
+    load_control_secret,
 };
 use unleash_protocol::{CommandEnvelope, ErrorCode, IpcError, ReceiptState, RetryClass};
 use unleash_store::{
@@ -207,6 +207,26 @@ pub(crate) fn prepare(
 }
 
 pub(crate) fn start(state: &Arc<DaemonRuntimeState>, actor: ActorId, command: CommandId) {
+    start_with(
+        state,
+        actor,
+        command,
+        Arc::new(super::SystemControlSecretSource),
+    );
+}
+
+/// Retrait natif du contrôle avec la source de secret de contrôle donnée.
+///
+/// Seul [`start`] est appelé par l'IPC, avec la source d'aléa du système. Ce point d'entrée est la
+/// couture d'injection des tests de la crate (REQ-TERM-003) : le module n'est pas exporté, rien
+/// hors de la crate ne peut fournir une autre source, et aucun drapeau ni variable d'environnement
+/// ne la sélectionne.
+pub(crate) fn start_with(
+    state: &Arc<DaemonRuntimeState>,
+    actor: ActorId,
+    command: CommandId,
+    control_secrets: Arc<dyn super::ControlSecretSource>,
+) {
     let Some(activity) = state.broker_activity.admit() else {
         return;
     };
@@ -230,7 +250,7 @@ pub(crate) fn start(state: &Arc<DaemonRuntimeState>, actor: ActorId, command: Co
         {
             return;
         }
-        if run(state, record, activity).await.is_err() {
+        if run(state, record, activity, control_secrets).await.is_err() {
             tracing::warn!("Terminal release has no confirmed disposition; inspect recovery");
         }
     });
@@ -265,6 +285,7 @@ async fn run(
     state: Arc<DaemonRuntimeState>,
     record: TerminalReleaseRecord,
     activity: Arc<crate::broker_activity::BrokerActivityGuard>,
+    control_secrets: Arc<dyn super::ControlSecretSource>,
 ) -> Result<(), ()> {
     let c = &record.context;
     if c.authority_generation != state.authority_generation || c.daemon_epoch != state.daemon_epoch
@@ -304,6 +325,7 @@ async fn run(
         record,
         slot,
         activity,
+        control_secrets,
     };
     let secrets = PlatformKeyringSecretStore::new(Arc::new(
         unleash_platform::UnavailableOsKeyring::new("No release SecretRefs in this path"),
@@ -397,6 +419,7 @@ struct ReleaseExecutor {
     record: TerminalReleaseRecord,
     slot: Slot,
     activity: Arc<crate::broker_activity::BrokerActivityGuard>,
+    control_secrets: Arc<dyn super::ControlSecretSource>,
 }
 impl ActionExecutorPort for ReleaseExecutor {
     fn execute_action<'a>(
@@ -421,9 +444,10 @@ impl ActionExecutorPort for ReleaseExecutor {
             let state = Arc::clone(&self.state);
             let record = self.record.clone();
             let activity = Arc::clone(&self.activity);
+            let control_secrets = Arc::clone(&self.control_secrets);
             let observation = tokio::task::spawn_blocking(move || {
                 let _activity = activity;
-                observe_once(&state, &record, dispatch)
+                observe_once(&state, &record, dispatch, control_secrets.as_ref())
             })
             .await
             .map_err(|_| unknown())?
@@ -606,6 +630,7 @@ fn observe_once(
     state: &DaemonRuntimeState,
     record: &TerminalReleaseRecord,
     dispatch: DispatchId,
+    control_secrets: &dyn super::ControlSecretSource,
 ) -> Result<TerminalReleaseObservation, ReleaseError> {
     let c = &record.context;
     let runtime = rendezvous(state, record)?;
@@ -623,7 +648,7 @@ fn observe_once(
             dispatch_id: dispatch,
         })?;
     let secret = load_control_secret(&runtime.join(CONTROL_SECRET_FILENAME))?;
-    let next = HostControlSecret::generate()?;
+    let next = control_secrets.generate()?;
     before_effect(state, c)?;
     let mut client = HostClient::connect(
         &runtime.join(HOST_SOCKET_FILENAME),
