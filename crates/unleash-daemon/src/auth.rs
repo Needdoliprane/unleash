@@ -303,6 +303,7 @@ pub fn authorize_query(
         | "GetAgent"
         | "GetInvocation"
         | "GetRun"
+        | "ListRuns"
         | "ListProviderProfiles" => Capability::QueryState,
         _ => {
             return Err(IpcError::new(

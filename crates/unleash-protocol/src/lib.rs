@@ -56,4 +56,8 @@ pub use provider_profile::{
 };
 pub use strict_json::{from_json_str_strict, parse_json_value_strict};
 pub use ts_export::{generate_all_ts_files, write_ts_bindings};
-pub use workflow_run::{CreateRunPayload, CreateRunPurpose, CreateRunSource, GetRunPayload};
+pub use workflow_run::{
+    CreateRunPayload, CreateRunPurpose, CreateRunSource, DEFAULT_RUN_PAGE_SIZE, GetRunPayload,
+    ListRunsPayload, ListRunsPayloadError, MAX_OPAQUE_CURSOR_LEN, MAX_RUN_PAGE_SIZE,
+    RunCoverageStatus, RunListEntry, RunPage, RunPageCoverage, RunPurpose,
+};

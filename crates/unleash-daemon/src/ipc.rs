@@ -498,6 +498,7 @@ async fn dispatch_query(
         "GetAgent" => query_agent(state, session, query).await,
         "GetInvocation" => query_invocation(state, session, query).await,
         "GetRun" => query_workflow_run(state, session, query).await,
+        "ListRuns" => query_run_list(state, session, query).await,
         "GetBackupManifest" => query_backup_manifest(state, session, query).await,
         "ReadTerminalLog" => crate::terminal_service::read_log(state, session, query).await,
         "GetProviderProfile" => {
@@ -572,6 +573,34 @@ async fn query_workflow_run(
     })
     .await
     .map_err(|_| internal_ipc_error("Lecture du run interrompue", None))?
+    .map_err(|error| store_error_to_ipc_error(&error, None))?;
+    let (result, cursor) = projection_response(projection)?;
+    Ok(QueryResponse {
+        request_id: query.request_id,
+        watermark: Some(cursor),
+        result,
+    })
+}
+
+async fn query_run_list(
+    state: &Arc<DaemonRuntimeState>,
+    session: &AuthenticatedSession,
+    query: QueryEnvelope,
+) -> Result<QueryResponse, IpcError> {
+    // Le contrat exige l'UUID non nul du projet : une liste n'a jamais de portée implicite.
+    let project = query.project_id.ok_or_else(invalid_projection)?;
+    if project.as_uuid().is_nil() {
+        return Err(invalid_projection());
+    }
+    let payload: unleash_protocol::ListRunsPayload =
+        serde_json::from_value(Value::Object(query.payload)).map_err(|_| invalid_projection())?;
+    let store = Arc::clone(&state.store);
+    let allowed = session.allowed_projects.clone();
+    let projection = tokio::task::spawn_blocking(move || {
+        store.list_runs_snapshot(&payload, project, allowed.as_ref())
+    })
+    .await
+    .map_err(|_| internal_ipc_error("Lecture de la liste des runs interrompue", None))?
     .map_err(|error| store_error_to_ipc_error(&error, None))?;
     let (result, cursor) = projection_response(projection)?;
     Ok(QueryResponse {

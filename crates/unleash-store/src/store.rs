@@ -12,7 +12,7 @@ use unleash_domain::{
     DaemonInstanceId, LeaseId, MicrosAmount, PoolId, ProjectId, Sequence, Sha256Digest, StreamId,
     TimestampMs,
 };
-use unleash_protocol::{CommandEnvelope, EventEnvelope};
+use unleash_protocol::{CommandEnvelope, EventEnvelope, ListRunsPayload, RunPage};
 use uuid::Uuid;
 
 use crate::backup::{
@@ -2332,6 +2332,22 @@ impl UnleashStore {
                 project,
                 allowed_projects,
             )
+        })
+    }
+
+    /// Lit une page des runs d'un projet et son watermark dans une même transaction lectrice.
+    ///
+    /// # Errors
+    /// Refuse une portée invisible, un projet absent, un curseur mal formé ou étranger au projet,
+    /// et un curseur d'une lignée d'autorité qui n'est plus servie.
+    pub fn list_runs_snapshot(
+        &self,
+        page: &ListRunsPayload,
+        project: ProjectId,
+        allowed_projects: Option<&HashSet<ProjectId>>,
+    ) -> Result<SnapshotProjection<RunPage>, StoreError> {
+        self.project_snapshot(|conn| {
+            crate::workflow_run_projection::list_runs_conn(conn, page, project, allowed_projects)
         })
     }
 
