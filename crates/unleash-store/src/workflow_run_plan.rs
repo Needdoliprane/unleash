@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::Value;
-use unleash_domain::{MissionId, ProjectId, Revision, Sha256Digest};
+use unleash_domain::{MissionId, ModelPolicy, ProjectId, Revision, Sha256Digest};
 use unleash_protocol::{ReasonCode, from_json_str_strict};
 use uuid::Uuid;
 
@@ -737,6 +737,8 @@ pub(crate) struct EntryTask {
     pub max_step_activations: u32,
     pub activations: u32,
     pub timeout_seconds: u32,
+    /// Policy of the engaged definition; the writer refuses on it before the first effect.
+    pub model_policy: ModelPolicy,
 }
 
 #[derive(Deserialize)]
@@ -800,8 +802,10 @@ impl RunPlan {
         {
             return Err(invalid("the retained budget cannot admit an initial task"));
         }
+        let model_policy = definition_model_policy(&workflow)?;
         let (node_id, activations) = entry_task_path(&workflow)?;
         let task = crate::workflow_activation::verify_task_node(&workflow, node_id, 1)?;
+        require_agent_task_allowed(model_policy, node_id)?;
         let timeout_seconds = task
             .get("timeout_seconds")
             .and_then(Value::as_u64)
@@ -840,6 +844,7 @@ impl RunPlan {
             max_step_activations: budget.step_activations,
             activations,
             timeout_seconds,
+            model_policy,
         })
     }
 }
@@ -907,9 +912,142 @@ fn entry_task_path(workflow: &Value) -> Result<(&str, u32), StoreError> {
     Ok((node_id, activations))
 }
 
+/// Model policy that a published workflow definition engages for its runs.
+///
+/// Only the `v1.1` and `v1.2` profiles declare `model_policy`. The `v1` profile has
+/// no such member: its tasks are agent tasks under strictly positive model budgets,
+/// so its calls stay bounded. A declared policy that cannot be read, or a profile
+/// that requires one and carries none, is never read as permissive.
+pub(crate) fn definition_model_policy(definition: &Value) -> Result<ModelPolicy, StoreError> {
+    let Some(declared) = definition.get("model_policy") else {
+        return if definition.get("schema_version").and_then(Value::as_str)
+            == Some("unleash.workflow.v1")
+        {
+            Ok(ModelPolicy::AllowedBounded)
+        } else {
+            Err(invalid(
+                "the published workflow profile requires an explicit model policy",
+            ))
+        };
+    };
+    serde_json::from_value(declared.clone())
+        .map_err(|_| invalid("the published workflow declares an unknown model policy"))
+}
+
+/// Refuse the activation of an agent task under `model_policy=forbidden`
+/// (REQ-MODEL-018, INV-059).
+///
+/// The caller reads the policy from the engaged definition, which a run never
+/// changes (INV-018). The refusal precedes every effect of the activation.
+pub(crate) fn require_agent_task_allowed(
+    policy: ModelPolicy,
+    node_id: &str,
+) -> Result<(), StoreError> {
+    match policy {
+        ModelPolicy::AllowedBounded => Ok(()),
+        ModelPolicy::Forbidden => Err(StoreError::CapabilityDenied {
+            reason: ReasonCode::ModelCallsForbidden,
+            message: format!(
+                "model_policy=forbidden: the agent task `{node_id}` is not activated for this run"
+            ),
+        }),
+    }
+}
+
 pub(crate) fn invalid(message: &str) -> StoreError {
     StoreError::InvalidArgument {
         reason: None,
         message: message.to_owned(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{definition_model_policy, require_agent_task_allowed};
+    use crate::StoreError;
+    use serde_json::{Value, json};
+    use unleash_domain::ModelPolicy;
+    use unleash_protocol::{ErrorCode, ReasonCode, RetryClass};
+
+    fn definition(profile: &str, model_policy: Option<&str>) -> Value {
+        let mut definition = json!({"schema_version": profile, "bindings": {}, "body": {}});
+        if let Some(policy) = model_policy {
+            definition
+                .as_object_mut()
+                .expect("the fixture definition is an object")
+                .insert("model_policy".to_owned(), json!(policy));
+        }
+        definition
+    }
+
+    // T-F012-018 / AC-F012-018 / REQ-MODEL-018 — la politique se lit dans la définition
+    // engagée du run.
+    #[test]
+    fn reads_the_policy_of_the_engaged_definition() {
+        assert_eq!(
+            definition_model_policy(&definition("unleash.workflow.v1", None)).unwrap(),
+            ModelPolicy::AllowedBounded
+        );
+        for profile in ["unleash.workflow.v1.1", "unleash.workflow.v1.2"] {
+            assert_eq!(
+                definition_model_policy(&definition(profile, Some("forbidden"))).unwrap(),
+                ModelPolicy::Forbidden,
+                "{profile}"
+            );
+            assert_eq!(
+                definition_model_policy(&definition(profile, Some("allowed_bounded"))).unwrap(),
+                ModelPolicy::AllowedBounded,
+                "{profile}"
+            );
+        }
+        // A restriction carried by a profile that cannot declare it still restricts.
+        assert_eq!(
+            definition_model_policy(&definition("unleash.workflow.v1", Some("forbidden"))).unwrap(),
+            ModelPolicy::Forbidden
+        );
+    }
+
+    // T-F012-018 / AC-F012-018 / REQ-MODEL-018 — une politique illisible n'est jamais une
+    // autorisation.
+    #[test]
+    fn refuses_an_unusable_policy() {
+        for (profile, policy) in [
+            ("unleash.workflow.v1.1", None),
+            ("unleash.workflow.v1.2", None),
+            ("unleash.workflow.v1.1", Some("Forbidden")),
+            ("unleash.workflow.v1.2", Some("unbounded")),
+            ("unleash.workflow.v1", Some("unbounded")),
+        ] {
+            assert!(
+                matches!(
+                    definition_model_policy(&definition(profile, policy)),
+                    Err(StoreError::InvalidArgument { reason: None, .. })
+                ),
+                "{profile} {policy:?}"
+            );
+        }
+        let mut numeric = definition("unleash.workflow.v1.1", None);
+        numeric
+            .as_object_mut()
+            .unwrap()
+            .insert("model_policy".to_owned(), json!(0));
+        assert!(definition_model_policy(&numeric).is_err());
+    }
+
+    // T-F012-018 / AC-F012-018 / REQ-MODEL-018 — seul `forbidden` refuse l'activation d'une
+    // tâche d'agent.
+    #[test]
+    fn refuses_an_agent_task_only_under_forbidden() {
+        require_agent_task_allowed(ModelPolicy::AllowedBounded, "develop").unwrap();
+        let error = require_agent_task_allowed(ModelPolicy::Forbidden, "develop").unwrap_err();
+        assert!(matches!(
+            error,
+            StoreError::CapabilityDenied {
+                reason: ReasonCode::ModelCallsForbidden,
+                ..
+            }
+        ));
+        assert_eq!(error.error_code(), ErrorCode::CapabilityDenied);
+        assert_eq!(error.retry_class(), RetryClass::Never);
     }
 }

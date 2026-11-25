@@ -21,7 +21,9 @@ use crate::{
     },
     policies_secrets::{SubjectKind, ensure_subject_not_blocked_tx, require_human_decider},
     workflow_activation::{insert_ready_task, node_activated_event},
-    workflow_run_plan::{self, EntryTask, RunManifestTarget, RunPlan, invalid},
+    workflow_run_plan::{
+        self, EntryTask, RunManifestTarget, RunPlan, invalid, require_agent_task_allowed,
+    },
 };
 
 pub(crate) const COMMAND: &str = "StartRun";
@@ -57,8 +59,8 @@ impl UnleashStore {
     /// retained definition and selects the initial task from its entry node.
     /// # Errors
     /// Refuses invalid or stale commands, missing evidence, unavailable scopes
-    /// and workflows whose entry needs a different reducer decision or exceeds
-    /// the activation budget.
+    /// and workflows whose entry needs a different reducer decision, exceeds the
+    /// activation budget or activates an agent task under `model_policy=forbidden`.
     pub fn start_prepared_workflow_run(
         &self,
         mut envelope: CommandEnvelope,
@@ -369,6 +371,9 @@ fn record_start(
     if entry.activations > entry.max_step_activations {
         return Err(StoreError::WorkflowActivationBudgetExhausted);
     }
+    // REQ-MODEL-018: the writer decides on the policy of the engaged definition
+    // (INV-018) before the first write of the start.
+    require_agent_task_allowed(entry.model_policy, &entry.node_id)?;
     let task = WorkflowTaskActivationPlan {
         daemon_epoch: start.epoch,
         definition_hash: run.definition,

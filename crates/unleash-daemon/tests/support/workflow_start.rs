@@ -379,6 +379,8 @@ async fn t_f005_004_refuses_the_entry_above_the_activation_budget() {
         .unwrap();
 }
 
+// T-F012-018 / AC-F012-018 / REQ-MODEL-018 — l'entrée d'un run `forbidden` qui active
+// une tâche d'agent est refusée avant tout effet de démarrage.
 #[tokio::test]
 async fn t_f012_018_forbidden_run_refuses_agent_task_activation() {
     let data = unleash_testkit::local_test_dir("f012-model-policy-data").unwrap();

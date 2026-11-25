@@ -13,6 +13,7 @@ use unleash_protocol::{
 use crate::{
     AggregateKind, CommandMutation, CommitCommandRequest, CommitOutcome, DaemonStateRow,
     EventAppendSpec, StoreError, UnleashStore, commands::ensure_scope_not_frozen_tx,
+    workflow_run_plan::{definition_model_policy, require_agent_task_allowed},
 };
 
 pub(crate) const COMMAND: &str = "ActivateWorkflowTask";
@@ -58,6 +59,8 @@ impl UnleashStore {
     /// Refuses invalid, stale or conflicting activation plans and missing
     /// definitions. Each task consumes one activation, including retries.
     /// If the run has no established budget, a new activation is refused.
+    /// An agent task of a run whose engaged definition sets
+    /// `model_policy=forbidden` is refused before any effect (REQ-MODEL-018).
     pub fn activate_workflow_task(
         &self,
         mut envelope: CommandEnvelope,
@@ -233,6 +236,12 @@ pub(crate) fn verify_definition(
             .map_err(|_| invalid("workflow definition must be UTF-8"))?;
         let definition: Value = from_json_str_strict(json)?;
         let node = verify_task_node(&definition, &plan.definition_node_id, plan.step_attempt)?;
+        // REQ-MODEL-018: the policy is read from the verified bytes of the engaged
+        // definition (INV-018); the writer then checks that same definition hash.
+        require_agent_task_allowed(
+            definition_model_policy(&definition)?,
+            &plan.definition_node_id,
+        )?;
         if run.has_manifest {
             crate::workflow_run_plan::verify_activation(
                 conn,
