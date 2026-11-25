@@ -283,7 +283,12 @@ async fn start_c5_terminal(fixture: &mut LiveFixture) -> Value {
     );
     let accepted = fixture.client.send_command(&request).await.unwrap();
     assert_eq!(accepted.state, ReceiptState::Accepted);
-    await_observed(fixture, LAUNCH_DISPOSITION, &request.aggregate_id.to_string()).await;
+    await_observed(
+        fixture,
+        LAUNCH_DISPOSITION,
+        &request.aggregate_id.to_string(),
+    )
+    .await;
     let reference = accepted.result_ref.unwrap();
     let query = result_query(fixture, request.command_id, &reference, 0xf011_6001);
     let deadline = Instant::now() + DEADLINE;
