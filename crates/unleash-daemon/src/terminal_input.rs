@@ -12,10 +12,10 @@ use std::{
 use unleash_action_broker::{
     ActionBroker, ActionExecutionFailure, ActionExecutionResult, ActionExecutorPort, ActionIntent,
     ActionProvenance, ActionSubject, AuthorityLayer, AuthorizationDecision, AuthorizationOutcome,
-    BoxFuture, BrokerConfig, EffectiveAuthority, EffectsClass, HostIsolationProbe, IsolationMode,
-    IsolationRequirements, LocalAuthorityFallbackPolicy, NormalizedResourceRef,
-    PlatformKeyringSecretStore, ResolvedSecret, ScopeKind, StrictNoneAcceptedObligationChecker,
-    SystemClockAndTimer, compute_effective_authority,
+    BoxFuture, BrokerConfig, EffectiveAuthority, EffectsClass, GuardMode, HostIsolationProbe,
+    InitialEffectivePolicy, IsolationMode, IsolationRequirements, LocalAuthorityFallbackPolicy,
+    NormalizedResourceRef, PlatformKeyringSecretStore, ResolvedSecret, ScopeKind,
+    StrictNoneAcceptedObligationChecker, SystemClockAndTimer, compute_effective_authority,
 };
 use unleash_domain::{
     ActorId, CommandId, DataLocality, DispatchId, Fence, LineageFence, ModelPolicy,
@@ -241,7 +241,10 @@ async fn run(
     let slot = Arc::new(Mutex::new(None));
     let timer = Arc::new(SystemClockAndTimer::new());
     let wait_timer = Arc::clone(&timer);
-    let broker = ActionBroker::new(
+    // Le courtier de la saisie est lié à la politique engagée par l'intention (REQ-SEC-007) :
+    // construit à la révision initiale, il répond `PolicyDenied` dès qu'une politique, même
+    // standard, est posée.
+    let broker = ActionBroker::new_with_policy_snapshot(
         Arc::clone(&state.store.config().clock),
         wait_timer,
         timer,
@@ -263,8 +266,17 @@ async fn run(
                 Arc::clone(&slot),
             ),
         ),
-    );
-    broker.bump_scope_revision(Some(project), c.scope_revision);
+        InitialEffectivePolicy {
+            project_id: Some(project),
+            policy_revision: c.policy_revision,
+            scope_revision: c.scope_revision,
+            policy_digest: c.security_policy_digest,
+            isolation_mode: IsolationMode::Standard,
+            guard_mode: GuardMode::BrokerOnly,
+            lineage_fence: fence,
+        },
+    )
+    .map_err(|_| ())?;
     let AuthorizationOutcome::Authorized(decision) = broker
         .authorize_action(intent, &authority)
         .await
