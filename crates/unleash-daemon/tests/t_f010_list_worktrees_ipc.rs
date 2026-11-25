@@ -55,8 +55,12 @@ async fn attach_repository(client: &mut UnleashClient, project: ProjectId, repo:
         payload: serde_json::from_value(json!({"name":"F010 fixture", "weight":1})).unwrap(),
     };
     let receipt = client.send_command(&command).await.unwrap();
-    assert_eq!(receipt.state, ReceiptState::Completed);
+    // La base M4 rend un reçu `accepted` pour `CreateProject` et `ReviseProject`, comportement
+    // épinglé par e2e_m1_restore_lineage. `accepted` annonce un engagement, pas une fin : l'effet
+    // est attendu par un sondage borné avant de poursuivre.
+    assert_eq!(receipt.state, ReceiptState::Accepted);
     assert_eq!(receipt.new_revision, Revision::new(1));
+    wait_for_project(client, project, Revision::new(1), None).await;
     command.request_id = RequestId::from_u128(0x00f0_1003);
     command.command_id = CommandId::from_u128(0x00f0_1004);
     command.command_type = "ReviseProject".to_owned();
@@ -76,8 +80,51 @@ async fn attach_repository(client: &mut UnleashClient, project: ProjectId, repo:
     }))
     .unwrap();
     let receipt = client.send_command(&command).await.unwrap();
-    assert_eq!(receipt.state, ReceiptState::Completed);
+    assert_eq!(receipt.state, ReceiptState::Accepted);
     assert_eq!(receipt.new_revision, Revision::new(2));
+    wait_for_project(client, project, Revision::new(2), Some(repo)).await;
+}
+
+/// Attend que `GetProject` rende le projet à la révision attendue, dépôt rattaché compris quand
+/// `repo` est fourni. L'inventaire ne court ainsi jamais après un état qui n'existe pas encore.
+#[allow(
+    clippy::indexing_slicing,
+    reason = "La fixture lit les champs de la projection qu'elle attend"
+)]
+async fn wait_for_project(
+    client: &mut UnleashClient,
+    project: ProjectId,
+    revision: Revision,
+    repo: Option<&Path>,
+) {
+    let reached = |result: &serde_json::Value| {
+        result["revision"] == json!(revision)
+            && repo.is_none_or(|repo| {
+                result["repositories"].as_array().is_some_and(|repositories| {
+                    repositories
+                        .iter()
+                        .any(|entry| entry["root_path"].as_str() == repo.to_str())
+                })
+            })
+    };
+    let observed = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let query = QueryEnvelope {
+                protocol_version: ProtocolVersion,
+                request_id: RequestId::from_u128(0x00f0_10ff),
+                query_type: "GetProject".to_owned(),
+                project_id: Some(project),
+                payload: serde_json::Map::new(),
+            };
+            if client.query(&query).await.is_ok_and(|response| reached(&response.result)) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .is_ok();
+    assert!(observed, "projet attendu à la révision {}", revision.as_u64());
 }
 
 #[tokio::test]
