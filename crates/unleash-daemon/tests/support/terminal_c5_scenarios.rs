@@ -275,6 +275,54 @@ async fn await_observed(fixture: &LiveFixture, source: &str, key: &str) -> Dispo
     }
 }
 
+/// Number of rows of one ledger query, read outside the stopped daemon.
+fn ledger_count(fixture: &LiveFixture, sql: &str) -> i64 {
+    let conn = rusqlite::Connection::open_with_flags(
+        fixture.data.path().join("unleash-authority.db"),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .unwrap();
+    conn.query_row(sql, [], |row| row.get(0)).unwrap()
+}
+
+/// Stops the owned daemon through its actual drain and waits for its exit. Every
+/// terminal task has then ended, so a missing effect observed afterwards is final.
+async fn stop_and_await_exit(fixture: &mut LiveFixture) {
+    let revision = fixture
+        .snapshot()
+        .await
+        .pointer("/daemon/revision")
+        .and_then(Value::as_u64)
+        .unwrap();
+    let stop = CommandEnvelope {
+        protocol_version: ProtocolVersion,
+        request_id: RequestId::from_u128(0xf011_6206),
+        command_id: CommandId::from_u128(0xf011_6206),
+        authority_generation: fixture.authority,
+        actor_ref: None,
+        project_id: None,
+        aggregate_id: fixture.authority.as_uuid(),
+        expected_revision: Revision::new(revision),
+        command_type: "StopDaemon".into(),
+        payload: object(json!({"reason":"terminal refusal drain","drain_timeout_ms":10000})),
+    };
+    assert_eq!(
+        fixture.client.send_command(&stop).await.unwrap().state,
+        ReceiptState::Accepted
+    );
+    let deadline = Instant::now() + DEADLINE;
+    loop {
+        if fixture.daemon.child.try_wait().unwrap().is_some() {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "drain did not close the writer and broker tasks"
+        );
+        tokio::time::sleep(Duration::from_millis(1)).await;
+    }
+}
+
 async fn start_c5_terminal(fixture: &mut LiveFixture) -> Value {
     let mut request = fixture.allocation(0xf011_4105);
     request.payload.insert(
@@ -741,6 +789,194 @@ async fn t_f017_007_standard_policy_does_not_deny_terminal_acquisition_nor_input
         b"started\n",
         "one physical launch"
     );
+}
+
+// T-F017-007 / AC-F017-007 / REQ-SEC-007
+#[tokio::test]
+async fn t_f017_007_policy_change_after_launch_engagement_never_launches() {
+    use super::super::{renewal_fixture, resize_scenarios};
+    let root = local_test_dir("launch-policy-boundary").unwrap();
+    std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let armed = root.path().join("armed");
+    let barrier = root.path().join("intent.sock");
+    let listener = signal_listener(&barrier);
+    let mut fixture = renewal_fixture::start_with_intent_cutpoint(&armed, &barrier).await;
+    fixture.provision(true).await;
+    let mut request = fixture.allocation(0xf011_6301);
+    request.payload.insert(
+        "arguments".into(),
+        json!(["--ignored", "--exact", WORKER_ENTRY, "--nocapture"]),
+    );
+    unleash_platform::write_private_file_atomic(&armed, b"armed").unwrap();
+    let accepted = fixture.client.send_command(&request).await.unwrap();
+    assert_eq!(accepted.state, ReceiptState::Accepted);
+    let mut stalled = renewal_fixture::wait_after_intent(&listener).await;
+    let engaged = disposition(
+        &fixture,
+        LAUNCH_DISPOSITION,
+        &request.aggregate_id.to_string(),
+    )
+    .unwrap();
+    assert_eq!(
+        (engaged.state.as_str(), engaged.policy_revision),
+        ("authorizing", Some(0)),
+        "the launch intent is engaged under the policy in force when it was accepted"
+    );
+    assert_eq!(
+        ledger_count(&fixture, "SELECT COUNT(*) FROM broker_dispatches"),
+        0
+    );
+    resize_scenarios::set_standard_policy(&mut fixture).await;
+    tokio::io::AsyncWriteExt::write_all(&mut stalled, &[1])
+        .await
+        .unwrap();
+    stop_and_await_exit(&mut fixture).await;
+    assert!(
+        !fixture.data.path().join("process-hosts").exists(),
+        "no host runtime or bootstrap was ever created"
+    );
+    assert!(
+        !fixture.project_root.path().join("worker-starts").exists(),
+        "the child was never launched"
+    );
+    for table in ["processes", "terminal_sessions", "broker_dispatches"] {
+        assert_eq!(
+            ledger_count(&fixture, &format!("SELECT COUNT(*) FROM {table}")),
+            0,
+            "no launch effect in {table}"
+        );
+    }
+}
+
+// T-F017-007 / AC-F017-007 / REQ-SEC-007
+#[tokio::test]
+async fn t_f017_007_policy_change_after_input_engagement_never_writes() {
+    use super::super::{renewal_fixture, resize_scenarios};
+    let root = local_test_dir("input-policy-boundary").unwrap();
+    std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let armed = root.path().join("armed");
+    let barrier = root.path().join("intent.sock");
+    let listener = signal_listener(&barrier);
+    let mut fixture = renewal_fixture::start_with_intent_cutpoint(&armed, &barrier).await;
+    fixture.provision(true).await;
+    std::fs::set_permissions(
+        fixture.project_root.path(),
+        std::fs::Permissions::from_mode(0o700),
+    )
+    .unwrap();
+    let acquired = start_c5_terminal(&mut fixture).await;
+    let before = fixture.host_manifest();
+    let request = input_command(&fixture, &acquired);
+    unleash_platform::write_private_file_atomic(&armed, b"armed").unwrap();
+    let accepted = fixture.client.send_command(&request).await.unwrap();
+    assert_eq!(accepted.state, ReceiptState::Accepted);
+    let mut stalled = renewal_fixture::wait_after_intent(&listener).await;
+    let engaged = disposition(
+        &fixture,
+        INPUT_DISPOSITION,
+        &request.command_id.to_string(),
+    )
+    .unwrap();
+    assert_eq!(
+        (engaged.state.as_str(), engaged.policy_revision),
+        ("authorizing", Some(0)),
+        "the input intent is engaged under the policy in force when it was accepted"
+    );
+    resize_scenarios::set_standard_policy(&mut fixture).await;
+    tokio::io::AsyncWriteExt::write_all(&mut stalled, &[1])
+        .await
+        .unwrap();
+    stop_and_await_exit(&mut fixture).await;
+    assert!(
+        !fixture.project_root.path().join("worker-effects").exists(),
+        "the child never received the input"
+    );
+    assert!(
+        read_native_journal(&before)
+            .get("entries")
+            .and_then(Value::as_object)
+            .unwrap()
+            .is_empty(),
+        "the host journal holds no native input entry"
+    );
+    assert_eq!(
+        ledger_count(
+            &fixture,
+            "SELECT COUNT(*) FROM action_dispatches d JOIN terminal_input_intents i ON i.action_id=d.action_id"
+        ),
+        0,
+        "the refused input was never dispatched"
+    );
+}
+
+// T-F017-007 / AC-F017-007 / REQ-SEC-007
+#[tokio::test]
+async fn t_f017_007_unqualified_strict_policy_never_writes_nor_launches() {
+    let mut fixture = LiveFixture::new(true).await;
+    std::fs::set_permissions(
+        fixture.project_root.path(),
+        std::fs::Permissions::from_mode(0o700),
+    )
+    .unwrap();
+    let acquired = start_c5_terminal(&mut fixture).await;
+    let before = fixture.host_manifest();
+    let mut policy = command(
+        fixture.authority,
+        0xf011_6320,
+        fixture.project,
+        fixture.authority.as_uuid(),
+        0,
+        "SetPolicy",
+        json!({"scope_kind":"global","scope_id":"global","isolation_mode":"strict",
+            "policy_version":"terminal-strict-qualification",
+            "reason":"strict policy committed before input and launch"}),
+    );
+    policy.project_id = None;
+    let committed = fixture.client.send_command(&policy).await.unwrap();
+    assert_eq!(committed.state, ReceiptState::Accepted);
+    assert_eq!(committed.new_revision, Revision::new(1));
+    let input = input_command(&fixture, &acquired);
+    let accepted = fixture.client.send_command(&input).await.unwrap();
+    assert_eq!(accepted.state, ReceiptState::Accepted);
+    let mut launch = fixture.allocation(0xf011_6321);
+    launch.aggregate_id = Uuid::from_u128(0xf011_6322);
+    launch.payload.insert(
+        "purpose_key".into(),
+        json!("strict-unqualified-qualification"),
+    );
+    launch.payload.insert(
+        "arguments".into(),
+        json!(["--ignored", "--exact", WORKER_ENTRY, "--nocapture"]),
+    );
+    let accepted = fixture.client.send_command(&launch).await.unwrap();
+    assert_eq!(accepted.state, ReceiptState::Accepted);
+    stop_and_await_exit(&mut fixture).await;
+    assert!(
+        !fixture.project_root.path().join("worker-effects").exists(),
+        "the child never received the input under a strict policy"
+    );
+    assert!(
+        read_native_journal(&before)
+            .get("entries")
+            .and_then(Value::as_object)
+            .unwrap()
+            .is_empty(),
+        "the host journal holds no native input entry"
+    );
+    assert_eq!(
+        ledger_count(
+            &fixture,
+            "SELECT COUNT(*) FROM action_dispatches d JOIN terminal_input_intents i ON i.action_id=d.action_id"
+        ),
+        0,
+        "the input was never dispatched under a strict policy"
+    );
+    assert_eq!(
+        ledger_count(&fixture, "SELECT COUNT(*) FROM processes"),
+        1,
+        "only the terminal acquired before the strict policy was ever launched"
+    );
+    assert_eq!(fixture.host_manifest().last_confirmed_input_seq, 0);
 }
 
 #[tokio::test]
