@@ -375,7 +375,8 @@ pub fn effective_uid() -> u32 {
 ///
 /// Sous Linux, le chemin est dérivé de l'UID seul : aucun accès au disque ne le déplace. Cette
 /// fonction ne qualifie rien et ne crée rien ; les clients s'en servent pour joindre le démon et
-/// concluent à son absence quand le rendez-vous n'existe pas.
+/// concluent à son absence quand le rendez-vous n'existe pas. Le processus qui crée le rendez-vous
+/// sans chemin explicite passe par [`prepare_canonical_rendezvous_dir`].
 ///
 /// # Errors
 /// Retourne [`PlatformError::ForbiddenDocumentationPath`] si un invariant de chemin est violé.
@@ -417,6 +418,20 @@ fn linux_runtime_root(uid: u32) -> PathBuf {
 /// Candidat unique sous Linux : `/run/user/<uid>/unleash`, dans la racine runtime `/run/user/<uid>`.
 fn linux_rendezvous_dir(uid: u32) -> PathBuf {
     linux_runtime_root(uid).join(RUNTIME_ROOT_RENDEZVOUS_DIR)
+}
+
+/// Résout et prépare le rendez-vous canonique par défaut de l'UID effectif courant, pour le
+/// processus qui le crée sans chemin explicite (le démon). Un seul candidat par OS, dérivé de
+/// l'UID sans lire l'état du disque ; sous Linux, la racine runtime doit préexister et être
+/// qualifiée, sinon refus avant toute création (`REQ-CORE-001`).
+///
+/// # Errors
+/// - [`PlatformError::RuntimeRootUnavailable`] sous Linux si la racine runtime manque ou n'est
+///   pas qualifiée.
+/// - [`PlatformError::ForbiddenDocumentationPath`] si le chemin résolu touche `.claude/`.
+/// - [`PlatformError::LayoutUndecided`] pour une plateforme sans candidat arrêté (Windows).
+pub fn prepare_canonical_rendezvous_dir() -> Result<PathBuf, PlatformError> {
+    prepare_canonical_rendezvous_dir_with(PlatformOsKind::current(), effective_uid())
 }
 
 /// Résout et prépare le rendez-vous canonique par défaut, sans chemin explicite, pour une

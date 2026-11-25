@@ -11,7 +11,9 @@ use std::process::ExitCode;
 use clap::Parser;
 use serde_json::json;
 use tokio::signal::unix::{SignalKind, signal};
-use unleash_daemon::{DaemonConfig, DaemonStartOutcome, UnleashDaemon};
+use unleash_daemon::{DaemonConfig, DaemonError, DaemonStartOutcome, UnleashDaemon};
+use unleash_domain::DaemonStartupIssue;
+use unleash_platform::PlatformError;
 
 #[derive(Debug, Parser)]
 #[command(name = "unleashd", version, about = "OVPT Unleash user daemon")]
@@ -93,6 +95,14 @@ async fn main() -> ExitCode {
             ExitCode::SUCCESS
         }
         Ok(_) => ExitCode::SUCCESS,
+        Err(err @ DaemonError::Platform(PlatformError::RuntimeRootUnavailable { .. })) => {
+            // Issue de démarrage `failed_start` (`runtime-lifecycle.md`) : aucun socket n'existe
+            // encore, la sortie d'erreur standard est le seul canal. L'erreur nomme le chemin
+            // refusé et sa remédiation ; rien n'a été créé.
+            let mut err_out = std::io::stderr().lock();
+            let _ = writeln!(err_out, "{} : {err}", DaemonStartupIssue::FailedStart);
+            ExitCode::FAILURE
+        }
         Err(err) => {
             let mut err_out = std::io::stderr().lock();
             let _ = writeln!(err_out, "{err}");

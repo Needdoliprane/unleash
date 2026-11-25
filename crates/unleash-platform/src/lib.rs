@@ -8,6 +8,9 @@
 //!   toute écriture runtime dans `.claude/` (`REQ-CORE-008`, `INV-046`).
 //! - Validation de sécurité du répertoire de rendez-vous (`0700`, propriétaire = UID effectif,
 //!   pas de lien symbolique) et du socket Unix (`0600`, limite `SUN_LEN <= 103` octets).
+//! - Rendez-vous canonique à un seul candidat par OS, dérivé de l'UID sans lire l'état du disque ;
+//!   sous Linux, la racine runtime `/run/user/<uid>` est qualifiée avant toute création, sinon
+//!   refus explicite sans repli (`REQ-CORE-001`, `RuntimeRootUnavailable`).
 //! - Verrou exclusif d'autorité OS (`flock`) par UID effectif, indépendant de `data_root`, profil
 //!   et surcharges `XDG_RUNTIME_DIR`/`TMPDIR` (`REQ-CORE-001`, `AuthorityAlreadyActive`).
 //! - Extraction de l'identité noyau du pair Unix (`LOCAL_PEERCRED` macOS / `SO_PEERCRED` Linux).
@@ -47,7 +50,8 @@ pub use keyring::{
 pub use paths::{
     CLAUDE_DIR_NAME, EnvSnapshot, PlatformOsKind, PlatformPaths, assert_not_under_claude,
     canonical_rendezvous_dir, canonical_rendezvous_dir_with, effective_uid,
-    prepare_canonical_rendezvous_dir_with, prepare_rendezvous_dir_in_runtime_root,
+    prepare_canonical_rendezvous_dir, prepare_canonical_rendezvous_dir_with,
+    prepare_rendezvous_dir_in_runtime_root,
 };
 pub use peer_cred::{
     PeerCredentials, extract_peer_credentials, verify_peer_uid, verify_same_uid_peer,
