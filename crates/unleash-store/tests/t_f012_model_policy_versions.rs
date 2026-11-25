@@ -412,6 +412,40 @@ fn t_f012_002_publishes_a_model_policy_version_and_reads_it_after_reopen() {
     reopened.shutdown().unwrap();
 }
 
+// T-F012-002 — Un rôle global lit `user/default` : les réglages utilisateur publient une
+// politique qui vise un profil utilisateur, sans fuir dans un projet (REQ-MODEL-002).
+#[test]
+fn t_f012_002_publishes_a_model_policy_in_the_user_settings() {
+    let directory = local_test_dir("f012-model-policy-user").unwrap();
+    let (store, scope, _project_profile) = ready(directory.path());
+    let author = authority(CallerRole::HumanOperator);
+    let home = Scope::user();
+    let shared = configure_profile(&store, &home, SHARED_PROFILE, 1, 0xf012_0008);
+    let policy = Policy::bounded(&[shared.reference()]);
+    assert!(history(&store, &home).is_empty());
+
+    let receipt = commit_policy(
+        &store,
+        &author,
+        &home,
+        0xf012_0060,
+        Revision::INITIAL,
+        &policy.patch(),
+    )
+    .unwrap();
+
+    let expected = policy.expected(1, &receipt.receipt_id, &Value::Null);
+    assert_eq!(receipt.new_revision, Revision::new(1));
+    assert_eq!(receipt.result_ref, Some(expected.reference));
+    assert_eq!(history(&store, &home), vec![expected.version.clone()]);
+    assert!(history(&store, &scope).is_empty());
+
+    store.shutdown().unwrap();
+    let reopened = UnleashStore::open(StoreConfig::new(directory.path())).unwrap();
+    assert_eq!(history(&reopened, &home), vec![expected.version]);
+    reopened.shutdown().unwrap();
+}
+
 // T-F012-002 — Une version suivante n'efface pas la précédente ; la révocation est un fait
 // distinct qui garde le document, son digest et le reçu de publication (REQ-MODEL-002).
 #[test]
