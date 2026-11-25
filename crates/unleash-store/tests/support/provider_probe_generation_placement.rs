@@ -18,6 +18,8 @@ use unleash_testkit::ManualClock;
 
 const OBSERVER: &str = "system:provider-generation-placement";
 
+mod outcome;
+
 fn initialize_pool(store: &UnleashStore, caller: &CallerAuthority) -> PoolId {
     let execution_pool = ExecutionPoolSettings::default();
     let authority = store.active_authority_generation().unwrap();
