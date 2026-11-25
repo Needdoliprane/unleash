@@ -123,8 +123,9 @@ impl PlatformPaths {
     ///
     /// # Errors
     /// Retourne [`PlatformError::InvalidPath`] si `$HOME` est absent ou une surcharge `XDG_*`
-    /// est relative ou contient `..`, ou [`PlatformError::ForbiddenDocumentationPath`] si un
-    /// chemin touche `.claude/`.
+    /// est relative ou contient `..`, [`PlatformError::ForbiddenDocumentationPath`] si un
+    /// chemin touche `.claude/`, ou [`PlatformError::LayoutUndecided`] pour une plateforme sans
+    /// emplacements arrêtés (Windows).
     pub fn resolve_for(os: PlatformOsKind, env: &EnvSnapshot) -> Result<Self, PlatformError> {
         let home = env
             .home
@@ -141,6 +142,12 @@ impl PlatformPaths {
         }
         assert_not_under_claude(home)?;
 
+        // Windows : emplacement explicite. Aucune disposition n'est arrêtée (ADR-14 : hors matrice
+        // qualifiée) ; la résolution refuse plutôt que de replier sur la règle Linux.
+        if os == PlatformOsKind::Windows {
+            return Err(PlatformError::LayoutUndecided { os });
+        }
+
         let (config_dir, data_dir, logs_dir, cache_dir) = match os {
             PlatformOsKind::MacOs => {
                 let app_support = home.join("Library/Application Support/Unleash");
@@ -151,9 +158,7 @@ impl PlatformPaths {
                     home.join("Library/Caches/Unleash"),
                 )
             }
-            // Windows suit encore la règle Linux : comportement de fait hérité du classement
-            // « tout OS non-macOS est Linux », en attente d'emplacements arrêtés.
-            PlatformOsKind::Linux | PlatformOsKind::Windows => {
+            PlatformOsKind::Linux => {
                 let cfg_base = resolve_xdg_base(
                     env.xdg_config_home.as_deref(),
                     home.join(".config"),
@@ -386,7 +391,8 @@ pub fn canonical_rendezvous_dir() -> Result<PathBuf, PlatformError> {
 /// effectif et un instantané d'environnement donnés (`XDG_RUNTIME_DIR` et `TMPDIR` sont ignorés).
 ///
 /// # Errors
-/// Retourne [`PlatformError::ForbiddenDocumentationPath`] si le chemin résolu touche `.claude/`.
+/// - [`PlatformError::ForbiddenDocumentationPath`] si le chemin résolu touche `.claude/`.
+/// - [`PlatformError::LayoutUndecided`] pour une plateforme sans candidat arrêté (Windows).
 pub fn canonical_rendezvous_dir_with(
     os: PlatformOsKind,
     uid: u32,
@@ -395,10 +401,11 @@ pub fn canonical_rendezvous_dir_with(
     match os {
         // Candidat unique, dérivé de l'UID seul : ni l'état du disque ni l'environnement ne le
         // déplacent, et il n'existe aucun repli sous `/tmp` (`runtime-lifecycle.md`, `REQ-CORE-001`).
-        // Windows suit encore la règle Linux : comportement de fait hérité du classement
-        // « tout OS non-macOS est Linux », en attente d'un candidat arrêté.
-        PlatformOsKind::Linux | PlatformOsKind::Windows => Ok(linux_rendezvous_dir(uid)),
+        PlatformOsKind::Linux => Ok(linux_rendezvous_dir(uid)),
         PlatformOsKind::MacOs => macos_rendezvous_dir(uid),
+        // Windows : emplacement explicite. Aucun candidat n'est arrêté (ADR-14 : hors matrice
+        // qualifiée) ; on refuse plutôt que de replier sur la règle Linux ou un répertoire partagé.
+        PlatformOsKind::Windows => Err(PlatformError::LayoutUndecided { os }),
     }
 }
 
@@ -420,16 +427,19 @@ fn linux_rendezvous_dir(uid: u32) -> PathBuf {
 /// - [`PlatformError::RuntimeRootUnavailable`] sous Linux si la racine runtime manque ou n'est
 ///   pas qualifiée.
 /// - [`PlatformError::ForbiddenDocumentationPath`] si le chemin résolu touche `.claude/`.
+/// - [`PlatformError::LayoutUndecided`] pour une plateforme sans candidat arrêté (Windows).
 pub fn prepare_canonical_rendezvous_dir_with(
     os: PlatformOsKind,
     uid: u32,
 ) -> Result<PathBuf, PlatformError> {
     match os {
-        // Windows suit encore la règle Linux : comportement de fait, en attente d'un candidat arrêté.
-        PlatformOsKind::Linux | PlatformOsKind::Windows => prepare_linux_rendezvous_dir(uid),
+        PlatformOsKind::Linux => prepare_linux_rendezvous_dir(uid),
         // macOS : comportement conservé. Le système fournit la racine Darwin ; le rendez-vous
         // reste créé et validé par `ensure_private_rendezvous_dir` à l'acquisition du verrou.
         PlatformOsKind::MacOs => canonical_rendezvous_dir_with(os, uid, &EnvSnapshot::default()),
+        // Windows : emplacement explicite. Aucun candidat n'est arrêté (ADR-14 : hors matrice
+        // qualifiée) ; on refuse plutôt que de replier sur la règle Linux ou un répertoire partagé.
+        PlatformOsKind::Windows => Err(PlatformError::LayoutUndecided { os }),
     }
 }
 
