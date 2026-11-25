@@ -24,6 +24,7 @@
 use std::ffi::OsString;
 use std::fs;
 use std::io::{BufRead, BufReader, Read};
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::mpsc;
@@ -31,13 +32,14 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use serde_json::Value;
-use unleash_platform::effective_uid;
+use unleash_platform::{AuthorityLock, PlatformError, effective_uid};
 use unleash_testkit::{local_test_dir, private_test_dir};
 
-/// Délai laissé à `unleashd` pour sortir seul quand un refus est attendu.
-const EXIT_DEADLINE: Duration = Duration::from_secs(60);
-/// Délai laissé à `unleashd` pour publier sa ligne prête.
-const READY_DEADLINE: Duration = Duration::from_secs(60);
+/// Attente bornée d'une sortie de `unleashd` quand un refus est attendu. Généreuse : sur un banc
+/// à disque très encombré, le démarrage du binaire peut prendre des minutes.
+const EXIT_DEADLINE: Duration = Duration::from_secs(300);
+/// Attente bornée de la ligne prête de `unleashd`, pour la même raison.
+const READY_DEADLINE: Duration = Duration::from_secs(300);
 
 /// Processus du démon de test : jamais laissé vivant derrière un test.
 struct DaemonChild(Child);
@@ -273,5 +275,84 @@ fn t_f001_001_binary_without_runtime_root_refuses_before_any_creation() {
     assert!(
         !runtime_root.exists(),
         "la racine runtime ne doit toujours pas être créée"
+    );
+}
+
+// T-F001-001 / AC-F001-001 / REQ-CORE-001
+#[test]
+#[ignore = "exige un Linux dont /run/user/<uid> appartient à l'utilisateur et est en 0700 : à lancer explicitement dans le banc"]
+fn t_f001_001_binary_starts_on_the_canonical_rendezvous_of_a_qualified_runtime_root() {
+    let uid = effective_uid();
+    let runtime_root = PathBuf::from(format!("/run/user/{uid}"));
+    let rendezvous = runtime_root.join("unleash");
+    let socket = rendezvous.join("daemon.sock");
+    let tmp_candidate = format!("/tmp/unleash-{uid}");
+    let root_text = runtime_root.display().to_string();
+
+    // Préconditions : racine qualifiée par l'hôte, et aucun rendez-vous canonique préexistant,
+    // qu'un démon réel peut tenir. Sinon le test échoue et ne touche à rien.
+    let meta = fs::symlink_metadata(&runtime_root).unwrap();
+    assert!(
+        meta.is_dir() && !meta.file_type().is_symlink(),
+        "Précondition non satisfaite : {root_text} doit être un répertoire réel"
+    );
+    assert!(
+        meta.uid() == uid && meta.mode() & 0o7777 == 0o700,
+        "Précondition non satisfaite : {root_text} doit appartenir à l'UID {uid} et être en 0700"
+    );
+    assert!(
+        !rendezvous.exists(),
+        "Précondition non satisfaite : un rendez-vous canonique existe déjà ; un démon peut le tenir"
+    );
+
+    let sandbox = local_test_dir("rdvcanon").unwrap();
+    let data_root = sandbox.path().join("data");
+    let home = sandbox.path().join("home");
+    let data_arg = data_root.to_str().unwrap();
+    let (mut daemon, ready) = spawn_unleashd_until_ready(
+        &["--data-root", data_arg, "--foreground", "--ready-json"],
+        &home,
+    );
+    assert_eq!(
+        ready.get("status").and_then(Value::as_str),
+        Some("ready"),
+        "le démarrage par défaut doit réussir sur une racine qualifiée ; ready={ready}"
+    );
+    assert_eq!(
+        ready.get("socket_path").and_then(Value::as_str),
+        socket.to_str(),
+        "le socket doit être celui du candidat canonique ; ready={ready}"
+    );
+    let meta = fs::symlink_metadata(&rendezvous).unwrap();
+    assert!(meta.is_dir() && !meta.file_type().is_symlink());
+    assert_eq!(meta.uid(), uid);
+    assert_eq!(meta.mode() & 0o7777, 0o700);
+    assert!(
+        !Path::new(&tmp_candidate).exists(),
+        "aucun candidat sous /tmp ne doit être retenu"
+    );
+
+    // Le verrou d'autorité par défaut vise le même rendez-vous que le démon : l'autorité est active.
+    let refused = AuthorityLock::acquire(Path::new(data_arg)).unwrap_err();
+    assert!(
+        matches!(
+            &refused,
+            PlatformError::DaemonAlreadyRunning { socket_path, .. }
+                if socket_path == &socket
+        ),
+        "le verrou par défaut doit viser le rendez-vous canonique ; obtenu : {refused}"
+    );
+
+    // Arrêt de la fixture. La racine runtime appartient à l'hôte : elle est conservée ; seul le
+    // rendez-vous canonique créé par ce test est retiré, après libération du verrou.
+    daemon.0.kill().unwrap();
+    daemon.0.wait().unwrap();
+    let lock = AuthorityLock::acquire(Path::new(data_arg)).unwrap();
+    assert_eq!(lock.rendezvous_dir(), rendezvous);
+    drop(lock);
+    fs::remove_dir_all(&rendezvous).unwrap();
+    assert!(
+        runtime_root.is_dir(),
+        "la racine runtime de l'hôte doit être conservée"
     );
 }
