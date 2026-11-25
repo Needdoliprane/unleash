@@ -143,6 +143,50 @@ fn t_f001_001_exclusive_authority_lock_and_xdg_immunity() {
     );
 }
 
+// T-F001-001 / AC-F001-001 / REQ-CORE-001
+// Sous Linux, le rendez-vous canonique n'a qu'un seul candidat, dérivé de l'UID seul : ni l'état du
+// disque, ni `XDG_RUNTIME_DIR`, ni `TMPDIR` ne le déplacent et aucun repli sous `/tmp` n'existe.
+// Deux démons d'un même utilisateur ne peuvent ainsi pas se croire l'autorité sur deux rendez-vous.
+#[test]
+fn t_f001_001_linux_rendezvous_dir_is_a_single_candidate_derived_from_uid() {
+    const FICTITIOUS_UID: u32 = 4242;
+    let expected = PathBuf::from(format!("/run/user/{FICTITIOUS_UID}/unleash"));
+    let runtime_root = PathBuf::from(format!("/run/user/{FICTITIOUS_UID}"));
+    assert!(
+        !runtime_root.exists(),
+        "Précondition : la racine runtime de l'UID fictif doit être absente, sinon ce test ne prouve pas l'indépendance au disque"
+    );
+
+    let hostile = EnvSnapshot {
+        home: Some(PathBuf::from("/home/alice")),
+        xdg_runtime_dir: Some(String::from("/tmp/hostile-xdg-runtime")),
+        tmpdir: Some(String::from("/tmp/hostile-tmpdir")),
+        ..EnvSnapshot::default()
+    };
+    let neutral = EnvSnapshot {
+        home: Some(PathBuf::from("/home/bob")),
+        ..EnvSnapshot::default()
+    };
+
+    let under_hostile_env =
+        canonical_rendezvous_dir_with(PlatformOsKind::Linux, FICTITIOUS_UID, &hostile).unwrap();
+    let under_neutral_env =
+        canonical_rendezvous_dir_with(PlatformOsKind::Linux, FICTITIOUS_UID, &neutral).unwrap();
+
+    assert_eq!(
+        under_hostile_env, expected,
+        "Le candidat Linux ne doit dépendre que de l'UID, jamais de l'état du disque ni de l'environnement"
+    );
+    assert_eq!(
+        under_neutral_env, expected,
+        "Le candidat Linux ne doit pas dépendre de l'environnement"
+    );
+    assert!(
+        !under_hostile_env.starts_with("/tmp"),
+        "Aucun candidat sous /tmp ne doit être retenu"
+    );
+}
+
 // T-F001-004 / AC-F001-004 / REQ-CORE-004
 #[test]
 fn t_f001_004_rendezvous_permissions_symlinks_and_peer_cred() {
