@@ -497,6 +497,17 @@ pub struct ProviderServiceLaunchPermit {
     commit: BrokerPhaseCommit,
 }
 
+impl std::fmt::Debug for ProviderServiceLaunchPermit {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ProviderServiceLaunchPermit")
+            .field("launch_id", &self.context.launch_id)
+            .field("dispatch_id", &self.dispatch_id)
+            .field("expires_at", &self.expires_at)
+            .finish_non_exhaustive()
+    }
+}
+
 impl ProviderServiceLaunchPermit {
     /// The durable preparation covered by the permit.
     #[must_use]

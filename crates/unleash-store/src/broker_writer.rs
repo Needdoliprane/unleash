@@ -439,9 +439,67 @@ struct PhaseAccess<'a> {
     connect_access: Option<crate::provider_probe_connect::ConnectPhaseAccess<'a>>,
     transport_observation: Option<TransportObservation<'a>>,
     service_launch: Option<&'a crate::provider_service_launch::ServiceLaunchPhaseAccess>,
-    service_launch_attestation: Option<&'a crate::ProviderServiceLaunchAttestation>,
+    service_launch_evidence: Option<ServiceLaunchEvidence<'a>>,
     managed_generation:
         Option<&'a crate::provider_probe_generation::dispatch::ManagedGenerationDispatchBinding>,
+    managed_generation_observation: Option<ManagedGenerationObservationAccess<'a>>,
+}
+
+/// Preuve locale d'une observation de lancement de service, apportée par le port dédié.
+#[derive(Clone, Copy)]
+pub(crate) enum ServiceLaunchEvidence<'a> {
+    /// Hôte et enfant attestés par le socket de contrôle privé.
+    Attested(&'a crate::ProviderServiceLaunchAttestation),
+    /// Aucun processus lancé : refus certain, sans effet à réconcilier (REQ-MODEL-015).
+    Refused(&'a crate::ProviderServiceLaunchRefusalRecord),
+}
+
+/// Issue d'une génération managée, validée par son port d'observation dédié (REQ-MODEL-015).
+#[derive(Clone, Copy)]
+pub(crate) struct ManagedGenerationObservationAccess<'a> {
+    /// Dispatch de transport effectivement observé.
+    pub(crate) dispatch_id: DispatchId,
+    /// Requête native autorisée par le marqueur de dispatch.
+    pub(crate) request_digest: Sha256Digest,
+    /// Fait natif d'un succès observé ; `None` pour une issue inconnue.
+    pub(crate) native:
+        Option<&'a crate::provider_probe_generation::dispatch::ManagedGenerationObservation>,
+}
+
+/// Engage la phase d'observation d'un dispatch de génération managée.
+///
+/// Seul ce port admet une phase `Observation` pour ce type de dispatch ; le port générique la
+/// refuse. Un succès exige le fait natif exact ; une issue inconnue n'en porte jamais.
+pub(crate) fn commit_managed_generation_observation_tx(
+    tx: &Transaction<'_>,
+    config: &StoreConfig,
+    now: TimestampMs,
+    request: &BrokerPhaseRequest,
+    observation: ManagedGenerationObservationAccess<'_>,
+) -> Result<BrokerPhaseCommit, StoreError> {
+    let BrokerPhase::Observation { receipt, .. } = &request.phase else {
+        return Err(invalid("observation de génération managée attendue"));
+    };
+    let (state, digest) = match observation.native {
+        Some(native) => (ActionState::ObservedSuccess, Some(native.outcome_digest)),
+        None => (ActionState::OutcomeUnknown, None),
+    };
+    if receipt.dispatch_id != observation.dispatch_id
+        || receipt.state != state
+        || receipt.output_digest != digest
+    {
+        return Err(invalid("observation de génération managée divergente"));
+    }
+    commit_phase_tx_inner(
+        tx,
+        config,
+        now,
+        request,
+        PhaseAccess {
+            managed_generation_observation: Some(observation),
+            ..PhaseAccess::default()
+        },
+    )
 }
 
 pub(crate) fn commit_phase_tx(
@@ -540,19 +598,21 @@ pub(crate) fn commit_service_launch_observation_tx(
     now: TimestampMs,
     request: &BrokerPhaseRequest,
     service_launch: &crate::provider_service_launch::ServiceLaunchPhaseAccess,
-    proof: Option<&crate::ProviderServiceLaunchAttestation>,
+    evidence: Option<ServiceLaunchEvidence<'_>>,
 ) -> Result<BrokerPhaseCommit, StoreError> {
     let BrokerPhase::Observation { receipt, .. } = &request.phase else {
         return Err(invalid("observation de lancement attendue"));
     };
-    let expected = if proof.is_some() {
-        ActionState::ObservedSuccess
-    } else {
-        ActionState::OutcomeUnknown
+    let (state, digest) = match evidence {
+        Some(ServiceLaunchEvidence::Attested(proof)) => {
+            (ActionState::ObservedSuccess, Some(canonical_sha256(proof)?))
+        }
+        Some(ServiceLaunchEvidence::Refused(record)) => {
+            (ActionState::ObservedFailure, Some(canonical_sha256(record)?))
+        }
+        None => (ActionState::OutcomeUnknown, None),
     };
-    if receipt.state != expected
-        || proof.map(canonical_sha256).transpose()? != receipt.output_digest
-    {
+    if receipt.state != state || receipt.output_digest != digest {
         return Err(invalid("observation de lancement divergente"));
     }
     commit_phase_tx_inner(
@@ -562,7 +622,7 @@ pub(crate) fn commit_service_launch_observation_tx(
         request,
         PhaseAccess {
             service_launch: Some(service_launch),
-            service_launch_attestation: proof,
+            service_launch_evidence: evidence,
             ..PhaseAccess::default()
         },
     )
@@ -714,8 +774,9 @@ fn commit_phase_tx_inner(
         connect_access,
         transport_observation,
         service_launch,
-        service_launch_attestation,
+        service_launch_evidence,
         managed_generation,
+        managed_generation_observation,
     } = access;
     let daemon = read_daemon_state_tx(tx)?;
     if daemon.authority_generation != request.authority_generation {
@@ -754,7 +815,11 @@ fn commit_phase_tx_inner(
     crate::provider_probes::validate_incarnation(tx, &daemon, action)?;
     crate::terminal_allocations::validate_incarnation(tx, &daemon, action)?;
     if matches!(request.phase, BrokerPhase::Observation { .. }) {
-        crate::provider_probe_generation::dispatch::reject_generic_observation(tx, action)?;
+        crate::provider_probe_generation::dispatch::reject_generic_observation(
+            tx,
+            action,
+            managed_generation_observation.is_some(),
+        )?;
     }
     if matches!(request.phase, BrokerPhase::Dispatch { .. }) {
         let markers: i64 = tx
@@ -1075,12 +1140,17 @@ fn commit_phase_tx_inner(
                     |r| r.get(0),
                 )
                 .map_err(StoreError::from_rusqlite)?;
-            let unknown_clock = (transport_observation.is_some() || service_launch.is_some())
-                && receipt.state == ActionState::OutcomeUnknown
-                && config
-                    .clock_uncertain
-                    .load(std::sync::atomic::Ordering::Acquire);
-            if !unknown_clock
+            // Une horloge incertaine n'empêche pas de consigner une issue inconnue, ni le refus
+            // certain d'un lancement dont aucun processus n'a été démarré.
+            let clock_tolerated = config
+                .clock_uncertain
+                .load(std::sync::atomic::Ordering::Acquire)
+                && (((transport_observation.is_some()
+                    || service_launch.is_some()
+                    || managed_generation_observation.is_some())
+                    && receipt.state == ActionState::OutcomeUnknown)
+                    || matches!(service_launch_evidence, Some(ServiceLaunchEvidence::Refused(_))));
+            if !clock_tolerated
                 && (receipt.observed_at_ms.as_i64() < started
                     || receipt.observed_at_ms.as_i64() > now.as_i64())
             {
@@ -1133,10 +1203,26 @@ fn commit_phase_tx_inner(
     if let Some(binding) = managed_generation {
         payload.insert("managed_generation".into(), serde_json::to_value(binding)?);
     }
-    if let Some(proof) = service_launch_attestation {
+    match service_launch_evidence {
+        Some(ServiceLaunchEvidence::Attested(proof)) => {
+            payload.insert(
+                "provider_service_launch".into(),
+                serde_json::to_value(proof)?,
+            );
+        }
+        Some(ServiceLaunchEvidence::Refused(record)) => {
+            payload.insert(
+                "provider_service_launch_refusal".into(),
+                serde_json::to_value(record)?,
+            );
+        }
+        None => {}
+    }
+    // Preuve LOCALE du fait natif d'une génération managée ; jamais une réponse fournisseur.
+    if let Some(native) = managed_generation_observation.and_then(|observation| observation.native) {
         payload.insert(
-            "provider_service_launch".into(),
-            serde_json::to_value(proof)?,
+            "managed_generation_observation".into(),
+            serde_json::to_value(native)?,
         );
     }
     if state == ActionState::ObservedSuccess

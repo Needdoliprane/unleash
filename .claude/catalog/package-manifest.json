@@ -14,7 +14,7 @@
     "cache/"
   ],
   "hash_algorithm": "sha256",
-  "source_tree_digest": "10d30b209711217402089c1f4b6c3af68d40537910db477331e71a32794848b6",
+  "source_tree_digest": "cd52fc7b034f425bddd25b6a03a0cd6a0dd41d5bfeca67ef1e2bdb7a4dc9c963",
   "files": [
     {
       "path": "INDEX.md",
@@ -396,8 +396,8 @@
     },
     {
       "path": "architecture/sqlite-design.md",
-      "sha256": "73e1770843238b85c09a42e535a45061e58706029c231fecb2176c936f674740",
-      "bytes": 80454,
+      "sha256": "85a229188123f3fcbf786f979c535eaf5f2dde50c0460bc2889887f3251b47e9",
+      "bytes": 82244,
       "media_type": "text/markdown"
     },
     {
@@ -1584,8 +1584,8 @@
     },
     {
       "path": "features/F012-model-api-router/technical-design.md",
-      "sha256": "61c7c64b1fb4aeb3469ff2bc520ac5a3eba49c42b732405cef709d24987e4c2f",
-      "bytes": 22353,
+      "sha256": "3c065ff3654d7122e2c5f3a6322459268eccf8a0f2f9b0a2aa681f75a47ba5bb",
+      "bytes": 22665,
       "media_type": "text/markdown"
     },
     {
@@ -2076,8 +2076,8 @@
     },
     {
       "path": "schemas/event.schema.json",
-      "sha256": "1df608b944cada1d5df5c622807460c02c6814cfc542f3e36498810f27714dda",
-      "bytes": 14644,
+      "sha256": "81400f57f9814d4fbe4ada15787eb4e13b3fd86c3e502f6b82c0db0a057d1a48",
+      "bytes": 17002,
       "media_type": "application/json"
     },
     {

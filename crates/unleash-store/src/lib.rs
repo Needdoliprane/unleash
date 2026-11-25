@@ -135,7 +135,7 @@ pub use provider_probe_connect_observation::{
 };
 pub use provider_probe_generation::AuthenticatedGenerationPreparation;
 pub use provider_probe_generation::dispatch::{
-    ManagedGenerationDispatchPermit, ManagedOllamaTransport,
+    ManagedGenerationDispatchPermit, ManagedGenerationObservation, ManagedOllamaTransport,
 };
 pub use provider_probe_generation::placement::{
     AdmittedOllamaChatInputs, ManagedGenerationAdmission, ManagedProviderListener,
@@ -170,7 +170,8 @@ pub use provider_profiles::{
 pub use provider_service_launch::{
     AttestedProviderServiceLaunch, ProviderServiceBackend, ProviderServiceLaunchAttestation,
     ProviderServiceLaunchContext, ProviderServiceLaunchFingerprint, ProviderServiceLaunchOutcome,
-    ProviderServiceLaunchPermit, ProviderServiceLaunchPlan, ProviderServiceProcessIdentity,
+    ProviderServiceLaunchPermit, ProviderServiceLaunchPlan, ProviderServiceLaunchRefusal,
+    ProviderServiceLaunchRefusalRecord, ProviderServiceProcessIdentity,
 };
 pub use qualification::{
     APPROVED_BACKPORT_VERSIONS, EffectivePragmaProfile, MIN_QUALIFIED_SQLITE_VERSION,

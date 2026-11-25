@@ -350,6 +350,32 @@ Un rejeu exact retrouve le curseur d’origine. Seul le port dédié engage
 cette observation. Le placement réseau et l’identité du pair lors d’un
 envoi ultérieur exigent leurs propres preuves.
 
+Un échec certain survenu avant tout processus fils est un refus net, jamais
+une issue inconnue. Le contrôleur établit qu’aucun hôte n’a été démarré :
+permis périmé ou refusé par le writer, bootstrap divergent du plan,
+répertoire de rendez-vous occupé ou refusé, aléa indisponible, préparation
+du répertoire d’exécution ou `spawn` impossible. Le port dédié engage alors
+`ObservedFailure` sans effet, avec une cause fermée : `stale_permit`,
+`bootstrap_mismatch`, `runtime_in_use`, `random_unavailable` ou
+`launch_unavailable`. L’enregistrement `provider_service_launch_refusal` de
+l’événement `ActionObserved` porte le numéro de schéma, l’empreinte de la
+préparation et la cause ; son empreinte canonique est l’`output_digest`.
+Aucune attestation ne l’accompagne. Une horloge incertaine n’empêche pas ce
+refus. Un rejeu exact restitue le même curseur ; une autre cause, une
+attestation ou une issue inconnue ne remplacent pas le refus engagé.
+
+L’observation d’une génération managée relève de son port dédié, ouvert par
+le permis de transport. Le writer relie le reçu au marqueur durable du
+dispatch `unleash-ollama-chat`. Un succès exige le fait natif exact de ce
+dispatch : version, action, dispatch, requête autorisée, corps reçu,
+résultat observé et date d’observation. Ce fait figure dans le champ
+`managed_generation_observation` de l’événement `ActionObserved` ;
+l’empreinte canonique du résultat observé est l’`output_digest`. Une issue
+inconnue ne porte ni fait ni empreinte. Tout autre état est refusé. Le port
+générique reste fermé à ce dispatch et le port dédié ne sert aucun autre.
+Un rejeu exact restitue le curseur d’origine. Cette observation ne libère
+à elle seule aucune réservation.
+
 | Table | Colonnes minimales | Contraintes |
 |---|---|---|
 | `model_catalog_snapshots` | `catalog_id`, `catalog_version`, `digest`, `source_kind`, `published_at_ms`, `valid_until_ms`, `imported_at_ms`, `content_ref` | UNIQUE `(catalog_id,catalog_version)` ; source_kind ovpt_release/user_import/user_declared ; contenu immuable référencé par objet ; import ou saisie seulement par SetProviderProfile, jamais par récupération réseau automatique (Q-14, [F012](../features/F012-model-api-router/technical-design.md)). |

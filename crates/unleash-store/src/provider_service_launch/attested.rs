@@ -24,6 +24,18 @@ pub struct AttestedProviderServiceLaunch {
     pub recorded_at: TimestampMs,
 }
 
+impl std::fmt::Debug for AttestedProviderServiceLaunch {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("AttestedProviderServiceLaunch")
+            .field("launch_id", &self.context.launch_id)
+            .field("attestation_digest", &self.attestation_digest)
+            .field("event_cursor", &self.event_cursor)
+            .field("recorded_at", &self.recorded_at)
+            .finish_non_exhaustive()
+    }
+}
+
 #[derive(Deserialize)]
 struct ObservationPayload {
     action_id: ActionId,

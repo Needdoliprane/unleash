@@ -105,7 +105,10 @@ Le contrôleur du daemon conserve le processus hôte avant d'attendre son
 attestation. Le writer rattache l'attestation au dispatch de la préparation
 dans l'incarnation active. Il engage `ActionObserved` avec le document
 natif et son empreinte. Sans preuve affirmative, il conserve le dispatch
-en issue inconnue. Cette liaison établit le fait de lancement. L'admission
+en issue inconnue. Un échec certain survenu avant tout démarrage est au
+contraire un refus net : échec observé sans effet, engagé avec sa cause
+fermée par le même port dédié.
+Cette liaison établit le fait de lancement. L'admission
 d'une génération doit encore vérifier le placement et le pair du transport.
 
 Pour préparer le placement Ollama géré, le daemon relit le dispatch
@@ -136,7 +139,9 @@ celle du transport. Le marqueur `unleash-ollama-chat` et
 et le corps publié. Le permis est à usage unique et borné par le bail,
 le placement et la décision. Après perte de l'acquittement, le marqueur
 impose la réconciliation. L'observation du résultat relève du port
-dédié à cette génération.
+dédié à cette génération. Un succès observé porte le fait natif exact du
+dispatch ; une issue inconnue n'en porte jamais. Le port générique reste
+fermé à ce dispatch.
 
 Le banc natif couple ce lancement à une fixture TCP loopback. Il vérifie
 l’identité OS issue de l’enfant détenu, l’écoute, le socket accepté et le

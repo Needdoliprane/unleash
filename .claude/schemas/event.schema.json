@@ -163,6 +163,32 @@
                   "host": { "$ref": "#/$defs/provider_service_process_identity" },
                   "child": { "$ref": "#/$defs/provider_service_process_identity" }
                 }
+              },
+              "provider_service_launch_refusal": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["schema_version", "context_digest", "cause"],
+                "properties": {
+                  "schema_version": { "const": 1 },
+                  "context_digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+                  "cause": {
+                    "enum": ["stale_permit", "bootstrap_mismatch", "runtime_in_use", "random_unavailable", "launch_unavailable"]
+                  }
+                }
+              },
+              "managed_generation_observation": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["schema_version", "action_id", "dispatch_id", "request_digest", "response_digest", "outcome_digest", "observed_at_ms"],
+                "properties": {
+                  "schema_version": { "const": 1 },
+                  "action_id": { "type": "string", "format": "uuid" },
+                  "dispatch_id": { "type": "string", "format": "uuid" },
+                  "request_digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+                  "response_digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+                  "outcome_digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+                  "observed_at_ms": { "type": "integer" }
+                }
               }
             },
             "if": { "required": ["provider_service_launch"] },
@@ -172,7 +198,29 @@
                 "state": { "const": "observed_success" },
                 "output_digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" }
               }
-            }
+            },
+            "allOf": [
+              {
+                "if": { "required": ["provider_service_launch_refusal"] },
+                "then": {
+                  "required": ["state", "output_digest"],
+                  "properties": {
+                    "state": { "const": "observed_failure" },
+                    "output_digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" }
+                  }
+                }
+              },
+              {
+                "if": { "required": ["managed_generation_observation"] },
+                "then": {
+                  "required": ["state", "output_digest"],
+                  "properties": {
+                    "state": { "const": "observed_success" },
+                    "output_digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" }
+                  }
+                }
+              }
+            ]
           }
         }
       }

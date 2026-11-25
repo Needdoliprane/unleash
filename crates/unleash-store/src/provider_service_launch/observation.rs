@@ -62,6 +62,39 @@ pub enum ProviderServiceLaunchOutcome {
     Attested(Box<ProviderServiceLaunchAttestation>),
     /// No affirmative evidence of launch.
     Unconfirmed,
+    /// No process was started: a certain refusal, with nothing to reconcile (REQ-MODEL-015).
+    NotStarted {
+        /// Closed cause, recorded by the writer.
+        cause: ProviderServiceLaunchRefusal,
+    },
+}
+
+/// Closed cause of a service launch refused before any child process was started.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderServiceLaunchRefusal {
+    /// Permit expired, clock uncertain or preparation refused by the writer.
+    StalePermit,
+    /// The retained bootstrap is not the prepared native plan.
+    BootstrapMismatch,
+    /// The rendezvous directory is occupied or rejected.
+    RuntimeInUse,
+    /// The system source of randomness is unavailable for the control secret.
+    RandomUnavailable,
+    /// Preparing the runtime directory or spawning the host failed.
+    LaunchUnavailable,
+}
+
+/// Durable record of a launch refused before any child process was started.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProviderServiceLaunchRefusalRecord {
+    /// Document version.
+    pub schema_version: u32,
+    /// Durable preparation covered by the refused permit.
+    pub context_digest: Sha256Digest,
+    /// Closed cause.
+    pub cause: ProviderServiceLaunchRefusal,
 }
 
 impl UnleashStore {
@@ -69,6 +102,8 @@ impl UnleashStore {
     ///
     /// The daemon owns the runtime verification. This writer binds its attestation to the
     /// immutable preparation and appends it with the broker phase and outbox in one transaction.
+    /// A launch refused before any process was started is recorded as an observed failure
+    /// without effect; an unconfirmed launch remains an unknown outcome.
     ///
     /// # Errors
     /// Rejects foreign markers, diverging observations, and observations from a stale incarnation.
@@ -115,7 +150,8 @@ impl UnleashStore {
             let (decision, recorded_at) =
                 marker.ok_or_else(|| invalid("durable service launch marker unavailable"))?;
             let decision: BrokerAuthorizationDecision = serde_json::from_str(&decision)?;
-            let (state, digest, attestation) = match &outcome {
+            let mut refusal_record = None;
+            let (state, digest, evidence) = match &outcome {
                 ProviderServiceLaunchOutcome::Attested(proof) => {
                     if proof.context_digest != intent.payload_digest
                         || proof.environment_digest != context.plan.environment_digest
@@ -133,7 +169,20 @@ impl UnleashStore {
                     (
                         ActionState::ObservedSuccess,
                         Some(canonical_sha256(proof)?),
-                        Some(proof.as_ref()),
+                        Some(crate::broker_writer::ServiceLaunchEvidence::Attested(proof)),
+                    )
+                }
+                ProviderServiceLaunchOutcome::NotStarted { cause } => {
+                    refusal_record = Some(ProviderServiceLaunchRefusalRecord {
+                        schema_version: 1,
+                        context_digest: intent.payload_digest,
+                        cause: *cause,
+                    });
+                    let record = refusal_record.as_ref();
+                    (
+                        ActionState::ObservedFailure,
+                        record.map(canonical_sha256).transpose()?,
+                        record.map(crate::broker_writer::ServiceLaunchEvidence::Refused),
                     )
                 }
                 ProviderServiceLaunchOutcome::Unconfirmed => {
@@ -175,7 +224,7 @@ impl UnleashStore {
                 &super::ServiceLaunchPhaseAccess {
                     intent_digest: intent.intent_digest,
                 },
-                attestation,
+                evidence,
             )
         })
     }

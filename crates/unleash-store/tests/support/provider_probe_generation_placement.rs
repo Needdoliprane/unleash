@@ -18,6 +18,7 @@ use unleash_testkit::ManualClock;
 
 const OBSERVER: &str = "system:provider-generation-placement";
 
+// Issues durables d'une génération managée et d'un lancement refusé (REQ-MODEL-015).
 #[path = "provider_probe_generation_placement/outcome.rs"]
 mod outcome;
 
