@@ -4,7 +4,6 @@
 
 use std::ffi::CStr;
 use std::fs;
-use std::os::unix::fs::MetadataExt;
 use std::path::{Component, Path, PathBuf};
 
 use crate::errors::PlatformError;
@@ -357,6 +356,10 @@ pub fn effective_uid() -> u32 {
 /// Résout le répertoire de rendez-vous canonique pour l'UID effectif courant,
 /// totalement indépendant de `data_root`, `profile`, `XDG_RUNTIME_DIR` et `TMPDIR`.
 ///
+/// Sous Linux, le chemin est dérivé de l'UID seul : aucun accès au disque ne le déplace. Cette
+/// fonction ne qualifie rien et ne crée rien ; les clients s'en servent pour joindre le démon et
+/// concluent à son absence quand le rendez-vous n'existe pas.
+///
 /// # Errors
 /// Retourne [`PlatformError::ForbiddenDocumentationPath`] si un invariant de chemin est violé.
 pub fn canonical_rendezvous_dir() -> Result<PathBuf, PlatformError> {
@@ -377,43 +380,38 @@ pub fn canonical_rendezvous_dir_with(
     uid: u32,
     _env: &EnvSnapshot,
 ) -> Result<PathBuf, PlatformError> {
-    let dir_name = format!("unleash-{uid}");
-    let dir = match os {
-        PlatformOsKind::MacOs => {
-            if let Some(darwin_tmp) = macos_darwin_user_temp_dir() {
-                let candidate = darwin_tmp.join(&dir_name);
-                let sock_len = candidate.join("daemon.sock").as_os_str().len();
-                if sock_len <= MAX_UNIX_SOCKET_PATH_BYTES {
-                    candidate
-                } else {
-                    PathBuf::from(format!("/private/tmp/{dir_name}"))
-                }
-            } else {
-                PathBuf::from(format!("/private/tmp/{dir_name}"))
-            }
-        }
-        PlatformOsKind::Linux => {
-            let run_user = PathBuf::from(format!("/run/user/{uid}"));
-            if is_owned_private_dir(&run_user, uid) {
-                run_user.join("unleash")
-            } else {
-                PathBuf::from(format!("/tmp/{dir_name}"))
-            }
-        }
-    };
-
-    assert_not_under_claude(&dir)?;
-    Ok(dir)
+    match os {
+        // Candidat unique, dérivé de l'UID seul : ni l'état du disque ni l'environnement ne le
+        // déplacent, et il n'existe aucun repli sous `/tmp` (`runtime-lifecycle.md`, `REQ-CORE-001`).
+        PlatformOsKind::Linux => Ok(linux_rendezvous_dir(uid)),
+        PlatformOsKind::MacOs => macos_rendezvous_dir(uid),
+    }
 }
 
-fn is_owned_private_dir(path: &Path, expected_uid: u32) -> bool {
-    let Ok(meta) = fs::symlink_metadata(path) else {
-        return false;
+/// Candidat unique sous Linux : `/run/user/<uid>/unleash`, dans la racine runtime `/run/user/<uid>`.
+fn linux_rendezvous_dir(uid: u32) -> PathBuf {
+    PathBuf::from(format!("/run/user/{uid}/unleash"))
+}
+
+// macOS : le candidat reste le répertoire temporaire Darwin par utilisateur, comportement conservé.
+// Le passage au répertoire de cache Darwin (`_CS_DARWIN_USER_CACHE_DIR`), proposé par l'arbitrage
+// du 25 novembre 2026, est différé à une qualification native : il se fera dans cette seule
+// fonction et dans `macos_darwin_user_temp_dir`, sans toucher au reste de la résolution.
+fn macos_rendezvous_dir(uid: u32) -> Result<PathBuf, PlatformError> {
+    let dir_name = format!("unleash-{uid}");
+    let dir = if let Some(darwin_tmp) = macos_darwin_user_temp_dir() {
+        let candidate = darwin_tmp.join(&dir_name);
+        let sock_len = candidate.join("daemon.sock").as_os_str().len();
+        if sock_len <= MAX_UNIX_SOCKET_PATH_BYTES {
+            candidate
+        } else {
+            PathBuf::from(format!("/private/tmp/{dir_name}"))
+        }
+    } else {
+        PathBuf::from(format!("/private/tmp/{dir_name}"))
     };
-    !meta.file_type().is_symlink()
-        && meta.is_dir()
-        && meta.uid() == expected_uid
-        && (meta.mode() & 0o7777) == 0o700
+    assert_not_under_claude(&dir)?;
+    Ok(dir)
 }
 
 #[cfg(target_os = "macos")]
