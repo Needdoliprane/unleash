@@ -86,6 +86,14 @@ pub(crate) struct PreferredProfileRef {
     digest: Sha256Digest,
 }
 
+impl PreferredProfileRef {
+    /// Indique si la référence a la forme fermée du contrat IPC : identité non nulle et version
+    /// positive exacte dans le domaine JSON.
+    pub(crate) fn is_well_formed(&self) -> bool {
+        !self.profile_id.is_nil() && (1..=MAX_WIRE_VERSION).contains(&self.profile_version)
+    }
+}
+
 fn deserialize_profile_digest<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
 ) -> Result<Sha256Digest, D::Error> {
@@ -394,7 +402,7 @@ fn require_published_skill(
     Ok(())
 }
 
-fn require_profile(
+pub(crate) fn require_profile(
     conn: &Connection,
     authority: AuthorityGeneration,
     project: Option<ProjectId>,

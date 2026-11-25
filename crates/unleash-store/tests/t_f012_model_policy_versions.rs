@@ -530,20 +530,20 @@ fn t_f012_002_refuses_out_of_scope_profiles_divergent_digests_and_outsides() {
         &outside
     )));
     // Profil réservé au projet, publié depuis les réglages utilisateur.
-    let user_scope = Scope::user();
+    let home = Scope::user();
     let project_patch = Policy::bounded(&[profile.reference()]).patch();
     assert!(is_conflict(commit_policy(
         &store,
         &author,
-        &user_scope,
+        &home,
         0xf012_0033,
         Revision::INITIAL,
         &project_patch
     )));
     assert_eq!(revision(&store, &scope), Revision::INITIAL);
-    assert_eq!(revision(&store, &user_scope), Revision::INITIAL);
+    assert_eq!(revision(&store, &home), Revision::INITIAL);
     assert!(history(&store, &scope).is_empty());
-    assert!(history(&store, &user_scope).is_empty());
+    assert!(history(&store, &home).is_empty());
 
     // Un réglage projet vise les profils globaux ou de ce projet.
     let mixed = Policy::bounded(&[profile.reference(), shared.reference()]);
@@ -593,6 +593,10 @@ fn t_f012_002_refuses_out_of_contract_limits_and_non_human_authority() {
         policy.capabilities = vec![capability];
         refuse(&policy);
     }
+    // Un profil est une version positive exacte, jamais zéro ni « latest ».
+    let versionless = json!({"profile_id":PROFILE,"profile_version":0,"digest":profile.digest});
+    let shapeless = Policy::bounded(&[versionless]);
+    refuse(&shapeless);
     assert_eq!(revision(&store, &scope), Revision::INITIAL);
     assert!(history(&store, &scope).is_empty());
 

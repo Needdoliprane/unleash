@@ -5,13 +5,20 @@ use std::{collections::BTreeMap, fmt};
 
 use rusqlite::{Transaction, params};
 use serde::{Deserialize, Serialize};
-use unleash_domain::{ActorId, ReceiptId, Sha256Digest};
+use unleash_domain::{ActorId, ProjectId, ReceiptId, Sha256Digest};
 use unleash_protocol::{CommandEnvelope, ReasonCode, canonical_sha256};
 
 use crate::SettingsScopeKind;
 use crate::StoreError;
-use crate::model_selection_bindings::PreferredProfileRef;
+use crate::model_selection_bindings::{PreferredProfileRef, require_profile};
 use crate::policies_secrets::{CallerAuthority, require_human_decider};
+
+/// Plus grand entier qui garde sa valeur exacte entre clients JSON (borne du contrat IPC).
+const MAX_WIRE_VERSION: u64 = 9_007_199_254_740_991;
+/// Durée maximale d'une version, en secondes (trente jours).
+const MAX_DURATION_SECONDS: u64 = 2_592_000;
+/// Limite d'octets UTF-8 d'une référence de capacité sur le fil.
+const MAX_CAPABILITY_BYTES: usize = 256;
 
 /// Identité stable d'une politique, publiée dans le namespace de son scope.
 ///
@@ -36,10 +43,9 @@ impl ModelPolicyId {
                         .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
             })
         {
-            return Err(StoreError::InvalidArgument {
-                reason: None,
-                message: "model policy identity is outside the closed contract form".to_owned(),
-            });
+            return Err(invalid(
+                "model policy identity is outside the closed contract form",
+            ));
         }
         Ok(Self(value))
     }
@@ -83,6 +89,21 @@ pub struct ModelPolicyLimits {
     pub max_cost_microusd: u64,
     /// Durée maximale, en secondes, de 1 à 2 592 000.
     pub max_duration_seconds: u64,
+}
+
+impl ModelPolicyLimits {
+    /// Refuse un plafond hors des bornes du contrat IPC.
+    fn validate(&self) -> Result<(), StoreError> {
+        if self.max_llm_calls > MAX_WIRE_VERSION
+            || self.max_output_tokens > MAX_WIRE_VERSION
+            || self.max_cost_microusd > MAX_WIRE_VERSION
+            || self.max_duration_seconds == 0
+            || self.max_duration_seconds > MAX_DURATION_SECONDS
+        {
+            return Err(invalid("model policy limits are outside the IPC contract bounds"));
+        }
+        Ok(())
+    }
 }
 
 /// Patch `SetSettings` fermé pour une politique de modèle versionnée.
@@ -179,6 +200,13 @@ enum Fact {
     },
 }
 
+fn invalid(message: &str) -> StoreError {
+    StoreError::InvalidArgument {
+        reason: None,
+        message: message.to_owned(),
+    }
+}
+
 fn conflict(message: &str) -> StoreError {
     StoreError::ContractViolation {
         reason: Some(ReasonCode::ModelConfigurationConflict),
@@ -246,10 +274,8 @@ pub(crate) fn parse(history_json: &str) -> Result<Vec<ModelPolicyVersion>, Store
     project(&serde_json::from_str::<Vec<Fact>>(history_json)?)
 }
 
-/// Plus grand entier qui garde sa valeur exacte entre clients JSON (borne du contrat IPC).
-const MAX_WIRE_VERSION: u64 = 9_007_199_254_740_991;
-
 /// Fait de publication ou de révocation, engagé sous l'autorité authentifiée du transport.
+#[derive(Clone, Copy)]
 pub(crate) struct PolicyEdit<'a> {
     /// Enveloppe de la commande `SetSettings` ; son acteur et sa lignée font foi.
     pub command: &'a CommandEnvelope,
@@ -270,18 +296,7 @@ pub(crate) fn append_tx(
     // Une politique de modèle est une autorité : seul un décideur humain la publie ou la révoque,
     // jamais un agent ni un modèle (F012/interfaces, « autorité humaine sur le scope »).
     require_human_decider(edit.caller, "publish or revoke a model policy")?;
-    let (scope, scope_id) = settings;
-    let envelope = edit.command;
-    // La portée du patch doit être celle de l'enveloppe : un réglage utilisateur vise la lignée
-    // active, un réglage projet vise le projet exact de la commande.
-    match (scope, envelope.project_id) {
-        (SettingsScopeKind::User, None)
-            if scope_id == "default"
-                && envelope.aggregate_id == envelope.authority_generation.as_uuid() => {}
-        (SettingsScopeKind::Project, Some(project))
-            if scope_id == project.to_string() && envelope.aggregate_id == project.as_uuid() => {}
-        _ => return Err(conflict("model policy is outside the edited settings scope")),
-    }
+    let project = edited_scope(settings, edit.command)?;
     let history = read_history(tx, settings)?;
     let fact = match &change.0 {
         Change::Publish {
@@ -291,10 +306,20 @@ pub(crate) fn append_tx(
             fallback_profiles,
             limits,
         } => {
-            let version = next_version(&history, policy_id)?;
+            validate_publish(
+                allowed_profiles,
+                allowed_capabilities,
+                fallback_profiles,
+                limits,
+            )?;
+            // L'éditeur n'autorise que des profils exacts de sa portée : la configuration n'élargit
+            // jamais les droits (AC-F012-002).
+            for reference in allowed_profiles.iter().chain(fallback_profiles) {
+                require_profile(tx, edit.command.authority_generation, project, reference)?;
+            }
             let document = PolicyDocument {
                 policy_id: policy_id.clone(),
-                version,
+                version: next_version(&history, policy_id)?,
                 allowed_profiles: allowed_profiles.clone(),
                 allowed_capabilities: allowed_capabilities.clone(),
                 fallback_profiles: fallback_profiles.clone(),
@@ -307,17 +332,142 @@ pub(crate) fn append_tx(
                 document,
             }
         }
-        Change::Revoke { .. } => {
-            return Err(conflict("model policy revocation is not engaged yet"));
+        Change::Revoke { policy_id, version } => {
+            if !(1..=MAX_WIRE_VERSION).contains(version) {
+                return Err(invalid(
+                    "model policy version is outside the IPC contract bounds",
+                ));
+            }
+            if !is_published(&history, policy_id, *version) {
+                return Err(conflict(
+                    "no published model policy version for this exact identity",
+                ));
+            }
+            if is_revoked(&history, policy_id, *version) {
+                return Err(conflict("model policy version is already revoked"));
+            }
+            Fact::Revoked {
+                policy_id: policy_id.clone(),
+                version: *version,
+                revocation: ModelPolicyRevocation {
+                    principal_id: edit.caller.actor_id.clone(),
+                    command_receipt_id: edit.receipt_id,
+                },
+            }
         }
     };
     append_fact(tx, settings, &fact)
 }
 
+/// Portée de l'enveloppe, qui doit être celle du patch : un réglage utilisateur vise la lignée
+/// active, un réglage projet vise le projet exact de la commande.
+fn edited_scope(
+    (scope, scope_id): (SettingsScopeKind, &str),
+    envelope: &CommandEnvelope,
+) -> Result<Option<ProjectId>, StoreError> {
+    match (scope, envelope.project_id) {
+        (SettingsScopeKind::User, None)
+            if scope_id == "default"
+                && envelope.aggregate_id == envelope.authority_generation.as_uuid() =>
+        {
+            Ok(None)
+        }
+        (SettingsScopeKind::Project, Some(project))
+            if scope_id == project.to_string() && envelope.aggregate_id == project.as_uuid() =>
+        {
+            Ok(Some(project))
+        }
+        _ => Err(conflict("model policy is outside the edited settings scope")),
+    }
+}
+
+/// Forme fermée du contrat IPC que la désérialisation seule ne couvre pas.
+fn validate_publish(
+    allowed_profiles: &[PreferredProfileRef],
+    allowed_capabilities: &[String],
+    fallback_profiles: &[PreferredProfileRef],
+    limits: &ModelPolicyLimits,
+) -> Result<(), StoreError> {
+    limits.validate()?;
+    if !is_unique(allowed_profiles)
+        || !is_unique(fallback_profiles)
+        || !is_unique(allowed_capabilities)
+    {
+        return Err(invalid("model policy lists carry a duplicate entry"));
+    }
+    if allowed_capabilities
+        .iter()
+        .any(|capability| !is_capability(capability))
+    {
+        return Err(invalid(
+            "model policy capability is outside the closed contract form",
+        ));
+    }
+    // Un profil est une version positive exacte, jamais « latest » (contrat IPC).
+    if allowed_profiles
+        .iter()
+        .chain(fallback_profiles)
+        .any(|reference| !reference.is_well_formed())
+    {
+        return Err(invalid(
+            "model policy profile reference is outside the closed contract form",
+        ));
+    }
+    // Chaque repli doit figurer parmi les profils autorisés (F012/interfaces).
+    if fallback_profiles
+        .iter()
+        .any(|fallback| !allowed_profiles.contains(fallback))
+    {
+        return Err(conflict("a model policy fallback is not an allowed profile"));
+    }
+    Ok(())
+}
+
+fn is_unique<T: PartialEq>(values: &[T]) -> bool {
+    values.iter().enumerate().all(|(index, value)| {
+        !values
+            .iter()
+            .take(index)
+            .any(|other| other == value)
+    })
+}
+
+/// Forme `probe_reference` du contrat IPC : au moins un caractère non blanc, aucun caractère de
+/// contrôle, 256 octets UTF-8 au plus.
+fn is_capability(capability: &str) -> bool {
+    capability.len() <= MAX_CAPABILITY_BYTES
+        && !capability.trim().is_empty()
+        && !capability.chars().any(char::is_control)
+}
+
+fn is_published(history: &[Fact], policy_id: &ModelPolicyId, version: u64) -> bool {
+    history.iter().any(|fact| {
+        matches!(
+            fact,
+            Fact::Published { document, .. }
+                if &document.policy_id == policy_id && document.version == version
+        )
+    })
+}
+
+fn is_revoked(history: &[Fact], policy_id: &ModelPolicyId, version: u64) -> bool {
+    history.iter().any(|fact| {
+        matches!(
+            fact,
+            Fact::Revoked {
+                policy_id: revoked,
+                version: revoked_version,
+                ..
+            } if revoked == policy_id && *revoked_version == version
+        )
+    })
+}
+
 fn read_history(
     tx: &Transaction<'_>,
-    (scope, scope_id): (SettingsScopeKind, &str),
+    settings: (SettingsScopeKind, &str),
 ) -> Result<Vec<Fact>, StoreError> {
+    let (scope, scope_id) = settings;
     let history: String = tx.query_row(
         "SELECT model_policy_history_json FROM settings WHERE scope_kind=?1 AND scope_id=?2",
         params![scope.as_str(), scope_id],
@@ -345,9 +495,10 @@ fn next_version(history: &[Fact], policy_id: &ModelPolicyId) -> Result<u64, Stor
 
 fn append_fact(
     tx: &Transaction<'_>,
-    (scope, scope_id): (SettingsScopeKind, &str),
+    settings: (SettingsScopeKind, &str),
     fact: &Fact,
 ) -> Result<(), StoreError> {
+    let (scope, scope_id) = settings;
     tx.execute(
         "UPDATE settings SET model_policy_history_json =
             json_insert(model_policy_history_json, '$[#]', json(?3))
@@ -357,19 +508,158 @@ fn append_fact(
     Ok(())
 }
 
-/// Référence de résultat du reçu : la version publiée par cette commande exacte.
+/// Référence de résultat du reçu : la version publiée, ou le fait distinct de révocation.
 pub(crate) fn result_ref_tx(
     tx: &Transaction<'_>,
     settings: (SettingsScopeKind, &str),
     receipt_id: ReceiptId,
 ) -> Result<String, StoreError> {
     let history = read_history(tx, settings)?;
+    let diverged = || {
+        StoreError::InvariantViolation("model policy fact and command receipt diverge".to_owned())
+    };
     match history.last() {
         Some(Fact::Published { document, digest }) if document.command_receipt_id == receipt_id => {
             Ok(version_ref(&document.policy_id, document.version, digest))
         }
-        _ => Err(StoreError::InvariantViolation(
-            "model policy fact and command receipt diverge".to_owned(),
-        )),
+        Some(Fact::Revoked {
+            policy_id,
+            version,
+            revocation,
+        }) if revocation.command_receipt_id == receipt_id => {
+            // Le dossier ne fixe pas la référence du reçu de révocation : elle désigne le fait
+            // distinct par un suffixe, sans se confondre avec celle de la publication.
+            let digest = published_digest(&history, policy_id, *version).ok_or_else(diverged)?;
+            Ok(format!("{}:revoked", version_ref(policy_id, *version, digest)))
+        }
+        _ => Err(diverged()),
+    }
+}
+
+fn published_digest(
+    history: &[Fact],
+    policy_id: &ModelPolicyId,
+    version: u64,
+) -> Option<&Sha256Digest> {
+    history.iter().find_map(|fact| match fact {
+        Fact::Published { document, digest }
+            if &document.policy_id == policy_id && document.version == version =>
+        {
+            Some(digest)
+        }
+        _ => None,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::{Value, json};
+
+    use super::*;
+
+    fn patch(command: &Value) -> &Value {
+        command
+            .pointer("/payload/patch/model_policy_version")
+            .unwrap()
+    }
+
+    fn refused(value: Value) -> bool {
+        serde_json::from_value::<ModelPolicyVersionChange>(value).is_err()
+    }
+
+    // T-F012-002 — Les DTO fermés ont exactement la forme des fixtures du dossier et refusent ce
+    // que le contrat IPC interdit (REQ-MODEL-002).
+    #[test]
+    fn closed_dtos_follow_the_dossier_fixtures_and_refuse_forbidden_shapes() {
+        let command: Value = serde_json::from_str(include_str!(
+            "../../../../.claude/examples/ipc-set-model-policy-version.json"
+        ))
+        .unwrap();
+        let publish = patch(&command).clone();
+        let change: ModelPolicyVersionChange = serde_json::from_value(publish.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&change).unwrap(), publish);
+
+        let mut revoke = publish.clone();
+        let fields = revoke.as_object_mut().unwrap();
+        fields.insert("operation".to_owned(), json!("revoke"));
+        fields.insert("version".to_owned(), json!(1));
+        for field in [
+            "allowed_profiles",
+            "allowed_capabilities",
+            "fallback_profiles",
+            "limits",
+        ] {
+            fields.remove(field);
+        }
+        let change: ModelPolicyVersionChange = serde_json::from_value(revoke.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&change).unwrap(), revoke);
+
+        let mut refused_shapes = Vec::new();
+        for (field, value) in [
+            ("version", json!(1)),
+            ("principal_id", json!("caller")),
+            ("state", json!("active")),
+        ] {
+            let mut forbidden = publish.clone();
+            forbidden
+                .as_object_mut()
+                .unwrap()
+                .insert(field.to_owned(), value);
+            refused_shapes.push(forbidden);
+        }
+        let mut missing = publish.clone();
+        missing.as_object_mut().unwrap().remove("limits");
+        refused_shapes.push(missing);
+        let mut negative = publish.clone();
+        negative
+            .pointer_mut("/limits/max_cost_microusd")
+            .unwrap()
+            .clone_from(&json!(-1));
+        refused_shapes.push(negative);
+        for (pointer, value) in [
+            ("/allowed_profiles/0/profile_version", json!(0)),
+            (
+                "/allowed_profiles/0/digest",
+                json!("sha256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"),
+            ),
+        ] {
+            let mut malformed = publish.clone();
+            malformed
+                .pointer_mut(pointer)
+                .unwrap()
+                .clone_from(&value);
+            refused_shapes.push(malformed);
+        }
+        let oversized = "a".repeat(129);
+        for identity in ["", "Policy", "policy..fixture", oversized.as_str()] {
+            let mut malformed = publish.clone();
+            malformed
+                .as_object_mut()
+                .unwrap()
+                .insert("policy_id".to_owned(), json!(identity));
+            refused_shapes.push(malformed);
+        }
+        let mut unversioned = revoke.clone();
+        unversioned.as_object_mut().unwrap().remove("version");
+        refused_shapes.push(unversioned);
+        let mut with_limits = revoke.clone();
+        with_limits
+            .as_object_mut()
+            .unwrap()
+            .insert("limits".to_owned(), json!({"max_llm_calls": 1}));
+        refused_shapes.push(with_limits);
+        for forbidden in refused_shapes {
+            assert!(refused(forbidden));
+        }
+
+        let response: Value = serde_json::from_str(include_str!(
+            "../../../../.claude/examples/ipc-read-settings-model-policies-response.json"
+        ))
+        .unwrap();
+        let history = response.pointer("/result/model_policy_versions").unwrap();
+        let decoded: Vec<ModelPolicyVersion> = serde_json::from_value(history.clone()).unwrap();
+        assert_eq!(&serde_json::to_value(&decoded).unwrap(), history);
+        assert!(decoded.first().unwrap().revocation.is_some());
+        assert!(decoded.get(1).unwrap().revocation.is_none());
     }
 }
