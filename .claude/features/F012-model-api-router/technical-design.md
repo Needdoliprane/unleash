@@ -89,7 +89,54 @@ il relit le manifeste, le profil Seatbelt et l’identité fraîche de
 l’enfant. Les empreintes du contexte, de l’environnement et du profil
 doivent correspondre. Le handshake suit le protocole privé existant
 sans rotation du secret. Le rattachement durable d’un lancement F012
-au profil exact reste une obligation du daemon et du writer.
+au profil exact reste une obligation du daemon et du writer. Le writer
+engage la phase `Authorizing` du lancement à partir de la préparation
+V019 et de son reçu d'origine, après revalidation de la lignée, du profil,
+du scope et de la politique. L'intention lie l'exécutable et le plan
+Strict, avec une seule évaluation durable pour une préparation. Le port
+du journal vérifie l'intention et la politique lorsqu'il rattache le
+résultat du broker à cette évaluation. Le writer remet un permis distinct
+après revalidation des empreintes du bootstrap et engagement durable du
+dispatch. Le permis est propre à cette incarnation et ne peut pas être
+obtenu par rejeu. L'attestation native demeure nécessaire pour confirmer
+l'exécution du service.
+
+Le contrôleur du daemon conserve le processus hôte avant d'attendre son
+attestation. Le writer rattache l'attestation au dispatch de la préparation
+dans l'incarnation active. Il engage `ActionObserved` avec le document
+natif et son empreinte. Sans preuve affirmative, il conserve le dispatch
+en issue inconnue. Cette liaison établit le fait de lancement. L'admission
+d'une génération doit encore vérifier le placement et le pair du transport.
+
+Pour préparer le placement Ollama géré, le daemon relit le dispatch
+attesté de l'incarnation courante. Il compare l'enfant détenu et observe
+son écoute sur l'adresse et le port numériques du profil. Le fait de
+placement lie le dispatch et l'empreinte de l'attestation au probe. Le
+writer vérifie le profil versionné, la portée, la politique et l'identité
+de l'enfant à l'adoption et à la relecture des entrées admises. La lecture
+dédiée à la génération gérée exige ce lien. L'envoi reste soumis à son
+propre permis, à la vérification du pair du socket connecté et aux délais
+de la réservation.
+
+Après `Authorizing`, le parcours `TestProviderProfile` cherche ce listener
+parmi les services détenus pour le profil, la portée et la politique du
+probe. Une écoute confirmée unique est conservée dans SQLite. En cas
+d'absence ou d'ambiguïté, le probe attend sa preuve. Un rejeu peut chercher
+l'écoute tant que la preuve manque. Le probe est présenté à l'ordonnanceur
+quand son exécuteur est prêt à prendre en charge la réservation.
+
+Le writer relit le probe admis après l'autorisation du broker. Il
+recalcule l'empreinte du POST Ollama, du processus détenu et de
+l'admission depuis les faits engagés. Le fait de placement conserve
+l'URL du profil. Le writer dérive la route `/api/chat` à partir de
+la racine ou de ce chemin explicite, sur l'origine HTTP loopback attestée.
+Tout autre chemin est refusé. L'empreinte doit correspondre à
+celle du transport. Le marqueur `unleash-ollama-chat` et
+`ActionDispatchCommitted` portent le lien natif, l'admission, le placement
+et le corps publié. Le permis est à usage unique et borné par le bail,
+le placement et la décision. Après perte de l'acquittement, le marqueur
+impose la réconciliation. L'observation du résultat relève du port
+dédié à cette génération.
 
 Le banc natif couple ce lancement à une fixture TCP loopback. Il vérifie
 l’identité OS issue de l’enfant détenu, l’écoute, le socket accepté et le

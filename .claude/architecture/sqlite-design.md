@@ -322,9 +322,33 @@ profil Ollama géré par Unleash, sa destination locale, l’autorité courante,
 le plan natif explicite et les identités réservées. Le lien au reçu est une clé
 étrangère différable. Un rejeu exact retrouve le même reçu et les mêmes
 identités. La préparation ne crée ni action broker, ni ligne de processus,
-ni réservation d’admission. Le broker refuse le verbe de lancement et
-l’utilisation du reçu, de l’événement de préparation ou de l’identité
-d’action pour un autre effet.
+ni réservation d’admission. Seul le port dédié du writer peut ouvrir la
+première phase `Authorizing` du lancement. Dans la même transaction, il
+vérifie la commande et son reçu d’origine, revalide le contexte, puis
+engage une intention `process_exec` liée au digest du contexte et au
+confinement Strict. Le journal dédié peut ensuite engager le résultat
+de cette même évaluation. Le writer exige le digest de l'intention et
+la politique encore applicable. Un rejeu exact restitue le même curseur.
+Le writer générique refuse le verbe et l'utilisation du reçu, de
+l'événement de préparation ou de l'identité d'action pour tout autre effet.
+Le port d'évaluation s'arrête au résultat durable. Un port de lancement
+distinct revalide en transaction la préparation, les empreintes du
+bootstrap observé et la décision exacte. Il engage le marqueur,
+`ActionDispatchCommitted` et l'outbox avant de rendre un permis à usage
+unique, borné par le plan et la décision. Après un commit dont la remise
+est perdue, le marqueur impose une réconciliation et interdit un second
+permis. Il ne contient aucune preuve de processus démarré.
+
+Le contrôleur garde l’hôte démarré avant d’enregistrer son observation.
+Le port dédié vérifie le marqueur, l’incarnation et les empreintes attestées.
+L’empreinte de l’attestation est l’`output_digest` du reçu local. Le document
+et les identités natives du host et de son enfant figurent dans le champ
+`provider_service_launch` de l’événement `ActionObserved`. Le writer engage
+la phase, le résultat du dispatch, l’événement et son outbox ensemble.
+Sans attestation, il engage `OutcomeUnknown` et conserve le marqueur.
+Un rejeu exact retrouve le curseur d’origine. Seul le port dédié engage
+cette observation. Le placement réseau et l’identité du pair lors d’un
+envoi ultérieur exigent leurs propres preuves.
 
 | Table | Colonnes minimales | Contraintes |
 |---|---|---|

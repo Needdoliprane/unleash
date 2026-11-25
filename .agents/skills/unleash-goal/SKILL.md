@@ -11,7 +11,7 @@ Tu es l'**agent root** du goal décrit par l'utilisateur. Applique intégralemen
 
 - Délègue aux agents du projet définis dans `.codex/agents/` (`scout`, `implementer`, `systems_implementer`, `ui_implementer`, `test_engineer`, `verifier`, `integrator`, `doc_keeper`, `architect`) en les nommant dans ta demande ; chacun porte son modèle et son effort. Demande un autre modèle à la délégation quand le niveau choisi diffère.
 - Les sous-agents héritent du sandbox et des approbations de ta session : lance Codex avec un sandbox d'écriture sur le dépôt.
-- Worktrees : crée-les toi-même avant délégation, `git worktree add .claude/worktrees/<goal-id>-<task-id> -b task/<goal-id>/<task-id> goal/<goal-id>`, et donne ce chemin comme répertoire de travail du sous-agent. N'utilise aucun mode worktree qui crée ailleurs.
+- Worktrees : attribue un checkout disponible à chaque agent écrivain selon la règle du projet. Pour une revue en lecture seule, indique le checkout et la version du candidat figé.
 
 ## Antigravity
 

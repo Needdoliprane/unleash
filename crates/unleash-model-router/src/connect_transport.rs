@@ -73,6 +73,10 @@ pub struct OwnedLoopbackPeer {
 }
 
 impl OwnedLoopbackPeer {
+    pub(crate) fn process_identity(&self) -> &OsProcessIdentity {
+        &self.process
+    }
+
     /// Pin an already selected loopback address and the expected process identity.
     ///
     /// # Errors
@@ -88,12 +92,11 @@ impl OwnedLoopbackPeer {
     }
 
     pub(crate) fn bind_digest(&self, passive: Sha256Digest) -> Result<Sha256Digest, ConnectError> {
-        canonical_sha256(&json!({
-            "schema": "unleash.owned_loopback_request.v1",
-            "transport_request_digest": passive,
-            "endpoint": self.endpoint,
-            "process_identity": self.process,
-        }))
+        unleash_protocol::provider_probe::owned_loopback_request_digest(
+            passive,
+            self.endpoint,
+            &self.process,
+        )
         .map_err(|_| ConnectError::Digest)
     }
 }

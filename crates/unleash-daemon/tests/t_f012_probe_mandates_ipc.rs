@@ -104,8 +104,32 @@ impl Fixture {
         project: Option<ProjectId>,
         id: u128,
     ) -> Result<Profile, ClientError> {
-        let endpoint = format!("http://{}/v1", self.endpoint.local_addr().unwrap());
-        let payload = json!({"provider_kind":"lmstudio","dialect":{"kind":"openai_chat_completions","version":1},"endpoint":endpoint,"model":"synthetic-mandate-profile","locality":"local_only","server_management":"user_managed","auth":{"kind":"none"},"limits":{"max_inflight":1,"connect_timeout_ms":2_000,"queue_timeout_ms":1_000,"load_timeout_ms":180_000,"first_token_timeout_ms":60_000,"generation_timeout_ms":60_000},"declared_capabilities":["text"],"pricing":{"kind":"none_local"}});
+        self.configure_dialect(
+            client,
+            profile,
+            project,
+            id,
+            unleash_protocol::ProviderDialectKind::OpenaiChatCompletions,
+        )
+        .await
+    }
+
+    async fn configure_dialect(
+        &self,
+        client: &mut UnleashClient,
+        profile: Uuid,
+        project: Option<ProjectId>,
+        id: u128,
+        dialect: unleash_protocol::ProviderDialectKind,
+    ) -> Result<Profile, ClientError> {
+        let (provider, path, management) =
+            if dialect == unleash_protocol::ProviderDialectKind::OllamaChat {
+                ("ollama", "api/chat", "unleash_managed")
+            } else {
+                ("lmstudio", "v1", "user_managed")
+            };
+        let endpoint = format!("http://{}/{path}", self.endpoint.local_addr().unwrap());
+        let payload = json!({"provider_kind":provider,"dialect":{"kind":dialect,"version":1},"endpoint":endpoint,"model":"synthetic-mandate-profile","locality":"local_only","server_management":management,"auth":{"kind":"none"},"limits":{"max_inflight":1,"connect_timeout_ms":2_000,"queue_timeout_ms":1_000,"load_timeout_ms":180_000,"first_token_timeout_ms":60_000,"generation_timeout_ms":60_000},"declared_capabilities":["text"],"pricing":{"kind":"none_local"}});
         let mut request = command(client, id, "SetProviderProfile", profile, payload);
         request.project_id = project;
         let receipt = client.send_command(&request).await?;
@@ -416,6 +440,102 @@ fn assert_generation_waiting_for_placement(
     assert_eq!(
         field(field(&manifest, "origin_ref"), "provider_probe_id"),
         &json!(probe)
+    );
+}
+
+#[tokio::test]
+async fn t_f012_ollama_generation_authorizing_binds_configured_endpoint() {
+    let (fixture, mut admin) = Fixture::start().await;
+    let profile = fixture
+        .configure_dialect(
+            &mut admin,
+            Uuid::from_u128(0xf012_9e06),
+            None,
+            350,
+            unleash_protocol::ProviderDialectKind::OllamaChat,
+        )
+        .await
+        .unwrap();
+    let grant = admin
+        .send_command(&policy(
+            &admin,
+            352,
+            None,
+            0,
+            Some(generation_issue(&profile)),
+        ))
+        .await
+        .unwrap();
+    let request = generation_request(&admin, &profile, &grant, 353);
+    let receipt = admin.send_command(&request).await.unwrap();
+    let appeared = wait_for_generation_intent(&fixture, request.aggregate_id).await;
+    fixture.shutdown().await;
+    assert!(
+        appeared,
+        "l'intention du profil natif doit être matérialisée"
+    );
+    assert_generation_waiting_for_placement(&fixture, request.aggregate_id, &receipt);
+
+    let (encoded, body_hash, body_path): (String, String, String) = fixture
+        .db()
+        .query_row(
+            "SELECT i.intent_json, o.object_hash, o.relative_path
+         FROM provider_probe_contexts p JOIN broker_intents i USING(action_id)
+         JOIN object_references r ON r.owner_id=p.probe_id AND r.owner_kind='provider_probe'
+           AND r.source_field='request_payload' AND r.state='live'
+         JOIN object_records o ON o.object_hash=r.object_hash
+           AND o.object_hash=json_extract(p.context_json,'$.preparation.payload_manifest_hash')
+         WHERE p.probe_id=?1",
+            [request.aggregate_id.to_string()],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    let intent: Value = serde_json::from_str(&encoded).unwrap();
+    let manifest = field(&intent, "manifest");
+    let endpoint = fixture.endpoint.local_addr().unwrap();
+    assert_eq!(
+        field(manifest, "resource_refs"),
+        &json!([
+            {"kind":"model_target","value":{"provider":"ollama","model_id":"synthetic-mandate-profile","locality":"local_only"}},
+            {"kind":"network_endpoint","value":{"host":endpoint.ip().to_string(),"port":endpoint.port(),"is_private_or_loopback":true}}
+        ])
+    );
+    assert_eq!(field(&intent, "payload_digest"), &json!(body_hash));
+    let body = std::fs::read(fixture.data.path().join("artifacts").join(body_path)).unwrap();
+    let profile_ref = unleash_model_router::transport::ProfileRef::new(
+        &profile.id.to_string(),
+        1,
+        profile
+            .configuration_digest
+            .as_str()
+            .unwrap()
+            .parse()
+            .unwrap(),
+    )
+    .unwrap();
+    let identity = unleash_platform::inspect_process_identity(std::process::id()).unwrap();
+    let prepared =
+        unleash_model_router::ollama_transport::FrozenOllamaChatRequest::from_published_body(
+            &format!("http://{endpoint}/api/chat"),
+            profile_ref,
+            unleash_model_router::connect_transport::OwnedLoopbackPeer::new(endpoint, identity)
+                .unwrap(),
+            "synthetic-mandate-profile",
+            unleash_model_router::ollama_transport::OllamaChatLimits {
+                connect_ms: 2_000,
+                total_ms: 5_000,
+                output_tokens: 32,
+            },
+            body,
+            body_hash.parse().unwrap(),
+        )
+        .unwrap();
+    assert_eq!(
+        &json!(prepared.resources()),
+        field(manifest, "resource_refs")
+    );
+    assert!(
+        matches!(fixture.endpoint.accept(), Err(error) if error.kind() == ErrorKind::WouldBlock)
     );
 }
 

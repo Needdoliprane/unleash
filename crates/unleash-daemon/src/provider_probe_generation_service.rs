@@ -1,23 +1,25 @@
-//! First durable broker phase for the independently authorized generation probe.
+//! Prepare the broker intent and observe placement for a managed generation probe.
 
 use crate::auth::AuthenticatedSession;
 use crate::ipc::{DaemonRuntimeState, publish_committed_events_ordered};
+use crate::provider_service_evaluation::{ManagedProviderServiceHosts, ProviderServiceLaunchError};
 use std::sync::Arc;
 use unleash_action_broker::{
     ActionIntent, ActionProvenance, ActionSubject, AuthorizationEvaluation, BrokerJournalEntry,
-    EffectsClass, IsolationRequirements, NormalizedResourceRef,
+    EffectsClass, IsolationRequirements,
 };
 use unleash_domain::{AuthorizationEvaluationId, Fence, LineageFence, ReconcileStrategy, Revision};
 use unleash_protocol::CommandEnvelope;
 use unleash_store::{
-    BrokerPhaseRequest, PolicyIsolationMode, PreparedProviderProbe, StoreError, UnleashStore,
+    BrokerPhaseRequest, CallerAuthority, PolicyIsolationMode, PreparedProviderProbe, StoreError,
+    UnleashStore,
 };
 
 fn unavailable() -> StoreError {
     StoreError::EvidenceUnavailable("intention native de génération indisponible".into())
 }
 
-fn authorizing(
+pub(crate) fn authorizing(
     store: &UnleashStore,
     record: &PreparedProviderProbe,
     isolation: PolicyIsolationMode,
@@ -32,11 +34,7 @@ fn authorizing(
         .map_err(|_| unavailable())?,
         project_id: context.project_id,
         verb: unleash_store::PROVIDER_PROBE_VERB.into(),
-        resource_refs: vec![NormalizedResourceRef::ModelTarget {
-            provider: context.profile.provider_id.clone(),
-            model_id: context.preparation.resolved_model_id.clone(),
-            locality: context.profile.declared_locality,
-        }],
+        resource_refs: serde_json::from_value(record.resource_refs()).map_err(|_| unavailable())?,
         payload_digest: record.payload_digest(),
         reconcile_strategy: ReconcileStrategy::ObserveThenDecide,
         effects_class: EffectsClass::ModelDispatch,
@@ -74,6 +72,23 @@ fn authorizing(
     })
 }
 
+pub(crate) fn adopt_placement_if_ready(
+    store: &UnleashStore,
+    services: &ManagedProviderServiceHosts,
+    command: &CommandEnvelope,
+    caller: &CallerAuthority,
+) -> Result<Option<uuid::Uuid>, ProviderServiceLaunchError> {
+    let Some(probe) = store.read_waiting_managed_generation(command, caller)? else {
+        return Ok(None);
+    };
+    let Some(listener) = services.observe_probe_listener(store, &probe)? else {
+        return Ok(None);
+    };
+    Ok(Some(store.stage_managed_provider_generation_placement(
+        command, caller, listener,
+    )?))
+}
+
 pub(crate) fn start(
     state: &Arc<DaemonRuntimeState>,
     session: &AuthenticatedSession,
@@ -91,26 +106,47 @@ pub(crate) fn start(
     tokio::spawn(async move {
         let store = Arc::clone(&state.store);
         let writer_activity = Arc::clone(&activity);
+        let preparation_command = command.clone();
+        let preparation_caller = caller.clone();
         let result = tokio::task::spawn_blocking(move || {
             let _activity = writer_activity;
-            store.commit_provider_generation_authorizing(&command, &caller, |record, isolation| {
-                authorizing(&store, record, isolation)
-            })
+            store.commit_provider_generation_authorizing(
+                &preparation_command,
+                &preparation_caller,
+                |record, isolation| authorizing(&store, record, isolation),
+            )
         })
         .await;
         match result {
-            Ok(Ok(Some(commit))) => {
-                let cursor = commit.event_cursor;
-                publish_committed_events_ordered(
-                    &state,
-                    cursor.stream_id,
-                    cursor.sequence.as_u64(),
-                    1,
-                    &[],
-                )
-                .await;
+            Ok(Ok(commit)) => {
+                if let Some(commit) = commit {
+                    let cursor = commit.event_cursor;
+                    publish_committed_events_ordered(
+                        &state,
+                        cursor.stream_id,
+                        cursor.sequence.as_u64(),
+                        1,
+                        &[],
+                    )
+                    .await;
+                }
+                if !*state.drain_started_tx.borrow() {
+                    let writer_activity = Arc::clone(&activity);
+                    let placement = tokio::task::spawn_blocking(move || {
+                        let _activity = writer_activity;
+                        adopt_placement_if_ready(
+                            &state.store,
+                            &state.provider_service_hosts,
+                            &command,
+                            &caller,
+                        )
+                    })
+                    .await;
+                    if !matches!(placement, Ok(Ok(_))) {
+                        tracing::debug!("Placement du probe de génération en attente");
+                    }
+                }
             }
-            Ok(Ok(None)) => {}
             Ok(Err(error)) => tracing::warn!(
                 code=%error.error_code(), reason=?error.reason_code(),
                 "Préparation du broker de génération en attente",

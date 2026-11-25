@@ -64,6 +64,8 @@ pub(crate) struct DaemonRuntimeState {
     pub(crate) terminal_host_launcher: Arc<dyn crate::terminal_host_launcher::TerminalHostLauncher>,
     pub(crate) broker_activity: Arc<crate::broker_activity::BrokerActivity>,
     pub(crate) invocation_workers: crate::managed_workers::ManagedWorkers,
+    pub(crate) provider_service_hosts:
+        crate::provider_service_evaluation::ManagedProviderServiceHosts,
     pub(crate) store: Arc<UnleashStore>,
     pub(crate) authority_generation: AuthorityGeneration,
     pub(crate) daemon_epoch: DaemonEpoch,

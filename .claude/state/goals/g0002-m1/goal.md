@@ -16,7 +16,7 @@ Jalon : M1 — Features : F001, F002, F017 (broker interne), F018 (squelette rep
 - [x] Client disparu après acceptation ne crée pas 2 commandes ; daemon tué redémarre avec état engagé ; restore invalide ancienne lignée (`STALE_AUTHORITY_GENERATION`) ; acteur non autorisé refusé et historisé sans secret
 - [x] Preuves `qualification/evidence/EV-F017-*.json` (limites `EXT-GUARD` explicites) & `EV-F018-*.json` et `qualification/m1/exit.md` validés par `qa-expert`, `reliability-expert`, `security-expert`
 - [x] Gates Rust et dossier vertes sur `dev@8598866`, push réussi et SHA distant vérifié
-- [ ] CI GitHub Actions observée sur le SHA publié. Dernière lecture HTTP 404.
+- [ ] CI GitHub Actions observée sur le SHA publié `b7c73bb`. Actions et Checks renvoient HTTP 404.
 
 ## Hors périmètre
 - Contrat/serveur réel AI-Guard (`EXT-GUARD`, prévu en M6)
@@ -28,7 +28,7 @@ Jalon : M1 — Features : F001, F002, F017 (broker interne), F018 (squelette rep
 | t01a | `crates/unleash-action-broker` + double `GuardPort` dans `unleash-testkit` (parallèle) | `Cargo.*`, `crates/unleash-action-broker/**`, `crates/unleash-testkit/**` | — | systems-implementer | strong / pro | fmt/clippy/test/doc/deny | done |
 | t01a-journal | Stabiliser la reprise de l’évaluation d’autorisation du broker | `crates/unleash-action-broker/**`, doubles ciblés | 08e62c0 intégré, 109b937 pour l’ID partagé | systems-implementer | strong / Sol ultra | reprise exacte, backoff, concurrence, refus de redispatch | done |
 | t01b | `crates/unleash-store` M1 + backup/restore/capsule F018 + Q-12 (parallèle) | `crates/unleash-store/**` | — | systems-implementer | strong / pro | fmt/clippy/test/doc/deny | intégré sur `8598866` |
-| t02 | Câblage `ActionBroker` et opérations M1 dans `daemon`/`client`/`cli` | `crates/unleash-{daemon,client,cli}/** et transport Hello ciblé dans unleash-platform/protocol` | APIs t01b stables pour démarrer, candidats t01a/t01b vérifiés avant intégration | systems-implementer | strong / pro | fmt/clippy/test/doc/deny | intégré sur `8598866`, retrait physique encore ouvert |
+| t02 | Câblage `ActionBroker` et opérations M1 dans `daemon`/`client`/`cli` | `crates/unleash-{daemon,client,cli}/** et transport Hello ciblé dans unleash-platform/protocol` | APIs t01b stables pour démarrer, candidats t01a/t01b vérifiés avant intégration | systems-implementer | strong / pro | fmt/clippy/test/doc/deny | intégré sur `8598866`, retrait physique et Git vérifié le 23 novembre |
 | t03a | E2E restauration et lignée sur daemon/CLI réels | `crates/unleash-daemon/tests/e2e_m1_restore_lineage.rs` | APIs t01b et t02 du candidat privé | test-engineer | strong / Sol ultra | Rejet de l’ancienne lignée et consultation du reçu historique | done |
 | t03 | Preuves `EV-F017/F018-*`, `qualification/m1/exit.md`, revues experts, fusion `dev` & push | `qualification/**`, `.claude/state/goals/**` | t02 | root + experts | strong / pro | Toutes gates sur `dev` | publié sur `8598866`, lecture CI encore ouverte |
 
@@ -36,8 +36,7 @@ Jalon : M1 — Features : F001, F002, F017 (broker interne), F018 (squelette rep
 
 | Périmètre | Prochain résultat observable | Dépendance immédiate et responsable |
 | --- | --- | --- |
-| CI M1 | Résultat GitHub Actions constaté pour le SHA publié `8598866` | ROOT. Dernière lecture CI en échec HTTP 401/404. |
-| Résidu du checkout t02 | Absence physique et Git vérifiée après résolution du refus SMB | ROOT. Réconcilier le chemin exact, les consommateurs et la copie vérifiée avant retrait. |
+| CI M1 | Identifiant d’exécution et résultat des jobs GitHub Actions pour le SHA publié sur `dev`. | ROOT. Le workflow corrigé passe `actionlint` et est publié sur `dev` (`b7c73bb`, confirmé par Git). Le 25 novembre, l’accès GitHub est rétabli (`gh` connecté, dépôt `Needdoliprane/unleash`) : le dépôt compte zéro exécution d’Actions, le push de `b7c73bb` n’a jamais déclenché de workflow ; Actions est activé depuis. La preuve viendra du prochain push sur `dev` (après intégration de M2 et gates vertes) : relever l’identifiant d’exécution et les conclusions des jobs `ubuntu-latest` et `macos-latest` pour le SHA publié. |
 
 ## Résultat
-M1 accepté localement et publié à `85988665786b1b14d1ca5d74a4fbaba9e5cee2b0`. Le rejeu `dev` donne 369 tests réussis et un dossier valide. [Rapport M1](../../../../qualification/m1/exit.md). La clôture reste ouverte pour la CI GitHub et le résidu physique du worktree t02 après le refus SMB. La livraison t01b est intégrée et son checkout est absent physiquement et dans Git.
+M1 a été accepté localement et publié à `85988665786b1b14d1ca5d74a4fbaba9e5cee2b0`. Le rejeu `dev` donne 369 tests réussis et un dossier valide. [Rapport M1](../../../../qualification/m1/exit.md). Le seul changement publié en `b7c73bbc41e95cfcd5ec0102ad1f4be0d6021f31` corrige le workflow CI. Les checkouts t01b et t02 sont absents physiquement et dans Git. La clôture de M1 attend le résultat de la CI GitHub sur le SHA publié.

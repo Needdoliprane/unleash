@@ -189,7 +189,9 @@ mod sqlite_tests;
 #[path = "terminal_unknown_sqlite_tests.rs"]
 mod terminal_unknown_sqlite_tests;
 
-fn decision(d: &AuthorizationDecision) -> Result<BrokerAuthorizationDecision, BrokerJournalError> {
+pub(crate) fn decision(
+    d: &AuthorizationDecision,
+) -> Result<BrokerAuthorizationDecision, BrokerJournalError> {
     Ok(BrokerAuthorizationDecision {
         action_id: d.action_id,
         evaluation_id: d.evaluation_id,

@@ -3,6 +3,7 @@
 use std::collections::BTreeMap;
 use std::time::Duration;
 use unleash_domain::{AdmissionClass, InvocationId, PoolId, ReservationId};
+use unleash_protocol::CommandEnvelope;
 use unleash_scheduler::{
     ActiveExecution, AdmissionSnapshot, CheckpointEligibility, CheckpointRequest,
     ControlReserveMode, Decision, ExecutionUnit, ObservedCheckpoint, ProjectFairness,
@@ -10,8 +11,10 @@ use unleash_scheduler::{
 };
 use unleash_store::{
     AdmissionDecision, AdmissionOutcome, AdmissionSnapshotToken, AdmissionUnit, AdmissionUrgency,
-    BudgetReservationRequest, ExecutionAdmissionSnapshot, StoreError, UnleashStore,
+    BudgetReservationRequest, CallerAuthority, ExecutionAdmissionSnapshot,
+    ManagedGenerationAdmission, StoreError, UnleashStore,
 };
+use uuid::Uuid;
 
 /// Trusted scheduling inputs prepared for an admission snapshot.
 #[derive(Debug, Default)]
@@ -44,6 +47,24 @@ pub fn schedule_execution(
     schedule_where(store, pool, token, inputs, |_| true)
 }
 
+/// Schedule the exact staged probe for its waiting managed generation executor.
+///
+/// # Errors
+/// Refuses stale evidence, an unavailable admission writer or divergent scheduling inputs.
+pub fn schedule_managed_generation(
+    store: &UnleashStore,
+    command: &CommandEnvelope,
+    caller: &CallerAuthority,
+    evidence: Uuid,
+) -> Result<(Option<ManagedGenerationAdmission>, Decision), StoreError> {
+    store.admit_staged_managed_generation(command, caller, evidence, |snapshot, own_unit| {
+        let mut inputs = ExecutionSchedulingInputs::default();
+        // The writer verifies the local profile's applicable accounts even for a zero-cost probe.
+        inputs.budgets.insert(own_unit, Vec::new());
+        decision_for_executor(snapshot, &mut inputs, |selected| selected == own_unit)
+    })
+}
+
 pub(crate) fn schedule_invocation_execution(
     store: &UnleashStore,
     pool: PoolId,
@@ -63,29 +84,37 @@ fn schedule_where(
     owns: fn(AdmissionUnit) -> bool,
 ) -> Result<(AdmissionOutcome, Decision), StoreError> {
     store.commit_execution_admission_with_report(pool, token, move |snapshot| {
-        let decision = decide(snapshot, &inputs)?;
-        let mutation = match &decision {
-            Decision::Idle => AdmissionDecision::Idle,
-            Decision::Wait { .. } => AdmissionDecision::Wait,
-            Decision::Admit(plan) => {
-                let unit = store_unit(plan.unit);
-                // Keep global ordering when this executor cannot run the selected unit.
-                if !owns(unit) {
-                    return Ok((AdmissionDecision::Wait, decision));
-                }
-                let budgets = inputs.budgets.remove(&unit).ok_or_else(|| {
-                    StoreError::InvariantViolation("Plan budgétaire de l’admission absent".into())
-                })?;
-                AdmissionDecision::Admit {
-                    unit,
-                    deficit_deltas: plan.deficit_deltas.clone(),
-                    consecutive_controls: plan.consecutive_controls_with_work,
-                    budgets,
-                }
-            }
-        };
-        Ok((mutation, decision))
+        decision_for_executor(snapshot, &mut inputs, owns)
     })
+}
+
+fn decision_for_executor(
+    snapshot: &ExecutionAdmissionSnapshot,
+    inputs: &mut ExecutionSchedulingInputs,
+    owns: impl FnOnce(AdmissionUnit) -> bool,
+) -> Result<(AdmissionDecision, Decision), StoreError> {
+    let decision = decide(snapshot, inputs)?;
+    let mutation = match &decision {
+        Decision::Idle => AdmissionDecision::Idle,
+        Decision::Wait { .. } => AdmissionDecision::Wait,
+        Decision::Admit(plan) => {
+            let unit = store_unit(plan.unit);
+            // Keep global ordering when this executor cannot run the selected unit.
+            if !owns(unit) {
+                return Ok((AdmissionDecision::Wait, decision));
+            }
+            let budgets = inputs.budgets.remove(&unit).ok_or_else(|| {
+                StoreError::InvariantViolation("Plan budgétaire de l’admission absent".into())
+            })?;
+            AdmissionDecision::Admit {
+                unit,
+                deficit_deltas: plan.deficit_deltas.clone(),
+                consecutive_controls: plan.consecutive_controls_with_work,
+                budgets,
+            }
+        }
+    };
+    Ok((mutation, decision))
 }
 
 fn decide(

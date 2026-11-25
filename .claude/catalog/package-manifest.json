@@ -14,7 +14,7 @@
     "cache/"
   ],
   "hash_algorithm": "sha256",
-  "source_tree_digest": "217f14717e5d1e15131f078069a3a70ca119246a773a5f96478214b8e85b62b7",
+  "source_tree_digest": "1561adfdd43bba5fd4579af0356e9278dec2856451665da198f9804708cdc375",
   "files": [
     {
       "path": "INDEX.md",
@@ -396,8 +396,8 @@
     },
     {
       "path": "architecture/sqlite-design.md",
-      "sha256": "e5a82049e94bb33dc06fdacdd863d7e5c90e6bd28abb0b6542d1eb31353ee444",
-      "bytes": 78735,
+      "sha256": "73e1770843238b85c09a42e535a45061e58706029c231fecb2176c936f674740",
+      "bytes": 80454,
       "media_type": "text/markdown"
     },
     {
@@ -714,8 +714,8 @@
     },
     {
       "path": "brief/revision-2026-11-16-r7.md",
-      "sha256": "8050a08fed0b727a47e816c1ba8783c5f148fd1a072bbb55a3aa70f75044bdf4",
-      "bytes": 11626,
+      "sha256": "ef1c85c1bfd3f169d165e22de1bef9748d8b7522beb5c42104dbdf39db1a3630",
+      "bytes": 12101,
       "media_type": "text/markdown"
     },
     {
@@ -1584,8 +1584,8 @@
     },
     {
       "path": "features/F012-model-api-router/technical-design.md",
-      "sha256": "3954281050233639413d62f93a294d3755c9c2964242b796520255060584c9eb",
-      "bytes": 19343,
+      "sha256": "61c7c64b1fb4aeb3469ff2bc520ac5a3eba49c42b732405cef709d24987e4c2f",
+      "bytes": 22353,
       "media_type": "text/markdown"
     },
     {
@@ -1908,8 +1908,8 @@
     },
     {
       "path": "plans/readiness-checklist.md",
-      "sha256": "4835cd3bc5800f7dd310461747e9880cce515ccbb5fd48d592e3decf7c53d6f4",
-      "bytes": 10929,
+      "sha256": "c38c73a23d37990bddabb0d8ce2eb4e46b5f78f2cd514106c235cbf8bffe7a85",
+      "bytes": 11213,
       "media_type": "text/markdown"
     },
     {
@@ -2076,8 +2076,8 @@
     },
     {
       "path": "schemas/event.schema.json",
-      "sha256": "edce6c09345b7cd58ffc3ea7e92f9275be3f4b7d445ce6a874d3961cdd881e15",
-      "bytes": 11934,
+      "sha256": "1df608b944cada1d5df5c622807460c02c6814cfc542f3e36498810f27714dda",
+      "bytes": 14644,
       "media_type": "application/json"
     },
     {
