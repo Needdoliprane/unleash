@@ -46,6 +46,8 @@ pub enum BackupBlockReason {
     IsolationProfileUnavailable,
     /// Refus terminal déjà engagé dans le journal broker.
     AuthorizationDenied,
+    /// Politique effective courante différente de celle que la demande a engagée au claim.
+    PolicyChanged,
 }
 
 impl BackupBlockReason {
@@ -56,6 +58,7 @@ impl BackupBlockReason {
             Self::GuardProfileUnavailable => "guard_profile_unavailable",
             Self::IsolationProfileUnavailable => "isolation_profile_unavailable",
             Self::AuthorizationDenied => "authorization_denied",
+            Self::PolicyChanged => "policy_changed",
         }
     }
 }
@@ -486,7 +489,7 @@ pub(crate) fn read_backup_request_conn(
         let (barrier,objects):(i64,i64)=conn.query_row("SELECT COALESCE(SUM(CASE WHEN pin_kind='backup_barrier' THEN 1 ELSE 0 END),0),COALESCE(SUM(CASE WHEN pin_kind='backup' THEN 1 ELSE 0 END),0) FROM object_pins WHERE owner_kind='backup_job' AND owner_id=?1 AND state='held'",[backup.to_string()],|r|Ok((r.get(0)?,r.get(1)?))).map_err(StoreError::from_rusqlite)?;
         let has_reason:i64=conn.query_row("SELECT COUNT(*) FROM pragma_table_info('backup_requests') WHERE name='block_reason'",[],|r|r.get(0)).map_err(StoreError::from_rusqlite)?;
         let reason:Option<String>=if has_reason==0 {None} else {conn.query_row("SELECT block_reason FROM backup_requests WHERE backup_id=?1",[backup.to_string()],|r|r.get(0)).map_err(StoreError::from_rusqlite)?};
-        let block_reason=reason.map(|v|match v.as_str() {"guard_profile_unavailable"=>Ok(BackupBlockReason::GuardProfileUnavailable),"isolation_profile_unavailable"=>Ok(BackupBlockReason::IsolationProfileUnavailable),"authorization_denied"=>Ok(BackupBlockReason::AuthorizationDenied),_=>Err(invalid("motif sauvegarde SQL inconnu"))}).transpose()?;
+        let block_reason=reason.map(|v|match v.as_str() {"guard_profile_unavailable"=>Ok(BackupBlockReason::GuardProfileUnavailable),"isolation_profile_unavailable"=>Ok(BackupBlockReason::IsolationProfileUnavailable),"authorization_denied"=>Ok(BackupBlockReason::AuthorizationDenied),"policy_changed"=>Ok(BackupBlockReason::PolicyChanged),_=>Err(invalid("motif sauvegarde SQL inconnu"))}).transpose()?;
         let action_state:Option<String>=conn.query_row("SELECT state FROM actions WHERE action_id=?1",[action.as_str()],|r|r.get(0)).optional().map_err(StoreError::from_rusqlite)?;
         let action_state=action_state.map(|v|crate::recovery_ops::parse_action_state(&v)).transpose()?;
         Ok(BackupRequestRecord {
@@ -710,6 +713,15 @@ pub(crate) fn block_claimed_backup_tx(
             .is_some_and(|g| g.guard_mode != crate::GuardPolicyMode::BrokerOnly),
         BackupBlockReason::IsolationProfileUnavailable => {
             policy.effective_isolation_mode == crate::PolicyIsolationMode::Strict
+        }
+        // REQ-SEC-007 : la révision effective courante, relue par le writer, est comparée à celle
+        // que la demande a engagée ; aucune assertion du harnais n'est prise pour preuve.
+        BackupBlockReason::PolicyChanged => {
+            policy
+                .global_policy
+                .as_ref()
+                .map_or(Revision::INITIAL, |policy| policy.revision)
+                != record.policy_revision
         }
         BackupBlockReason::AuthorizationDenied => {
             tx.query_row(

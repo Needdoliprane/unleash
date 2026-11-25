@@ -14,7 +14,7 @@
     "cache/"
   ],
   "hash_algorithm": "sha256",
-  "source_tree_digest": "4c383af30e8ce9372f9ec21a9fb1413091743e7dd7d994d7fd8864a407be3dc3",
+  "source_tree_digest": "7c377ad7f3172d280d595629ecb81a60a064c3480c2870620e30a4b1446e51a7",
   "files": [
     {
       "path": "INDEX.md",
@@ -1824,8 +1824,8 @@
     },
     {
       "path": "features/F018-reliability-recovery/interfaces.md",
-      "sha256": "b73cb3266a6664a193e7fe0d39b5a4ea525f8baef0afd340c21748a4a2e5a28d",
-      "bytes": 8934,
+      "sha256": "600ae2fcc383409ee9d9dce95f6d1a0c94808716663281e3b0f7513ca13787be",
+      "bytes": 9198,
       "media_type": "text/markdown"
     },
     {

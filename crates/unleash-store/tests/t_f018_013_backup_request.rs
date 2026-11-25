@@ -1063,3 +1063,145 @@ fn generic_denied_action_cannot_attest_a_broker_authorization_refusal() {
         BackupRequestState::Claimed
     );
 }
+
+/// Politique standard posée par une commande réelle : la révision effective passe de 0 à 1.
+fn standard_policy(
+    store: &UnleashStore,
+    ids: &DeterministicIdGenerator,
+    envelope_aggregate: BackupId,
+) -> CommitCommandRequest {
+    let mut policy = request(store, ids, envelope_aggregate);
+    policy.target_aggregate = AggregateKind::SecurityPolicy;
+    policy.envelope.aggregate_id = ids.new_uuid();
+    policy.envelope.command_type = "SetPolicy".to_owned();
+    policy.mutation = CommandMutation::SetPolicy {
+        scope_kind: unleash_store::PolicyScopeKind::Global,
+        scope_id: "global".to_owned(),
+        isolation_mode: unleash_store::PolicyIsolationMode::Standard,
+        policy_version: "standard-fixture".to_owned(),
+        reason: "fixture".to_owned(),
+        caller: unleash_store::CallerAuthority {
+            actor_id: ActorId::new("p-sys").unwrap(),
+            role: unleash_store::CallerRole::HumanOperator,
+        },
+    };
+    policy
+}
+
+// T-F017-013 / AC-F017-007 / REQ-SEC-007 : `policy_changed` n'est attesté que par la comparaison
+// des révisions faite par le writer, et seulement avant tout marqueur de dispatch.
+#[test]
+fn policy_change_blocks_a_claimed_backup_only_before_dispatch() {
+    use unleash_store::BackupBlockReason::PolicyChanged;
+    let directory = local_test_dir("f017-013-policy-changed").unwrap();
+    let ids = Arc::new(DeterministicIdGenerator::new(0xF017_1331));
+    let mut config = StoreConfig::new(directory.path());
+    config.id_generator = ids.clone();
+    let store = UnleashStore::open(config).unwrap();
+    store
+        .register_principal("p-sys", "system", "p-sys")
+        .unwrap();
+    let backup = BackupId::from_uuid(ids.new_uuid());
+    let accepted = store
+        .commit_command(request(&store, &ids, backup))
+        .unwrap()
+        .receipt()
+        .clone();
+    let record = store
+        .claim_backup_request(backup, store.active_authority_generation().unwrap())
+        .unwrap();
+    let authority = record.authority_generation;
+    let state = || store.inspect_backup_request(backup).unwrap().unwrap();
+    // Sans changement réel de politique, le motif n'est pas attesté : rien n'est écrit.
+    assert!(store.block_claimed_backup(backup, authority, PolicyChanged).is_err());
+    assert_eq!(state().state, BackupRequestState::Claimed);
+    assert_eq!(state().block_reason, None);
+    // La politique change après le claim ; la demande a engagé la révision initiale.
+    store
+        .commit_command(standard_policy(&store, &ids, backup))
+        .unwrap();
+    assert_eq!(state().policy_revision, Revision::INITIAL);
+    let blocked = store
+        .block_claimed_backup(backup, authority, PolicyChanged)
+        .unwrap();
+    assert_eq!(blocked.state, BackupRequestState::Blocked);
+    assert_eq!(blocked.block_reason, Some(PolicyChanged));
+    assert_eq!(blocked.job_state, Some(BackupJobState::Aborted));
+    assert!(blocked.dispatch_id.is_none());
+    assert!(!record.destination_dir.exists());
+    let replay = store
+        .block_claimed_backup(backup, authority, PolicyChanged)
+        .unwrap();
+    assert_eq!(replay.last_event_cursor, blocked.last_event_cursor);
+    assert!(
+        store
+            .block_claimed_backup(
+                backup,
+                authority,
+                unleash_store::BackupBlockReason::GuardProfileUnavailable
+            )
+            .is_err()
+    );
+    let id = backup.to_string();
+    const BLOCKED: &str = " FROM events WHERE aggregate_id=?1 AND event_type='BackupRequestBlocked'";
+    let (events, reason, execution, cause, outbox): (i64, String, String, String, i64) = store
+        .read_snapshot(|conn, _| {
+            let count = |sql: String| conn.query_row(&sql, [&id], |row| row.get::<_, i64>(0));
+            let text = |sql: String| conn.query_row(&sql, [&id], |row| row.get::<_, String>(0));
+            Ok((
+                count(format!("SELECT COUNT(*){BLOCKED}"))?,
+                text(format!("SELECT json_extract(payload_json,'$.reason'){BLOCKED}"))?,
+                text(format!(
+                    "SELECT json_extract(payload_json,'$.execution_state'){BLOCKED}"
+                ))?,
+                text(format!("SELECT causation_receipt_id{BLOCKED}"))?,
+                count(format!(
+                    "SELECT COUNT(*) FROM outbox o JOIN events e ON e.event_id=o.event_id\
+                     WHERE e.aggregate_id=?1 AND e.event_type='BackupRequestBlocked'\
+                     AND o.destination='clients'"
+                ))?,
+            ))
+        })
+        .unwrap();
+    assert_eq!(events, 1);
+    assert_eq!(reason, "policy_changed");
+    assert_eq!(execution, "not_dispatched");
+    assert_eq!(cause, accepted.receipt_id.to_string());
+    assert_eq!(outbox, 1);
+    // Après un marqueur de dispatch, le même changement de politique ne bloque plus : inspection requise.
+    let (dispatched, dispatched_ids, _cfg, record, _execute, _directory) =
+        execution_fixture(Arc::new(unleash_store::NoopCutpointObserver));
+    dispatched
+        .commit_command(standard_policy(
+            &dispatched,
+            &dispatched_ids,
+            record.backup_id,
+        ))
+        .unwrap();
+    assert!(
+        dispatched
+            .block_claimed_backup(record.backup_id, record.authority_generation, PolicyChanged)
+            .is_err()
+    );
+    assert_eq!(
+        dispatched
+            .inspect_backup_request(record.backup_id)
+            .unwrap()
+            .unwrap()
+            .state,
+        BackupRequestState::Claimed
+    );
+    assert!(
+        dispatched
+            .read_snapshot(|conn, _| {
+                conn.query_row(
+                    "SELECT COUNT(*) FROM events WHERE aggregate_id=?1 AND event_type='BackupRequestBlocked'",
+                    [record.backup_id.to_string()],
+                    |r| r.get::<_, i64>(0),
+                )
+                .map_err(StoreError::from_rusqlite)
+            })
+            .unwrap()
+            == 0
+    );
+}

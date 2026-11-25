@@ -213,6 +213,14 @@ async fn run(
         .map_or(unleash_domain::Revision::INITIAL, |policy| policy.revision)
         != record.policy_revision
     {
+        // REQ-SEC-007 : la demande n'est pas exécutée sous une politique qu'elle n'a pas engagée.
+        block_before_dispatch(
+            &state,
+            &record,
+            &activity,
+            BackupBlockReason::PolicyChanged,
+        )
+        .await;
         return Err(());
     }
     let authority = compute_effective_authority(
