@@ -166,6 +166,16 @@ fn validates_the_model_policy_version_patch_and_history() {
             .remove(field);
         envelope
     };
+    let inserted = |base: &Value, parent: &str, field: &str, value: &Value| {
+        let mut envelope = base.clone();
+        envelope
+            .pointer_mut(parent)
+            .unwrap()
+            .as_object_mut()
+            .unwrap()
+            .insert(field.to_owned(), value.clone());
+        envelope
+    };
     let mut user = publish.clone();
     user["project_id"] = Value::Null;
     user["payload"]["scope_kind"] = json!("user");
@@ -209,19 +219,15 @@ fn validates_the_model_policy_version_patch_and_history() {
         ),
         (
             "version fournie à la publication",
-            replaced(&publish, &format!("{path}/version"), &json!(1)),
+            inserted(&publish, path, "version", &json!(1)),
         ),
         (
             "identité fournie à la publication",
-            replaced(&publish, &format!("{path}/principal_id"), &json!("caller")),
+            inserted(&publish, path, "principal_id", &json!("caller")),
         ),
         (
             "révocation contenant des paramètres de publication",
-            replaced(
-                &revoke,
-                &format!("{path}/limits"),
-                &json!({"max_llm_calls": 1}),
-            ),
+            inserted(&revoke, path, "limits", &json!({"max_llm_calls": 1})),
         ),
         ("révocation sans version", removed(&revoke, path, "version")),
         (

@@ -547,11 +547,11 @@ pub(crate) fn result_ref_tx(
     }
 }
 
-fn published_digest(
-    history: &[Fact],
+fn published_digest<'a>(
+    history: &'a [Fact],
     policy_id: &ModelPolicyId,
     version: u64,
-) -> Option<&Sha256Digest> {
+) -> Option<&'a Sha256Digest> {
     history.iter().find_map(|fact| match fact {
         Fact::Published { document, digest }
             if &document.policy_id == policy_id && document.version == version =>
@@ -583,12 +583,35 @@ mod tests {
     #[test]
     fn closed_dtos_follow_the_dossier_fixtures_and_refuse_forbidden_shapes() {
         let command: Value = serde_json::from_str(include_str!(
-            "../../../../.claude/examples/ipc-set-model-policy-version.json"
+            "../../../.claude/examples/ipc-set-model-policy-version.json"
         ))
         .unwrap();
         let publish = patch(&command).clone();
-        let change: ModelPolicyVersionChange = serde_json::from_value(publish.clone()).unwrap();
-        assert_eq!(serde_json::to_value(&change).unwrap(), publish);
+        // Le patch n'est qu'une entrée : la fixture se décode dans sa variante, valeurs exactes.
+        let ModelPolicyVersionChange(Change::Publish {
+            policy_id,
+            allowed_profiles,
+            allowed_capabilities,
+            fallback_profiles,
+            limits,
+        }) = serde_json::from_value(publish.clone()).unwrap()
+        else {
+            panic!("la fixture de publication doit se décoder comme une publication");
+        };
+        assert_eq!(policy_id.as_str(), "policy.fixture");
+        assert_eq!(allowed_profiles.len(), 1);
+        assert!(allowed_profiles.first().unwrap().is_well_formed());
+        assert_eq!(allowed_capabilities, ["text", "streaming"]);
+        assert!(fallback_profiles.is_empty());
+        assert_eq!(
+            limits,
+            ModelPolicyLimits {
+                max_llm_calls: 1,
+                max_output_tokens: 128,
+                max_cost_microusd: 10000,
+                max_duration_seconds: 60,
+            }
+        );
 
         let mut revoke = publish.clone();
         let fields = revoke.as_object_mut().unwrap();
@@ -602,8 +625,13 @@ mod tests {
         ] {
             fields.remove(field);
         }
-        let change: ModelPolicyVersionChange = serde_json::from_value(revoke.clone()).unwrap();
-        assert_eq!(serde_json::to_value(&change).unwrap(), revoke);
+        let ModelPolicyVersionChange(Change::Revoke { policy_id, version }) =
+            serde_json::from_value(revoke.clone()).unwrap()
+        else {
+            panic!("une révocation sans paramètre de publication doit se décoder");
+        };
+        assert_eq!(policy_id.as_str(), "policy.fixture");
+        assert_eq!(version, 1);
 
         let mut refused_shapes = Vec::new();
         for (field, value) in [
@@ -647,9 +675,9 @@ mod tests {
                 .insert("policy_id".to_owned(), json!(identity));
             refused_shapes.push(malformed);
         }
-        let mut unversioned = revoke.clone();
-        unversioned.as_object_mut().unwrap().remove("version");
-        refused_shapes.push(unversioned);
+        let mut unnumbered = revoke.clone();
+        unnumbered.as_object_mut().unwrap().remove("version");
+        refused_shapes.push(unnumbered);
         let mut with_limits = revoke.clone();
         with_limits
             .as_object_mut()
@@ -661,7 +689,7 @@ mod tests {
         }
 
         let response: Value = serde_json::from_str(include_str!(
-            "../../../../.claude/examples/ipc-read-settings-model-policies-response.json"
+            "../../../.claude/examples/ipc-read-settings-model-policies-response.json"
         ))
         .unwrap();
         let history = response.pointer("/result/model_policy_versions").unwrap();
