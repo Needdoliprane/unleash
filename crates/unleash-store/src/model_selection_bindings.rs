@@ -76,9 +76,10 @@ impl SkillRef {
     }
 }
 
+/// Exacte `(profile_id, profile_version, digest)` d'un profil configuré, sans octet de secret.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-struct PreferredProfileRef {
+pub(crate) struct PreferredProfileRef {
     profile_id: Uuid,
     profile_version: u64,
     #[serde(deserialize_with = "deserialize_profile_digest")]

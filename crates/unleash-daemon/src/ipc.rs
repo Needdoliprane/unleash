@@ -1700,7 +1700,7 @@ async fn prepare_command_request(
             )
             .await?
                 && let CommandMutation::SetSettings { patch, .. }
-                | CommandMutation::SetSettingsWithModelSelectionBinding { patch, .. } =
+                | CommandMutation::SetSettingsWithModelConfiguration { patch, .. } =
                     &mut prepared.req.mutation
             {
                 patch.extra_typed.get_or_insert_with(Map::new).insert(
@@ -2167,12 +2167,13 @@ fn prepare_admin_command(
             }
             let patch = strict_settings_patch(patch).ok_or_else(invalid)?;
             let mutation = if let Some(binding) = binding {
-                CommandMutation::SetSettingsWithModelSelectionBinding {
+                CommandMutation::SetSettingsWithModelConfiguration {
                     scope_kind: payload.scope_kind,
                     scope_id: payload.scope_id,
                     caller,
                     patch,
-                    binding: Box::new(binding),
+                    binding: Some(Box::new(binding)),
+                    policy: None,
                 }
             } else {
                 CommandMutation::SetSettings {

@@ -424,8 +424,8 @@ pub enum CommandMutation {
         /// Patch typé des paramètres.
         patch: SettingsPatch,
     },
-    /// Met à jour les réglages et une préférence versionnée dans le même commit.
-    SetSettingsWithModelSelectionBinding {
+    /// Met à jour les réglages et des changements typés de configuration modèle dans le même commit.
+    SetSettingsWithModelConfiguration {
         /// Portée des paramètres modifiés.
         scope_kind: SettingsScopeKind,
         /// Identifiant de portée.
@@ -435,7 +435,9 @@ pub enum CommandMutation {
         /// Autres réglages de la même modification.
         patch: SettingsPatch,
         /// Changement de préférence pour la référence exacte du skill.
-        binding: Box<crate::ModelSelectionBindingChange>,
+        binding: Option<Box<crate::ModelSelectionBindingChange>>,
+        /// Publication ou révocation d'une politique de modèle versionnée.
+        policy: Option<Box<crate::ModelPolicyVersionChange>>,
     },
     /// Met à jour la politique d'isolation (`SetPolicy` : `standard` ou `strict`).
     SetPolicy {
@@ -1325,9 +1327,13 @@ pub(crate) fn tx_commit_command(
         CommandMutation::PrepareProviderServiceLaunch { .. }
     )
     .then(|| format!("provider-service-launch:{}", req.envelope.aggregate_id));
-    let model_selection_result = if let CommandMutation::SetSettingsWithModelSelectionBinding {
+    // Une commande composée ne porte qu'une référence de résultat : elle désigne la préférence
+    // de skill, comme une préférence seule, car sa résolution contrôle ce reçu. La version de
+    // politique publiée dans la même commande reste désignée par son propre reçu dans l'historique.
+    let model_selection_result = if let CommandMutation::SetSettingsWithModelConfiguration {
         scope_kind,
         scope_id,
+        binding: Some(_),
         ..
     } = &req.mutation
     {
@@ -2378,7 +2384,7 @@ fn apply_command_mutation(
             caller,
             patch,
         }
-        | CommandMutation::SetSettingsWithModelSelectionBinding {
+        | CommandMutation::SetSettingsWithModelConfiguration {
             scope_kind,
             scope_id,
             caller,
@@ -2407,24 +2413,33 @@ fn apply_command_mutation(
                 patch,
                 config.id_generator.as_ref(),
             )?;
-            if let CommandMutation::SetSettingsWithModelSelectionBinding { binding, .. } = mutation
+            if let CommandMutation::SetSettingsWithModelConfiguration { binding, policy, .. } =
+                mutation
             {
-                if &caller.actor_id != actor_id || envelope.command_type != "SetSettings" {
+                if binding.is_none() && policy.is_none() {
                     return Err(StoreError::InvariantViolation(
-                        "model preference command identity diverges".to_owned(),
+                        "model configuration command carries no change".to_owned(),
                     ));
                 }
-                crate::model_selection_bindings::append_tx(
-                    tx,
-                    (*scope_kind, scope_id),
-                    crate::model_selection_bindings::BindingEdit {
-                        command: envelope,
-                        actor: actor_id,
-                        receipt_id,
-                    },
-                    binding,
-                    config.id_generator.as_ref(),
-                )?;
+                if &caller.actor_id != actor_id || envelope.command_type != "SetSettings" {
+                    return Err(StoreError::InvariantViolation(
+                        "model configuration command identity diverges".to_owned(),
+                    ));
+                }
+                if let Some(binding) = binding {
+                    crate::model_selection_bindings::append_tx(
+                        tx,
+                        (*scope_kind, scope_id),
+                        crate::model_selection_bindings::BindingEdit {
+                            command: envelope,
+                            actor: actor_id,
+                            receipt_id,
+                        },
+                        binding,
+                        config.id_generator.as_ref(),
+                    )?;
+                }
+                let _ = policy;
             }
             let mut payload = Map::new();
             payload.insert(
