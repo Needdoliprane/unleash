@@ -115,7 +115,9 @@ where
 fn is_well_formed_cursor(cursor: &str) -> bool {
     !cursor.is_empty()
         && cursor.len() <= MAX_OPAQUE_CURSOR_LEN
-        && cursor.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+        && cursor
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
 }
 
 impl TryFrom<RawListRuns> for ListRunsPayload {
@@ -126,7 +128,9 @@ impl TryFrom<RawListRuns> for ListRunsPayload {
         if !(1..=MAX_RUN_PAGE_SIZE).contains(&page_size) {
             return Err(ListRunsPayloadError::InvalidPageSize);
         }
-        if let Some(cursor) = raw.opaque_cursor.as_deref() && !is_well_formed_cursor(cursor) {
+        if let Some(cursor) = raw.opaque_cursor.as_deref()
+            && !is_well_formed_cursor(cursor)
+        {
             return Err(ListRunsPayloadError::InvalidCursor);
         }
         Ok(Self {

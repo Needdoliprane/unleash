@@ -149,9 +149,7 @@ fn encode_run_cursor(cursor: &RunCursor) -> String {
 /// Reads an opaque cursor without trusting it.
 fn decode_run_cursor(opaque: &str) -> Result<RunCursor, RunCursorRefusal> {
     let mut bytes = [0_u8; RUN_CURSOR_BYTES];
-    if opaque.len() != RUN_CURSOR_BYTES * 2
-        || hex::decode_to_slice(opaque, &mut bytes).is_err()
-    {
+    if opaque.len() != RUN_CURSOR_BYTES * 2 || hex::decode_to_slice(opaque, &mut bytes).is_err() {
         return Err(RunCursorRefusal::Malformed);
     }
     if bytes[0..1] != [RUN_CURSOR_FORMAT] {
@@ -254,8 +252,9 @@ fn run_list_entry(row: &rusqlite::Row<'_>) -> Result<RunListEntry, StoreError> {
     let state: String = row.get(3)?;
     let revision: i64 = row.get(4)?;
     let purpose: String = row.get(5)?;
-    let revision = u64::try_from(revision)
-        .map_err(|_| StoreError::InvariantViolation("révision de run stockée négative".to_owned()))?;
+    let revision = u64::try_from(revision).map_err(|_| {
+        StoreError::InvariantViolation("révision de run stockée négative".to_owned())
+    })?;
     Ok(RunListEntry {
         run_id: stored(&run_id, "run_id")?,
         mission_id: stored(&mission_id, "mission_id")?,

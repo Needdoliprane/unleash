@@ -71,7 +71,8 @@ async fn create_project(client: &mut UnleashClient, project: ProjectId, id: u128
         aggregate_id: project.as_uuid(),
         expected_revision: Revision::INITIAL,
         command_type: "CreateProject".to_owned(),
-        payload: serde_json::from_value(json!({"name": format!("F006-{id}"), "weight": 1})).unwrap(),
+        payload: serde_json::from_value(json!({"name": format!("F006-{id}"), "weight": 1}))
+            .unwrap(),
     };
     let receipt = client.send_command(&command).await.unwrap();
     assert_eq!(receipt.state, ReceiptState::Accepted);
@@ -124,7 +125,10 @@ async fn t_f006_010_manual_draft_preserves_utf8_and_project_across_restart() {
     ))
     .unwrap();
     query.project_id = Some(project);
-    assert_eq!(query.payload.get("draft_id"), Some(&json!(create.aggregate_id)));
+    assert_eq!(
+        query.payload.get("draft_id"),
+        Some(&json!(create.aggregate_id))
+    );
     let before = client.query(&query).await.unwrap();
     let mut expected: Value = serde_json::from_str(include_str!(
         "../../../.claude/examples/ipc-get-workflow-text-draft-response.json"
@@ -136,7 +140,10 @@ async fn t_f006_010_manual_draft_preserves_utf8_and_project_across_restart() {
     expected["result"]["text"] = json!(DRAFT_TEXT);
     expected["result"]["text_hash"] = json!(DRAFT_HASH);
     assert_eq!(before.result, expected["result"]);
-    assert_eq!(before.result["text"].as_str().unwrap().as_bytes(), DRAFT_TEXT.as_bytes());
+    assert_eq!(
+        before.result["text"].as_str().unwrap().as_bytes(),
+        DRAFT_TEXT.as_bytes()
+    );
     let before_cursor = before.watermark.unwrap();
     assert_eq!(before_cursor.stream_id, receipt.event_cursor.stream_id);
     assert!(before_cursor.sequence >= receipt.event_cursor.sequence);

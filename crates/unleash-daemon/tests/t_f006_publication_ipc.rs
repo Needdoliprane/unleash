@@ -45,8 +45,7 @@ async fn t_f006_009_publish_rejects_an_existing_command_id_with_different_intent
         aggregate_id: project.as_uuid(),
         expected_revision: Revision::INITIAL,
         command_type: "CreateProject".to_owned(),
-        payload: serde_json::from_value(json!({"name": "F006 publication", "weight": 1}))
-            .unwrap(),
+        payload: serde_json::from_value(json!({"name": "F006 publication", "weight": 1})).unwrap(),
     };
     let original = client.send_command(&create).await.unwrap();
     assert_eq!(original.state, ReceiptState::Accepted);
@@ -91,5 +90,8 @@ async fn t_f006_009_publish_rejects_an_existing_command_id_with_different_intent
         .unwrap();
     assert_eq!(retained.receipt, original);
     drop(client);
-    daemon.shutdown_graceful("publication conflict checked").await.unwrap();
+    daemon
+        .shutdown_graceful("publication conflict checked")
+        .await
+        .unwrap();
 }

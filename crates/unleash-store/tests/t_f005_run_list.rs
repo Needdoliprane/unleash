@@ -172,7 +172,11 @@ fn t_f005_001_pages_follow_ascending_runs_and_keep_the_engaged_version() {
         .unwrap();
     assert_eq!(
         other.value,
-        complete(OTHER_PROJECT, vec![entry(OTHER_RUN, OTHER_MISSION, 1)], None)
+        complete(
+            OTHER_PROJECT,
+            vec![entry(OTHER_RUN, OTHER_MISSION, 1)],
+            None
+        )
     );
 
     let empty = store
@@ -254,9 +258,11 @@ fn t_f005_001_denies_scope_before_existence_and_hides_an_absent_project() {
         assert_eq!(denied.error_code(), ErrorCode::ScopeDenied);
         assert_eq!(denied.reason_code(), Some(ReasonCode::AccessDenied));
     }
-    assert!(store
-        .list_runs_snapshot(&page(1, None), PROJECT, Some(&allowed))
-        .is_ok());
+    assert!(
+        store
+            .list_runs_snapshot(&page(1, None), PROJECT, Some(&allowed))
+            .is_ok()
+    );
 
     // Un projet absent de la portée du demandeur est masqué, jamais listé comme vide.
     let granted = HashSet::from([ABSENT_PROJECT]);

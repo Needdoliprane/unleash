@@ -11,7 +11,8 @@ use unleash_protocol::{
     ErrorCode, ProtocolVersion, QueryEnvelope, QueryResponse, ReceiptState, canonicalize_to_vec,
 };
 use unleash_store::{
-    PrepareObjectRequest, PublishObjectReferenceRequest, StoreConfig, UnleashStore, WriteCriticality,
+    PrepareObjectRequest, PublishObjectReferenceRequest, StoreConfig, UnleashStore,
+    WriteCriticality,
 };
 use unleash_testkit::local_test_dir;
 
@@ -140,7 +141,10 @@ async fn t_f005_001_discovers_project_runs_and_opens_the_pinned_version() {
     publish_mandate(&mut client, &mut create).await;
     let receipt = client.send_command(&create).await.unwrap();
     assert_eq!(receipt.state, ReceiptState::Completed);
-    assert_eq!(receipt.result_ref, Some(format!("workflow-run:{PINNED_RUN}")));
+    assert_eq!(
+        receipt.result_ref,
+        Some(format!("workflow-run:{PINNED_RUN}"))
+    );
     let detail_query = QueryEnvelope {
         protocol_version: ProtocolVersion,
         request_id: RequestId::from_u128(0x5a04),
@@ -158,8 +162,9 @@ async fn t_f005_001_discovers_project_runs_and_opens_the_pinned_version() {
         .unwrap();
 
     let (daemon, mut client) = start(config).await;
-    let after = check_pages_and_open_selected_run(&mut client, detail_query, seeded_run, seeded_mission)
-        .await;
+    let after =
+        check_pages_and_open_selected_run(&mut client, detail_query, seeded_run, seeded_mission)
+            .await;
     assert_eq!(after.result, before.result);
     drop(client);
     daemon.shutdown_graceful("run list verified").await.unwrap();
@@ -206,7 +211,11 @@ async fn check_pages_and_open_selected_run(
         second.result.pointer("/coverage/status"),
         Some(&json!("complete"))
     );
-    let entries = second.result.get("items").and_then(Value::as_array).unwrap();
+    let entries = second
+        .result
+        .get("items")
+        .and_then(Value::as_array)
+        .unwrap();
     assert_eq!(entries.len(), 1);
     let retained = entries.first().unwrap();
     assert_eq!(retained.get("run_id"), Some(&json!(seeded_run)));
