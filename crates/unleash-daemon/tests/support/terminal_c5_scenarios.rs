@@ -726,10 +726,7 @@ async fn t_f017_007_standard_policy_does_not_deny_terminal_acquisition_nor_input
     // engage its revision, so each reserved broker must be bound to that snapshot.
     super::super::resize_scenarios::set_standard_policy(&mut fixture).await;
     let acquired = start_c5_terminal(&mut fixture).await;
-    let terminal = acquired
-        .get("terminal_id")
-        .and_then(Value::as_str)
-        .unwrap();
+    let terminal = acquired.get("terminal_id").and_then(Value::as_str).unwrap();
     assert_eq!(
         await_observed(&fixture, LAUNCH_DISPOSITION, terminal)
             .await
