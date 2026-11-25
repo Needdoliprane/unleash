@@ -2,22 +2,23 @@
 #![allow(clippy::unwrap_used)]
 
 use crate::provider_service_evaluation::fresh_provider_service_secret;
-use unleash_testkit::DeterministicIdGenerator;
 
 #[test]
 fn provider_service_secret_does_not_follow_the_identifier_generator() {
-    // Deux générateurs de même graine produisent la même séquence d'identifiants : un secret
-    // qui en dérive serait reproductible par quiconque connaît la graine ou l'heure de démarrage.
-    let first = fresh_provider_service_secret(&DeterministicIdGenerator::new(11))
-        .unwrap()
-        .expose_secret()
-        .to_owned();
-    let second = fresh_provider_service_secret(&DeterministicIdGenerator::new(11))
+    // Le générateur d'identifiants du démon donne une séquence reproductible : un secret qui en
+    // dérive serait calculable par quiconque connaît la graine ou l'heure de démarrage.
+    let first = fresh_provider_service_secret().unwrap().expose_secret().to_owned();
+    let second = fresh_provider_service_secret()
         .unwrap()
         .expose_secret()
         .to_owned();
     assert_ne!(
         first, second,
-        "le secret de contrôle du service fournisseur ne doit pas dériver du générateur d'identifiants"
+        "deux secrets de contrôle successifs doivent différer"
+    );
+    assert_eq!(first.len(), 64, "256 bits encodés en hexadécimal");
+    assert!(
+        !first.starts_with("provider-service:"),
+        "le secret de contrôle ne doit pas dériver du générateur d'identifiants"
     );
 }
