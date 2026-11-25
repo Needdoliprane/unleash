@@ -18,6 +18,7 @@ use unleash_testkit::ManualClock;
 
 const OBSERVER: &str = "system:provider-generation-placement";
 
+#[path = "provider_probe_generation_placement/outcome.rs"]
 mod outcome;
 
 fn initialize_pool(store: &UnleashStore, caller: &CallerAuthority) -> PoolId {
