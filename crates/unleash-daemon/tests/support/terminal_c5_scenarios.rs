@@ -871,12 +871,8 @@ async fn t_f017_007_policy_change_after_input_engagement_never_writes() {
     let accepted = fixture.client.send_command(&request).await.unwrap();
     assert_eq!(accepted.state, ReceiptState::Accepted);
     let mut stalled = renewal_fixture::wait_after_intent(&listener).await;
-    let engaged = disposition(
-        &fixture,
-        INPUT_DISPOSITION,
-        &request.command_id.to_string(),
-    )
-    .unwrap();
+    let engaged =
+        disposition(&fixture, INPUT_DISPOSITION, &request.command_id.to_string()).unwrap();
     assert_eq!(
         (engaged.state.as_str(), engaged.policy_revision),
         ("authorizing", Some(0)),
