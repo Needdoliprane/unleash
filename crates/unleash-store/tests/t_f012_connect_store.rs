@@ -40,7 +40,7 @@ mod mixed_admission_fixture;
 const PROFILE: Uuid = Uuid::from_u128(0xf012_c501);
 const PRINCIPAL: &str = "connect-store-principal";
 
-struct FailBeforeCommit(AtomicBool);
+struct FailBeforeCommit(AtomicBool, AtomicBool);
 
 impl CutpointObserver for FailBeforeCommit {
     fn hit(&self, point: StoreCutpoint) -> Result<(), StoreError> {
@@ -48,6 +48,14 @@ impl CutpointObserver for FailBeforeCommit {
             return Err(StoreError::CutpointInjected {
                 cutpoint: "C1".into(),
                 message: "synthetic connect rollback".into(),
+            });
+        }
+        if point == StoreCutpoint::C4AfterBrokerDispatchCommit
+            && self.1.swap(false, Ordering::SeqCst)
+        {
+            return Err(StoreError::CutpointInjected {
+                cutpoint: "C4".into(),
+                message: "synthetic dispatch reply loss".into(),
             });
         }
         Ok(())
@@ -218,7 +226,10 @@ fn fixture() -> (
     Arc<FailBeforeCommit>,
 ) {
     let directory = local_test_dir("f012-connect-store").unwrap();
-    let failure = Arc::new(FailBeforeCommit(AtomicBool::new(false)));
+    let failure = Arc::new(FailBeforeCommit(
+        AtomicBool::new(false),
+        AtomicBool::new(false),
+    ));
     let mut config = StoreConfig::new(directory.path());
     config.cutpoints = failure.clone();
     let store = UnleashStore::open(config).unwrap();

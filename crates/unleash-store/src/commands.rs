@@ -251,6 +251,8 @@ pub enum CommandMutation {
         /// État initial.
         state: AgentState,
     },
+    /// Enregistre l'invocation résolue par le harness dans la file durable.
+    CreateInvocation,
     /// Crée l'agent, sa session primaire et l'affectation résolue par le harness.
     CreateAssignedAgent {
         /// Autorité humaine du propriétaire de la mission.
@@ -1011,6 +1013,7 @@ pub(crate) fn tx_commit_command(
     }
     crate::provider_profiles::validate_identity(req)?;
     crate::provider_service_launch::validate_command(req)?;
+    crate::invocation_queue::validate_command(req)?;
     crate::workflow_activation::validate_identity(req)?;
     crate::task_assignment::validate_identity(req)?;
     crate::agent_creation::validate_identity(req)?;
@@ -1356,6 +1359,10 @@ pub(crate) fn tx_commit_command(
             .or(service_launch_result)
             .or(model_selection_result)
             .or(release_result)
+            .or_else(|| {
+                matches!(req.mutation, CommandMutation::CreateInvocation)
+                    .then(|| format!("invocation:{}", req.envelope.aggregate_id))
+            })
             .or_else(|| {
                 if matches!(req.mutation, CommandMutation::SetProviderProfile { .. }) {
                     Some(format!(
@@ -1972,6 +1979,14 @@ fn apply_command_mutation(
             )?;
             Ok(Revision::new(1))
         }
+        CommandMutation::CreateInvocation => crate::invocation_queue::queue_tx(
+            tx,
+            config,
+            daemon,
+            now_ms,
+            envelope,
+            generated_events,
+        ),
         CommandMutation::CreateAssignedAgent { caller } => crate::agent_creation::commit_tx(
             tx,
             (config, daemon, now_ms),

@@ -64,8 +64,9 @@ pub use error::ProcessHostError;
 pub use fencing::{FencingGate, HostCommandHeader};
 pub use host::{
     HOST_READY_PREFIX, HOST_SOCKET_FILENAME, HostClient, LostHostReconciliation, ProcessHostServer,
-    StdioBarrierCutpointObserver, StrictServiceLaunchObservation, attest_strict_service_launch,
-    reconcile_after_lost_host,
+    StdioBarrierCutpointObserver, StrictServiceLaunchDigests, StrictServiceLaunchObservation,
+    attest_strict_service_launch, inspect_strict_service_launch_plan,
+    probe_strict_service_confinement, reconcile_after_lost_host,
 };
 pub use isolation::{
     IsolationBackendProbe, IsolationMode, IsolationProfileKind, LinuxBwrapPlan,

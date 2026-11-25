@@ -2,8 +2,13 @@
 //! Explicit launch environment for a directly owned, egress-denied macOS service.
 
 use std::collections::BTreeMap;
+use std::fs::File;
+use std::io::Write;
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 
+use rustix::fs::{Mode, OFlags};
+use sha2::{Digest as _, Sha256};
 use unleash_domain::{CommandId, Sha256Digest};
 use unleash_platform::{
     OsProcessIdentity, effective_uid, ensure_private_rendezvous_dir, inspect_process_identity,
@@ -15,8 +20,8 @@ use crate::error::ProcessHostError;
 use crate::host::{HOST_SOCKET_FILENAME, HostClient};
 use crate::isolation::{
     IsolationBackendProbe, IsolationMode, IsolationProfileKind, MACOS_SEATBELT_PROFILE_FILENAME,
-    PreparedLaunchCommand, StrictIsolationSpec, prepare_strict_launch_command,
-    render_macos_seatbelt_profile,
+    OsIsolationBackendProbe, PreparedLaunchCommand, SandboxProbeOutcome, StrictIsolationSpec,
+    prepare_strict_launch_command, render_macos_seatbelt_profile,
 };
 use crate::manifest::{
     CANARY_SECRETS_FILENAME, CONTROL_SECRET_FILENAME, EnvironmentMode, HOST_MANIFEST_FILENAME,
@@ -24,6 +29,8 @@ use crate::manifest::{
     effective_environment_digest_v1, explicit_environment_v1,
 };
 use crate::protocol::{HostRequest, HostResponse};
+
+static SERVICE_PROBE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 pub(super) fn prepare(
     spec: &HostBootstrapSpec,
@@ -47,6 +54,105 @@ struct StrictServicePlan {
     confinement: StrictIsolationSpec,
     allocation_context_digest: Sha256Digest,
     environment_digest: Sha256Digest,
+}
+
+/// Fingerprints of the effective Strict bootstrap before host execution.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StrictServiceLaunchDigests {
+    /// Executable file bytes.
+    pub executable_digest: Sha256Digest,
+    /// Program, arguments, path and explicit environment keys.
+    pub command_digest: Sha256Digest,
+    /// Complete effective environment.
+    pub environment_digest: Sha256Digest,
+    /// Exact confinement profile, with runtime paths protected.
+    pub confinement_digest: Sha256Digest,
+}
+
+/// Inspect the exact configuration that a Strict service would use.
+/// This reads the executable and renders the profile in memory. The host
+/// still has to check and enforce the profile at launch.
+///
+/// # Errors
+/// Refuses a bootstrap unsupported by the native Strict service plan.
+pub fn inspect_strict_service_launch_plan(
+    spec: &HostBootstrapSpec,
+) -> Result<StrictServiceLaunchDigests, ProcessHostError> {
+    let cwd = spec.cwd.canonicalize()?;
+    let plan = validate_launch(spec, &cwd)?;
+    let profile = render_macos_seatbelt_profile(&plan.confinement)?;
+    let fd = rustix::fs::open(
+        Path::new(&spec.program),
+        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::NONBLOCK,
+        Mode::empty(),
+    )
+    .map_err(std::io::Error::from)?;
+    let mut executable = File::from(fd);
+    if !executable.metadata()?.is_file() {
+        return Err(ProcessHostError::InvalidArgument {
+            reason: "strict service executable is not a regular file".into(),
+        });
+    }
+    let mut digest = Sha256::new();
+    std::io::copy(&mut executable, &mut digest)?;
+    Ok(StrictServiceLaunchDigests {
+        executable_digest: Sha256Digest::from_raw_bytes(digest.finalize().into()),
+        command_digest: spec.compute_command_digest()?,
+        environment_digest: plan.environment_digest,
+        confinement_digest: Sha256Digest::from_bytes(profile.as_bytes()),
+    })
+}
+
+/// Confirm that native Seatbelt can load the exact prepared profile.
+/// The OS probe runs its inert command and the profile file is then removed.
+///
+/// # Errors
+/// Refuses a divergent profile, an unavailable backend, or a failed profile probe.
+pub fn probe_strict_service_confinement(
+    spec: &HostBootstrapSpec,
+    expected_profile: Sha256Digest,
+) -> Result<(), ProcessHostError> {
+    let cwd = spec.cwd.canonicalize()?;
+    let plan = validate_launch(spec, &cwd)?;
+    let profile = render_macos_seatbelt_profile(&plan.confinement)?;
+    if Sha256Digest::from_bytes(profile.as_bytes()) != expected_profile {
+        return Err(ProcessHostError::InvalidArgument {
+            reason: "strict service profile differs from its preparation".into(),
+        });
+    }
+    validate_rendezvous_dir(&spec.runtime_dir)?;
+    let sequence = SERVICE_PROBE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let probe_profile = spec.runtime_dir.join(format!(
+        "service-probe-{}-{sequence}.sb",
+        std::process::id()
+    ));
+    let fd = rustix::fs::open(
+        &probe_profile,
+        OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::RUSR | Mode::WUSR,
+    )
+    .map_err(std::io::Error::from)?;
+    let probe = OsIsolationBackendProbe::default();
+    let written = File::from(fd).write_all(profile.as_bytes());
+    let result = written
+        .map(|()| probe.probe_macos_seatbelt(probe.macos_sandbox_exec_path(), &probe_profile));
+    std::fs::remove_file(probe_profile)?;
+    match result? {
+        SandboxProbeOutcome::Supported => Ok(()),
+        SandboxProbeOutcome::MissingBackend { detail } => {
+            Err(ProcessHostError::IsolationBackendMissing {
+                backend: "macos-seatbelt".into(),
+                remediation: detail,
+            })
+        }
+        SandboxProbeOutcome::Unenforceable { detail } => {
+            Err(ProcessHostError::IsolationObligationUnenforceable {
+                backend: "macos-seatbelt".into(),
+                reason: detail,
+                remediation: "verify availability of the prepared Strict service profile".into(),
+            })
+        }
+    }
 }
 
 fn validate_launch(

@@ -19,7 +19,7 @@ enum Framing {
     UntilClosed,
 }
 
-fn framing(head: &[u8]) -> Result<(u16, Framing), InventoryError> {
+fn framing(head: &[u8], media: Option<&[u8]>) -> Result<(u16, Framing), InventoryError> {
     let mut headers = [httparse::EMPTY_HEADER; MAX_HEADERS];
     let mut response = httparse::Response::new(&mut headers);
     if !response
@@ -38,7 +38,19 @@ fn framing(head: &[u8]) -> Result<(u16, Framing), InventoryError> {
     }
     let mut length = None;
     let mut chunked = false;
+    let mut matched_media = false;
     for header in response.headers {
+        if let Some(expected) = media
+            && header.name.eq_ignore_ascii_case("content-type")
+        {
+            let value = header.value.split(|byte| *byte == b';').next();
+            if matched_media
+                || !value.is_some_and(|value| value.trim_ascii().eq_ignore_ascii_case(expected))
+            {
+                return Err(InventoryError::InvalidResponse);
+            }
+            matched_media = true;
+        }
         if header.name.eq_ignore_ascii_case("content-length") {
             if header.value.is_empty()
                 || !header.value.iter().all(u8::is_ascii_digit)
@@ -65,7 +77,7 @@ fn framing(head: &[u8]) -> Result<(u16, Framing), InventoryError> {
             return Err(InventoryError::InvalidResponse);
         }
     }
-    if chunked && length.is_some() {
+    if (chunked && length.is_some()) || (media.is_some() && !matched_media) {
         return Err(InventoryError::InvalidResponse);
     }
     Ok((
@@ -162,6 +174,25 @@ pub(super) async fn read_response<S: AsyncRead + Unpin + ?Sized>(
     stream: &mut S,
     bound: usize,
 ) -> Result<Response, InventoryError> {
+    read_with_media(stream, bound, None).await
+}
+
+pub(crate) async fn read_ndjson_body<S: AsyncRead + Unpin + ?Sized>(
+    stream: &mut S,
+    bound: usize,
+) -> Result<Vec<u8>, InventoryError> {
+    Ok(
+        read_with_media(stream, bound, Some(b"application/x-ndjson"))
+            .await?
+            .body,
+    )
+}
+
+async fn read_with_media<S: AsyncRead + Unpin + ?Sized>(
+    stream: &mut S,
+    bound: usize,
+    media: Option<&[u8]>,
+) -> Result<Response, InventoryError> {
     let mut head = Vec::new();
     while !head.ends_with(b"\r\n\r\n") {
         head.push(
@@ -174,7 +205,7 @@ pub(super) async fn read_response<S: AsyncRead + Unpin + ?Sized>(
             return Err(InventoryError::InvalidResponse);
         }
     }
-    let (status, framing) = framing(&head)?;
+    let (status, framing) = framing(&head, media)?;
     let body = match framing {
         Framing::Length(length) => {
             let mut body = Vec::new();

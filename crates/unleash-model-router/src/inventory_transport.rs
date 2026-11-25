@@ -29,7 +29,7 @@ use crate::connect_transport::{
 };
 use crate::transport::{BrokerDispatch, ProfileRef};
 
-mod http;
+pub(crate) mod http;
 
 /// This is metadata retrieval, not model generation or a connection-only proof.
 pub const INVENTORY_VERB: &str = "model.provider.inventory";

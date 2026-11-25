@@ -23,6 +23,7 @@ pub mod events;
 pub mod fs_sync;
 mod initial_context;
 mod invocation_projection;
+mod invocation_queue;
 pub mod leases;
 pub mod migrations;
 mod mission_scope;
@@ -100,6 +101,7 @@ pub use events::{
 };
 pub use initial_context::InitialContextPlan;
 pub use invocation_projection::{InvocationAttemptProjection, InvocationProjection};
+pub use invocation_queue::InvocationQueuePlan;
 pub use leases::{AcquireLeaseRequest, FenceAssertion, LeaseState, ResourceLeaseRecord};
 pub use migrations::{CURRENT_SCHEMA_VERSION, MigrationRecord, MigrationReport, MigrationState};
 pub use mission_scope::PreparedMissionScope;
@@ -132,6 +134,13 @@ pub use provider_probe_connect_observation::{
     CommitProviderConnectObservation, ConnectCertificateValidation, ProviderConnectObservation,
 };
 pub use provider_probe_generation::AuthenticatedGenerationPreparation;
+pub use provider_probe_generation::dispatch::{
+    ManagedGenerationDispatchPermit, ManagedOllamaTransport,
+};
+pub use provider_probe_generation::placement::{
+    AdmittedOllamaChatInputs, ManagedGenerationAdmission, ManagedProviderListener,
+    PLACEMENT_OBSERVER_PRINCIPAL,
+};
 pub use provider_probe_inventory::{
     ClaimProviderProbeInventoryRequest, InventoryTransportLimits, ProviderProbeInventoryClaim,
     ProviderProbeInventoryClaimOutcome, ProviderProbeInventoryPreparation,
@@ -159,7 +168,9 @@ pub use provider_profiles::{
     ProviderSecretBinding,
 };
 pub use provider_service_launch::{
-    ProviderServiceBackend, ProviderServiceLaunchContext, ProviderServiceLaunchPlan,
+    AttestedProviderServiceLaunch, ProviderServiceBackend, ProviderServiceLaunchAttestation,
+    ProviderServiceLaunchContext, ProviderServiceLaunchFingerprint, ProviderServiceLaunchOutcome,
+    ProviderServiceLaunchPermit, ProviderServiceLaunchPlan, ProviderServiceProcessIdentity,
 };
 pub use qualification::{
     APPROVED_BACKPORT_VERSIONS, EffectivePragmaProfile, MIN_QUALIFIED_SQLITE_VERSION,

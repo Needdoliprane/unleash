@@ -2,6 +2,7 @@
 //! Inventaire et drainage des exécuteurs persistants dans le répertoire de rendez-vous (`0600`).
 
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, PoisonError};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -15,6 +16,7 @@ use unleash_protocol::from_json_str_strict;
 use crate::error::DaemonError;
 
 const HOSTS_MANIFEST_FILENAME: &str = "hosts.json";
+static HOSTS_MANIFEST_WRITER: Mutex<()> = Mutex::new(());
 
 /// État d'un exécuteur ou host enregistré sous l'autorité locale.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -99,6 +101,9 @@ impl RendezvousExecutorController {
         rendezvous_dir: &Path,
         reg: ExecutorRegistration,
     ) -> Result<(), DaemonError> {
+        let _writer = HOSTS_MANIFEST_WRITER
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         let path = rendezvous_dir.join(HOSTS_MANIFEST_FILENAME);
         let mut manifest = load_hosts_manifest(&path)?;
         if let Some(existing) = manifest

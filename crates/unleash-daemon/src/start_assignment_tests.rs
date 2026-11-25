@@ -1,9 +1,10 @@
 //! IPC qualification of the first task's published context and assignment.
 
+// This module is compiled under `#[cfg(test)]`, so `clippy.toml` already permits
+// `unwrap`, `expect` and `panic` here; expecting those lints would never be fulfilled.
 #![expect(
-    clippy::unwrap_used,
-    clippy::panic,
-    reason = "Assertions on isolated workflow fixtures"
+    clippy::indexing_slicing,
+    reason = "Assertions on isolated workflow fixtures read JSON answers by key"
 )]
 
 use std::{os::unix::fs::PermissionsExt, path::Path, sync::Arc};
@@ -133,7 +134,7 @@ async fn configure_profile(
         "endpoint":"http://127.0.0.1:9/v1","model":format!("workflow-fixture-local-{}", current + 1),"locality":"local_only",
         "server_management":"user_managed","auth":{"kind":"none"},"pricing":{"kind":"none_local"},
         "limits":{"max_inflight":1,"connect_timeout_ms":2000,"queue_timeout_ms":1000,
-            "load_timeout_ms":180000,"first_token_timeout_ms":60000,"generation_timeout_ms":300000},
+            "load_timeout_ms":180_000,"first_token_timeout_ms":60_000,"generation_timeout_ms":300_000},
         "declared_capabilities":["text"]
     }))).await.unwrap();
 }
@@ -488,6 +489,123 @@ async fn persists_and_removes_a_versioned_skill_model_preference() {
     drop(client);
     daemon
         .shutdown_graceful("finish settings fixture")
+        .await
+        .unwrap();
+}
+
+// T-F012-002 — Le vrai writer engage une première politique modèle et son reçu.
+#[expect(
+    clippy::too_many_lines,
+    reason = "One model policy lifecycle through IPC and restart"
+)]
+#[tokio::test]
+async fn publishes_a_role_model_policy_through_settings() {
+    let mut route = route().await;
+    let project = route.assign.project_id.unwrap();
+    let profile = configured_profile_reference(&mut route.client, &route.assign, PROFILE).await;
+    let policy = json!({
+        "operation": "publish",
+        "policy_id": "policy.fixture",
+        "allowed_profiles": [profile],
+        "allowed_capabilities": ["text"],
+        "fallback_profiles": [],
+        "limits": {
+            "max_llm_calls": 1,
+            "max_output_tokens": 128,
+            "max_cost_microusd": 10000,
+            "max_duration_seconds": 60
+        }
+    });
+    let publish = command(
+        &route.assign,
+        0x59d0,
+        "SetSettings",
+        project.as_uuid(),
+        0,
+        json!({"scope_kind":"project","scope_id":project,"patch":{"model_policy_version":policy}}),
+    );
+    let read = QueryEnvelope {
+        protocol_version: ProtocolVersion,
+        request_id: RequestId::from_u128(0x59d1),
+        query_type: "ReadSettings".to_owned(),
+        project_id: Some(project),
+        payload: serde_json::from_value(json!({"scope_kind":"project","scope_id":project}))
+            .unwrap(),
+    };
+    let receipt = route.client.send_command(&publish).await.unwrap();
+    assert_eq!(receipt.state, ReceiptState::Accepted);
+    assert_eq!(receipt.new_revision, Revision::new(1));
+    let published = route.client.query(&read).await.unwrap().result;
+    assert_eq!(published.get("scope_kind"), Some(&json!("project")));
+    assert_eq!(published.get("scope_id"), Some(&json!(project)));
+    assert_eq!(published.get("revision"), Some(&json!(1)));
+    let [version] = published
+        .get("model_policy_versions")
+        .and_then(Value::as_array)
+        .unwrap()
+        .as_slice()
+    else {
+        panic!("expected the single published policy version");
+    };
+    for field in [
+        "policy_id",
+        "allowed_profiles",
+        "allowed_capabilities",
+        "fallback_profiles",
+        "limits",
+    ] {
+        assert_eq!(
+            version.get(field),
+            Some(policy.get(field).unwrap()),
+            "{field}"
+        );
+    }
+    assert_eq!(version.get("version"), Some(&json!(1)));
+    assert_eq!(
+        version.get("principal_id"),
+        Some(&json!(route.caller.actor_id))
+    );
+    assert_eq!(
+        version.get("command_receipt_id"),
+        Some(&json!(receipt.receipt_id))
+    );
+    let digest: Sha256Digest = version
+        .get("digest")
+        .and_then(Value::as_str)
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert_eq!(version.get("digest"), Some(&json!(digest)));
+    let reference = format!("model-policy:policy.fixture:1:{digest}");
+    assert_eq!(
+        version.get("policy_version_ref").and_then(Value::as_str),
+        Some(reference.as_str())
+    );
+    assert_eq!(version.get("revocation"), Some(&Value::Null));
+    assert_eq!(receipt.result_ref.as_deref(), Some(reference.as_str()));
+
+    drop(route.client);
+    route
+        .daemon
+        .shutdown_graceful("restart model policy fixture")
+        .await
+        .unwrap();
+    drop(route.daemon);
+    let (daemon, mut client) = start(route.config).await;
+    let mut retry = publish.clone();
+    retry.request_id = RequestId::from_u128(0x59d2);
+    assert_eq!(client.send_command(&retry).await.unwrap(), receipt);
+    let mut stale = publish;
+    stale.request_id = RequestId::from_u128(0x59d3);
+    stale.command_id = CommandId::from_u128(0x59d3);
+    assert!(matches!(
+        client.send_command(&stale).await,
+        Err(ClientError::Remote(error)) if error.code == ErrorCode::RevisionConflict
+    ));
+    assert_eq!(client.query(&read).await.unwrap().result, published);
+    drop(client);
+    daemon
+        .shutdown_graceful("finish model policy fixture")
         .await
         .unwrap();
 }

@@ -136,6 +136,92 @@ pub struct DaemonHandle {
 }
 
 impl DaemonHandle {
+    /// Observe the owned service's current listener and adopt it for an authenticated generation probe.
+    ///
+    /// # Errors
+    /// Refuses missing ownership, mismatched launch or profile, and stale probe or listener evidence.
+    pub async fn adopt_managed_provider_generation_placement(
+        &self,
+        command: unleash_protocol::CommandEnvelope,
+        caller: unleash_store::CallerAuthority,
+        dispatch: unleash_domain::DispatchId,
+    ) -> Result<uuid::Uuid, crate::provider_service_evaluation::ProviderServiceLaunchError> {
+        use crate::provider_service_evaluation::ProviderServiceLaunchError;
+        let state = self
+            .runtime
+            .upgrade()
+            .ok_or(ProviderServiceLaunchError::Draining)?;
+        let activity = state
+            .broker_activity
+            .admit()
+            .ok_or(ProviderServiceLaunchError::Draining)?;
+        tokio::task::spawn_blocking(move || {
+            let _activity = activity;
+            let listener = state
+                .provider_service_hosts
+                .observe_listener(&state.store, dispatch)?;
+            Ok(state
+                .store
+                .adopt_managed_provider_generation_placement(&command, &caller, listener)?)
+        })
+        .await?
+    }
+
+    /// Hand a prepared service dispatch to the daemon's owned process controller.
+    ///
+    /// A durable unknown disposition is returned as such. The controller retains the
+    /// process-host after a spawn even if observation or publication fails.
+    ///
+    /// # Errors
+    /// The daemon stopped accepting work or could not durably record the disposition.
+    pub async fn launch_prepared_provider_service(
+        &self,
+        envelope: unleash_protocol::CommandEnvelope,
+        caller: unleash_store::CallerAuthority,
+        bootstrap: unleash_process_host::HostBootstrapSpec,
+        permit: unleash_store::ProviderServiceLaunchPermit,
+    ) -> Result<
+        crate::provider_service_evaluation::ManagedProviderServiceLaunch,
+        crate::provider_service_evaluation::ProviderServiceLaunchError,
+    > {
+        use crate::provider_service_evaluation::ProviderServiceLaunchError;
+        let state = self
+            .runtime
+            .upgrade()
+            .ok_or(ProviderServiceLaunchError::Draining)?;
+        let activity = state
+            .broker_activity
+            .admit()
+            .ok_or(ProviderServiceLaunchError::Draining)?;
+        tokio::spawn(async move {
+            let writer_state = Arc::clone(&state);
+            let outcome = tokio::task::spawn_blocking(move || {
+                let result = writer_state.provider_service_hosts.launch(
+                    &writer_state.store,
+                    &envelope,
+                    &caller,
+                    bootstrap,
+                    permit,
+                );
+                (result, activity)
+            })
+            .await?;
+            let (result, _activity) = outcome;
+            let result = result?;
+            let cursor = result.commit.event_cursor;
+            crate::ipc::publish_committed_events_ordered(
+                &state,
+                cursor.stream_id,
+                cursor.sequence.as_u64(),
+                1,
+                &[],
+            )
+            .await;
+            Ok(result)
+        })
+        .await?
+    }
+
     #[cfg(test)]
     pub(crate) fn test_runtime_state(&self) -> Arc<DaemonRuntimeState> {
         self.runtime.upgrade().expect("daemon test runtime")
@@ -495,6 +581,7 @@ impl UnleashDaemon {
             for observer in [
                 unleash_store::CONNECT_OBSERVER_PRINCIPAL,
                 unleash_store::INVENTORY_OBSERVER_PRINCIPAL,
+                unleash_store::PLACEMENT_OBSERVER_PRINCIPAL,
             ] {
                 opened.register_principal(observer, "system", observer)?;
             }
@@ -595,6 +682,10 @@ impl UnleashDaemon {
             terminal_host_launcher: Arc::clone(&config.terminal_host_launcher),
             broker_activity: crate::broker_activity::BrokerActivity::new(),
             invocation_workers: crate::managed_workers::ManagedWorkers::default(),
+            provider_service_hosts:
+                crate::provider_service_evaluation::ManagedProviderServiceHosts::new(
+                    rdv_dir.clone(),
+                ),
             store: Arc::clone(&store),
             authority_generation: recovery_row.authority_generation,
             daemon_epoch: recovery_row.daemon_epoch,

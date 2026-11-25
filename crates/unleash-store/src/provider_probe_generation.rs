@@ -2,7 +2,10 @@
 //! The existing dispatch gate stays closed until the native producers are qualified.
 
 mod authorizing;
+pub(crate) mod dispatch;
 pub(crate) mod placement;
+
+use std::collections::BTreeMap;
 
 use crate::commands::{DaemonStateRow, EventAppendSpec, read_daemon_state_conn};
 use crate::objects::{OwnedReferenceAdoption, PublishedObjectReference, tx_adopt_owned_reference};
@@ -19,12 +22,14 @@ use unleash_domain::{
     DataLocality, ModelPolicy, ProviderProbeId, ReceiptId, Revision, Sha256Digest, TimestampMs,
 };
 use unleash_protocol::{
-    CommandEnvelope, ProviderAuthentication, ProviderTestPhase, ReceiptState,
+    CommandEnvelope, ProviderAuthentication, ProviderDialectKind, ProviderTestPhase, ReceiptState,
     TestProviderProfilePayload, canonical_sha256, canonicalize_to_vec, compute_command_digest_v2,
+    provider_probe::ollama_chat_body,
 };
 
 const PREPARATION_OWNER: &str = "provider_generation_preparation";
 const FIXTURE_ID: &str = "f012.synthetic_text.v1";
+const FIXTURE_PROMPT: &str = "Reply with the word OK.";
 
 /// Immutable inputs retained by the authenticated preparation path.
 #[derive(Debug, Clone)]
@@ -121,6 +126,16 @@ fn publish(
     field: &'static str,
     document: &Value,
 ) -> Result<ArtifactCandidate, StoreError> {
+    publish_candidate(store, PREPARATION_OWNER, owner_id, field, document)
+}
+
+fn publish_candidate(
+    store: &UnleashStore,
+    owner_kind: &str,
+    owner_id: &str,
+    field: &'static str,
+    document: &Value,
+) -> Result<ArtifactCandidate, StoreError> {
     let bytes = canonicalize_to_vec(document)?;
     let hash = Sha256Digest::from_bytes(&bytes);
     let handle = store.prepare_object(PrepareObjectRequest {
@@ -128,7 +143,7 @@ fn publish(
         byte_length: u64::try_from(bytes.len())
             .map_err(|_| unavailable("objet génération trop grand"))?,
         media_type: "application/json".into(),
-        owner_kind: PREPARATION_OWNER.into(),
+        owner_kind: owner_kind.into(),
         owner_id: owner_id.into(),
     })?;
     let published = store
@@ -138,7 +153,7 @@ fn publish(
                 pin_id: handle.pin_id.clone(),
                 object_hash: hash,
                 object_generation: handle.object_generation,
-                owner_kind: PREPARATION_OWNER.into(),
+                owner_kind: owner_kind.into(),
                 owner_id: owner_id.into(),
                 source_field: field.into(),
             })
@@ -189,18 +204,27 @@ fn build_preparation(
     let effective = limits(&resolved);
     let fixture = json!({
         "schema_version":1,"fixture_id":FIXTURE_ID,
-        "messages":[{"role":"user","content":"Reply with the word OK."}],
+        "messages":[{"role":"user","content":FIXTURE_PROMPT}],
     });
     let fixture_digest = canonical_sha256(&fixture)?;
+    let dialect = profile.dialect();
+    let request_payload = if dialect.kind == ProviderDialectKind::OllamaChat && dialect.version == 1
+    {
+        ollama_chat_body(
+            profile.model(),
+            FIXTURE_PROMPT,
+            effective.max_output_tokens,
+            &BTreeMap::new(),
+        )
+    } else {
+        json!({
+            "schema_version":1,"fixture_digest":fixture_digest,"model":profile.model(),
+            "profile_digest":resolved.profile.configuration_digest,"limits":effective,
+        })
+    };
     let docs = [
         ("fixture", fixture),
-        (
-            "request_payload",
-            json!({
-                "schema_version":1,"fixture_digest":fixture_digest,"model":profile.model(),
-                "profile_digest":resolved.profile.configuration_digest,"limits":effective,
-            }),
-        ),
+        ("request_payload", request_payload),
         (
             "capabilities",
             json!({
