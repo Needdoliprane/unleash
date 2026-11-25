@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
-//! Résolution des chemins canoniques `ADR-14` (macOS/Linux), identifiant UID effectif,
-//! chemin de rendez-vous canonique et garde stricte interdisant `.claude/`.
+//! Résolution des chemins canoniques `ADR-14` (macOS/Linux ; emplacement Windows réservé),
+//! identifiant UID effectif, chemin de rendez-vous canonique et garde stricte interdisant `.claude/`.
 
 use std::ffi::CStr;
 use std::fs;
@@ -15,13 +15,16 @@ use crate::rendezvous::{
 /// Nom du dossier documentaire interdit à toute écriture runtime (`REQ-CORE-008`, `INV-046`).
 pub const CLAUDE_DIR_NAME: &str = ".claude";
 
-/// Plateforme cible supportée pour la résolution des emplacements `ADR-14`.
+/// Plateforme cible pour la résolution des emplacements `ADR-14`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PlatformOsKind {
     /// macOS 15+ (Apple Silicon).
     MacOs,
     /// Linux (Ubuntu LTS `x86_64`).
     Linux,
+    /// Windows : hors matrice qualifiée V1 (ADR-14, point 7). Aucun emplacement n'y est arrêté ;
+    /// la variante réserve un emplacement explicite à la résolution, sans promesse.
+    Windows,
 }
 
 impl PlatformOsKind {
@@ -32,7 +35,11 @@ impl PlatformOsKind {
         {
             Self::MacOs
         }
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(target_os = "windows")]
+        {
+            Self::Windows
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
         {
             Self::Linux
         }
@@ -144,7 +151,9 @@ impl PlatformPaths {
                     home.join("Library/Caches/Unleash"),
                 )
             }
-            PlatformOsKind::Linux => {
+            // Windows suit encore la règle Linux : comportement de fait hérité du classement
+            // « tout OS non-macOS est Linux », en attente d'emplacements arrêtés.
+            PlatformOsKind::Linux | PlatformOsKind::Windows => {
                 let cfg_base = resolve_xdg_base(
                     env.xdg_config_home.as_deref(),
                     home.join(".config"),
@@ -386,7 +395,9 @@ pub fn canonical_rendezvous_dir_with(
     match os {
         // Candidat unique, dérivé de l'UID seul : ni l'état du disque ni l'environnement ne le
         // déplacent, et il n'existe aucun repli sous `/tmp` (`runtime-lifecycle.md`, `REQ-CORE-001`).
-        PlatformOsKind::Linux => Ok(linux_rendezvous_dir(uid)),
+        // Windows suit encore la règle Linux : comportement de fait hérité du classement
+        // « tout OS non-macOS est Linux », en attente d'un candidat arrêté.
+        PlatformOsKind::Linux | PlatformOsKind::Windows => Ok(linux_rendezvous_dir(uid)),
         PlatformOsKind::MacOs => macos_rendezvous_dir(uid),
     }
 }
@@ -414,7 +425,8 @@ pub fn prepare_canonical_rendezvous_dir_with(
     uid: u32,
 ) -> Result<PathBuf, PlatformError> {
     match os {
-        PlatformOsKind::Linux => prepare_linux_rendezvous_dir(uid),
+        // Windows suit encore la règle Linux : comportement de fait, en attente d'un candidat arrêté.
+        PlatformOsKind::Linux | PlatformOsKind::Windows => prepare_linux_rendezvous_dir(uid),
         // macOS : comportement conservé. Le système fournit la racine Darwin ; le rendez-vous
         // reste créé et validé par `ensure_private_rendezvous_dir` à l'acquisition du verrou.
         PlatformOsKind::MacOs => canonical_rendezvous_dir_with(os, uid, &EnvSnapshot::default()),

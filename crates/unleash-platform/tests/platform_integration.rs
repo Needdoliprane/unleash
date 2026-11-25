@@ -385,6 +385,30 @@ fn t_f001_001_qualified_runtime_root_receives_only_the_private_rendezvous_dir() 
     );
 }
 
+// T-F001-001 / AC-F001-001 / REQ-CORE-001
+// Windows n'a ni candidat de rendez-vous ni emplacements arrêtés (ADR-14 : hors matrice
+// qualifiée). Son emplacement est explicite : il refuse, il ne replie ni sur la règle Linux ni sur
+// un répertoire partagé.
+#[test]
+fn t_f001_001_undecided_platform_refuses_instead_of_falling_back() {
+    let env = EnvSnapshot {
+        home: Some(PathBuf::from("/Users/alice")),
+        ..EnvSnapshot::default()
+    };
+    assert!(matches!(
+        canonical_rendezvous_dir_with(PlatformOsKind::Windows, 4242, &env),
+        Err(PlatformError::LayoutUndecided { os: PlatformOsKind::Windows })
+    ));
+    assert!(matches!(
+        PlatformPaths::resolve_for(PlatformOsKind::Windows, &env),
+        Err(PlatformError::LayoutUndecided { os: PlatformOsKind::Windows })
+    ));
+    assert!(matches!(
+        prepare_canonical_rendezvous_dir_with(PlatformOsKind::Windows, 4242),
+        Err(PlatformError::LayoutUndecided { os: PlatformOsKind::Windows })
+    ));
+}
+
 // T-F001-004 / AC-F001-004 / REQ-CORE-004
 #[test]
 fn t_f001_004_rendezvous_permissions_symlinks_and_peer_cred() {

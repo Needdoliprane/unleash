@@ -4,6 +4,8 @@
 use std::path::PathBuf;
 use thiserror::Error;
 
+use crate::paths::PlatformOsKind;
+
 /// Erreur produite par les adaptateurs système de `unleash-platform`.
 ///
 /// Aucune variante ne doit jamais contenir de valeur secrète en clair.
@@ -106,6 +108,17 @@ pub enum PlatformError {
         reason: String,
         /// Remédiation indiquée à l'utilisateur.
         remediation: String,
+    },
+
+    /// Emplacements canoniques `ADR-14` non arrêtés pour cette plateforme : aucun candidat de
+    /// rendez-vous, aucune disposition, et aucun repli (`REQ-CORE-001`).
+    #[error(
+        "Emplacements canoniques non arrêtés pour la plateforme {os:?} : \
+         aucun repli n'est tenté"
+    )]
+    LayoutUndecided {
+        /// Plateforme hors décisions arrêtées (Windows, hors matrice qualifiée V1).
+        os: PlatformOsKind,
     },
 
     /// Une autre autorité daemon est déjà active pour cet UID sur une autre racine (`ResourceBusy/AUTHORITY_ALREADY_ACTIVE`).
