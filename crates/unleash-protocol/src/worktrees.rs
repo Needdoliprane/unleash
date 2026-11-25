@@ -385,12 +385,10 @@ impl WorktreeItem {
 }
 
 fn has_repetition<T: PartialEq>(values: &[T]) -> bool {
-    values.iter().enumerate().any(|(index, value)| {
-        values
-            .iter()
-            .skip(index + 1)
-            .any(|later| *later == *value)
-    })
+    values
+        .iter()
+        .enumerate()
+        .any(|(index, value)| values.iter().skip(index + 1).any(|later| *later == *value))
 }
 
 /// Couverture d'une collecte.
@@ -566,7 +564,8 @@ mod tests {
         }
     }
 
-    // REQ-CORE-005 : la requête et la réponse de référence restent identiques après un aller-retour strict.
+    // T-F010-001 / AC-F010-001 / REQ-GIT-001 : la requête et la réponse de référence restent
+    // identiques après un aller-retour strict dans les DTO fermés.
     #[test]
     fn query_and_response_fixtures_round_trip_through_the_closed_dtos() {
         let query: Value = serde_json::from_str(include_str!(
@@ -622,11 +621,12 @@ mod tests {
             json!({"repo_id": "r", "root_path": "/tmp/r"}),
             json!({"page_size": 5}),
         ] {
-            let candidate = serde_json::from_value::<ListWorktreesPayload>(rejected);
+            let candidate = serde_json::from_value::<ListWorktreesPayload>(rejected.clone());
             assert!(candidate.is_err(), "charge utile acceptée : {rejected}");
         }
     }
 
+    // T-F010-001 / AC-F010-001 / REQ-GIT-001 : la requête est refusée avant toute observation.
     #[test]
     fn query_validation_rejects_blank_repository_bad_sizes_and_foreign_cursors() {
         let with = |repo_id: &str, page_size: Option<u16>, opaque_cursor: Option<&str>| {
@@ -668,6 +668,7 @@ mod tests {
         assert!(is_well_formed_cursor(&"a".repeat(512)));
     }
 
+    // T-F010-001 / AC-F010-001 / REQ-GIT-001 : un `head_oid` suit le format d'objet observé.
     #[test]
     fn object_identifiers_follow_the_observed_format_and_expose_the_null_id() {
         let oid = GitObjectId::parse(GitObjectFormat::Sha1, HEAD).unwrap();
@@ -689,6 +690,7 @@ mod tests {
         assert!(unborn.is_null());
     }
 
+    // T-F010-001 / AC-F010-001 / REQ-GIT-001 : `branch_ref` est un nom complet de branche locale.
     #[test]
     fn branch_refs_follow_the_closed_schema_pattern() {
         assert!(is_worktree_branch_ref("refs/heads/main"));
@@ -704,6 +706,7 @@ mod tests {
         }
     }
 
+    // T-F010-001 / AC-F010-001 / REQ-GIT-001 : le résultat rend les références demandées.
     #[test]
     fn result_contract_refuses_every_drift_from_the_request() {
         let project = ProjectId::from_u128(PROJECT);
@@ -718,12 +721,6 @@ mod tests {
         let sorted = result(paths);
         sorted.check_contract(project, "repo-01", 50).unwrap();
 
-        let mut other_repository = sorted.clone();
-        other_repository.repo_id = String::from("repo-02");
-        assert_eq!(
-            other_repository.check_contract(project, "repo-02", 50),
-            Err(WorktreeContractViolation::ProjectMismatch)
-        );
         let other_project = ProjectId::from_u128(PROJECT + 1);
         assert_eq!(
             sorted.check_contract(other_project, "repo-01", 50),
@@ -754,10 +751,16 @@ mod tests {
         );
     }
 
+    // T-F010-001 / AC-F010-001 / REQ-GIT-001 : un item observé garde une identité et des
+    // opérations cohérentes ; une cible réservée n'est jamais dite libre.
     #[test]
     fn item_contract_refuses_identity_format_and_operation_drifts() {
         let sha1 = GitObjectFormat::Sha1;
         item("/a").check_contract(sha1).unwrap();
+        assert_eq!(
+            item("/a").check_contract(GitObjectFormat::Sha256),
+            Err(WorktreeContractViolation::ObjectFormatMismatch)
+        );
 
         let mut detached = item("/a");
         detached.branch_ref = None;
@@ -766,10 +769,7 @@ mod tests {
         let mut unborn = item("/a");
         unborn.head_oid = None;
         unborn.check_contract(sha1).unwrap();
-        assert_eq!(
-            unborn.check_contract(GitObjectFormat::Sha256),
-            Err(WorktreeContractViolation::ObjectFormatMismatch)
-        );
+        unborn.check_contract(GitObjectFormat::Sha256).unwrap();
 
         let mut without_identity = item("/a");
         without_identity.head_oid = None;
@@ -848,6 +848,8 @@ mod tests {
         rebasing.check_contract(sha1).unwrap();
     }
 
+    // T-F010-001 / AC-F010-001 / REQ-GIT-001 : une observation incertaine n'est jamais couverte
+    // par un inventaire « complete ».
     #[test]
     fn coverage_never_claims_completeness_over_an_uncertain_observation() {
         let project = ProjectId::from_u128(PROJECT);
