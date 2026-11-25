@@ -86,6 +86,7 @@ fantoccini = { version = "0.22.2", default-features = false }
 tokio = { version = "1.54.1", features = ["rt", "rt-multi-thread", "net", "io-util", "sync", "time", "macros", "fs", "signal"] }
 rustix = { version = "1.1", features = ["fs", "process", "net"] }
 libc = "0.2"
+getrandom = "0.3.4"
 hyper = { version = "1.0", features = ["http1", "client", "server"] }
 hyper-util = { version = "0.1", features = ["tokio", "http1", "client", "client-legacy", "server", "server-auto"] }
 http = "1.0"

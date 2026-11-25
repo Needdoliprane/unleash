@@ -35,7 +35,7 @@ tracing.workspace = true
 uuid.workspace = true
 chrono.workspace = true
 clap.workspace = true
-getrandom = "0.3.4"
+getrandom.workspace = true
 zeroize.workspace = true
 
 [dev-dependencies]
