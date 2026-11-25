@@ -91,7 +91,7 @@ pub struct ListRunsPayload {
 struct RawListRuns {
     #[serde(default, deserialize_with = "present")]
     page_size: Option<u16>,
-    #[serde(default, deserialize_with = "absent_or_null")]
+    #[serde(default)]
     opaque_cursor: Option<String>,
 }
 
@@ -101,14 +101,6 @@ where
     D: Deserializer<'de>,
 {
     u16::deserialize(deserializer).map(Some)
-}
-
-/// Reads an omitted or null field as `None`.
-fn absent_or_null<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    Ok(Option::<String>::deserialize(deserializer)?.flatten())
 }
 
 /// Tells whether a cursor respects the wire charset of `opaque_cursor`.
