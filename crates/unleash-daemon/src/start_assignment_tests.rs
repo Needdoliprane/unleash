@@ -12,7 +12,8 @@ use std::{os::unix::fs::PermissionsExt, path::Path, sync::Arc};
 use serde_json::{Value, json};
 use unleash_client::{ClientConfig, ClientError, UnleashClient};
 use unleash_domain::{
-    ActorId, AgentId, CommandId, InvocationId, MissionId, RequestId, Revision, Sha256Digest,
+    ActorId, AgentId, CommandId, InvocationId, MissionId, ProjectId, RequestId, Revision,
+    Sha256Digest,
 };
 use unleash_platform::{current_boot_identity, effective_uid};
 use unleash_protocol::{
@@ -629,7 +630,7 @@ async fn set_model_policy(
     client: &mut UnleashClient,
     base: &CommandEnvelope,
     id: u128,
-    project: Uuid,
+    project: ProjectId,
     revision: u64,
     policy: &Value,
 ) -> Result<CommandReceipt, ClientError> {
@@ -645,7 +646,7 @@ async fn set_model_policy(
         .await
 }
 
-fn settings_query(id: u128, project: Uuid) -> QueryEnvelope {
+fn settings_query(id: u128, project: ProjectId) -> QueryEnvelope {
     QueryEnvelope {
         protocol_version: ProtocolVersion,
         request_id: RequestId::from_u128(id),
@@ -656,7 +657,7 @@ fn settings_query(id: u128, project: Uuid) -> QueryEnvelope {
     }
 }
 
-fn project_settings(project: Uuid, policy: &Value) -> Value {
+fn project_settings(project: ProjectId, policy: &Value) -> Value {
     json!({"scope_kind":"project","scope_id":project,"patch":{"model_policy_version":policy}})
 }
 
@@ -804,7 +805,7 @@ async fn revokes_a_published_model_policy_version_through_settings() {
 }
 
 /// Une route dont la politique de modèle `policy.fixture` n'a encore rien publié.
-async fn unpublished_model_policy() -> (Route, Uuid, Value, QueryEnvelope, CommandEnvelope) {
+async fn unpublished_model_policy() -> (Route, ProjectId, Value, QueryEnvelope, CommandEnvelope) {
     let mut route = route().await;
     let project = route.assign.project_id.unwrap();
     let profile = configured_profile_reference(&mut route.client, &route.assign, PROFILE).await;
@@ -827,7 +828,7 @@ async fn unpublished_model_policy() -> (Route, Uuid, Value, QueryEnvelope, Comma
 // être celle de l'enveloppe.
 #[tokio::test]
 async fn refuses_a_model_policy_without_edition_right_or_outside_the_envelope_scope() {
-    let (mut route, project, _profile, read, publish) = unpublished_model_policy().await;
+    let (mut route, _project, _profile, read, publish) = unpublished_model_policy().await;
 
     // Acteur sans droit d'édition : la preuve administrative manque.
     let mut plain_client = UnleashClient::connect(
@@ -904,12 +905,16 @@ async fn refuses_a_model_policy_patch_outside_the_closed_contract_or_incoherent_
     divergent.command_id = CommandId::from_u128(0x59e8);
     divergent.payload["patch"]["model_policy_version"]["allowed_profiles"][0]["digest"] =
         json!(Sha256Digest::from_bytes(b"other fixture version"));
-    assert!(is_model_conflict(&route.client.send_command(&divergent).await));
+    assert!(is_model_conflict(
+        &route.client.send_command(&divergent).await
+    ));
     let mut widened = publish.clone();
     widened.command_id = CommandId::from_u128(0x59ea);
     widened.payload["patch"]["model_policy_version"]["fallback_profiles"] =
         json!([{"profile_id":PROFILE,"profile_version":2,"digest":profile["digest"]}]);
-    assert!(is_model_conflict(&route.client.send_command(&widened).await));
+    assert!(is_model_conflict(
+        &route.client.send_command(&widened).await
+    ));
     let missing = set_model_policy(
         &mut route.client,
         &route.assign,
