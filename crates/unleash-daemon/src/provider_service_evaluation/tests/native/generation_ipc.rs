@@ -1,4 +1,6 @@
-//! F012: one observed generation, replayable through the daemon socket.
+//! T-F012-015 / AC-F012-015 / REQ-MODEL-015 : une génération observée sur le socket du
+//! démon, rejouable. Exige macOS (plan strict, écoute possédée) et l'hôte de processus
+//! empaqueté depuis les mêmes sources ; aucun double de Seatbelt ne le remplace.
 
 use super::{
     NominalTestHost, PROFILE_ID, TestResult, configure_profile, prepare_nominal_generation,
@@ -26,7 +28,8 @@ use unleash_store::{CallerAuthority, CallerRole};
 use unleash_testkit::local_test_dir;
 use uuid::Uuid;
 
-const CHILD_TEST: &str = "provider_service_evaluation::tests::generation_ipc::ollama_fixture_child";
+const CHILD_TEST: &str =
+    "provider_service_evaluation::tests::native::generation_ipc::t_f012_015_ollama_fixture_child";
 const RESPONSE: &str = concat!(
     r#"{"model":"inert-fixture","created_at":"2026-11-20T00:00:00Z","message":{"role":"assistant","content":"Answer"},"done":false}"#,
     "\n",
@@ -43,11 +46,8 @@ struct CompletedGeneration {
 
 #[tokio::test]
 #[ignore = "requires the dedicated macOS runner and the same-source packaged process host"]
-async fn t_f012_generation_active_mandate_persists_one_result_and_replays_after_restart()
+async fn t_f012_015_generation_active_mandate_persists_one_result_and_replays_after_restart()
 -> TestResult {
-    if !cfg!(target_os = "macos") {
-        return Err("the owned Seatbelt service requires the dedicated macOS runner".into());
-    }
     let host_binary = PathBuf::from(
         std::env::var_os("UNLEASH_TEST_PROCESS_HOST_BIN").ok_or("missing fixture host binary")?,
     )
@@ -403,7 +403,7 @@ async fn profile_observation(
 
 #[test]
 #[ignore = "run only by the exact parent through its owned fixture service"]
-fn ollama_fixture_child() -> TestResult {
+fn t_f012_015_ollama_fixture_child() -> TestResult {
     let port: u16 = fs::read_to_string("listener-port")?.parse()?;
     if port == 0 {
         return Err("the parent must reserve a nonzero fixture port".into());

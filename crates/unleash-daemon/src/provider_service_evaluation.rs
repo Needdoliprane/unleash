@@ -479,10 +479,9 @@ impl BrokerJournalPort for ServiceEvaluationJournal {
     }
 }
 
-// Every evaluation fixture needs an inspectable `strict_service_v1` plan.
-// `validate_launch` refuses it off macOS with `IsolationObligationUnenforceable`
-// before any broker phase, so these tests cannot run elsewhere. The Store
-// contracts of the launch remain covered on every platform by the
-// `unleash-store` service launch scenarios (REQ-MODEL-015).
-#[cfg(all(test, target_os = "macos"))]
+// Le module de tests tourne sur toutes les plateformes : les contrats du writer y sont exercés
+// par les ports du writer sur un plan synthétique. Seule sa partie `native` (évaluation réelle
+// par le broker, lancement d'un hôte, écoute possédée) est réservée à macOS, seul système où
+// le plan strict est qualifié (REQ-MODEL-015).
+#[cfg(test)]
 mod tests;
