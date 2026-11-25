@@ -24,6 +24,9 @@ use uuid::Uuid;
 const PROFILE: Uuid = Uuid::from_u128(0xf012_0001);
 const PROJECT: ProjectId = ProjectId::from_u128(0xf012_0002);
 const POLICY: &str = "policy.fixture";
+// La portée d'un profil est immuable : chaque portée de la fixture a son propre profil.
+const FOREIGN_PROFILE: Uuid = Uuid::from_u128(0xf012_0005);
+const SHARED_PROFILE: Uuid = Uuid::from_u128(0xf012_0007);
 
 struct Profile {
     id: Uuid,
@@ -236,7 +239,13 @@ fn create_project(store: &UnleashStore, project: ProjectId, command: u128) -> Sc
     scope
 }
 
-fn configure_profile(store: &UnleashStore, scope: &Scope, version: u64, command: u128) -> Profile {
+fn configure_profile(
+    store: &UnleashStore,
+    scope: &Scope,
+    profile_id: Uuid,
+    version: u64,
+    command: u128,
+) -> Profile {
     let payload: SetProviderProfilePayload = serde_json::from_value(json!({
         "provider_kind":"lmstudio","dialect":{"kind":"openai_chat_completions","version":1},
         "endpoint":"http://127.0.0.1:1234/v1","model":"policy-fixture","locality":"local_only",
@@ -249,7 +258,7 @@ fn configure_profile(store: &UnleashStore, scope: &Scope, version: u64, command:
     .unwrap();
     let configuration = ProviderProfileConfiguration {
         schema_version: 1,
-        profile_id: PROFILE,
+        profile_id,
         profile_version: version,
         project_id: scope.project,
         payload,
@@ -262,7 +271,7 @@ fn configure_profile(store: &UnleashStore, scope: &Scope, version: u64, command:
         store,
         command,
         scope,
-        PROFILE,
+        profile_id,
         Revision::new(version - 1),
         "SetProviderProfile",
         &wire,
@@ -283,7 +292,7 @@ fn configure_profile(store: &UnleashStore, scope: &Scope, version: u64, command:
         ))
         .unwrap();
     Profile {
-        id: PROFILE,
+        id: profile_id,
         version,
         digest,
     }
@@ -296,7 +305,7 @@ fn ready(root: &Path) -> (UnleashStore, Scope, Profile) {
         .register_principal("profile-user", "user", actor().as_str())
         .unwrap();
     let scope = create_project(&store, PROJECT, 0xf012_0003);
-    let profile = configure_profile(&store, &scope, 1, 0xf012_0004);
+    let profile = configure_profile(&store, &scope, PROFILE, 1, 0xf012_0004);
     (store, scope, profile)
 }
 
@@ -483,8 +492,8 @@ fn t_f012_002_refuses_out_of_scope_profiles_divergent_digests_and_outsides() {
     let (store, scope, profile) = ready(directory.path());
     let author = authority(CallerRole::HumanOperator);
     let other = create_project(&store, ProjectId::from_u128(0xf012_0005), 0xf012_0005);
-    let foreign = configure_profile(&store, &other, 1, 0xf012_0006);
-    let shared = configure_profile(&store, &Scope::user(), 1, 0xf012_0007);
+    let foreign = configure_profile(&store, &other, FOREIGN_PROFILE, 1, 0xf012_0006);
+    let shared = configure_profile(&store, &Scope::user(), SHARED_PROFILE, 1, 0xf012_0007);
     let divergent = json!({"profile_id":PROFILE,"profile_version":1,
         "digest":Sha256Digest::from_bytes(b"other fixture version")});
     let mut widened = Policy::bounded(&[profile.reference()]);
