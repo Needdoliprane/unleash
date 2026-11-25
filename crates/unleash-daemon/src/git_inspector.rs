@@ -368,7 +368,7 @@ impl OperationState {
 /// `complete` à `false`.
 fn detect_operations(gitdir: &Path) -> OperationState {
     let mut unreadable = false;
-    let present = |name: &str| match gitdir.join(name).try_exists() {
+    let mut present = |name: &str| match gitdir.join(name).try_exists() {
         Ok(seen) => seen,
         Err(_) => {
             unreadable = true;
@@ -627,18 +627,14 @@ impl Inspector {
             child.wait().await
         })
         .await;
-        let stderr_tail = match tokio::time::timeout_at(
-            self.deadline + CHILD_GRACE,
-            &mut diagnostics,
-        )
-        .await
-        {
-            Ok(Ok(Ok(capture))) => capture.value,
-            Ok(Ok(Err(_))) | Ok(Err(_)) | Err(_) => {
-                diagnostics.abort();
-                Vec::new()
-            }
-        };
+        let stderr_tail =
+            match tokio::time::timeout_at(self.deadline + CHILD_GRACE, &mut diagnostics).await {
+                Ok(Ok(Ok(capture))) => capture.value,
+                Ok(Ok(Err(_))) | Ok(Err(_)) | Err(_) => {
+                    diagnostics.abort();
+                    Vec::new()
+                }
+            };
         let capture = captured?;
         // Un processus qui ne s'est pas terminé dans le délai de grâce laisse la collecte sans réponse.
         let Ok(Ok(status)) = exited else {
