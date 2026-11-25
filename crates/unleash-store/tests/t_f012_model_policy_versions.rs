@@ -362,7 +362,7 @@ fn commit_policy(
         .map(|outcome| outcome.receipt().clone())
 }
 
-fn is_conflict(result: Result<CommandReceipt, StoreError>) -> bool {
+fn is_conflict(result: &Result<CommandReceipt, StoreError>) -> bool {
     matches!(
         result,
         Err(StoreError::ContractViolation {
@@ -372,7 +372,7 @@ fn is_conflict(result: Result<CommandReceipt, StoreError>) -> bool {
     )
 }
 
-fn is_invalid(result: Result<CommandReceipt, StoreError>) -> bool {
+fn is_invalid(result: &Result<CommandReceipt, StoreError>) -> bool {
     matches!(
         result,
         Err(StoreError::InvalidArgument { reason: None, .. })
@@ -479,7 +479,7 @@ fn t_f012_002_publishes_the_next_version_and_revokes_an_exact_version() {
 
     // La révocation répétée et une version absente sont refusées sans rien engager.
     let repeat = revoke_patch(1);
-    assert!(is_conflict(commit_policy(
+    assert!(is_conflict(&commit_policy(
         &store,
         &author,
         &scope,
@@ -488,7 +488,7 @@ fn t_f012_002_publishes_the_next_version_and_revokes_an_exact_version() {
         &repeat
     )));
     let missing = revoke_patch(3);
-    assert!(is_conflict(commit_policy(
+    assert!(is_conflict(&commit_policy(
         &store,
         &author,
         &scope,
@@ -522,7 +522,7 @@ fn t_f012_002_refuses_out_of_scope_profiles_divergent_digests_and_outsides() {
 
     // Profil réservé à un autre projet.
     let reserved = Policy::bounded(&[foreign.reference()]).patch();
-    assert!(is_conflict(commit_policy(
+    assert!(is_conflict(&commit_policy(
         &store,
         &author,
         &scope,
@@ -532,7 +532,7 @@ fn t_f012_002_refuses_out_of_scope_profiles_divergent_digests_and_outsides() {
     )));
     // Digest divergent de la version configurée.
     let stale_digest = Policy::bounded(&[divergent]).patch();
-    assert!(is_conflict(commit_policy(
+    assert!(is_conflict(&commit_policy(
         &store,
         &author,
         &scope,
@@ -542,7 +542,7 @@ fn t_f012_002_refuses_out_of_scope_profiles_divergent_digests_and_outsides() {
     )));
     // Repli qui ne figure pas parmi les profils autorisés.
     let outside = widened.patch();
-    assert!(is_conflict(commit_policy(
+    assert!(is_conflict(&commit_policy(
         &store,
         &author,
         &scope,
@@ -553,7 +553,7 @@ fn t_f012_002_refuses_out_of_scope_profiles_divergent_digests_and_outsides() {
     // Profil réservé au projet, publié depuis les réglages utilisateur.
     let home = Scope::user();
     let project_patch = Policy::bounded(&[profile.reference()]).patch();
-    assert!(is_conflict(commit_policy(
+    assert!(is_conflict(&commit_policy(
         &store,
         &author,
         &home,
@@ -592,7 +592,7 @@ fn t_f012_002_refuses_out_of_contract_limits_and_non_human_authority() {
     let mut command = 0xf012_0040u128;
     let mut refuse = |policy: &Policy| {
         command += 1;
-        assert!(is_invalid(commit_policy(
+        assert!(is_invalid(&commit_policy(
             &store,
             &author,
             &scope,

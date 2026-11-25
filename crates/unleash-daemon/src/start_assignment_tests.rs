@@ -660,7 +660,7 @@ fn project_settings(project: Uuid, policy: &Value) -> Value {
     json!({"scope_kind":"project","scope_id":project,"patch":{"model_policy_version":policy}})
 }
 
-fn is_model_conflict(result: Result<CommandReceipt, ClientError>) -> bool {
+fn is_model_conflict(result: &Result<CommandReceipt, ClientError>) -> bool {
     matches!(
         result,
         Err(ClientError::Remote(error))
@@ -765,7 +765,7 @@ async fn revokes_a_published_model_policy_version_through_settings() {
     );
 
     // La révocation répétée est refusée sans rien engager.
-    let repeated = set_model_policy(
+    let duplicate = set_model_policy(
         &mut route.client,
         &route.assign,
         0x59d6,
@@ -774,7 +774,7 @@ async fn revokes_a_published_model_policy_version_through_settings() {
         &model_policy_revocation(1),
     )
     .await;
-    assert!(is_model_conflict(repeated));
+    assert!(is_model_conflict(&duplicate));
     assert_eq!(route.client.query(&read).await.unwrap().result, published);
 
     drop(route.client);
@@ -785,7 +785,7 @@ async fn revokes_a_published_model_policy_version_through_settings() {
         .unwrap();
     drop(route.daemon);
     let (daemon, mut client) = start(route.config).await;
-    let mut replay = command(
+    let mut retransmitted = command(
         &route.assign,
         0x59d5,
         "SetSettings",
@@ -793,8 +793,8 @@ async fn revokes_a_published_model_policy_version_through_settings() {
         2,
         project_settings(project, &model_policy_revocation(1)),
     );
-    replay.request_id = RequestId::from_u128(0x59d7);
-    assert_eq!(client.send_command(&replay).await.unwrap(), revoked);
+    retransmitted.request_id = RequestId::from_u128(0x59d7);
+    assert_eq!(client.send_command(&retransmitted).await.unwrap(), revoked);
     assert_eq!(client.query(&read).await.unwrap().result, published);
     drop(client);
     daemon
@@ -830,7 +830,7 @@ async fn refuses_a_model_policy_without_edition_right_or_outside_the_envelope_sc
     let (mut route, project, _profile, read, publish) = unpublished_model_policy().await;
 
     // Acteur sans droit d'édition : la preuve administrative manque.
-    let mut unprivileged = UnleashClient::connect(
+    let mut plain_client = UnleashClient::connect(
         ClientConfig::new(
             route.daemon.socket_path().to_owned(),
             ClientKind::Cli,
@@ -841,10 +841,10 @@ async fn refuses_a_model_policy_without_edition_right_or_outside_the_envelope_sc
     .await
     .unwrap();
     assert!(matches!(
-        unprivileged.send_command(&publish).await,
+        plain_client.send_command(&publish).await,
         Err(ClientError::Remote(error)) if error.code == ErrorCode::CapabilityDenied
     ));
-    drop(unprivileged);
+    drop(plain_client);
 
     // Portée du patch incompatible avec l'enveloppe : réglages utilisateur sous un projet.
     let mut crossed = publish.clone();
@@ -904,14 +904,12 @@ async fn refuses_a_model_policy_patch_outside_the_closed_contract_or_incoherent_
     divergent.command_id = CommandId::from_u128(0x59e8);
     divergent.payload["patch"]["model_policy_version"]["allowed_profiles"][0]["digest"] =
         json!(Sha256Digest::from_bytes(b"other fixture version"));
-    assert!(is_model_conflict(
-        route.client.send_command(&divergent).await
-    ));
+    assert!(is_model_conflict(&route.client.send_command(&divergent).await));
     let mut widened = publish.clone();
     widened.command_id = CommandId::from_u128(0x59ea);
     widened.payload["patch"]["model_policy_version"]["fallback_profiles"] =
         json!([{"profile_id":PROFILE,"profile_version":2,"digest":profile["digest"]}]);
-    assert!(is_model_conflict(route.client.send_command(&widened).await));
+    assert!(is_model_conflict(&route.client.send_command(&widened).await));
     let missing = set_model_policy(
         &mut route.client,
         &route.assign,
@@ -921,7 +919,7 @@ async fn refuses_a_model_policy_patch_outside_the_closed_contract_or_incoherent_
         &model_policy_revocation(1),
     )
     .await;
-    assert!(is_model_conflict(missing));
+    assert!(is_model_conflict(&missing));
 
     let settings = route.client.query(&read).await.unwrap().result;
     assert_eq!(settings["revision"], json!(0));
