@@ -505,7 +505,7 @@ pub fn store_canary_secrets(path: &Path, canaries: &[&str]) -> Result<(), Proces
 }
 
 /// Génère 32 octets aléatoires depuis la source d'aléa du système (`/dev/urandom` ou
-/// `getrandom` sous Unix, `BCryptGenRandom` sous Windows).
+/// `getrandom` sous Unix, `ProcessPrng` sous Windows).
 ///
 /// # Errors
 /// [`ProcessHostError::RandomSourceUnavailable`] si la source est indisponible : aucun repli

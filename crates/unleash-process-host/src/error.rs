@@ -89,8 +89,9 @@ pub enum ProcessHostError {
     },
 
     /// La source d'aléa du système est indisponible ; aucun repli déterministe n'est
-    /// produit (`REQ-TERM-003`).
-    #[error("Source d'aléa du système indisponible (RANDOM_SOURCE_UNAVAILABLE)")]
+    /// produit (`REQ-TERM-003`). Erreur interne sans code de raison dédié : le catalogue
+    /// des raisons du contrat n'en définit aucun, et aucun n'est annoncé ici.
+    #[error("Source d'aléa du système indisponible")]
     RandomSourceUnavailable,
 
     /// Tentative d'invocation modèle depuis un process-host strictement interdite (`REQ-TERM-004`).
