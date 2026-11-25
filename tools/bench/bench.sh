@@ -16,12 +16,24 @@
 # `RUSTFLAGS=-D warnings` est fixé comme dans la CI.
 set -eu
 
+# Une seule lecture du script, en mémoire : une modification du fichier ne touche que les invocations futures.
+# Le drapeau porte le chemin du script : un script lancé par un autre (gates.sh vers bench.sh) se relit aussi.
+if [ "${UNLEASH_BENCH_IN_MEMORY:-}" != "$0" ] && [ -f "$0" ]; then
+    export UNLEASH_BENCH_IN_MEMORY="$0"
+    exec sh -c "$(cat -- "$0")" "$0" "$@"
+fi
+
 # Racine du dépôt (checkout ou worktree) qui contient ce script : les sources en sont lues par git archive.
 here=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd -P)
 repo=$(git -C "$here" rev-parse --show-toplevel)
 context=desktop-linux
 socket=$HOME/.docker/run/docker.sock
 registry=$HOME/.cargo/registry
+# Verrou global des bancs (voir acquire_bench_lock) ; hors partage des preuves. Un seul dossier
+# pour tous les worktrees du dépôt, donc pour tous les bancs de la machine : le checkout racine.
+git_common=$(git -C "$here" rev-parse --git-common-dir)
+case $git_common in /*) ;; *) git_common=$here/$git_common ;; esac
+lock_root=${UNLEASH_BENCH_LOCK_DIR:-$(dirname -- "$git_common")/.claude/cache/bench}
 image=${UNLEASH_BENCH_IMAGE:-unleash-bench:1.94.1-bookworm-20261124}
 toolchain=1.94.1
 bench_label=${UNLEASH_BENCH_LABEL:-tools/bench}
@@ -38,13 +50,13 @@ dock() {
 }
 
 api_ok() {
-    [ "$(dock 8s context inspect "$context" --format '{{.Endpoints.docker.Host}}')" = "unix://$socket" ] || return 1
-    [ "$(curl --connect-timeout 2 --max-time 5 --unix-socket "$socket" -fsS http://localhost/_ping 2>/dev/null)" = OK ]
+    [ "$(dock 90s context inspect "$context" --format '{{.Endpoints.docker.Host}}')" = "unix://$socket" ] || return 1
+    [ "$(curl --connect-timeout 10 --max-time 60 --unix-socket "$socket" -fsS http://localhost/_ping 2>/dev/null)" = OK ]
 }
 
 require_bench() {
     api_ok || { printf '%s\n' "L'API Docker ne répond pas sur $socket." >&2; exit 3; }
-    state=$(dock 8s inspect --format '{{.State.Status}} {{.HostConfig.NetworkMode}}' "$1")
+    state=$(dock 90s inspect --format '{{.State.Status}} {{.HostConfig.NetworkMode}}' "$1")
     [ "$state" = 'running none' ] || {
         printf 'Conteneur %s dans l état %s ; banc arrêté ou réseau inattendu, réconciliation requise.\n' "$1" "$state" >&2
         exit 3
@@ -53,7 +65,7 @@ require_bench() {
 
 # Le démon exige une colonne PID dès que des options ps sont fournies à docker top.
 require_idle() {
-    processes=$(dock 12s top "$1" -eo pid,comm)
+    processes=$(dock 240s top "$1" -eo pid,comm)
     printf '%s\n' "$processes" | awk '
         NR == 1 { next }
         /^[[:space:]]*[0-9]+[[:space:]]+(docker-init|tini|sleep)[[:space:]]*$/ { next }
@@ -61,10 +73,43 @@ require_idle() {
     ' || { printf 'Processus à réconcilier dans le banc %s :\n%s\n' "$1" "$processes" >&2; exit 3; }
 }
 
+# Verrou global des bancs : un seul contrôle (compilation puis exécution) à la fois sur le
+# volume de compilation partagé, pour que les binaires déversés (`unleashd`,
+# `unleash-process-host`) soient toujours ceux de l'arbre du banc qui exécute. Le verrou est un
+# dossier créé par `mkdir` (atomique) ; il est libéré à la fin du contrôle et repris si son
+# propriétaire n'existe plus.
+acquire_bench_lock() {
+    lock=$lock_dir/hold
+    n=0
+    until mkdir "$lock" 2>/dev/null; do
+        owner=$(cat "$lock/pid" 2>/dev/null || true)
+        if [ -n "$owner" ] && ! kill -0 "$owner" 2>/dev/null; then
+            rm -f "$lock/pid"
+            rmdir "$lock" 2>/dev/null || true
+            continue
+        fi
+        n=$((n + 1))
+        if [ "$n" -eq 1 ]; then
+            printf 'Attente du verrou des bancs : un seul contrôle à la fois sur le volume partagé.\n' >&2
+        fi
+        if [ "$n" -gt 1440 ]; then
+            printf 'Verrou des bancs occupé depuis plus de quatre heures ; abandon.\n' >&2
+            return 3
+        fi
+        sleep 10
+    done
+    printf '%s\n' "$$" > "$lock/pid"
+}
+
+release_bench_lock() {
+    rm -f "$lock_dir/hold/pid"
+    rmdir "$lock_dir/hold" 2>/dev/null || true
+}
+
 write_probe() {
     dir=$1
     # shellcheck disable=SC2016
-    dock 15s exec "$bench" /bin/sh -eu -c '
+    dock 240s exec "$bench" /bin/sh -eu -c '
         mkdir -p "$1"
         marker=$(mktemp "$1/.bench-write.XXXXXX")
         printf "%s\n" ready > "$marker"
@@ -79,7 +124,7 @@ cmd_preflight() {
     require_bench "$bench"
     require_idle "$bench"
     # shellcheck disable=SC2016
-    dock 12s exec "$bench" /bin/sh -eu -c '
+    dock 240s exec "$bench" /bin/sh -eu -c '
         printf "Commande exécutée dans le banc : rustc %s, git %s, node %s, pnpm %s\n" \
             "$(rustc +"$1" --version | cut -d" " -f2)" "$(git --version | cut -d" " -f3)" \
             "$(node --version)" "$(pnpm --version)"
@@ -87,11 +132,11 @@ cmd_preflight() {
     for dir in /work /tmp /cargo-target /cargo-home; do
         write_probe "$dir"
     done
-    [ "$(dock 10s exec "$bench" readlink /cargo-home/registry)" = /usr/local/cargo/registry ] || {
+    [ "$(dock 240s exec "$bench" readlink /cargo-home/registry)" = /usr/local/cargo/registry ] || {
         printf '%s\n' 'Le registre Cargo du banc ne pointe pas vers le montage en lecture seule.' >&2
         exit 3
     }
-    dock 10s exec "$bench" /bin/sh -eu -c 'pkg-config --exists gdk-3.0 webkit2gtk-4.1 && printf "%s\n" "GTK3 et WebKitGTK présents."'
+    dock 240s exec "$bench" /bin/sh -eu -c 'pkg-config --exists gdk-3.0 webkit2gtk-4.1 && printf "%s\n" "GTK3 et WebKitGTK présents."'
     printf '%s\n' "Prévol du banc $bench réussi : commande exécutée, écritures vérifiées."
 }
 
@@ -109,13 +154,17 @@ cmd_create() {
         esac
     done
     api_ok
-    dock 120s run --detach --name "$name" --label io.unleash.bench="$bench_label" \
+    # UNLEASH_BENCH_TARGET_VOLUME partage un volume de compilation entre bancs d'une même ligne :
+    # les dépendances déjà construites servent à tous et Cargo série les compilations (verrou du
+    # répertoire de compilation), ce qui convient à un disque de VM lent.
+    target_volume=${UNLEASH_BENCH_TARGET_VOLUME:-unleash-bench-$name-target}
+    dock 900s run --detach --name "$name" --label io.unleash.bench="$bench_label" \
         --init --network none --cpus "$cpus" --memory "$memory" --pids-limit 4096 \
         --mount "type=bind,source=$registry,target=/usr/local/cargo/registry,readonly" \
         --mount "type=volume,source=unleash-bench-$name-cargo-home,target=/cargo-home" \
-        --mount "type=volume,source=unleash-bench-$name-target,target=/cargo-target" \
+        --mount "type=volume,source=$target_volume,target=/cargo-target" \
         "$image" sleep infinity
-    dock 30s exec "$name" /bin/sh -eu -c '
+    dock 300s exec "$name" /bin/sh -eu -c '
         mkdir -p /work /cargo-home /cargo-target
         ln -sfn /usr/local/cargo/registry /cargo-home/registry
     '
@@ -128,7 +177,7 @@ archive_into() {
     git -C "$repo" archive --format=tar "$3" \
         Cargo.toml Cargo.lock rust-toolchain.toml rustfmt.toml clippy.toml deny.toml \
         crates apps .claude ':(exclude).claude/state' \
-        | dock 600s exec -i "$1" /bin/sh -eu -c 'tar -m -x -C "$1"' sh "$2"
+        | dock 1800s exec -i "$1" /bin/sh -eu -c 'tar -m -x -C "$1"' sh "$2"
 }
 
 cmd_source() {
@@ -140,9 +189,9 @@ cmd_source() {
     dir=/work/src-$label
     # Chemins suivis seulement : ni node_modules, ni dist, ni état, ni preuves.
     # shellcheck disable=SC2016
-    dock 15s exec "$bench" /bin/sh -eu -c '[ ! -e "$1" ] || { printf "%s\n" "Source déjà présente : $1" >&2; exit 3; }' sh "$dir"
+    dock 240s exec "$bench" /bin/sh -eu -c '[ ! -e "$1" ] || { printf "%s\n" "Source déjà présente : $1" >&2; exit 3; }' sh "$dir"
     # shellcheck disable=SC2016
-    dock 15s exec "$bench" /bin/sh -eu -c 'mkdir -p "$1"' sh "$dir"
+    dock 240s exec "$bench" /bin/sh -eu -c 'mkdir -p "$1"' sh "$dir"
     archive_into "$bench" "$dir" "$commit"
     printf 'source %s commit=%s dir=%s\n' "$label" "$commit" "$dir"
 }
@@ -156,7 +205,7 @@ cmd_resync() {
     commit=$(git -C "$repo" rev-parse --verify "$rev^{commit}")
     dir=/work/src-$label
     # shellcheck disable=SC2016
-    dock 60s exec "$bench" /bin/sh -eu -c '
+    dock 1800s exec "$bench" /bin/sh -eu -c '
         src=$1 keep=$1.keep
         [ -d "$src" ] || { printf "%s\n" "Source absente : $src" >&2; exit 3; }
         rm -rf "$keep"
@@ -171,7 +220,7 @@ cmd_resync() {
     ' sh "$dir"
     archive_into "$bench" "$dir" "$commit"
     # shellcheck disable=SC2016
-    dock 30s exec "$bench" /bin/sh -eu -c '
+    dock 600s exec "$bench" /bin/sh -eu -c '
         src=$1 keep=$1.keep
         mkdir -p "$src/apps/gui-renderer"
         for name in node_modules dist; do
@@ -189,9 +238,11 @@ run_logged() {
     bench=$1 label=$2 log=$3 limit=$4 dir=$5
     shift 5
     require_idle "$bench"
+    acquire_bench_lock
     status=0
+    trap 'release_bench_lock' EXIT INT TERM
     # shellcheck disable=SC2016
-    dock $((limit + 60))s exec "$bench" /bin/sh -c '
+    dock $((limit + 600))s exec "$bench" /bin/sh -c '
         cd "$1" || exit 3
         label=$2 limit=$3
         shift 3
@@ -210,9 +261,11 @@ run_logged() {
     count=$(grep -Fxc "$marker" "$log" || :)
     if [ "$count" != 1 ]; then
         printf 'Issue inconnue pour %s : code %s, marqueur %s fois, journal %s\n' "$label" "$status" "$count" "$log" >&2
+        release_bench_lock
         return 3
     fi
     printf '%s code %s, journal %s\n' "$label" "$status" "$log"
+    release_bench_lock
     return "$status"
 }
 
@@ -259,6 +312,8 @@ cmd_shell() {
 }
 
 [ $# -ge 1 ] || usage
+mkdir -p "$lock_root"
+lock_dir=$lock_root
 command=$1
 shift
 case $command in
