@@ -66,6 +66,22 @@ async fn block_before_dispatch(
     }
 }
 
+/// Point de contrôle du harnais, atteint hors du thread writer ; inerte avec l'observateur de production.
+async fn harness_checkpoint(
+    state: &Arc<DaemonRuntimeState>,
+    activity: &Arc<BrokerActivityGuard>,
+    checkpoint: StoreCutpoint,
+) -> bool {
+    let observer = Arc::clone(&state.store.config().cutpoints);
+    let task_activity = Arc::clone(activity);
+    tokio::task::spawn_blocking(move || {
+        let _activity = task_activity;
+        observer.hit(checkpoint).is_ok()
+    })
+    .await
+    .unwrap_or(false)
+}
+
 /// Admit a detached orchestration only after the command receipt exists.
 pub(crate) fn start(state: &Arc<DaemonRuntimeState>, backup_id: BackupId) {
     let Some(activity) = state.broker_activity.admit() else {
@@ -223,6 +239,15 @@ async fn run(
         .await;
         return Err(());
     }
+    if !harness_checkpoint(
+        &state,
+        &activity,
+        StoreCutpoint::C11iAfterBackupRevalidation,
+    )
+    .await
+    {
+        return Err(());
+    }
     let authority = compute_effective_authority(
         None,
         record.policy_revision,
@@ -321,6 +346,15 @@ async fn run(
             return Err(());
         }
     };
+    if !harness_checkpoint(
+        &state,
+        &activity,
+        StoreCutpoint::C11jAfterBackupAuthorization,
+    )
+    .await
+    {
+        return Err(());
+    }
     let executor = BackupExecutor {
         store: Arc::clone(&state.store),
         record: record.clone(),
