@@ -89,6 +89,58 @@ pub(crate) fn adopt_placement_if_ready(
     )?))
 }
 
+/// Issue de la recherche de placement d'un probe de génération, pour le journal (REQ-MODEL-015).
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum PlacementReport {
+    /// Placement adopté et mis en scène pour l'ordonnanceur.
+    Adopted(uuid::Uuid),
+    /// Aucun service managé n'offre encore d'écoute confirmée.
+    AwaitingEvidence,
+    /// Le writer a refusé la lecture ou l'adoption.
+    Refused { code: String },
+    /// La tâche du writer n'a pas rendu de réponse exploitable.
+    Indeterminate,
+}
+
+/// Classe l'issue de la recherche de placement ; le refus garde le code du writer.
+pub(crate) fn placement_report(
+    result: &Result<Result<Option<uuid::Uuid>, ProviderServiceLaunchError>, tokio::task::JoinError>,
+) -> PlacementReport {
+    match result {
+        Ok(Ok(Some(evidence))) => PlacementReport::Adopted(*evidence),
+        Ok(Ok(None)) => PlacementReport::AwaitingEvidence,
+        Ok(Err(error)) => PlacementReport::Refused {
+            code: error.diagnostic_code().into_owned(),
+        },
+        Err(_) => PlacementReport::Indeterminate,
+    }
+}
+
+fn log_placement(report: &PlacementReport, probe: uuid::Uuid) {
+    match report {
+        PlacementReport::Adopted(evidence) => tracing::info!(
+            probe_id = %probe,
+            evidence_id = %evidence,
+            "Placement du probe de génération adopté"
+        ),
+        PlacementReport::AwaitingEvidence => tracing::debug!(
+            probe_id = %probe,
+            code = "placement_evidence_pending",
+            "Placement du probe de génération en attente d'une écoute managée"
+        ),
+        PlacementReport::Refused { code } => tracing::warn!(
+            probe_id = %probe,
+            code = %code,
+            "Placement du probe de génération refusé par le writer"
+        ),
+        PlacementReport::Indeterminate => tracing::warn!(
+            probe_id = %probe,
+            code = "placement_writer_task",
+            "Issue du writer de placement indéterminée"
+        ),
+    }
+}
+
 pub(crate) fn start(
     state: &Arc<DaemonRuntimeState>,
     session: &AuthenticatedSession,
@@ -142,16 +194,19 @@ pub(crate) fn start(
                         )
                     })
                     .await;
-                    if !matches!(placement, Ok(Ok(_))) {
-                        tracing::debug!("Placement du probe de génération en attente");
-                    }
+                    // Seule l'absence de preuve est une attente silencieuse ; un refus ou une
+                    // tâche sans réponse est un avertissement, avec son code.
+                    log_placement(&placement_report(&placement), command.aggregate_id);
                 }
             }
             Ok(Err(error)) => tracing::warn!(
                 code=%error.error_code(), reason=?error.reason_code(),
                 "Préparation du broker de génération en attente",
             ),
-            Err(_) => tracing::warn!("Issue du writer de génération indéterminée"),
+            Err(_) => tracing::warn!(
+                code = "generation_writer_task",
+                "Issue du writer de génération indéterminée"
+            ),
         }
         drop(activity);
     });

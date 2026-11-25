@@ -8,7 +8,10 @@ use std::{
     time::{Duration, Instant},
 };
 
-use super::{OwnedProviderServiceHost, ProviderServiceLaunchError, spawn_provider_service_host};
+use super::{
+    OwnedProviderServiceHost, ProviderServiceLaunchError, ProviderServiceLaunchRefused,
+    spawn_provider_service_host,
+};
 use crate::executors::{ExecutorRegistration, ExecutorState, RendezvousExecutorController};
 use unleash_domain::{ActionState, DispatchId};
 use unleash_platform::{OsProcessIdentity, observe_owned_tcp_listener};
@@ -17,7 +20,8 @@ use unleash_protocol::CommandEnvelope;
 use unleash_store::{
     BrokerPhaseCommit, CallerAuthority, ManagedProviderListener, PreparedProviderProbe,
     ProviderServiceLaunchAttestation, ProviderServiceLaunchContext, ProviderServiceLaunchOutcome,
-    ProviderServiceLaunchPermit, ProviderServiceProcessIdentity, StoreError, UnleashStore,
+    ProviderServiceLaunchPermit, ProviderServiceLaunchRefusal, ProviderServiceProcessIdentity,
+    StoreError, UnleashStore,
 };
 
 /// Durable disposition of a managed provider service launch.
@@ -25,8 +29,21 @@ use unleash_store::{
 pub struct ManagedProviderServiceLaunch {
     /// Commit of the outcome, including the event cursor.
     pub commit: BrokerPhaseCommit,
-    /// `ObservedSuccess` for an attested launch or `OutcomeUnknown` otherwise.
+    /// `ObservedSuccess`, `ObservedFailure` for a refusal without effect, or `OutcomeUnknown`.
     pub state: ActionState,
+    /// Certain or unknown issue of the launch, distinct from the broker state.
+    pub disposition: ProviderServiceLaunchDisposition,
+}
+
+/// Issue d'un lancement de service managé.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProviderServiceLaunchDisposition {
+    /// Hôte de processus lancé et service attesté.
+    Attested,
+    /// Aucun processus lancé : refus certain, sans effet à réconcilier.
+    NotStarted(ProviderServiceLaunchRefused),
+    /// Hôte lancé sans attestation : l'issue reste à réconcilier.
+    Unconfirmed,
 }
 
 pub(crate) struct ManagedProviderServiceHosts {
@@ -59,6 +76,11 @@ impl ManagedProviderServiceHosts {
         self.launch_with_binary(store, envelope, caller, bootstrap, permit, &executable)
     }
 
+    /// Lance le service ou solde son refus ; l'issue durable n'est jamais laissée indéterminée.
+    ///
+    /// Sûreté à l'annulation : cette fonction est synchrone. Un appelant interrompu ne peut
+    /// l'arrêter qu'entre le `spawn` de l'hôte et la consignation du writer ; le marqueur de
+    /// dispatch reste alors engagé et impose la réconciliation, sans second permis.
     pub(super) fn launch_with_binary(
         &self,
         store: &UnleashStore,
@@ -71,7 +93,7 @@ impl ManagedProviderServiceHosts {
         let context = permit.context().clone();
         let launch_id = context.launch_id;
         let dispatch_id = permit.dispatch_id();
-        let registration = ExecutorRegistration {
+        let mut registration = ExecutorRegistration {
             executor_id: permit.context().host_id.to_string(),
             data_root: store.config().data_root.clone(),
             pid: None,
@@ -80,39 +102,102 @@ impl ManagedProviderServiceHosts {
             os_identity: None,
             state: ExecutorState::Active,
         };
-        let attestation = if self.register(&registration) {
-            let started =
-                spawn_provider_service_host(store, envelope, caller, bootstrap, permit, executable);
-            self.observe_started(context, registration, started)
-        } else {
-            None
+        // Tout refus certain survenu avant un processus fils est journalisé et soldé en échec
+        // observé sans effet : il ne reste jamais une issue inconnue (REQ-MODEL-015).
+        let (refused, attested) = match self.register(&registration) {
+            Err(code) => {
+                tracing::warn!(
+                    code,
+                    launch_id = %launch_id,
+                    dispatch_id = %dispatch_id,
+                    "Lancement du service fournisseur refusé : registre d'exécuteurs indisponible"
+                );
+                (
+                    Some(ProviderServiceLaunchRefused::from_kind(
+                        ProviderServiceLaunchRefusal::LaunchUnavailable,
+                        "executor_registry_unavailable",
+                        "io",
+                    )),
+                    None,
+                )
+            }
+            Ok(()) => match spawn_provider_service_host(
+                store,
+                envelope,
+                caller,
+                bootstrap,
+                permit,
+                executable,
+            ) {
+                Ok(host) => (None, self.observe_started(context, registration, host, launch_id)),
+                Err(refused) => {
+                    tracing::warn!(
+                        code = refused.code,
+                        kind = refused.kind,
+                        cause = ?refused.cause,
+                        launch_id = %launch_id,
+                        dispatch_id = %dispatch_id,
+                        "Lancement du service fournisseur refusé avant tout processus"
+                    );
+                    registration.state = ExecutorState::Neutralized;
+                    if let Err(code) = self.register(&registration) {
+                        tracing::warn!(
+                            code,
+                            launch_id = %launch_id,
+                            dispatch_id = %dispatch_id,
+                            "Retrait du registre indisponible après un lancement refusé"
+                        );
+                    }
+                    (Some(refused), None)
+                }
+            },
         };
-        let (outcome, state) = match attestation {
-            Some(proof) if !store.config().clock_uncertain.load(Ordering::Acquire) => (
+        let (outcome, state, disposition) = match (refused, attested) {
+            (Some(refused), _) => (
+                ProviderServiceLaunchOutcome::NotStarted {
+                    cause: refused.cause,
+                },
+                ActionState::ObservedFailure,
+                ProviderServiceLaunchDisposition::NotStarted(refused),
+            ),
+            (None, Some(proof)) if !store.config().clock_uncertain.load(Ordering::Acquire) => (
                 ProviderServiceLaunchOutcome::Attested(Box::new(proof)),
                 ActionState::ObservedSuccess,
+                ProviderServiceLaunchDisposition::Attested,
             ),
-            _ => (
-                ProviderServiceLaunchOutcome::Unconfirmed,
-                ActionState::OutcomeUnknown,
-            ),
+            (None, attested) => {
+                if attested.is_some() {
+                    tracing::warn!(
+                        code = "clock_uncertain",
+                        launch_id = %launch_id,
+                        dispatch_id = %dispatch_id,
+                        "Hôte du service fournisseur attesté sous horloge incertaine : issue inconnue"
+                    );
+                }
+                (
+                    ProviderServiceLaunchOutcome::Unconfirmed,
+                    ActionState::OutcomeUnknown,
+                    ProviderServiceLaunchDisposition::Unconfirmed,
+                )
+            }
         };
         let commit =
             store.commit_provider_service_launch_observation(launch_id, dispatch_id, outcome)?;
-        Ok(ManagedProviderServiceLaunch { commit, state })
+        Ok(ManagedProviderServiceLaunch {
+            commit,
+            state,
+            disposition,
+        })
     }
 
+    /// Retient l'hôte démarré avant de chercher son attestation ; `None` laisse l'issue inconnue.
     fn observe_started(
         &self,
         context: ProviderServiceLaunchContext,
         mut registration: ExecutorRegistration,
-        started: Result<OwnedProviderServiceHost, ProviderServiceLaunchError>,
+        host: OwnedProviderServiceHost,
+        launch_id: uuid::Uuid,
     ) -> Option<ProviderServiceLaunchAttestation> {
-        let Ok(host) = started else {
-            registration.state = ExecutorState::Neutralized;
-            self.register(&registration);
-            return None;
-        };
         let dispatch = host.dispatch_id();
         let service = Arc::new(OwnedService {
             context,
@@ -123,25 +208,49 @@ impl ManagedProviderServiceHosts {
             .unwrap_or_else(PoisonError::into_inner)
             .insert(dispatch, Arc::clone(&service));
         let mut host = service.host.lock().unwrap_or_else(PoisonError::into_inner);
-        let identity = host.host_identity.as_ref()?;
+        let Some(identity) = host.host_identity.as_ref() else {
+            tracing::warn!(
+                code = "host_identity_unverified",
+                launch_id = %launch_id,
+                dispatch_id = %dispatch,
+                "Hôte du service fournisseur lancé sans identité vérifiable : issue inconnue"
+            );
+            return None;
+        };
         registration.pid = Some(identity.pid);
         registration.boot_identity = Some(identity.boot_identity.as_str().into());
         registration.start_identity = Some(identity.start_identity.as_str().into());
         registration.os_identity = Some(identity.clone());
-        if !self.register(&registration) {
+        if let Err(code) = self.register(&registration) {
+            tracing::warn!(
+                code,
+                launch_id = %launch_id,
+                dispatch_id = %dispatch,
+                "Hôte du service fournisseur lancé : registre d'exécuteurs indisponible"
+            );
             return None;
         }
-        wait_for_attestation(&mut host).ok()
+        match wait_for_attestation(&mut host) {
+            Ok(proof) => Some(proof),
+            Err(error) => {
+                tracing::warn!(
+                    code = %error.diagnostic_code(),
+                    launch_id = %launch_id,
+                    dispatch_id = %dispatch,
+                    "Hôte du service fournisseur lancé sans attestation : issue inconnue"
+                );
+                None
+            }
+        }
     }
 
-    fn register(&self, registration: &ExecutorRegistration) -> bool {
+    fn register(&self, registration: &ExecutorRegistration) -> Result<(), &'static str> {
         if RendezvousExecutorController::upsert_registration(&self.rendezvous, registration.clone())
             .is_err()
         {
-            tracing::warn!("Managed provider host registry update unavailable");
-            return false;
+            return Err("executor_registry_unavailable");
         }
-        true
+        Ok(())
     }
 
     pub(crate) fn observe_listener(
@@ -226,12 +335,20 @@ impl ManagedProviderServiceHosts {
             match self.observe_listener(store, dispatch) {
                 Ok(_) if selected.is_some() => return Ok(None),
                 Ok(listener) => selected = Some(listener),
-                Err(ProviderServiceLaunchError::Store(error))
-                    if !matches!(error, StoreError::EvidenceUnavailable(_)) =>
-                {
-                    return Err(error.into());
+                // La preuve de lancement attesté n'est pas encore engagée : attente normale.
+                Err(error @ ProviderServiceLaunchError::Store(StoreError::EvidenceUnavailable(_))) => {
+                    tracing::debug!(
+                        code = %error.diagnostic_code(),
+                        dispatch_id = %dispatch,
+                        "Écoute du service managé en attente de sa preuve de lancement"
+                    );
                 }
-                Err(_) => {}
+                Err(ProviderServiceLaunchError::Store(error)) => return Err(error.into()),
+                Err(error) => tracing::warn!(
+                    code = %error.diagnostic_code(),
+                    dispatch_id = %dispatch,
+                    "Écoute du service managé non confirmée pour le probe de génération"
+                ),
             }
         }
         Ok(selected)

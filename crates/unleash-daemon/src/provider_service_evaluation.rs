@@ -2,8 +2,6 @@
 
 use std::{
     collections::BTreeSet,
-    fs::OpenOptions,
-    os::unix::fs::OpenOptionsExt as _,
     path::Path,
     process::{Child, ExitStatus},
     sync::{Arc, atomic::Ordering},
@@ -36,7 +34,7 @@ use crate::terminal_host_launcher::{PackagedTerminalHostLauncher, TerminalHostLa
 
 mod controller;
 pub(crate) use controller::ManagedProviderServiceHosts;
-pub use controller::ManagedProviderServiceLaunch;
+pub use controller::{ManagedProviderServiceLaunch, ProviderServiceLaunchDisposition};
 
 /// Failure while binding or evaluating a prepared launch.
 #[derive(Debug, thiserror::Error)]
@@ -61,6 +59,12 @@ pub enum ProviderServiceEvaluationError {
 /// Evaluate one new preparation through the durable service journal.
 /// This operation does not issue a process launch permit.
 ///
+/// # Cancellation
+/// Cancelling the caller stops the broker evaluation; no process is launched here. Each broker
+/// phase the journal already committed (`Authorizing`, then `Authorization`) stays durable. An
+/// evaluation cancelled after `Authorizing` leaves its action in `authorizing`: this port then
+/// refuses to evaluate it again, and no permit can be claimed without an `Authorized` action.
+///
 /// # Errors
 /// Returns the failure reported by the writer or broker.
 pub async fn evaluate_provider_service_launch(
@@ -73,6 +77,12 @@ pub async fn evaluate_provider_service_launch(
 }
 
 /// Obtain the exclusive durable permit for this evaluated service launch.
+///
+/// # Cancellation
+/// The dispatch marker is committed by one writer transaction, which a cancelled caller cannot
+/// stop. If the caller is dropped before the permit is returned, the marker stays committed
+/// without a permit: it then imposes reconciliation and forbids any second permit. This
+/// operation starts no process.
 ///
 /// # Errors
 /// Refuses stale or divergent launch material and any already marked dispatch.
@@ -111,7 +121,10 @@ pub async fn claim_prepared_provider_service_launch(
     .await?
 }
 
-/// Failure before launching or while observing a managed provider service.
+/// Failure while observing a managed provider service, or of the daemon's ability to launch.
+///
+/// A refusal that is certain to precede any child process is typed apart, as
+/// [`ProviderServiceLaunchRefused`]: it never leaves an unknown outcome.
 #[derive(Debug, thiserror::Error)]
 pub enum ProviderServiceLaunchError {
     /// The retained bootstrap differs from the broker's preparation.
@@ -120,15 +133,9 @@ pub enum ProviderServiceLaunchError {
     /// The writer refused the last pre-launch check.
     #[error(transparent)]
     Store(#[from] StoreError),
-    /// The clock cannot establish that the permit is still live.
-    #[error("service launch permit expired or clock uncertain")]
-    StalePermit,
     /// The runtime can no longer admit a launch operation.
     #[error("daemon is not accepting provider service launches")]
     Draining,
-    /// A fresh service launch needs a dedicated empty runtime directory.
-    #[error("service launch runtime already in use")]
-    RuntimeInUse,
     /// The owned process-host cannot be authenticated.
     #[error("service host identity unavailable")]
     HostUnverified,
@@ -150,6 +157,59 @@ pub enum ProviderServiceLaunchError {
     /// The launch or ordered publication task became unavailable.
     #[error(transparent)]
     Task(#[from] tokio::task::JoinError),
+}
+
+impl ProviderServiceLaunchError {
+    /// Code de diagnostic sans secret ni message sous-jacent : le code IPC exact pour le store,
+    /// la famille fermée sinon.
+    #[must_use]
+    pub fn diagnostic_code(&self) -> std::borrow::Cow<'static, str> {
+        match self {
+            Self::Store(error) => {
+                std::borrow::Cow::Owned(format!("store:{}", error.error_code()))
+            }
+            _ => std::borrow::Cow::Borrowed(ProviderServiceLaunchRefused::kind_of(self)),
+        }
+    }
+}
+
+/// Lancement refusé avant tout processus fils : échec certain, sans effet à réconcilier.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("managed provider service launch refused before any process: {code} ({kind})")]
+pub struct ProviderServiceLaunchRefused {
+    /// Cause fermée, engagée par le writer avec la disposition du lancement.
+    pub cause: unleash_store::ProviderServiceLaunchRefusal,
+    /// Code de diagnostic statique, sans secret.
+    pub code: &'static str,
+    /// Famille fermée de l'erreur source, sans message ni secret.
+    pub kind: &'static str,
+}
+
+impl ProviderServiceLaunchRefused {
+    /// Classe une erreur de préparation survenue avant tout processus fils.
+    const fn from_kind(
+        cause: unleash_store::ProviderServiceLaunchRefusal,
+        code: &'static str,
+        kind: &'static str,
+    ) -> Self {
+        Self { cause, code, kind }
+    }
+
+    /// Famille fermée d'une erreur de lancement ou d'observation.
+    const fn kind_of(error: &ProviderServiceLaunchError) -> &'static str {
+        match error {
+            ProviderServiceLaunchError::Bootstrap(_) => "bootstrap",
+            ProviderServiceLaunchError::Store(_) => "store",
+            ProviderServiceLaunchError::Draining => "daemon_draining",
+            ProviderServiceLaunchError::HostUnverified => "host_unverified",
+            ProviderServiceLaunchError::ListenerUnverified => "listener_unverified",
+            ProviderServiceLaunchError::Io(_) => "io",
+            ProviderServiceLaunchError::Platform(_) => "platform",
+            ProviderServiceLaunchError::Encoding(_) => "encoding",
+            ProviderServiceLaunchError::ProcessHost(_) => "process_host",
+            ProviderServiceLaunchError::Task(_) => "task",
+        }
+    }
 }
 
 /// Retains the directly spawned host even when its identity or attestation is uncertain.
@@ -207,6 +267,12 @@ pub(crate) fn fresh_provider_service_secret(
     Ok(HostControlSecret::generate()?)
 }
 
+/// Démarre l'hôte de processus détenu d'un service managé, ou refuse avant tout processus fils.
+///
+/// Toute erreur retournée est certaine et survient avant la frontière du `spawn` : aucun
+/// processus n'existe et l'appelant solde le marqueur de dispatch en refus sans effet
+/// (REQ-MODEL-015). Passé le `spawn`, la fonction ne peut plus échouer ; un hôte dont l'identité
+/// ne peut être établie est retenu pour observation et réconciliation.
 fn spawn_provider_service_host(
     store: &UnleashStore,
     envelope: &CommandEnvelope,
@@ -214,46 +280,69 @@ fn spawn_provider_service_host(
     bootstrap: HostBootstrapSpec,
     permit: ProviderServiceLaunchPermit,
     executable: &Path,
-) -> Result<OwnedProviderServiceHost, ProviderServiceLaunchError> {
+) -> Result<OwnedProviderServiceHost, ProviderServiceLaunchRefused> {
+    use unleash_store::ProviderServiceLaunchRefusal as Cause;
     let check_clock = || {
         let config = store.config();
         if config.clock_uncertain.load(Ordering::Acquire)
             || config.clock.now_ms() >= permit.expires_at()
         {
-            return Err(ProviderServiceLaunchError::StalePermit);
+            return Err(ProviderServiceLaunchRefused::from_kind(
+                Cause::StalePermit,
+                "stale_permit",
+                "clock",
+            ));
         }
         Ok(())
     };
     check_clock()?;
-    verify_bootstrap(permit.context(), &bootstrap)?;
+    verify_bootstrap(permit.context(), &bootstrap)
+        .map_err(|error| refused_launch(Cause::BootstrapMismatch, "bootstrap_mismatch", error))?;
     if bootstrap.resource_fence != Fence::new(1) || bootstrap.canaries_secret_path.is_some() {
-        return Err(
-            ProviderServiceEvaluationError::Bootstrap(ProcessHostError::InvalidArgument {
-                reason: "service launch requires a fresh control fence and private runtime".into(),
-            })
-            .into(),
-        );
+        return Err(ProviderServiceLaunchRefused::from_kind(
+            Cause::BootstrapMismatch,
+            "bootstrap_fence",
+            "process_host",
+        ));
     }
-    validate_rendezvous_dir(&bootstrap.runtime_dir)?;
-    if std::fs::read_dir(&bootstrap.runtime_dir)?.next().is_some() {
-        return Err(ProviderServiceLaunchError::RuntimeInUse);
+    validate_rendezvous_dir(&bootstrap.runtime_dir)
+        .map_err(|error| refused_launch(Cause::RuntimeInUse, "runtime_directory_rejected", error))?;
+    let occupied = match std::fs::read_dir(&bootstrap.runtime_dir) {
+        Ok(mut entries) => entries.next().is_some(),
+        Err(error) => {
+            return Err(refused_launch(
+                Cause::RuntimeInUse,
+                "runtime_directory_unreadable",
+                error,
+            ));
+        }
+    };
+    if occupied {
+        return Err(ProviderServiceLaunchRefused::from_kind(
+            Cause::RuntimeInUse,
+            "runtime_in_use",
+            "runtime",
+        ));
     }
-    let bootstrap_path = bootstrap.runtime_dir.join("bootstrap.json");
-    let secret = fresh_provider_service_secret()?;
-    let file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(&bootstrap_path)?;
-    serde_json::to_writer(&file, &bootstrap)?;
-    file.sync_all()?;
-    store_control_secret(&bootstrap.control_secret_path, &secret)?;
-    store.validate_provider_service_launch_permit(envelope, caller, &permit)?;
+    // L'aléa du système n'a aucun repli déterministe : son indisponibilité est certaine.
+    let secret = fresh_provider_service_secret()
+        .map_err(|error| refused_launch(Cause::RandomUnavailable, "random_unavailable", error))?;
+    write_service_bootstrap(&bootstrap)
+        .map_err(|error| refused_launch(Cause::LaunchUnavailable, "bootstrap_write_failed", error))?;
+    store_control_secret(&bootstrap.control_secret_path, &secret).map_err(|error| {
+        refused_launch(Cause::LaunchUnavailable, "control_secret_write_failed", error)
+    })?;
+    store
+        .validate_provider_service_launch_permit(envelope, caller, &permit)
+        .map_err(|error| refused_launch(Cause::StalePermit, "permit_rejected", error))?;
     check_clock()?;
     let dispatch_id = permit.dispatch_id();
     // No path after the spawn boundary can reuse this permit.
     drop(permit);
-    let child = PackagedTerminalHostLauncher.spawn(executable, &bootstrap_path)?;
+    let bootstrap_path = bootstrap.runtime_dir.join("bootstrap.json");
+    let child = PackagedTerminalHostLauncher
+        .spawn(executable, &bootstrap_path)
+        .map_err(|error| refused_launch(Cause::LaunchUnavailable, "spawn_failed", error))?;
     let host_identity = unleash_platform::inspect_process_identity(child.id())
         .ok()
         .filter(|identity| {
@@ -267,6 +356,38 @@ fn spawn_provider_service_host(
         command_id: envelope.command_id,
         dispatch_id,
     })
+}
+
+/// Refus certain avant tout processus fils, avec la famille fermée de son erreur source.
+fn refused_launch<E>(
+    cause: unleash_store::ProviderServiceLaunchRefusal,
+    code: &'static str,
+    error: E,
+) -> ProviderServiceLaunchRefused
+where
+    ProviderServiceLaunchError: From<E>,
+{
+    let error = ProviderServiceLaunchError::from(error);
+    ProviderServiceLaunchRefused::from_kind(cause, code, ProviderServiceLaunchRefused::kind_of(&error))
+}
+
+/// Écrit le bootstrap du service dans son répertoire d'exécution, par la couche plateforme.
+///
+/// L'appelant a vérifié le répertoire vide juste avant : le fichier est donc neuf. L'écriture
+/// est atomique, en `0600`, sans suivi de lien symbolique et sous la garde `.claude/` ; le
+/// démon ne fait lui-même aucun appel système propre à un OS.
+///
+/// # Errors
+/// Refuse un bootstrap non encodable ou un fichier impossible à écrire.
+pub fn write_service_bootstrap(
+    bootstrap: &HostBootstrapSpec,
+) -> Result<(), ProviderServiceLaunchError> {
+    let bytes = serde_json::to_vec(bootstrap)?;
+    unleash_platform::write_private_file_atomic(
+        &bootstrap.runtime_dir.join("bootstrap.json"),
+        &bytes,
+    )?;
+    Ok(())
 }
 
 async fn evaluate_with_probe(

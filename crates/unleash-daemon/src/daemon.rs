@@ -136,10 +136,16 @@ pub struct DaemonHandle {
 }
 
 impl DaemonHandle {
-    /// Observe the owned service's current listener and adopt it for an authenticated generation probe.
+    /// Observe l'écoute courante du service détenu et l'adopte pour un probe de génération.
+    ///
+    /// # Sûreté à l'annulation
+    /// Toute l'écriture est une transaction du writer, exécutée sur un thread bloquant qu'un
+    /// appelant annulé ne peut arrêter. L'annulation laisse donc soit aucun effet, soit le
+    /// placement mis en scène engagé, qu'un appel ultérieur relit depuis le store.
     ///
     /// # Errors
-    /// Refuses missing ownership, mismatched launch or profile, and stale probe or listener evidence.
+    /// Refuse l'absence de propriété, un lancement ou un profil divergent, une preuve de probe
+    /// ou d'écoute périmée, et un daemon qui n'admet plus de travail.
     pub async fn adopt_managed_provider_generation_placement(
         &self,
         command: unleash_protocol::CommandEnvelope,
@@ -167,13 +173,19 @@ impl DaemonHandle {
         .await?
     }
 
-    /// Hand a prepared service dispatch to the daemon's owned process controller.
+    /// Confie un dispatch de service préparé au contrôleur de processus détenu par le démon.
     ///
-    /// A durable unknown disposition is returned as such. The controller retains the
-    /// process-host after a spawn even if observation or publication fails.
+    /// Une issue durable inconnue est rendue comme telle. Le contrôleur retient l'hôte de
+    /// processus après un `spawn`, même si l'observation ou la publication échoue.
+    ///
+    /// # Sûreté à l'annulation
+    /// Le lancement et la consignation de son issue tiennent un garde d'activité du broker
+    /// jusqu'à leur terme : le démon en est le propriétaire à vie et son drainage les attend.
+    /// Un appelant annulé n'arrête ni le `spawn` de l'hôte ni la transaction qui consigne son
+    /// issue ; seul l'avis aux clients peut manquer, que la publication ordonnée suivante reprend.
     ///
     /// # Errors
-    /// The daemon stopped accepting work or could not durably record the disposition.
+    /// Le démon n'admet plus de travail, ou n'a pas pu consigner l'issue de façon durable.
     pub async fn launch_prepared_provider_service(
         &self,
         envelope: unleash_protocol::CommandEnvelope,

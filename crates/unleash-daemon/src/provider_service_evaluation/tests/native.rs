@@ -14,7 +14,9 @@ use unleash_process_host::{
     effective_environment_digest_v1, explicit_environment_v1, inspect_strict_service_launch_plan,
 };
 use unleash_protocol::{ReceiptState, canonical_sha256};
-use unleash_store::{AggregateKind, CommandMutation, CommitCommandRequest};
+use unleash_store::{
+    AggregateKind, CommandMutation, CommitCommandRequest, ProviderServiceLaunchRefusal,
+};
 use unleash_testkit::{TestIsolationProbe, local_test_dir};
 use uuid::Uuid;
 
@@ -200,7 +202,11 @@ fn t_f012_015_launch_permit_rejects_changed_bootstrap_before_start() -> TestResu
     );
     assert!(matches!(
         result,
-        Err(ProviderServiceLaunchError::Bootstrap(_))
+        Err(ProviderServiceLaunchRefused {
+            cause: ProviderServiceLaunchRefusal::BootstrapMismatch,
+            code: "bootstrap_mismatch",
+            kind: "bootstrap",
+        })
     ));
     assert_eq!(
         std::fs::read_dir(&fixture.bootstrap.runtime_dir)?.count(),

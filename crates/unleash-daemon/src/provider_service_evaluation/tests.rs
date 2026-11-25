@@ -10,8 +10,9 @@ use super::*;
 use serde_json::{Value, json};
 use std::sync::atomic::Ordering;
 use unleash_domain::{
-    ActionId, ActionState, ActorId, AuthorityGeneration, AuthorizationEvaluationId, DaemonEpoch,
-    DispatchId, HostId, ProcessId, ProcessRunUuid, Revision, Sha256Digest,
+    ActionId, ActionState, ActorId, AuthorityGeneration, AuthorizationEvaluationId, CommandId,
+    DaemonEpoch, DispatchId, HostId, ProcessId, ProcessRunUuid, RequestId, Revision,
+    Sha256Digest,
 };
 use unleash_process_host::{
     CONTROL_SECRET_FILENAME, EnvironmentMode, IsolationMode as HostIsolationMode,
@@ -24,8 +25,8 @@ use unleash_store::{
     BrokerAuthorizationOutcome, BrokerExecutor, BrokerEvaluation, BrokerPhase,
     BrokerPhaseRequest, CallerAuthority, CallerRole, CommandMutation, CommitCommandRequest,
     PrepareObjectRequest, ProviderProfileConfiguration, ProviderProfilePreparation,
-    ProviderServiceLaunchFingerprint, PublishObjectReferenceRequest, StoreConfig, StoreError,
-    UnleashStore,
+    ProviderServiceLaunchFingerprint, ProviderServiceLaunchRefusal, PublishObjectReferenceRequest,
+    StoreConfig, StoreError, UnleashStore,
 };
 use unleash_testkit::local_test_dir;
 use uuid::Uuid;
@@ -63,13 +64,161 @@ fn t_f012_015_launch_permit_refuses_uncertain_clock_without_preparing_files() ->
     );
     assert!(matches!(
         result,
-        Err(ProviderServiceLaunchError::StalePermit)
+        Err(ProviderServiceLaunchRefused {
+            cause: ProviderServiceLaunchRefusal::StalePermit,
+            code: "stale_permit",
+            kind: "clock",
+        })
     ));
     assert_eq!(
         std::fs::read_dir(&bootstrap.runtime_dir)?.count(),
         0
     );
     assert_eq!(fixture.counts()?, (3, 1, 0));
+    Ok(())
+}
+
+// T-F012-015 / AC-F012-015 / REQ-MODEL-015 — un échec certain survenu avant tout processus
+// fils est un refus net : échec observé sans effet, jamais une issue inconnue.
+#[test]
+fn t_f012_015_launch_refused_before_any_process_is_a_certain_failure() -> TestResult {
+    let fixture = WriterFixture::new()?;
+    let permit = fixture.claim_permit_through_writer()?;
+    let bootstrap = bootstrap_fixture(&fixture.directory.path().canonicalize()?)?;
+    let rendezvous = fixture.directory.path().join("registry");
+    unleash_platform::ensure_private_rendezvous_dir(&rendezvous)?;
+    let controller = ManagedProviderServiceHosts::new(rendezvous);
+    fixture
+        .store
+        .config()
+        .clock_uncertain
+        .store(true, Ordering::Release);
+    let outcome = controller.launch_with_binary(
+        &fixture.store,
+        &fixture.command,
+        &fixture.caller,
+        bootstrap.clone(),
+        permit,
+        &fixture.directory.path().join("unused-host"),
+    )?;
+    assert_eq!(outcome.state, ActionState::ObservedFailure);
+    assert_eq!(
+        outcome.disposition,
+        ProviderServiceLaunchDisposition::NotStarted(ProviderServiceLaunchRefused {
+            cause: ProviderServiceLaunchRefusal::StalePermit,
+            code: "stale_permit",
+            kind: "clock",
+        })
+    );
+    let refused = fixture
+        .store
+        .inspect_broker_action(fixture.action)?
+        .ok_or("missing launch action")?;
+    assert_eq!(refused.state, ActionState::ObservedFailure);
+    assert_eq!(refused.last_event_cursor, outcome.commit.event_cursor);
+    assert_eq!(
+        std::fs::read_dir(&bootstrap.runtime_dir)?.count(),
+        0
+    );
+    assert_eq!(fixture.counts()?, (4, 1, 0));
+    Ok(())
+}
+
+// T-F012-015 / AC-F012-015 / REQ-MODEL-015 — le diagnostic d'un échec de lancement porte un
+// code fermé et ne recopie jamais le message de l'erreur source.
+#[test]
+fn t_f012_015_launch_failures_expose_a_closed_code_without_the_cause_message() -> TestResult {
+    let io = std::io::Error::other("secret-canary-must-not-leak");
+    let error = ProviderServiceLaunchError::Io(io);
+    assert_eq!(error.diagnostic_code(), "io");
+    let denied = ProviderServiceLaunchError::Store(StoreError::Unauthorized(
+        "secret-canary-must-not-leak".into(),
+    ));
+    assert!(denied.diagnostic_code().starts_with("store:"));
+    assert!(!denied.diagnostic_code().contains("secret-canary"));
+    for code in [
+        ProviderServiceLaunchError::Draining.diagnostic_code(),
+        ProviderServiceLaunchError::HostUnverified.diagnostic_code(),
+        ProviderServiceLaunchError::ListenerUnverified.diagnostic_code(),
+    ] {
+        assert!(!code.is_empty());
+    }
+    let refused = refused_launch(
+        ProviderServiceLaunchRefusal::BootstrapMismatch,
+        "bootstrap_mismatch",
+        error,
+    );
+    assert_eq!(refused.kind, "io");
+    assert!(!refused.to_string().contains("secret-canary"));
+    Ok(())
+}
+
+// T-F012-015 / AC-F012-015 / REQ-MODEL-015 — chaque issue de la recherche de placement porte
+// un code ; seul l'absence de preuve est une attente silencieuse.
+#[test]
+fn t_f012_015_generation_placement_outcome_is_reported_with_a_typed_code() -> TestResult {
+    use crate::provider_probe_generation_service::{
+        PlacementReport, adopt_placement_if_ready, placement_report,
+    };
+    let fixture = WriterFixture::new()?;
+    let command = envelope(
+        &fixture.store,
+        &fixture.caller,
+        7,
+        Uuid::from_u128(0xf012_0540),
+        "TestProviderProfile",
+        json!({"phase":"generation_probe"}),
+    )?;
+    let rendezvous = fixture.directory.path().join("registry");
+    unleash_platform::ensure_private_rendezvous_dir(&rendezvous)?;
+    let services = ManagedProviderServiceHosts::new(rendezvous);
+    let refused = adopt_placement_if_ready(&fixture.store, &services, &command, &fixture.caller);
+    let PlacementReport::Refused { code } = placement_report(&Ok(refused)) else {
+        return Err("un placement refusé par le writer doit être rapporté comme tel".into());
+    };
+    assert!(code.starts_with("store:"), "{code}");
+    assert_eq!(
+        placement_report(&Ok(Ok(None))),
+        PlacementReport::AwaitingEvidence
+    );
+    let evidence = Uuid::from_u128(0xf012_0541);
+    assert_eq!(
+        placement_report(&Ok(Ok(Some(evidence)))),
+        PlacementReport::Adopted(evidence)
+    );
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    let cancelled = runtime.block_on(async {
+        let task = tokio::spawn(async {});
+        task.abort();
+        task.await
+    });
+    assert!(cancelled.is_err());
+    assert_eq!(placement_report(&cancelled), PlacementReport::Indeterminate);
+    Ok(())
+}
+
+// T-F012-015 / AC-F012-015 / REQ-MODEL-015 — le bootstrap du service est un fichier privé neuf,
+// écrit par la couche plateforme.
+#[cfg(unix)]
+#[test]
+fn t_f012_015_service_bootstrap_is_written_as_a_private_file() -> TestResult {
+    use std::os::unix::fs::PermissionsExt as _;
+    let root = local_test_dir("f012-service-bootstrap")?;
+    let bootstrap = bootstrap_fixture(&root.path().canonicalize()?)?;
+    write_service_bootstrap(&bootstrap)?;
+    let path = bootstrap.runtime_dir.join("bootstrap.json");
+    let metadata = std::fs::symlink_metadata(&path)?;
+    assert!(metadata.is_file());
+    assert_eq!(metadata.permissions().mode() & 0o777, 0o600);
+    let written: HostBootstrapSpec = serde_json::from_slice(&std::fs::read(&path)?)?;
+    assert_eq!(written, bootstrap);
+    let mut names = std::fs::read_dir(&bootstrap.runtime_dir)?
+        .map(|entry| entry.map(|entry| entry.file_name()))
+        .collect::<Result<Vec<_>, _>>()?;
+    names.sort();
+    assert_eq!(names, vec![std::ffi::OsString::from("bootstrap.json")]);
     Ok(())
 }
 
