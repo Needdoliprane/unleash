@@ -231,15 +231,24 @@ fn t_f001_001_missing_runtime_root_is_a_refusal_not_a_creation() {
         reported.contains(expected_rendezvous.as_str()),
         "le refus doit nommer le chemin du rendez-vous canonique : {reported}"
     );
-    assert!(reported.contains("logind"), "la remédiation doit être indiquée : {reported}");
+    assert!(
+        reported.contains("logind"),
+        "la remédiation doit être indiquée : {reported}"
+    );
     assert!(
         !reported.contains("/tmp"),
         "aucun candidat de repli sous /tmp ne doit être retenu : {reported}"
     );
 
     // Rien n'a été créé : ni la racine, ni un ancêtre, ni un candidat de repli.
-    assert!(!runtime_root.exists(), "la racine runtime ne doit jamais être créée");
-    assert!(!tmp_candidate.exists(), "aucun candidat sous /tmp ne doit être retenu");
+    assert!(
+        !runtime_root.exists(),
+        "la racine runtime ne doit jamais être créée"
+    );
+    assert!(
+        !tmp_candidate.exists(),
+        "aucun candidat sous /tmp ne doit être retenu"
+    );
 }
 
 // T-F001-001 / AC-F001-001 / REQ-CORE-001
@@ -266,8 +275,14 @@ fn t_f001_001_runtime_root_is_qualified_before_the_rendezvous_dir_is_created() {
         reported.contains(missing_rendezvous.as_str()),
         "le refus doit nommer le rendez-vous : {reported}"
     );
-    assert!(reported.contains("logind"), "la remédiation doit être indiquée : {reported}");
-    assert!(!missing.exists(), "la racine runtime ne doit jamais être créée");
+    assert!(
+        reported.contains("logind"),
+        "la remédiation doit être indiquée : {reported}"
+    );
+    assert!(
+        !missing.exists(),
+        "la racine runtime ne doit jamais être créée"
+    );
 
     // 2. Un fichier à la place du répertoire : refus, fichier inchangé.
     let as_file = sandbox.path().join("as-file");
@@ -289,7 +304,10 @@ fn t_f001_001_runtime_root_is_qualified_before_the_rendezvous_dir_is_created() {
     let Some(reason) = refused_runtime_root_reason(&outcome) else {
         panic!("Attendu le refus d'une racine symbolique, obtenu : {outcome:?}");
     };
-    assert!(reason.contains("lien symbolique"), "motif inattendu : {reason}");
+    assert!(
+        reason.contains("lien symbolique"),
+        "motif inattendu : {reason}"
+    );
     assert_eq!(fs::read_dir(&link_target).unwrap().count(), 0);
 
     // 4. Répertoire de mode 0755 : refus, aucun rendez-vous créé.
@@ -361,7 +379,10 @@ fn t_f001_001_qualified_runtime_root_receives_only_the_private_rendezvous_dir() 
             ..
         })
     ));
-    assert_eq!(fs::symlink_metadata(&rendezvous).unwrap().mode() & 0o7777, 0o755);
+    assert_eq!(
+        fs::symlink_metadata(&rendezvous).unwrap().mode() & 0o7777,
+        0o755
+    );
 }
 
 // T-F001-004 / AC-F001-004 / REQ-CORE-004
