@@ -22,7 +22,7 @@ use std::time::Duration;
 
 use serde::Serialize;
 use thiserror::Error;
-use tokio::io::AsyncReadExt;
+use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::process::{Child, ChildStdout, Command};
 use tokio::time::Instant;
 use unleash_domain::Sha256Digest;
@@ -164,7 +164,7 @@ pub(crate) fn classify_ownership(
 /// Vérifie que la racine enregistrée est elle-même un dépôt, sans laisser Git remonter vers un
 /// dépôt parent.
 pub(crate) fn ensure_repository_root(root: &Path) -> Result<(), InventoryError> {
-    let present = |name: &str| std::fs::try_exists(root.join(name)).unwrap_or(false);
+    let present = |name: &str| root.join(name).try_exists().unwrap_or(false);
     let main_or_linked = present(".git");
     let bare = present("HEAD") && present("objects") && present("refs");
     if main_or_linked || bare {
@@ -368,7 +368,7 @@ impl OperationState {
 /// `complete` à `false`.
 fn detect_operations(gitdir: &Path) -> OperationState {
     let mut unreadable = false;
-    let present = |name: &str| match std::fs::try_exists(gitdir.join(name)) {
+    let present = |name: &str| match gitdir.join(name).try_exists() {
         Ok(seen) => seen,
         Err(_) => {
             unreadable = true;
@@ -470,10 +470,10 @@ struct Capture<T> {
     complete: bool,
 }
 
-async fn read_up_to(
-    mut reader: ChildStdout,
-    cap: usize,
-) -> Result<Capture<Vec<u8>>, InventoryError> {
+async fn read_up_to<R>(mut reader: R, cap: usize) -> Result<Capture<Vec<u8>>, InventoryError>
+where
+    R: AsyncRead + Unpin,
+{
     let mut kept = Vec::new();
     let mut complete = true;
     let mut buffer = vec![0u8; READ_CHUNK];
@@ -539,6 +539,16 @@ fn with_overrides(overrides: &[String], command: &[&str]) -> Vec<String> {
     let mut full = overrides.to_vec();
     full.extend(arguments(command));
     full
+}
+
+/// Conserve l'échéance dépassée, seul échec qui arrête toute la collecte, et remplace tout autre
+/// échec par la cause retenue pour l'appelant.
+fn unless_deadline(error: InventoryError, fallback: InventoryError) -> InventoryError {
+    if error == InventoryError::DeadlineReached {
+        error
+    } else {
+        fallback
+    }
 }
 
 /// Lance Git avec le profil de lecture : programme et arguments séparés, jamais d'interpréteur.
@@ -617,19 +627,24 @@ impl Inspector {
             child.wait().await
         })
         .await;
-        let stderr_tail =
-            match tokio::time::timeout_at(self.deadline + CHILD_GRACE, &mut diagnostics).await {
-                Ok(Ok(Ok(capture))) => capture.value,
-                _ => {
-                    diagnostics.abort();
-                    Vec::new()
-                }
-            };
-        let capture = captured?;
-        let code = match exited {
-            Ok(Ok(status)) => status.code(),
-            _ => return Err(InventoryError::DeadlineReached),
+        let stderr_tail = match tokio::time::timeout_at(
+            self.deadline + CHILD_GRACE,
+            &mut diagnostics,
+        )
+        .await
+        {
+            Ok(Ok(Ok(capture))) => capture.value,
+            Ok(Ok(Err(_))) | Ok(Err(_)) | Err(_) => {
+                diagnostics.abort();
+                Vec::new()
+            }
         };
+        let capture = captured?;
+        // Un processus qui ne s'est pas terminé dans le délai de grâce laisse la collecte sans réponse.
+        let Ok(Ok(status)) = exited else {
+            return Err(InventoryError::DeadlineReached);
+        };
+        let code = status.code();
         if !code.is_some_and(|code| accepted.contains(&code)) {
             tracing::debug!(
                 command = arguments.first().map(String::as_str).unwrap_or("git"),
@@ -723,10 +738,7 @@ impl Inspector {
         let output = self
             .output(&arguments(&["--version"]), None)
             .await
-            .map_err(|error| match error {
-                InventoryError::DeadlineReached => InventoryError::DeadlineReached,
-                _ => InventoryError::VersionUnsupported,
-            })?;
+            .map_err(|error| unless_deadline(error, InventoryError::VersionUnsupported))?;
         parse_git_version(&output)
     }
 
@@ -737,10 +749,7 @@ impl Inspector {
                 Some(root),
             )
             .await
-            .map_err(|error| match error {
-                InventoryError::DeadlineReached => InventoryError::DeadlineReached,
-                _ => InventoryError::UnreadableRepository,
-            })?;
+            .map_err(|error| unless_deadline(error, InventoryError::UnreadableRepository))?;
         match std::str::from_utf8(&output)
             .map_err(|_| InventoryError::UnreadableRepository)?
             .trim()
@@ -758,10 +767,7 @@ impl Inspector {
                 Some(root),
             )
             .await
-            .map_err(|error| match error {
-                InventoryError::DeadlineReached => InventoryError::DeadlineReached,
-                _ => InventoryError::UnreadableRepository,
-            })?;
+            .map_err(|error| unless_deadline(error, InventoryError::UnreadableRepository))?;
         parse_worktree_listing(&output)
     }
 
@@ -936,6 +942,7 @@ mod tests {
         }
     }
 
+    // T-F010-001 / AC-F010-001 / REQ-GIT-001 : Git 2.39 est le minimum qualifié (ADR-09).
     #[test]
     fn git_version_requires_the_qualified_minimum() {
         assert_eq!(
@@ -969,6 +976,7 @@ mod tests {
         );
     }
 
+    // T-F010-001 / AC-F010-001 / REQ-GIT-001 : le profil Git effectif est épinglé dans l'empreinte.
     #[test]
     fn profile_digest_pins_version_format_and_profile() {
         let sha1 = profile_digest("git version 2.39.5", GitObjectFormat::Sha1).unwrap();
@@ -987,6 +995,7 @@ mod tests {
         );
     }
 
+    // T-F010-001 / AC-F010-001 / REQ-GIT-001 : la liste des worktrees se lit au format machine NUL.
     #[test]
     fn worktree_listing_reads_the_nul_terminated_records_of_git() {
         let stdout = concat!(
@@ -1014,6 +1023,7 @@ mod tests {
         );
     }
 
+    // T-F010-001 / AC-F010-001 / REQ-GIT-001 : un dépôt bare ne crée aucun item de HEAD détaché.
     #[test]
     fn worktree_listing_skips_bare_repositories() {
         let bare = concat!(
@@ -1029,6 +1039,8 @@ mod tests {
         assert!(!listing.omitted);
     }
 
+    // T-F010-001 / AC-F010-001 / REQ-GIT-001 : ce que le contrat fermé ne peut pas porter est
+    // omis, jamais inventé.
     #[test]
     fn worktree_listing_omits_what_the_closed_contract_cannot_represent() {
         // Chemin qui n'est pas une suite d'octets UTF-8 : le worktree est omis, jamais inventé.
@@ -1055,6 +1067,8 @@ mod tests {
         assert!(listing.omitted);
     }
 
+    // T-F010-001 / AC-F010-001 / REQ-GIT-001 : une sortie Git hors format documenté n'est pas
+    // interprétée.
     #[test]
     fn worktree_listing_refuses_undocumented_output() {
         for malformed in [
@@ -1073,6 +1087,8 @@ mod tests {
         assert_eq!(parse_worktree_listing(b""), Ok(WorktreeListing::default()));
     }
 
+    // T-F010-001 / AC-F010-001 / REQ-GIT-001 : un sous-module laisse l'état du worktree inconnu,
+    // jamais propre.
     #[test]
     fn gitlink_scan_follows_record_boundaries_across_chunks() {
         let mut scan = GitlinkScan::default();
@@ -1095,6 +1111,7 @@ mod tests {
         assert!(scan.found());
     }
 
+    // T-F010-001 / AC-F010-001 / REQ-GIT-001 : la lecture d'un index reste bornée en mémoire.
     #[test]
     fn gitlink_scan_bounds_one_record() {
         let mut scan = GitlinkScan::default();
@@ -1104,6 +1121,8 @@ mod tests {
         );
     }
 
+    // T-F010-001 / AC-F010-001 / REQ-GIT-001 : aucun filtre du dépôt n'est exécuté pendant la
+    // lecture.
     #[test]
     fn filter_overrides_neutralize_every_driver_of_the_repository() {
         let overrides = filter_overrides(
@@ -1122,7 +1141,7 @@ mod tests {
                 format!("filter.{driver}.required=false"),
             ]
         };
-        let mut expected = neutralized("doc-pdf");
+        let mut expected = neutralized("doc-pdf").to_vec();
         expected.extend(neutralized("lfs"));
         assert_eq!(overrides, expected);
         assert_eq!(filter_overrides(b""), Some(Vec::new()));
@@ -1144,6 +1163,8 @@ mod tests {
         assert_eq!(full.last().map(String::as_str), Some("status"));
     }
 
+    // T-F010-001 / AC-F010-001 / REQ-GIT-001 : les opérations en cours suivent les marqueurs
+    // consultés par Git.
     #[test]
     fn operations_follow_the_markers_git_consults() {
         let known = OperationState {
@@ -1195,6 +1216,8 @@ mod tests {
         assert!(!state.reservations_known);
     }
 
+    // T-F010-001 / AC-F010-001 / REQ-GIT-001 : seul le dépôt enregistré est lu, jamais un dépôt
+    // parent.
     #[test]
     fn repository_root_is_read_at_the_registered_location_only() {
         let empty = tempdir().unwrap();
@@ -1219,6 +1242,7 @@ mod tests {
         );
     }
 
+    // T-F010-001 / AC-F010-001 / REQ-GIT-001 : la propriété suit le registre des allocations.
     #[test]
     fn ownership_follows_the_allocation_registry() {
         let managed: HashSet<String> = [String::from("/w/managed")].into_iter().collect();

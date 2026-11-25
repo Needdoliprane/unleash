@@ -13,7 +13,6 @@ use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
 use serde_json::Value;
-use unleash_domain::ProjectId;
 use unleash_protocol::{
     ErrorCode, InventoryCoverageStatus, IpcError, ListWorktreesPayload, ListWorktreesResult,
     QueryEnvelope, QueryResponse, ReasonCode, RetryClass, WorktreeItem, is_worktree_branch_ref,
@@ -145,9 +144,12 @@ pub(crate) async fn query(
         tokio::task::spawn_blocking(move || store.project_worktree_registry(project, &repo_id))
             .await
             .map_err(|_| internal_failure("Lecture du projet interrompue"))?
-            .map_err(|error| match error {
-                StoreError::NotFound(_) => hidden(),
-                other => crate::error::store_error_to_ipc_error(&other, None),
+            .map_err(|error| {
+                if matches!(error, StoreError::NotFound(_)) {
+                    hidden()
+                } else {
+                    crate::error::store_error_to_ipc_error(&error, None)
+                }
             })?;
     let (project_record, managed_paths) = snapshot.value;
     let Some(repository) = project_record
@@ -202,7 +204,7 @@ pub(crate) async fn query(
     clippy::indexing_slicing
 )]
 mod tests {
-    use unleash_domain::Sha256Digest;
+    use unleash_domain::{ProjectId, Sha256Digest};
     use unleash_protocol::{
         GitObjectFormat, GitObjectId, InventoryCoverage, OperationBranch,
         OperationBranchProvenance, ReservedBranchOperation, WorktreeDirty, WorktreeOwnership,
@@ -245,7 +247,8 @@ mod tests {
         }
     }
 
-    // Q-10 / AC-F010-001 : une cible checkout dans un worktree humain est annoncée bloquée.
+    // T-F010-001 / AC-F010-001 / REQ-GIT-001 : une cible checkout dans un worktree humain,
+    // même dirty, est annoncée bloquée (Q-10).
     #[test]
     fn a_checked_out_target_is_blocked_even_when_dirty() {
         let human = inventory(
@@ -267,6 +270,8 @@ mod tests {
         );
     }
 
+    // T-F010-001 / AC-F010-001 / REQ-GIT-001 : une cible réservée par un rebase ou un bisect
+    // compte comme checkout (Q-10).
     #[test]
     fn a_target_reserved_by_a_rebase_or_a_bisect_is_blocked() {
         let mut rebasing = item("/w/rebasing", None);
@@ -289,6 +294,8 @@ mod tests {
         );
     }
 
+    // T-F010-001 / AC-F010-001 / REQ-GIT-001 : une collecte incomplète laisse la disponibilité
+    // inconnue, jamais libre.
     #[test]
     fn an_incomplete_collection_never_leaves_a_target_free() {
         let incomplete = inventory(vec![item("/w/human", Some("refs/heads/other"))], false);
@@ -309,6 +316,8 @@ mod tests {
         );
     }
 
+    // T-F010-001 / AC-F010-001 / REQ-GIT-001 : une cible qui n'est pas un nom complet de branche
+    // ne conclut rien.
     #[test]
     fn a_target_that_is_not_a_full_branch_ref_stays_unknown() {
         let collection = inventory(vec![item("/w/human", Some("refs/heads/integration"))], true);
@@ -321,6 +330,8 @@ mod tests {
         }
     }
 
+    // T-F010-001 / AC-F010-001 / REQ-GIT-001 : les échecs de collecte suivent la projection
+    // d'erreurs de F010.
     #[test]
     fn collection_failures_follow_the_f010_error_projection() {
         let unsupported = to_ipc_error(InventoryError::VersionUnsupported);
