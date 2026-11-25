@@ -4,6 +4,8 @@
 use std::path::PathBuf;
 use thiserror::Error;
 
+use crate::paths::PlatformOsKind;
+
 /// Erreur produite par les adaptateurs système de `unleash-platform`.
 ///
 /// Aucune variante ne doit jamais contenir de valeur secrète en clair.
@@ -89,6 +91,34 @@ pub enum PlatformError {
     NotASocket {
         /// Chemin inspecté.
         path: String,
+    },
+
+    /// Racine runtime requise par le rendez-vous canonique par défaut absente ou non qualifiée :
+    /// le démarrage échoue (`failed_start`) avant toute création (`REQ-CORE-001`).
+    #[error(
+        "Racine runtime '{root}' inutilisable pour le rendez-vous canonique '{rendezvous_dir}' : {reason}. \
+         Remédiation : {remediation}"
+    )]
+    RuntimeRootUnavailable {
+        /// Racine runtime attendue (Linux : `/run/user/<uid>`), jamais créée par Unleash.
+        root: String,
+        /// Chemin du rendez-vous canonique qui dépend de cette racine.
+        rendezvous_dir: String,
+        /// Motif du refus (absence, type, lien symbolique, propriétaire, mode).
+        reason: String,
+        /// Remédiation indiquée à l'utilisateur.
+        remediation: String,
+    },
+
+    /// Emplacements canoniques `ADR-14` non arrêtés pour cette plateforme : aucun candidat de
+    /// rendez-vous, aucune disposition, et aucun repli (`REQ-CORE-001`).
+    #[error(
+        "Emplacements canoniques non arrêtés pour la plateforme {os:?} : \
+         aucun repli n'est tenté"
+    )]
+    LayoutUndecided {
+        /// Plateforme hors décisions arrêtées (Windows, hors matrice qualifiée V1).
+        os: PlatformOsKind,
     },
 
     /// Une autre autorité daemon est déjà active pour cet UID sur une autre racine (`ResourceBusy/AUTHORITY_ALREADY_ACTIVE`).

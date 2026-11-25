@@ -12,8 +12,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::errors::PlatformError;
 use crate::paths::{
-    assert_not_under_claude, canonical_rendezvous_dir, canonicalize_with_existing_prefix,
-    effective_uid, normalize_lexical,
+    assert_not_under_claude, canonicalize_with_existing_prefix, effective_uid, normalize_lexical,
+    prepare_canonical_rendezvous_dir,
 };
 use crate::process_identity::{BootIdentity, StartIdentity, current_process_identity};
 use crate::rendezvous::{ensure_private_rendezvous_dir, validate_unix_socket_path_len};
@@ -65,14 +65,17 @@ enum AuthorityReleaseStep {
 
 impl AuthorityLock {
     /// Acquiert le verrou exclusif d'autorité pour `data_root` dans le répertoire de rendez-vous
-    /// canonique de l'UID effectif courant.
+    /// canonique par défaut de l'UID effectif courant : un seul candidat par OS, dérivé de l'UID
+    /// sans lire l'état du disque. Sous Linux, la racine runtime doit préexister et être qualifiée,
+    /// sinon refus avant toute création (`REQ-CORE-001`).
     ///
     /// # Errors
     /// - [`PlatformError::AuthorityAlreadyActive`] si une instance tourne déjà sur une autre racine.
     /// - [`PlatformError::DaemonAlreadyRunning`] si une instance tourne déjà sur la même racine.
+    /// - [`PlatformError::RuntimeRootUnavailable`] si la racine runtime manque ou n'est pas qualifiée.
     /// - [`PlatformError::ForbiddenDocumentationPath`] si un chemin touche `.claude/`.
     pub fn acquire(data_root: &Path) -> Result<Self, PlatformError> {
-        let rdv = canonical_rendezvous_dir()?;
+        let rdv = prepare_canonical_rendezvous_dir()?;
         Self::acquire_in(&rdv, data_root)
     }
 

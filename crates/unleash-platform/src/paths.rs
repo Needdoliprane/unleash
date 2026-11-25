@@ -1,25 +1,30 @@
 // SPDX-License-Identifier: Apache-2.0
-//! Résolution des chemins canoniques `ADR-14` (macOS/Linux), identifiant UID effectif,
-//! chemin de rendez-vous canonique et garde stricte interdisant `.claude/`.
+//! Résolution des chemins canoniques `ADR-14` (macOS/Linux ; emplacement Windows réservé),
+//! identifiant UID effectif, chemin de rendez-vous canonique et garde stricte interdisant `.claude/`.
 
 use std::ffi::CStr;
 use std::fs;
-use std::os::unix::fs::MetadataExt;
 use std::path::{Component, Path, PathBuf};
 
 use crate::errors::PlatformError;
-use crate::rendezvous::MAX_UNIX_SOCKET_PATH_BYTES;
+use crate::rendezvous::{
+    MAX_UNIX_SOCKET_PATH_BYTES, RUNTIME_ROOT_RENDEZVOUS_DIR,
+    create_rendezvous_dir_in_qualified_root, qualify_runtime_root,
+};
 
 /// Nom du dossier documentaire interdit à toute écriture runtime (`REQ-CORE-008`, `INV-046`).
 pub const CLAUDE_DIR_NAME: &str = ".claude";
 
-/// Plateforme cible supportée pour la résolution des emplacements `ADR-14`.
+/// Plateforme cible pour la résolution des emplacements `ADR-14`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PlatformOsKind {
     /// macOS 15+ (Apple Silicon).
     MacOs,
     /// Linux (Ubuntu LTS `x86_64`).
     Linux,
+    /// Windows : hors matrice qualifiée V1 (ADR-14, point 7). Aucun emplacement n'y est arrêté ;
+    /// la variante réserve un emplacement explicite à la résolution, sans promesse.
+    Windows,
 }
 
 impl PlatformOsKind {
@@ -30,7 +35,11 @@ impl PlatformOsKind {
         {
             Self::MacOs
         }
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(target_os = "windows")]
+        {
+            Self::Windows
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
         {
             Self::Linux
         }
@@ -114,8 +123,9 @@ impl PlatformPaths {
     ///
     /// # Errors
     /// Retourne [`PlatformError::InvalidPath`] si `$HOME` est absent ou une surcharge `XDG_*`
-    /// est relative ou contient `..`, ou [`PlatformError::ForbiddenDocumentationPath`] si un
-    /// chemin touche `.claude/`.
+    /// est relative ou contient `..`, [`PlatformError::ForbiddenDocumentationPath`] si un
+    /// chemin touche `.claude/`, ou [`PlatformError::LayoutUndecided`] pour une plateforme sans
+    /// emplacements arrêtés (Windows).
     pub fn resolve_for(os: PlatformOsKind, env: &EnvSnapshot) -> Result<Self, PlatformError> {
         let home = env
             .home
@@ -169,6 +179,11 @@ impl PlatformPaths {
                     state_base.join("unleash/logs"),
                     cache_base.join("unleash"),
                 )
+            }
+            // Windows : emplacement explicite. Aucune disposition n'est arrêtée (ADR-14 : hors
+            // matrice qualifiée) ; la résolution refuse plutôt que de replier sur la règle Linux.
+            PlatformOsKind::Windows => {
+                return Err(PlatformError::LayoutUndecided { os });
             }
         };
 
@@ -357,8 +372,14 @@ pub fn effective_uid() -> u32 {
 /// Résout le répertoire de rendez-vous canonique pour l'UID effectif courant,
 /// totalement indépendant de `data_root`, `profile`, `XDG_RUNTIME_DIR` et `TMPDIR`.
 ///
+/// Sous Linux, le chemin est dérivé de l'UID seul : aucun accès au disque ne le déplace. Cette
+/// fonction ne qualifie rien et ne crée rien ; les clients s'en servent pour joindre le démon et
+/// concluent à son absence quand le rendez-vous n'existe pas. Le processus qui crée le rendez-vous
+/// sans chemin explicite passe par [`prepare_canonical_rendezvous_dir`].
+///
 /// # Errors
-/// Retourne [`PlatformError::ForbiddenDocumentationPath`] si un invariant de chemin est violé.
+/// - [`PlatformError::LayoutUndecided`] pour une plateforme sans candidat arrêté (Windows).
+/// - [`PlatformError::ForbiddenDocumentationPath`] sous macOS si le chemin résolu touche `.claude/`.
 pub fn canonical_rendezvous_dir() -> Result<PathBuf, PlatformError> {
     canonical_rendezvous_dir_with(
         PlatformOsKind::current(),
@@ -371,49 +392,112 @@ pub fn canonical_rendezvous_dir() -> Result<PathBuf, PlatformError> {
 /// effectif et un instantané d'environnement donnés (`XDG_RUNTIME_DIR` et `TMPDIR` sont ignorés).
 ///
 /// # Errors
-/// Retourne [`PlatformError::ForbiddenDocumentationPath`] si le chemin résolu touche `.claude/`.
+/// - [`PlatformError::ForbiddenDocumentationPath`] si le chemin résolu touche `.claude/`.
+/// - [`PlatformError::LayoutUndecided`] pour une plateforme sans candidat arrêté (Windows).
 pub fn canonical_rendezvous_dir_with(
     os: PlatformOsKind,
     uid: u32,
     _env: &EnvSnapshot,
 ) -> Result<PathBuf, PlatformError> {
-    let dir_name = format!("unleash-{uid}");
-    let dir = match os {
-        PlatformOsKind::MacOs => {
-            if let Some(darwin_tmp) = macos_darwin_user_temp_dir() {
-                let candidate = darwin_tmp.join(&dir_name);
-                let sock_len = candidate.join("daemon.sock").as_os_str().len();
-                if sock_len <= MAX_UNIX_SOCKET_PATH_BYTES {
-                    candidate
-                } else {
-                    PathBuf::from(format!("/private/tmp/{dir_name}"))
-                }
-            } else {
-                PathBuf::from(format!("/private/tmp/{dir_name}"))
-            }
-        }
-        PlatformOsKind::Linux => {
-            let run_user = PathBuf::from(format!("/run/user/{uid}"));
-            if is_owned_private_dir(&run_user, uid) {
-                run_user.join("unleash")
-            } else {
-                PathBuf::from(format!("/tmp/{dir_name}"))
-            }
-        }
-    };
-
-    assert_not_under_claude(&dir)?;
-    Ok(dir)
+    match os {
+        // Candidat unique, dérivé de l'UID seul : ni l'état du disque ni l'environnement ne le
+        // déplacent, et il n'existe aucun repli sous `/tmp` (`runtime-lifecycle.md`, `REQ-CORE-001`).
+        PlatformOsKind::Linux => Ok(linux_rendezvous_dir(uid)),
+        PlatformOsKind::MacOs => macos_rendezvous_dir(uid),
+        // Windows : emplacement explicite. Aucun candidat n'est arrêté (ADR-14 : hors matrice
+        // qualifiée) ; on refuse plutôt que de replier sur la règle Linux ou un répertoire partagé.
+        PlatformOsKind::Windows => Err(PlatformError::LayoutUndecided { os }),
+    }
 }
 
-fn is_owned_private_dir(path: &Path, expected_uid: u32) -> bool {
-    let Ok(meta) = fs::symlink_metadata(path) else {
-        return false;
+/// Racine runtime Linux de l'UID : `/run/user/<uid>`, fournie par le gestionnaire de session.
+fn linux_runtime_root(uid: u32) -> PathBuf {
+    PathBuf::from(format!("/run/user/{uid}"))
+}
+
+/// Candidat unique sous Linux : `/run/user/<uid>/unleash`, dans la racine runtime `/run/user/<uid>`.
+fn linux_rendezvous_dir(uid: u32) -> PathBuf {
+    linux_runtime_root(uid).join(RUNTIME_ROOT_RENDEZVOUS_DIR)
+}
+
+/// Résout et prépare le rendez-vous canonique par défaut de l'UID effectif courant, pour le
+/// processus qui le crée sans chemin explicite (le démon). Un seul candidat par OS, dérivé de
+/// l'UID sans lire l'état du disque ; sous Linux, la racine runtime doit préexister et être
+/// qualifiée, sinon refus avant toute création (`REQ-CORE-001`).
+///
+/// # Errors
+/// - [`PlatformError::RuntimeRootUnavailable`] sous Linux si la racine runtime manque ou n'est
+///   pas qualifiée.
+/// - [`PlatformError::ForbiddenDocumentationPath`] si le chemin résolu touche `.claude/`.
+/// - [`PlatformError::LayoutUndecided`] pour une plateforme sans candidat arrêté (Windows).
+pub fn prepare_canonical_rendezvous_dir() -> Result<PathBuf, PlatformError> {
+    prepare_canonical_rendezvous_dir_with(PlatformOsKind::current(), effective_uid())
+}
+
+/// Résout et prépare le rendez-vous canonique par défaut, sans chemin explicite, pour une
+/// plateforme et un UID donnés. Le processus qui crée le rendez-vous (le démon) n'admet qu'un
+/// seul candidat par OS et ne crée rien tant que sa racine runtime n'est pas qualifiée.
+///
+/// # Errors
+/// - [`PlatformError::RuntimeRootUnavailable`] sous Linux si la racine runtime manque ou n'est
+///   pas qualifiée.
+/// - [`PlatformError::ForbiddenDocumentationPath`] si le chemin résolu touche `.claude/`.
+/// - [`PlatformError::LayoutUndecided`] pour une plateforme sans candidat arrêté (Windows).
+pub fn prepare_canonical_rendezvous_dir_with(
+    os: PlatformOsKind,
+    uid: u32,
+) -> Result<PathBuf, PlatformError> {
+    match os {
+        PlatformOsKind::Linux => prepare_linux_rendezvous_dir(uid),
+        // macOS : comportement conservé. Le système fournit la racine Darwin ; le rendez-vous
+        // reste créé et validé par `ensure_private_rendezvous_dir` à l'acquisition du verrou.
+        PlatformOsKind::MacOs => canonical_rendezvous_dir_with(os, uid, &EnvSnapshot::default()),
+        // Windows : emplacement explicite. Aucun candidat n'est arrêté (ADR-14 : hors matrice
+        // qualifiée) ; on refuse plutôt que de replier sur la règle Linux ou un répertoire partagé.
+        PlatformOsKind::Windows => Err(PlatformError::LayoutUndecided { os }),
+    }
+}
+
+/// Prépare le rendez-vous canonique Linux de l'UID : racine runtime qualifiée avant toute
+/// création, puis seul sous-répertoire applicatif créé.
+fn prepare_linux_rendezvous_dir(uid: u32) -> Result<PathBuf, PlatformError> {
+    prepare_rendezvous_dir_in_runtime_root(&linux_runtime_root(uid), uid)
+}
+
+/// Qualifie la racine runtime `root` pour `expected_uid`, puis y crée le seul sous-répertoire de
+/// rendez-vous `unleash`, en `0700`. Ne crée jamais la racine ni un ancêtre.
+///
+/// # Errors
+/// - [`PlatformError::RuntimeRootUnavailable`] si la racine manque ou n'est pas qualifiée.
+/// - [`PlatformError::ForbiddenDocumentationPath`] si le chemin touche `.claude/`.
+pub fn prepare_rendezvous_dir_in_runtime_root(
+    root: &Path,
+    expected_uid: u32,
+) -> Result<PathBuf, PlatformError> {
+    qualify_runtime_root(root, expected_uid)?;
+    create_rendezvous_dir_in_qualified_root(root)?;
+    Ok(root.join(RUNTIME_ROOT_RENDEZVOUS_DIR))
+}
+
+// macOS : le candidat reste le répertoire temporaire Darwin par utilisateur, comportement conservé.
+// Le passage au répertoire de cache Darwin (`_CS_DARWIN_USER_CACHE_DIR`), proposé par l'arbitrage
+// du 25 novembre 2026, est différé à une qualification native : il se fera dans cette seule
+// fonction et dans `macos_darwin_user_temp_dir`, sans toucher au reste de la résolution.
+fn macos_rendezvous_dir(uid: u32) -> Result<PathBuf, PlatformError> {
+    let dir_name = format!("unleash-{uid}");
+    let dir = if let Some(darwin_tmp) = macos_darwin_user_temp_dir() {
+        let candidate = darwin_tmp.join(&dir_name);
+        let sock_len = candidate.join("daemon.sock").as_os_str().len();
+        if sock_len <= MAX_UNIX_SOCKET_PATH_BYTES {
+            candidate
+        } else {
+            PathBuf::from(format!("/private/tmp/{dir_name}"))
+        }
+    } else {
+        PathBuf::from(format!("/private/tmp/{dir_name}"))
     };
-    !meta.file_type().is_symlink()
-        && meta.is_dir()
-        && meta.uid() == expected_uid
-        && (meta.mode() & 0o7777) == 0o700
+    assert_not_under_claude(&dir)?;
+    Ok(dir)
 }
 
 #[cfg(target_os = "macos")]

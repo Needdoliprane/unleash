@@ -16,9 +16,9 @@ use unleash_domain::{
 };
 use unleash_platform::{
     ADMIN_PROOF_FILENAME, AuthorityLock, PlatformError, PlatformPaths, assert_not_under_claude,
-    bind_private_unix_listener, canonical_rendezvous_dir, current_boot_identity, effective_uid,
-    read_admin_credential, validate_rendezvous_dir, validate_socket_file, verify_same_uid_peer,
-    write_private_file_atomic,
+    bind_private_unix_listener, current_boot_identity, effective_uid,
+    prepare_canonical_rendezvous_dir, read_admin_credential, validate_rendezvous_dir,
+    validate_socket_file, verify_same_uid_peer, write_private_file_atomic,
 };
 use unleash_protocol::{
     AdminProof, ClientKind, EventCausationKind, EventEnvelope, HelloRequest, HelloResponse,
@@ -432,8 +432,12 @@ fn resolve_paths_and_acquire_lock_blocking(
     assert_not_under_claude(&data_root)?;
 
     let rdv_dir = match explicit_rdv_dir {
+        // Chemin explicite (`--rendezvous-dir`, tests et isolement) : créateur, inchangé.
         Some(p) => p,
-        None => canonical_rendezvous_dir()?,
+        // Chemin canonique par défaut : un seul candidat par OS, dérivé de l'UID effectif sans
+        // lire l'état du disque. Sous Linux, la racine runtime doit préexister et être qualifiée,
+        // sinon refus avant toute création (`REQ-CORE-001`).
+        None => prepare_canonical_rendezvous_dir()?,
     };
     assert_not_under_claude(&rdv_dir)?;
 

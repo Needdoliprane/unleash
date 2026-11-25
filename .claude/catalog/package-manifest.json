@@ -14,7 +14,7 @@
     "cache/"
   ],
   "hash_algorithm": "sha256",
-  "source_tree_digest": "10d30b209711217402089c1f4b6c3af68d40537910db477331e71a32794848b6",
+  "source_tree_digest": "d2673fd70c6863efed5bb26d1fce13738a728ba4bad97723ffccfa1f5b934e00",
   "files": [
     {
       "path": "INDEX.md",
@@ -366,8 +366,8 @@
     },
     {
       "path": "architecture/runtime-lifecycle.md",
-      "sha256": "c8f45af2ab1a811389c98a36c0d2005d76731e9a86b2dcd20bf650cc3aa3f212",
-      "bytes": 15842,
+      "sha256": "68e04a92d80283f47f8fa8cfc65ed4954045b81f9dabf3201171c75fe9ac4794",
+      "bytes": 17107,
       "media_type": "text/markdown"
     },
     {

@@ -68,7 +68,9 @@ impl std::fmt::Debug for StoreOverrides {
 pub struct DaemonConfig {
     /// Racine de données explicite (défaut : `PlatformPaths::resolve()?.data_dir`).
     pub data_root: Option<PathBuf>,
-    /// Répertoire de rendez-vous explicite (défaut : `canonical_rendezvous_dir()`).
+    /// Répertoire de rendez-vous explicite, créateur (tests et isolement). Par défaut, le
+    /// rendez-vous canonique de l'UID effectif, préparé par `prepare_canonical_rendezvous_dir()` :
+    /// sous Linux, sa racine runtime doit préexister, sinon le démarrage échoue avant toute création.
     pub rendezvous_dir: Option<PathBuf>,
     /// Version du consommateur outbox (`dead_letter` rearm).
     pub consumer_version: String,
