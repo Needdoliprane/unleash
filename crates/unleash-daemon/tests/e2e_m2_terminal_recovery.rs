@@ -298,6 +298,21 @@ fn terminal_configuration() -> Value {
         "max_hosts":2,"max_processes":2,"max_ptys":2,"lease_ttl_ms":60000})
 }
 
+/// The packaged daemon launches `unleash-process-host` next to its own executable.
+/// A narrow `cargo test -p unleash-daemon` does not build that other package: say so
+/// instead of reporting an unknown launch outcome at the readiness deadline.
+fn require_prebuilt_native_host() {
+    let host = Path::new(env!("CARGO_BIN_EXE_unleashd"))
+        .parent()
+        .unwrap()
+        .join("unleash-process-host");
+    assert!(
+        host.is_file(),
+        "the exact prebuilt native host is required: {}",
+        host.display()
+    );
+}
+
 #[tokio::test]
 async fn t_f011_001_configuration_is_durable_idempotent_and_legacy_compatible() {
     let data = local_test_dir("f011-settings-data").unwrap();
@@ -507,6 +522,7 @@ async fn t_f011_003_real_daemon_accepts_authenticated_terminal_acquisition() {
     let canonical_project_root = project_root.path().canonicalize().unwrap();
     let project_path = canonical_project_root.to_str().unwrap();
     configure_nominal_fixture(&mut client, project, mission, project_path).await;
+    require_prebuilt_native_host();
 
     let acquire = command(
         authority,

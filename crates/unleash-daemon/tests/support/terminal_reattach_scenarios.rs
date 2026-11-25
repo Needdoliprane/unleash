@@ -482,6 +482,10 @@ mod renewal_scenarios {
 
 struct LiveFixture {
     daemon: FixtureDaemon,
+    /// True only while the packaged daemon owns the fixture: it alone launches the
+    /// packaged host next to its own executable. Instrumented fixtures run the host
+    /// library inside the test executable and need no packaged binary.
+    packaged_daemon: bool,
     client: UnleashClient,
     data: tempfile::TempDir,
     rendezvous: tempfile::TempDir,
@@ -499,7 +503,9 @@ impl Drop for LiveFixture {
 }
 impl LiveFixture {
     async fn empty() -> Self {
-        Self::empty_with(FixtureDaemon::spawn).await
+        let mut fixture = Self::empty_with(FixtureDaemon::spawn).await;
+        fixture.packaged_daemon = true;
+        fixture
     }
     async fn empty_with(spawn: impl FnOnce(&Path, &Path) -> FixtureDaemon) -> Self {
         let data = local_test_dir("f011-live-data").unwrap();
@@ -521,6 +527,7 @@ impl LiveFixture {
         let mission = Uuid::from_u128(0xf011_4002);
         Self {
             daemon,
+            packaged_daemon: false,
             client,
             data,
             rendezvous,
@@ -606,6 +613,9 @@ impl LiveFixture {
         )
     }
     async fn start_terminal(&mut self) -> Value {
+        if self.packaged_daemon {
+            require_prebuilt_native_host();
+        }
         let request = self.allocation(0xf011_4105);
         assert_eq!(
             self.client.send_command(&request).await.unwrap().state,
@@ -635,6 +645,7 @@ impl LiveFixture {
         let next = FixtureDaemon::spawn(self.data.path(), self.rendezvous.path());
         next.readiness();
         self.daemon = next;
+        self.packaged_daemon = true;
         self.client = UnleashClient::connect(ClientConfig::new(
             self.rendezvous.path().join("daemon.sock"),
             ClientKind::Cli,
