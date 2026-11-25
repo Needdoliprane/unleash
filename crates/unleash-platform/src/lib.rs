@@ -47,6 +47,7 @@ pub use keyring::{
 pub use paths::{
     CLAUDE_DIR_NAME, EnvSnapshot, PlatformOsKind, PlatformPaths, assert_not_under_claude,
     canonical_rendezvous_dir, canonical_rendezvous_dir_with, effective_uid,
+    prepare_canonical_rendezvous_dir_with, prepare_rendezvous_dir_in_runtime_root,
 };
 pub use peer_cred::{
     PeerCredentials, extract_peer_credentials, verify_peer_uid, verify_same_uid_peer,

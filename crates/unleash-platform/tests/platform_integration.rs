@@ -3,9 +3,9 @@
 //! `LOCAL_PEERCRED`/`SO_PEERCRED`, identité OS processus, `KeyringPort`, chemins `ADR-14` et garde `.claude/`).
 
 use std::fs;
-use std::os::unix::fs::{PermissionsExt, symlink};
+use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
 use std::os::unix::net::UnixStream;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Barrier};
 use std::thread;
@@ -18,8 +18,9 @@ use unleash_platform::{
     ProcessVerification, SecretStatus, UnavailableOsKeyring, assert_not_under_claude,
     bind_private_unix_listener, canonical_rendezvous_dir_with, current_boot_identity,
     current_process_identity, effective_uid, ensure_private_rendezvous_dir,
-    extract_peer_credentials, inspect_process_identity, validate_rendezvous_dir,
-    validate_socket_file, validate_unix_socket_path_len, verify_peer_uid, verify_process_identity,
+    extract_peer_credentials, inspect_process_identity, prepare_canonical_rendezvous_dir_with,
+    prepare_rendezvous_dir_in_runtime_root, validate_rendezvous_dir, validate_socket_file,
+    validate_unix_socket_path_len, verify_peer_uid, verify_process_identity,
     verify_same_uid_peer,
 };
 use unleash_testkit::local_test_dir;
@@ -184,6 +185,209 @@ fn t_f001_001_linux_rendezvous_dir_is_a_single_candidate_derived_from_uid() {
     assert!(
         !under_hostile_env.starts_with("/tmp"),
         "Aucun candidat sous /tmp ne doit être retenu"
+    );
+}
+
+/// Champs d'un refus de racine runtime, ou `None` pour tout autre résultat.
+fn runtime_root_refusal_details(
+    outcome: &Result<PathBuf, PlatformError>,
+) -> Option<(&str, &str, &str, &str)> {
+    match outcome {
+        Err(PlatformError::RuntimeRootUnavailable {
+            root,
+            rendezvous_dir,
+            reason,
+            remediation,
+        }) => Some((root, rendezvous_dir, reason, remediation)),
+        _ => None,
+    }
+}
+
+// T-F001-001 / AC-F001-001 / REQ-CORE-001
+// Sans chemin explicite, une racine runtime manquante est un refus, pas une création : le processus
+// qui crée le rendez-vous ne crée jamais la racine runtime et ne retient aucun candidat sous `/tmp`.
+#[test]
+fn t_f001_001_missing_runtime_root_is_a_refusal_not_a_creation() {
+    const FICTITIOUS_UID: u32 = 4242;
+    let runtime_root = PathBuf::from(format!("/run/user/{FICTITIOUS_UID}"));
+    let expected_root = runtime_root.display().to_string();
+    let expected_rendezvous = format!("/run/user/{FICTITIOUS_UID}/unleash");
+    let tmp_candidate = Path::new("/tmp/unleash-4242");
+    assert!(
+        !runtime_root.exists(),
+        "Précondition : la racine runtime de l'UID fictif doit être absente pour exercer le refus"
+    );
+    assert!(
+        !tmp_candidate.exists(),
+        "Précondition : aucun candidat sous /tmp ne doit préexister"
+    );
+
+    let outcome = prepare_canonical_rendezvous_dir_with(PlatformOsKind::Linux, FICTITIOUS_UID);
+    let Some((root, rendezvous_dir, reason, remediation)) = runtime_root_refusal_details(&outcome)
+    else {
+        panic!("Attendu le refus d'une racine runtime absente, obtenu : {outcome:?}");
+    };
+    assert_eq!(root, expected_root, "le refus doit nommer la racine runtime absente");
+    assert_eq!(
+        rendezvous_dir, expected_rendezvous,
+        "le refus doit nommer le rendez-vous canonique"
+    );
+    assert!(reason.contains("absente"), "motif inattendu : {reason}");
+    assert!(
+        remediation.contains("logind"),
+        "la remédiation doit être indiquée : {remediation}"
+    );
+    let reported = outcome.to_string();
+    assert!(
+        reported.contains(&expected_rendezvous),
+        "le refus doit nommer le chemin : {reported}"
+    );
+    assert!(
+        !reported.contains("/tmp"),
+        "aucun candidat sous /tmp ne doit être retenu : {reported}"
+    );
+
+    // Rien n'a été créé : ni la racine, ni un ancêtre, ni un candidat de repli.
+    assert!(
+        !runtime_root.exists(),
+        "la racine runtime ne doit jamais être créée"
+    );
+    assert!(
+        !tmp_candidate.exists(),
+        "aucun candidat sous /tmp ne doit être retenu"
+    );
+}
+
+// T-F001-001 / AC-F001-001 / REQ-CORE-001
+// La racine runtime est qualifiée avant toute création : absente, fichier, lien symbolique, autre
+// propriétaire ou mode non privé sont des refus, et un refus ne crée ni le rendez-vous ni la racine.
+#[test]
+fn t_f001_001_runtime_root_is_qualified_before_the_rendezvous_dir_is_created() {
+    let uid = effective_uid();
+    let sandbox = local_test_dir("rdvroot").unwrap();
+
+    // 1. Racine absente : refus qui nomme la racine et la remédiation ; rien n'est créé.
+    let missing = sandbox.path().join("missing");
+    let outcome = prepare_rendezvous_dir_in_runtime_root(&missing, uid);
+    let Some((root, rendezvous_dir, reason, remediation)) = runtime_root_refusal_details(&outcome)
+    else {
+        panic!("Attendu le refus d'une racine absente, obtenu : {outcome:?}");
+    };
+    assert_eq!(root, missing.display().to_string());
+    assert_eq!(
+        rendezvous_dir,
+        missing.join("unleash").display().to_string()
+    );
+    assert!(reason.contains("absente"), "motif inattendu : {reason}");
+    assert!(
+        remediation.contains("logind"),
+        "remédiation manquante : {remediation}"
+    );
+    assert!(
+        !missing.exists(),
+        "la racine runtime ne doit jamais être créée"
+    );
+
+    // 2. Un fichier à la place du répertoire : refus, fichier inchangé.
+    let as_file = sandbox.path().join("as-file");
+    fs::write(&as_file, b"not a directory").unwrap();
+    let outcome = prepare_rendezvous_dir_in_runtime_root(&as_file, uid);
+    let Some((_, _, reason, _)) = runtime_root_refusal_details(&outcome) else {
+        panic!("Attendu le refus d'une racine qui n'est pas un répertoire, obtenu : {outcome:?}");
+    };
+    assert!(reason.contains("répertoire"), "motif inattendu : {reason}");
+    assert_eq!(fs::read(&as_file).unwrap(), b"not a directory");
+
+    // 3. Lien symbolique, même vers un répertoire privé de l'UID : refus, cible intacte.
+    let link_target = sandbox.path().join("link-target");
+    fs::create_dir(&link_target).unwrap();
+    fs::set_permissions(&link_target, PermissionsExt::from_mode(0o700)).unwrap();
+    let symlink_root = sandbox.path().join("symlink-root");
+    symlink(&link_target, &symlink_root).unwrap();
+    let outcome = prepare_rendezvous_dir_in_runtime_root(&symlink_root, uid);
+    let Some((_, _, reason, _)) = runtime_root_refusal_details(&outcome) else {
+        panic!("Attendu le refus d'une racine symbolique, obtenu : {outcome:?}");
+    };
+    assert!(
+        reason.contains("lien symbolique"),
+        "motif inattendu : {reason}"
+    );
+    assert_eq!(fs::read_dir(&link_target).unwrap().count(), 0);
+
+    // 4. Répertoire de mode 0755 : refus, aucun rendez-vous créé.
+    let shared_root = sandbox.path().join("shared-root");
+    fs::create_dir(&shared_root).unwrap();
+    fs::set_permissions(&shared_root, PermissionsExt::from_mode(0o755)).unwrap();
+    let outcome = prepare_rendezvous_dir_in_runtime_root(&shared_root, uid);
+    let Some((_, _, reason, _)) = runtime_root_refusal_details(&outcome) else {
+        panic!("Attendu le refus d'une racine non privée, obtenu : {outcome:?}");
+    };
+    assert!(reason.contains("0o755"), "motif inattendu : {reason}");
+    assert_eq!(fs::read_dir(&shared_root).unwrap().count(), 0);
+
+    // 5. Répertoire privé d'un autre UID : refus, aucun rendez-vous créé.
+    let foreign_root = sandbox.path().join("foreign-root");
+    fs::create_dir(&foreign_root).unwrap();
+    fs::set_permissions(&foreign_root, PermissionsExt::from_mode(0o700)).unwrap();
+    let outcome = prepare_rendezvous_dir_in_runtime_root(&foreign_root, uid.wrapping_add(1));
+    let Some((_, _, reason, _)) = runtime_root_refusal_details(&outcome) else {
+        panic!("Attendu le refus d'une racine d'un autre propriétaire, obtenu : {outcome:?}");
+    };
+    assert!(reason.contains("UID attendu"), "motif inattendu : {reason}");
+    assert_eq!(fs::read_dir(&foreign_root).unwrap().count(), 0);
+}
+
+// T-F001-001 / AC-F001-001 / REQ-CORE-001
+// Une racine runtime qualifiée (répertoire réel, propriété de l'UID attendu, mode 0700) reçoit le
+// seul sous-répertoire de rendez-vous `unleash`, en `0700` ; un rendez-vous non privé est refusé.
+#[test]
+fn t_f001_001_qualified_runtime_root_receives_only_the_private_rendezvous_dir() {
+    let uid = effective_uid();
+    let sandbox = local_test_dir("rdvok").unwrap();
+    let runtime_root = sandbox.path().join("runtime");
+    fs::create_dir(&runtime_root).unwrap();
+    fs::set_permissions(&runtime_root, PermissionsExt::from_mode(0o700)).unwrap();
+
+    let rendezvous = prepare_rendezvous_dir_in_runtime_root(&runtime_root, uid).unwrap();
+    assert_eq!(rendezvous, runtime_root.join("unleash"));
+    let meta = fs::symlink_metadata(&rendezvous).unwrap();
+    assert!(meta.is_dir() && !meta.file_type().is_symlink());
+    assert_eq!(meta.uid(), uid);
+    assert_eq!(meta.mode() & 0o7777, 0o700);
+    validate_rendezvous_dir(&rendezvous).unwrap();
+
+    // Répété : le rendez-vous existant est revalidé, jamais recréé ni doublé.
+    assert_eq!(
+        prepare_rendezvous_dir_in_runtime_root(&runtime_root, uid).unwrap(),
+        rendezvous
+    );
+    let created: Vec<std::ffi::OsString> = fs::read_dir(&runtime_root)
+        .unwrap()
+        .map(|entry| entry.map(|entry| entry.file_name()))
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(
+        created,
+        vec![std::ffi::OsString::from("unleash")],
+        "la racine ne doit recevoir que le rendez-vous"
+    );
+
+    // Un rendez-vous préexistant non privé est refusé, jamais corrigé.
+    fs::set_permissions(&rendezvous, PermissionsExt::from_mode(0o755)).unwrap();
+    assert!(
+        matches!(
+            prepare_rendezvous_dir_in_runtime_root(&runtime_root, uid),
+            Err(PlatformError::InsecurePermissions {
+                expected_mode: 0o700,
+                actual_mode: 0o755,
+                ..
+            })
+        ),
+        "un rendez-vous non privé doit être refusé"
+    );
+    assert_eq!(
+        fs::symlink_metadata(&rendezvous).unwrap().mode() & 0o7777,
+        0o755
     );
 }
 

@@ -91,6 +91,23 @@ pub enum PlatformError {
         path: String,
     },
 
+    /// Racine runtime requise par le rendez-vous canonique par défaut absente ou non qualifiée :
+    /// le démarrage échoue (`failed_start`) avant toute création (`REQ-CORE-001`).
+    #[error(
+        "Racine runtime '{root}' inutilisable pour le rendez-vous canonique '{rendezvous_dir}' : {reason}. \
+         Remédiation : {remediation}"
+    )]
+    RuntimeRootUnavailable {
+        /// Racine runtime attendue (Linux : `/run/user/<uid>`), jamais créée par Unleash.
+        root: String,
+        /// Chemin du rendez-vous canonique qui dépend de cette racine.
+        rendezvous_dir: String,
+        /// Motif du refus (absence, type, lien symbolique, propriétaire, mode).
+        reason: String,
+        /// Remédiation indiquée à l'utilisateur.
+        remediation: String,
+    },
+
     /// Une autre autorité daemon est déjà active pour cet UID sur une autre racine (`ResourceBusy/AUTHORITY_ALREADY_ACTIVE`).
     #[error(
         "Autorité déjà active pour cet utilisateur sur la racine '{}' (racine demandée '{}', socket '{}')",

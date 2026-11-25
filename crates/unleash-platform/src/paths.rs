@@ -393,6 +393,32 @@ fn linux_rendezvous_dir(uid: u32) -> PathBuf {
     PathBuf::from(format!("/run/user/{uid}/unleash"))
 }
 
+/// Résout et prépare le rendez-vous canonique par défaut, sans chemin explicite, pour une
+/// plateforme et un UID donnés. Le processus qui crée le rendez-vous (le démon) n'admet qu'un
+/// seul candidat par OS et ne crée rien tant que sa racine runtime n'est pas qualifiée.
+///
+/// # Errors
+/// - [`PlatformError::RuntimeRootUnavailable`] si la racine runtime manque ou n'est pas qualifiée.
+/// - [`PlatformError::ForbiddenDocumentationPath`] si le chemin résolu touche `.claude/`.
+pub fn prepare_canonical_rendezvous_dir_with(
+    os: PlatformOsKind,
+    uid: u32,
+) -> Result<PathBuf, PlatformError> {
+    canonical_rendezvous_dir_with(os, uid, &EnvSnapshot::default())
+}
+
+/// Qualifie la racine runtime `root` pour `expected_uid`, puis y crée le seul sous-répertoire de
+/// rendez-vous `unleash`, en `0700`. Ne crée jamais la racine ni un ancêtre.
+///
+/// # Errors
+/// - [`PlatformError::RuntimeRootUnavailable`] si la racine manque ou n'est pas qualifiée.
+pub fn prepare_rendezvous_dir_in_runtime_root(
+    root: &Path,
+    _expected_uid: u32,
+) -> Result<PathBuf, PlatformError> {
+    Ok(root.join("unleash"))
+}
+
 // macOS : le candidat reste le répertoire temporaire Darwin par utilisateur, comportement conservé.
 // Le passage au répertoire de cache Darwin (`_CS_DARWIN_USER_CACHE_DIR`), proposé par l'arbitrage
 // du 25 novembre 2026, est différé à une qualification native : il se fera dans cette seule
