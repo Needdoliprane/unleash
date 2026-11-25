@@ -100,11 +100,13 @@ async fn wait_for_project(
     let reached = |result: &serde_json::Value| {
         result["revision"] == json!(revision)
             && repo.is_none_or(|repo| {
-                result["repositories"].as_array().is_some_and(|repositories| {
-                    repositories
-                        .iter()
-                        .any(|entry| entry["root_path"].as_str() == repo.to_str())
-                })
+                result["repositories"]
+                    .as_array()
+                    .is_some_and(|repositories| {
+                        repositories
+                            .iter()
+                            .any(|entry| entry["root_path"].as_str() == repo.to_str())
+                    })
             })
     };
     let observed = tokio::time::timeout(Duration::from_secs(5), async {
@@ -116,7 +118,11 @@ async fn wait_for_project(
                 project_id: Some(project),
                 payload: serde_json::Map::new(),
             };
-            if client.query(&query).await.is_ok_and(|response| reached(&response.result)) {
+            if client
+                .query(&query)
+                .await
+                .is_ok_and(|response| reached(&response.result))
+            {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
@@ -124,7 +130,11 @@ async fn wait_for_project(
     })
     .await
     .is_ok();
-    assert!(observed, "projet attendu à la révision {}", revision.as_u64());
+    assert!(
+        observed,
+        "projet attendu à la révision {}",
+        revision.as_u64()
+    );
 }
 
 #[tokio::test]
@@ -144,7 +154,11 @@ async fn t_f010_001_lists_dirty_external_worktree_without_mutation() {
     git(
         &repo,
         template.path(),
-        &["init", "--object-format=sha1", "--initial-branch=integration"],
+        &[
+            "init",
+            "--object-format=sha1",
+            "--initial-branch=integration",
+        ],
     )
     .await;
     let tracked = repo.join("tracked.txt");
@@ -216,26 +230,29 @@ async fn t_f010_001_lists_dirty_external_worktree_without_mutation() {
     );
     let observed_at = result["observed_at"].as_str().unwrap();
     chrono::DateTime::parse_from_rfc3339(observed_at).unwrap();
-    assert_eq!(*result, json!({
-        "project_id": project,
-        "repo_id": "repo-01",
-        "object_format": "sha1",
-        "git_profile_digest": digest,
-        "observed_at": observed_at,
-        "items": [{
-            "path": repo.to_str().unwrap(),
-            "head_oid": {"format": "sha1", "hex": head_oid},
-            "branch_ref": "refs/heads/integration",
-            "dirty": "dirty",
-            "operations": [],
-            "operations_complete": true,
-            "operation_branches": [],
-            "operation_branches_complete": true,
-            "ownership": "external"
-        }],
-        "coverage": {"status": "complete"},
-        "next_cursor": null
-    }));
+    assert_eq!(
+        *result,
+        json!({
+            "project_id": project,
+            "repo_id": "repo-01",
+            "object_format": "sha1",
+            "git_profile_digest": digest,
+            "observed_at": observed_at,
+            "items": [{
+                "path": repo.to_str().unwrap(),
+                "head_oid": {"format": "sha1", "hex": head_oid},
+                "branch_ref": "refs/heads/integration",
+                "dirty": "dirty",
+                "operations": [],
+                "operations_complete": true,
+                "operation_branches": [],
+                "operation_branches_complete": true,
+                "ownership": "external"
+            }],
+            "coverage": {"status": "complete"},
+            "next_cursor": null
+        })
+    );
     let after = [
         std::fs::read(&tracked).unwrap(),
         std::fs::read(&index).unwrap(),
@@ -244,5 +261,8 @@ async fn t_f010_001_lists_dirty_external_worktree_without_mutation() {
     ];
     assert_eq!(before, after);
     drop(client);
-    daemon.shutdown_graceful("F010 fixture terminée").await.unwrap();
+    daemon
+        .shutdown_graceful("F010 fixture terminée")
+        .await
+        .unwrap();
 }

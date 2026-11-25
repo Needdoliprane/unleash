@@ -42,9 +42,9 @@ pub mod subscriptions;
 pub mod terminal_host_launcher;
 mod terminal_service;
 pub mod worker_launch;
-pub mod worktree_inventory;
 #[cfg(test)]
 mod worker_shutdown_tests;
+pub mod worktree_inventory;
 
 pub use auth::{AuthVerifierPort, AuthenticatedSession, Capability, PeerUidAuthVerifier};
 pub use config::{DaemonConfig, PostCommitAction, PostCommitHook, StoreOverrides};

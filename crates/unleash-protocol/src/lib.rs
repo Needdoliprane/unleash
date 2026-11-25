@@ -60,9 +60,8 @@ pub use ts_export::{generate_all_ts_files, write_ts_bindings};
 pub use workflow_run::{CreateRunPayload, CreateRunPurpose, CreateRunSource, GetRunPayload};
 pub use worktrees::{
     DEFAULT_WORKTREE_PAGE_SIZE, GitObjectFormat, GitObjectId, GitOperation, InventoryCoverage,
-    InventoryCoverageStatus, ListWorktreesPayload, ListWorktreesResult,
-    MAX_WORKTREE_CURSOR_CHARS, MAX_WORKTREE_PAGE_SIZE, OperationBranch,
-    OperationBranchProvenance, ReservedBranchOperation, WorktreeContractViolation, WorktreeDirty,
-    WorktreeItem, WorktreeOwnership, WorktreeQueryError, is_worktree_branch_ref,
-    is_well_formed_cursor,
+    InventoryCoverageStatus, ListWorktreesPayload, ListWorktreesResult, MAX_WORKTREE_CURSOR_CHARS,
+    MAX_WORKTREE_PAGE_SIZE, OperationBranch, OperationBranchProvenance, ReservedBranchOperation,
+    WorktreeContractViolation, WorktreeDirty, WorktreeItem, WorktreeOwnership, WorktreeQueryError,
+    is_well_formed_cursor, is_worktree_branch_ref,
 };

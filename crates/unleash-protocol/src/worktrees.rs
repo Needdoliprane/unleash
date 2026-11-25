@@ -351,8 +351,13 @@ impl WorktreeItem {
         let associations_known = self.operation_branches.iter().all(|association| {
             matches!(
                 (association.operation, association.provenance),
-                (ReservedBranchOperation::Rebase, OperationBranchProvenance::RebaseMetadata)
-                    | (ReservedBranchOperation::Bisect, OperationBranchProvenance::BisectMetadata)
+                (
+                    ReservedBranchOperation::Rebase,
+                    OperationBranchProvenance::RebaseMetadata
+                ) | (
+                    ReservedBranchOperation::Bisect,
+                    OperationBranchProvenance::BisectMetadata
+                )
             ) && is_worktree_branch_ref(&association.branch_ref)
                 && self.operations.contains(&association.operation.observed())
         });
@@ -589,7 +594,8 @@ mod tests {
         ))
         .unwrap();
         let expected_result = response.get("result").cloned().unwrap();
-        let decoded: ListWorktreesResult = from_json_str_strict(expected_result.to_string()).unwrap();
+        let decoded: ListWorktreesResult =
+            from_json_str_strict(expected_result.to_string()).unwrap();
         assert_eq!(decoded.items.len(), 1);
         assert_eq!(decoded.items.first().unwrap().dirty, WorktreeDirty::Dirty);
         assert_eq!(decoded.coverage.status, InventoryCoverageStatus::Complete);
@@ -599,8 +605,12 @@ mod tests {
             .unwrap();
         assert_eq!(serde_json::to_value(&decoded).unwrap(), expected_result);
 
-        let without_size: ListWorktreesPayload = from_json_str_strict(r#"{"repo_id":"r"}"#).unwrap();
-        assert_eq!(without_size.effective_page_size(), DEFAULT_WORKTREE_PAGE_SIZE);
+        let without_size: ListWorktreesPayload =
+            from_json_str_strict(r#"{"repo_id":"r"}"#).unwrap();
+        assert_eq!(
+            without_size.effective_page_size(),
+            DEFAULT_WORKTREE_PAGE_SIZE
+        );
         assert_eq!(
             serde_json::to_value(&without_size).unwrap(),
             json!({"repo_id": "r", "opaque_cursor": null})
@@ -783,18 +793,25 @@ mod tests {
 
         let mut wrong_provenance = item("/a");
         wrong_provenance.operations = vec![GitOperation::Rebase];
-        wrong_provenance.operation_branches =
-            vec![reserved(ReservedBranchOperation::Rebase, "refs/heads/topic")];
-        wrong_provenance.operation_branches.first_mut().unwrap().provenance =
-            OperationBranchProvenance::BisectMetadata;
+        wrong_provenance.operation_branches = vec![reserved(
+            ReservedBranchOperation::Rebase,
+            "refs/heads/topic",
+        )];
+        wrong_provenance
+            .operation_branches
+            .first_mut()
+            .unwrap()
+            .provenance = OperationBranchProvenance::BisectMetadata;
         assert_eq!(
             wrong_provenance.check_contract(sha1),
             Err(WorktreeContractViolation::InconsistentOperationBranch)
         );
 
         let mut unobserved_reservation = item("/a");
-        unobserved_reservation.operation_branches =
-            vec![reserved(ReservedBranchOperation::Bisect, "refs/heads/topic")];
+        unobserved_reservation.operation_branches = vec![reserved(
+            ReservedBranchOperation::Bisect,
+            "refs/heads/topic",
+        )];
         assert_eq!(
             unobserved_reservation.check_contract(sha1),
             Err(WorktreeContractViolation::InconsistentOperationBranch)
@@ -857,8 +874,7 @@ mod tests {
         let mut unreadable_associations = item("/a");
         unreadable_associations.operation_branches_complete = false;
         assert_eq!(
-            ListWorktreesResult::coverage_of(std::slice::from_ref(&unreadable_associations))
-                .status,
+            ListWorktreesResult::coverage_of(std::slice::from_ref(&unreadable_associations)).status,
             InventoryCoverageStatus::Incomplete
         );
 

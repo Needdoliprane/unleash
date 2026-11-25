@@ -107,7 +107,8 @@ const PASSTHROUGH_ENV: [&str; 12] = [
 ];
 
 /// Surcharges de configuration du profil, passées par `-c` après celles du dépôt.
-const PROFILE_CONFIG: [(&str, &str); 2] = [("core.fsmonitor", "false"), ("protocol.allow", "never")];
+const PROFILE_CONFIG: [(&str, &str); 2] =
+    [("core.fsmonitor", "false"), ("protocol.allow", "never")];
 
 /// Échec d'une collecte d'inventaire.
 #[derive(Debug, PartialEq, Eq, Error)]
@@ -179,9 +180,7 @@ fn parse_git_version(stdout: &[u8]) -> Result<String, InventoryError> {
     let unsupported = || InventoryError::VersionUnsupported;
     let text = std::str::from_utf8(stdout).map_err(|_| unsupported())?;
     let label = text.lines().next().ok_or_else(unsupported)?;
-    let number = label
-        .strip_prefix("git version ")
-        .ok_or_else(unsupported)?;
+    let number = label.strip_prefix("git version ").ok_or_else(unsupported)?;
     let number: String = number
         .chars()
         .take_while(|character| character.is_ascii_digit() || *character == '.')
@@ -280,9 +279,7 @@ fn parse_worktree_listing(stdout: &[u8]) -> Result<WorktreeListing, InventoryErr
             });
             continue;
         }
-        let record = current
-            .as_mut()
-            .ok_or(InventoryError::UnexpectedOutput)?;
+        let record = current.as_mut().ok_or(InventoryError::UnexpectedOutput)?;
         let text = std::str::from_utf8(field).map_err(|_| InventoryError::UnexpectedOutput)?;
         // Verrouillage et élagabilité ne changent ni le chemin ni la branche observée.
         let informational = matches!(text, "locked" | "prunable")
@@ -396,8 +393,8 @@ fn detect_operations(gitdir: &Path) -> OperationState {
         .filter(|(_, seen)| *seen)
         .map(|(operation, _)| operation)
         .collect();
-    let reserves_branch = operations.contains(&GitOperation::Rebase)
-        || operations.contains(&GitOperation::Bisect);
+    let reserves_branch =
+        operations.contains(&GitOperation::Rebase) || operations.contains(&GitOperation::Bisect);
     OperationState {
         operations,
         complete: !unreadable && !applying && !reverting,
@@ -620,18 +617,14 @@ impl Inspector {
             child.wait().await
         })
         .await;
-        let stderr_tail = match tokio::time::timeout_at(
-            self.deadline + CHILD_GRACE,
-            &mut diagnostics,
-        )
-        .await
-        {
-            Ok(Ok(Ok(capture))) => capture.value,
-            _ => {
-                diagnostics.abort();
-                Vec::new()
-            }
-        };
+        let stderr_tail =
+            match tokio::time::timeout_at(self.deadline + CHILD_GRACE, &mut diagnostics).await {
+                Ok(Ok(Ok(capture))) => capture.value,
+                _ => {
+                    diagnostics.abort();
+                    Vec::new()
+                }
+            };
         let capture = captured?;
         let code = match exited {
             Ok(Ok(status)) => status.code(),
@@ -674,7 +667,9 @@ impl Inspector {
         directory: &Path,
     ) -> Result<Option<bool>, InventoryError> {
         match self
-            .run(arguments, Some(directory), &[0, 1], |stdout| read_up_to(stdout, 0))
+            .run(arguments, Some(directory), &[0, 1], |stdout| {
+                read_up_to(stdout, 0)
+            })
             .await
         {
             Ok((_, Some(0))) => Ok(Some(false)),
@@ -771,10 +766,7 @@ impl Inspector {
     }
 
     /// Rend le répertoire Git privé d'un worktree ; `None` quand il n'a pas pu être établi.
-    async fn private_gitdir(
-        &self,
-        worktree: &Path,
-    ) -> Result<Option<PathBuf>, InventoryError> {
+    async fn private_gitdir(&self, worktree: &Path) -> Result<Option<PathBuf>, InventoryError> {
         match self
             .output(
                 &arguments(&["rev-parse", "--absolute-git-dir"]),
@@ -782,9 +774,9 @@ impl Inspector {
             )
             .await
         {
-            Ok(output) => Ok(std::str::from_utf8(&output).ok().map(|text| {
-                PathBuf::from(text.trim_end_matches(['\r', '\n']).to_owned())
-            })),
+            Ok(output) => Ok(std::str::from_utf8(&output)
+                .ok()
+                .map(|text| PathBuf::from(text.trim_end_matches(['\r', '\n']).to_owned()))),
             Err(InventoryError::DeadlineReached) => Err(InventoryError::DeadlineReached),
             Err(_) => Ok(None),
         }
@@ -795,12 +787,9 @@ impl Inspector {
     async fn filters_of(&self, worktree: &Path) -> Result<Option<Vec<String>>, InventoryError> {
         let keys = arguments(&FILTER_KEYS);
         match self
-            .run(
-                &keys,
-                Some(worktree),
-                &[0, 1],
-                |stdout| read_up_to(stdout, MAX_LISTING_BYTES),
-            )
+            .run(&keys, Some(worktree), &[0, 1], |stdout| {
+                read_up_to(stdout, MAX_LISTING_BYTES)
+            })
             .await
         {
             Ok((capture, _)) => Ok(filter_overrides(&capture.value)),
@@ -1045,10 +1034,13 @@ mod tests {
         // Chemin qui n'est pas une suite d'octets UTF-8 : le worktree est omis, jamais inventé.
         let mut foreign_path = b"worktree /r/caf".to_vec();
         foreign_path.push(0xe9);
-        foreign_path.extend_from_slice(concat!(
-            "\0HEAD 49412001df8ca2164f25d9d3d2ac39a061cc024f\0detached\0\0",
-            "worktree /r/ok\0HEAD 49412001df8ca2164f25d9d3d2ac39a061cc024f\0detached\0\0",
-        ).as_bytes());
+        foreign_path.extend_from_slice(
+            concat!(
+                "\0HEAD 49412001df8ca2164f25d9d3d2ac39a061cc024f\0detached\0\0",
+                "worktree /r/ok\0HEAD 49412001df8ca2164f25d9d3d2ac39a061cc024f\0detached\0\0",
+            )
+            .as_bytes(),
+        );
         let listing = parse_worktree_listing(&foreign_path).unwrap();
         assert!(listing.omitted);
         assert_eq!(listing.worktrees, vec![raw("/r/ok", None)]);
@@ -1078,27 +1070,28 @@ mod tests {
                 "accepté : {malformed:?}"
             );
         }
-        assert_eq!(
-            parse_worktree_listing(b""),
-            Ok(WorktreeListing::default())
-        );
+        assert_eq!(parse_worktree_listing(b""), Ok(WorktreeListing::default()));
     }
 
     #[test]
     fn gitlink_scan_follows_record_boundaries_across_chunks() {
         let mut scan = GitlinkScan::default();
-        scan.push(b"100644 49412001df8ca2164f25d9d3d2ac39a061cc024f 0\ta.txt\0160").unwrap();
+        scan.push(b"100644 49412001df8ca2164f25d9d3d2ac39a061cc024f 0\ta.txt\0160")
+            .unwrap();
         assert!(!scan.found());
-        scan.push(b"0000 49412001df8ca2164f25d9d3d2ac39a061cc024f 1\tvendor/lib\0").unwrap();
+        scan.push(b"0000 49412001df8ca2164f25d9d3d2ac39a061cc024f 1\tvendor/lib\0")
+            .unwrap();
         assert!(scan.found());
 
         let mut scan = GitlinkScan::default();
         scan.push(b"100644 160000 0\t160000 look-alike\0").unwrap();
         assert!(!scan.found());
-        scan.push(b"100755 49412001df8ca2164f25d9d3d2ac39a061cc024f 0\ta b/c/d").unwrap();
+        scan.push(b"100755 49412001df8ca2164f25d9d3d2ac39a061cc024f 0\ta b/c/d")
+            .unwrap();
         scan.push(b"\0160000").unwrap();
         assert!(!scan.found());
-        scan.push(b" 49412001df8ca2164f25d9d3d2ac39a061cc024f 0\tsub\0").unwrap();
+        scan.push(b" 49412001df8ca2164f25d9d3d2ac39a061cc024f 0\tsub\0")
+            .unwrap();
         assert!(scan.found());
     }
 

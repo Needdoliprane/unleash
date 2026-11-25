@@ -24,10 +24,9 @@ pub(crate) fn managed_paths_conn(
         )
         .map_err(StoreError::from_rusqlite)?;
     let rows = statement
-        .query_map(
-            rusqlite::params![project_id.to_string(), repo_id],
-            |row| row.get::<_, String>(0),
-        )
+        .query_map(rusqlite::params![project_id.to_string(), repo_id], |row| {
+            row.get::<_, String>(0)
+        })
         .map_err(StoreError::from_rusqlite)?;
     rows.collect::<Result<Vec<_>, _>>()
         .map_err(StoreError::from_rusqlite)

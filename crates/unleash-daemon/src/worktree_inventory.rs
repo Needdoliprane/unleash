@@ -15,9 +15,8 @@ use chrono::{DateTime, Utc};
 use serde_json::Value;
 use unleash_domain::ProjectId;
 use unleash_protocol::{
-    ErrorCode, IpcError, InventoryCoverageStatus, ListWorktreesPayload, ListWorktreesResult,
-    QueryEnvelope, QueryResponse, ReasonCode, RetryClass, WorktreeItem,
-    is_worktree_branch_ref,
+    ErrorCode, InventoryCoverageStatus, IpcError, ListWorktreesPayload, ListWorktreesResult,
+    QueryEnvelope, QueryResponse, ReasonCode, RetryClass, WorktreeItem, is_worktree_branch_ref,
 };
 use unleash_store::StoreError;
 
@@ -96,9 +95,9 @@ fn to_ipc_error(error: InventoryError) -> IpcError {
                 "Git système absent, non reconnu ou inférieur à 2.39 (ADR-09)",
             )
         }
-        InventoryError::UnreadableRepository => invalid_argument(
-            "La racine enregistrée du dépôt n'est pas lisible comme dépôt Git",
-        ),
+        InventoryError::UnreadableRepository => {
+            invalid_argument("La racine enregistrée du dépôt n'est pas lisible comme dépôt Git")
+        }
         InventoryError::DeadlineReached | InventoryError::StreamLimitReached => {
             IpcError::from_reason(
                 ReasonCode::LocalResourceExhausted,
@@ -142,15 +141,14 @@ pub(crate) async fn query(
 
     let repo_id = payload.repo_id.clone();
     let store = Arc::clone(&state.store);
-    let snapshot = tokio::task::spawn_blocking(move || {
-        store.project_worktree_registry(project, &repo_id)
-    })
-    .await
-    .map_err(|_| internal_failure("Lecture du projet interrompue"))?
-    .map_err(|error| match error {
-        StoreError::NotFound(_) => hidden(),
-        other => crate::error::store_error_to_ipc_error(&other, None),
-    })?;
+    let snapshot =
+        tokio::task::spawn_blocking(move || store.project_worktree_registry(project, &repo_id))
+            .await
+            .map_err(|_| internal_failure("Lecture du projet interrompue"))?
+            .map_err(|error| match error {
+                StoreError::NotFound(_) => hidden(),
+                other => crate::error::store_error_to_ipc_error(&other, None),
+            })?;
     let (project_record, managed_paths) = snapshot.value;
     let Some(repository) = project_record
         .repositories
@@ -215,9 +213,7 @@ mod tests {
     fn item(path: &str, branch: Option<&str>) -> WorktreeItem {
         WorktreeItem {
             path: path.to_owned(),
-            head_oid: Some(
-                GitObjectId::parse(GitObjectFormat::Sha1, &"2".repeat(40)).unwrap(),
-            ),
+            head_oid: Some(GitObjectId::parse(GitObjectFormat::Sha1, &"2".repeat(40)).unwrap()),
             branch_ref: branch.map(ToOwned::to_owned),
             dirty: WorktreeDirty::Dirty,
             operations: Vec::new(),
@@ -253,7 +249,10 @@ mod tests {
     #[test]
     fn a_checked_out_target_is_blocked_even_when_dirty() {
         let human = inventory(
-            vec![item("/w/human", Some("refs/heads/integration")), item("/w/other", None)],
+            vec![
+                item("/w/human", Some("refs/heads/integration")),
+                item("/w/other", None),
+            ],
             true,
         );
         assert_eq!(
@@ -298,7 +297,10 @@ mod tests {
             IntegrationReadiness::Unknown
         );
         // La cible observée checkout reste un fait positif.
-        let seen = inventory(vec![item("/w/human", Some("refs/heads/integration"))], false);
+        let seen = inventory(
+            vec![item("/w/human", Some("refs/heads/integration"))],
+            false,
+        );
         assert_eq!(
             integration_readiness(&seen, "refs/heads/integration"),
             IntegrationReadiness::BlockedTargetCheckout {
@@ -323,7 +325,10 @@ mod tests {
     fn collection_failures_follow_the_f010_error_projection() {
         let unsupported = to_ipc_error(InventoryError::VersionUnsupported);
         assert_eq!(unsupported.code, ErrorCode::CapabilityDenied);
-        assert_eq!(unsupported.reason_code, Some(ReasonCode::GitVersionUnsupported));
+        assert_eq!(
+            unsupported.reason_code,
+            Some(ReasonCode::GitVersionUnsupported)
+        );
         assert_eq!(
             to_ipc_error(InventoryError::GitUnavailable).reason_code,
             Some(ReasonCode::GitVersionUnsupported)
@@ -331,7 +336,10 @@ mod tests {
 
         let exhausted = to_ipc_error(InventoryError::DeadlineReached);
         assert_eq!(exhausted.code, ErrorCode::ResourceBusy);
-        assert_eq!(exhausted.reason_code, Some(ReasonCode::LocalResourceExhausted));
+        assert_eq!(
+            exhausted.reason_code,
+            Some(ReasonCode::LocalResourceExhausted)
+        );
         assert_eq!(exhausted.retry_class, RetryClass::AfterHumanDecision);
         assert_eq!(
             to_ipc_error(InventoryError::StreamLimitReached).reason_code,
@@ -342,10 +350,7 @@ mod tests {
         assert_eq!(unreadable.code, ErrorCode::InvalidArgument);
         assert_eq!(unreadable.retry_class, RetryClass::Never);
         for failed in [InventoryError::GitFailed, InventoryError::UnexpectedOutput] {
-            assert_eq!(
-                to_ipc_error(failed).code,
-                ErrorCode::InternalFailure
-            );
+            assert_eq!(to_ipc_error(failed).code, ErrorCode::InternalFailure);
         }
     }
 }
