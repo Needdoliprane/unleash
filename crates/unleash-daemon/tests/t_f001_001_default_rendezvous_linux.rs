@@ -132,9 +132,9 @@ fn spawn_unleashd_until_ready(args: &[&str], home: &Path) -> (DaemonChild, Value
     });
     let line = match ready.recv_timeout(READY_DEADLINE) {
         Ok(read) => read.unwrap(),
-        Err(timeout) => panic!(
-            "unleashd n'a pas publié de ligne prête dans {READY_DEADLINE:?} : {timeout}"
-        ),
+        Err(timeout) => {
+            panic!("unleashd n'a pas publié de ligne prête dans {READY_DEADLINE:?} : {timeout}")
+        }
     };
     let ready = serde_json::from_str(line.trim()).unwrap();
     (child, ready)
