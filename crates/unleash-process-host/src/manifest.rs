@@ -81,14 +81,17 @@ impl HostControlSecret {
     }
 
     /// Génère un nouveau secret de contrôle aléatoire (256 bits encodés en hexadécimal).
-    #[must_use]
-    pub fn generate() -> Self {
-        let mut bytes = random_32_bytes();
+    ///
+    /// # Errors
+    /// [`ProcessHostError::RandomSourceUnavailable`] si la source d'aléa du système est
+    /// indisponible : aucun repli déterministe n'est produit.
+    pub fn generate() -> Result<Self, ProcessHostError> {
+        let mut bytes = random_32_bytes()?;
         let hex_val = hex::encode(bytes);
         bytes.zeroize();
-        Self {
+        Ok(Self {
             inner: SecretString::from(hex_val),
-        }
+        })
     }
 
     /// Expose le secret brut uniquement pour l'authentification sur canal privé ou persistance `0600`.
@@ -501,44 +504,54 @@ pub fn store_canary_secrets(path: &Path, canaries: &[&str]) -> Result<(), Proces
     Ok(())
 }
 
-/// Génère 32 octets aléatoires depuis `/dev/urandom` (avec repli horloge/compteur/SHA-256).
-pub(crate) fn random_32_bytes() -> [u8; 32] {
-    use std::io::Read;
-    use std::sync::atomic::{AtomicU64, Ordering};
-
-    static COUNTER: AtomicU64 = AtomicU64::new(1);
-
-    let mut buf = [0_u8; 32];
-    if let Ok(mut f) = fs::File::open("/dev/urandom")
-        && f.read_exact(&mut buf).is_ok()
-    {
-        return buf;
-    }
-
-    let mut hasher = Sha256::new();
-    hasher.update(std::process::id().to_le_bytes());
-    hasher.update(COUNTER.fetch_add(1, Ordering::SeqCst).to_le_bytes());
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.as_nanos());
-    hasher.update(nanos.to_le_bytes());
-    hasher.finalize().into()
+/// Génère 32 octets aléatoires depuis la source d'aléa du système (`/dev/urandom` ou
+/// `getrandom` sous Unix, `ProcessPrng` sous Windows).
+///
+/// # Errors
+/// [`ProcessHostError::RandomSourceUnavailable`] si la source est indisponible : aucun repli
+/// déterministe n'est produit, notamment pour un secret de contrôle.
+pub(crate) fn random_32_bytes() -> Result<[u8; 32], ProcessHostError> {
+    random_32_bytes_with(|buf| {
+        getrandom::fill(buf).map_err(|_| ProcessHostError::RandomSourceUnavailable)
+    })
 }
 
-/// Génère un UUID v4 à partir d'entropie OS (`/dev/urandom`).
-pub(crate) fn new_random_uuid() -> uuid::Uuid {
-    let r = random_32_bytes();
+fn random_32_bytes_with(
+    fill: impl FnOnce(&mut [u8]) -> Result<(), ProcessHostError>,
+) -> Result<[u8; 32], ProcessHostError> {
+    let mut buf = [0_u8; 32];
+    fill(&mut buf)?;
+    Ok(buf)
+}
+
+/// Génère un UUID v4 à partir de la source d'aléa du système.
+///
+/// # Errors
+/// [`ProcessHostError::RandomSourceUnavailable`] si la source est indisponible.
+pub(crate) fn new_random_uuid() -> Result<uuid::Uuid, ProcessHostError> {
+    let r = random_32_bytes()?;
     let mut b = [0_u8; 16];
     b.copy_from_slice(&r[..16]);
     b[6] = (b[6] & 0x0f) | 0x40;
     b[8] = (b[8] & 0x3f) | 0x80;
-    uuid::Uuid::from_bytes(b)
+    Ok(uuid::Uuid::from_bytes(b))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use unleash_testkit::local_test_dir;
+
+    #[test]
+    fn unavailable_random_source_is_an_error_never_a_fallback() {
+        // Une source d'aléa indisponible ne produit aucun octet : un hachage de pid, de compteur
+        // et d'horloge serait un secret de contrôle calculable.
+        assert!(matches!(
+            random_32_bytes_with(|_| Err(ProcessHostError::RandomSourceUnavailable)),
+            Err(ProcessHostError::RandomSourceUnavailable)
+        ));
+        assert!(random_32_bytes().is_ok_and(|bytes| bytes.len() == 32));
+    }
 
     #[test]
     fn control_secret_redacted_in_debug_and_display_and_ct_eq() {

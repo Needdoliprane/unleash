@@ -367,7 +367,7 @@ fn policy_snapshot(
     if revision != intent.policy_revision.as_u64() {
         return Err(invalid("révision de politique broker périmée"));
     }
-    let value = json!({"schema_version":1,"global_policy":summary.global_policy,"project_policy":summary.project_policy,"guard_config":summary.guard_config});
+    let value = crate::policies_secrets::engaged_policy_document(&summary);
     Ok((serde_json::to_string(&value)?, canonical_sha256(&value)?))
 }
 

@@ -304,6 +304,10 @@ impl PtyInputTracker {
             });
         }
 
+        // Identifiant du reçu réservé avant tout effet : un échec de la source d'aléa ne laisse
+        // ni marqueur durable ni octet PTY.
+        let receipt_id = ReceiptId::from_uuid(crate::manifest::new_random_uuid()?);
+
         // Cutpoint C3 : avant marqueur durable de dispatch.
         self.hit_cutpoint(HostInputCutpoint::C3BeforeWriteDispatched)?;
 
@@ -344,7 +348,6 @@ impl PtyInputTracker {
         self.hit_cutpoint(HostInputCutpoint::C5AfterPtyWriteBeforeReceipt)?;
 
         // Phase 3 : persister le reçu durable ReceiptConfirmed.
-        let receipt_id = ReceiptId::from_uuid(crate::manifest::new_random_uuid());
         if let Some(entry) = guard.disk.entries.get_mut(&input_seq) {
             entry.entry_state = InputEntryState::ReceiptConfirmed {
                 receipt_id,

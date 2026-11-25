@@ -623,7 +623,7 @@ fn observe_once(
             dispatch_id: dispatch,
         })?;
     let secret = load_control_secret(&runtime.join(CONTROL_SECRET_FILENAME))?;
-    let next = HostControlSecret::generate();
+    let next = HostControlSecret::generate()?;
     before_effect(state, c)?;
     let mut client = HostClient::connect(
         &runtime.join(HOST_SOCKET_FILENAME),

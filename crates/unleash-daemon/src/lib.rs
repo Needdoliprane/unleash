@@ -57,4 +57,8 @@ pub use recovery::RecoveryGate;
 pub use subscriptions::SubscriptionHub;
 
 #[cfg(test)]
+mod provider_service_secret_tests;
+#[cfg(test)]
 mod start_assignment_tests;
+#[cfg(test)]
+mod terminal_control_secret_tests;

@@ -88,6 +88,12 @@ pub enum ProcessHostError {
         remediation: String,
     },
 
+    /// La source d'aléa du système est indisponible ; aucun repli déterministe n'est
+    /// produit (`REQ-TERM-003`). Erreur interne sans code de raison dédié : le catalogue
+    /// des raisons du contrat n'en définit aucun, et aucun n'est annoncé ici.
+    #[error("Source d'aléa du système indisponible")]
+    RandomSourceUnavailable,
+
     /// Tentative d'invocation modèle depuis un process-host strictement interdite (`REQ-TERM-004`).
     #[error("Appel modèle autonome interdit dans process-host (MODEL_CALLS_FORBIDDEN) : {reason}")]
     ModelCallsForbidden {
@@ -189,6 +195,14 @@ impl ProcessHostError {
             Self::ModelCallsForbidden { .. } => {
                 IpcError::from_reason(ReasonCode::ModelCallsForbidden, self.to_string())
             }
+            // Ressource locale indisponible avant tout effet : jamais de nouvelle tentative
+            // automatique ; l'appelant décide d'une nouvelle commande explicite.
+            Self::RandomSourceUnavailable => IpcError::new(
+                ErrorCode::InternalFailure,
+                None,
+                self.to_string(),
+                RetryClass::Never,
+            ),
             Self::TerminalUnavailable { .. } => {
                 IpcError::from_reason(ReasonCode::TerminalUnavailable, self.to_string())
             }

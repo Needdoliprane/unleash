@@ -31,6 +31,7 @@ hex.workspace = true
 secrecy.workspace = true
 zeroize.workspace = true
 tracing.workspace = true
+getrandom.workspace = true
 
 [dev-dependencies]
 unleash-testkit.workspace = true

@@ -407,10 +407,7 @@ fn transfer_and_observe(
     if std::fs::symlink_metadata(&next_path).is_ok() {
         return Err("terminal transfer capability already exists; inspect".into());
     }
-    let next = HostControlSecret::new(format!(
-        "terminal-control:{}",
-        state.store.config().id_generator.new_uuid()
-    ))?;
+    let next = super::fresh_control_secret()?;
     store_control_secret(&next_path, &next)?;
     let mut client = HostClient::connect(
         &runtime.join(HOST_SOCKET_FILENAME),
@@ -502,7 +499,7 @@ fn reacquire_and_observe(
             },
         })?;
     let secret = load_control_secret(&runtime.join(CONTROL_SECRET_FILENAME))?;
-    let next = HostControlSecret::generate();
+    let next = HostControlSecret::generate()?;
     reactivation_permission(state, c)?;
     let mut client = HostClient::connect(
         &runtime.join(HOST_SOCKET_FILENAME),

@@ -761,9 +761,7 @@ pub(crate) fn policy(
                 .as_ref()
                 .map_or(0, |p| p.revision.as_u64()),
         );
-    let digest = unleash_protocol::canonical_sha256(
-        &serde_json::json!({"schema_version":1,"global_policy":summary.global_policy,"project_policy":summary.project_policy,"guard_config":summary.guard_config}),
-    )?;
+    let digest = crate::policies_secrets::engaged_policy_digest(&summary)?;
     Ok((Revision::new(revision), digest))
 }
 

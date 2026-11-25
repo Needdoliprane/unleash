@@ -199,6 +199,14 @@ impl OwnedProviderServiceHost {
     }
 }
 
+/// Secret de contrôle neuf d'un service fournisseur managé : 256 bits de la source d'aléa du
+/// système, jamais dérivés du générateur d'identifiants du démon, dont la séquence est
+/// reproductible.
+pub(crate) fn fresh_provider_service_secret()
+-> Result<HostControlSecret, ProviderServiceLaunchError> {
+    Ok(HostControlSecret::generate()?)
+}
+
 fn spawn_provider_service_host(
     store: &UnleashStore,
     envelope: &CommandEnvelope,
@@ -231,11 +239,7 @@ fn spawn_provider_service_host(
         return Err(ProviderServiceLaunchError::RuntimeInUse);
     }
     let bootstrap_path = bootstrap.runtime_dir.join("bootstrap.json");
-    let config = store.config();
-    let secret = HostControlSecret::new(format!(
-        "provider-service:{}",
-        config.id_generator.new_uuid()
-    ))?;
+    let secret = fresh_provider_service_secret()?;
     let file = OpenOptions::new()
         .write(true)
         .create_new(true)
