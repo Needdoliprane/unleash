@@ -224,6 +224,84 @@ pub fn ensure_private_rendezvous_dir(dir: &Path) -> Result<(), PlatformError> {
     }
 }
 
+/// Nom de l'unique sous-répertoire applicatif hébergé par une racine runtime qualifiée.
+pub(crate) const RUNTIME_ROOT_RENDEZVOUS_DIR: &str = "unleash";
+
+/// Remédiation indiquée quand la racine runtime manque ou n'est pas qualifiée.
+const RUNTIME_ROOT_REMEDIATION: &str = "ouvrez une session qui fournit cette racine (logind ou elogind ; \
+     activez linger pour qu'elle survive à la fin de session) ou faites-la créer au démarrage par \
+     l'administrateur : répertoire réel, propriété de l'utilisateur, mode 0700, sans lien symbolique";
+
+fn runtime_root_refusal(root: &Path, reason: impl Into<String>) -> PlatformError {
+    PlatformError::RuntimeRootUnavailable {
+        root: root.display().to_string(),
+        rendezvous_dir: root.join(RUNTIME_ROOT_RENDEZVOUS_DIR).display().to_string(),
+        reason: reason.into(),
+        remediation: String::from(RUNTIME_ROOT_REMEDIATION),
+    }
+}
+
+/// Qualifie une racine runtime avant toute création, sans rien créer : répertoire réel (ni lien
+/// symbolique ni fichier), sans ancêtre lien symbolique non root, propriétaire égal à
+/// `expected_uid`, mode exact `0700`. Tout écart est un refus (`REQ-CORE-001`).
+pub(crate) fn qualify_runtime_root(root: &Path, expected_uid: u32) -> Result<(), PlatformError> {
+    let meta = match fs::symlink_metadata(root) {
+        Ok(meta) => meta,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Err(runtime_root_refusal(root, "absente"));
+        }
+        Err(e) => return Err(PlatformError::Io(e)),
+    };
+    if meta.file_type().is_symlink() {
+        return Err(runtime_root_refusal(root, "la racine runtime est un lien symbolique"));
+    }
+    if !meta.is_dir() {
+        return Err(runtime_root_refusal(root, "la racine runtime n'est pas un répertoire"));
+    }
+    if let Err(rejection) = check_ancestor_symlinks(root) {
+        return Err(runtime_root_refusal(root, format!("ancêtre refusé ({rejection})")));
+    }
+    let actual_uid = meta.uid();
+    if actual_uid != expected_uid {
+        return Err(runtime_root_refusal(
+            root,
+            format!("propriétaire UID {actual_uid}, UID attendu {expected_uid}"),
+        ));
+    }
+    let mode = meta.mode() & 0o7777;
+    if mode != 0o700 {
+        return Err(runtime_root_refusal(root, format!("mode {mode:#o}, attendu 0o700")));
+    }
+    Ok(())
+}
+
+/// Crée le sous-répertoire de rendez-vous d'une racine runtime déjà qualifiée, en `0700`, puis le
+/// valide. Ne crée jamais la racine runtime ni un ancêtre : un sous-répertoire existant est
+/// seulement revalidé ; une racine disparue depuis sa qualification est un refus (`REQ-CORE-001`).
+pub(crate) fn create_rendezvous_dir_in_qualified_root(root: &Path) -> Result<(), PlatformError> {
+    let dir = root.join(RUNTIME_ROOT_RENDEZVOUS_DIR);
+    assert_not_under_claude(&dir)?;
+    check_ancestor_symlinks(&dir)?;
+    match fs::symlink_metadata(&dir) {
+        Ok(_) => validate_rendezvous_dir(&dir),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            match DirBuilder::new().mode(0o700).create(&dir) {
+                Ok(()) => {}
+                Err(create_err) if create_err.kind() == std::io::ErrorKind::NotFound => {
+                    return Err(runtime_root_refusal(
+                        root,
+                        "la racine runtime a disparu pendant le démarrage",
+                    ));
+                }
+                Err(create_err) if create_err.kind() == std::io::ErrorKind::AlreadyExists => {}
+                Err(create_err) => return Err(PlatformError::Io(create_err)),
+            }
+            validate_rendezvous_dir(&dir)
+        }
+        Err(e) => Err(PlatformError::Io(e)),
+    }
+}
+
 /// Valide un répertoire de rendez-vous existant : non-symlink (`O_NOFOLLOW`), véritable
 /// répertoire, propriétaire égal à l'UID effectif courant et permissions exactes `0700`.
 ///

@@ -7,7 +7,10 @@ use std::fs;
 use std::path::{Component, Path, PathBuf};
 
 use crate::errors::PlatformError;
-use crate::rendezvous::MAX_UNIX_SOCKET_PATH_BYTES;
+use crate::rendezvous::{
+    MAX_UNIX_SOCKET_PATH_BYTES, RUNTIME_ROOT_RENDEZVOUS_DIR, create_rendezvous_dir_in_qualified_root,
+    qualify_runtime_root,
+};
 
 /// Nom du dossier documentaire interdit à toute écriture runtime (`REQ-CORE-008`, `INV-046`).
 pub const CLAUDE_DIR_NAME: &str = ".claude";
@@ -388,9 +391,14 @@ pub fn canonical_rendezvous_dir_with(
     }
 }
 
+/// Racine runtime Linux de l'UID : `/run/user/<uid>`, fournie par le gestionnaire de session.
+fn linux_runtime_root(uid: u32) -> PathBuf {
+    PathBuf::from(format!("/run/user/{uid}"))
+}
+
 /// Candidat unique sous Linux : `/run/user/<uid>/unleash`, dans la racine runtime `/run/user/<uid>`.
 fn linux_rendezvous_dir(uid: u32) -> PathBuf {
-    PathBuf::from(format!("/run/user/{uid}/unleash"))
+    linux_runtime_root(uid).join(RUNTIME_ROOT_RENDEZVOUS_DIR)
 }
 
 /// Résout et prépare le rendez-vous canonique par défaut, sans chemin explicite, pour une
@@ -398,13 +406,25 @@ fn linux_rendezvous_dir(uid: u32) -> PathBuf {
 /// seul candidat par OS et ne crée rien tant que sa racine runtime n'est pas qualifiée.
 ///
 /// # Errors
-/// - [`PlatformError::RuntimeRootUnavailable`] si la racine runtime manque ou n'est pas qualifiée.
+/// - [`PlatformError::RuntimeRootUnavailable`] sous Linux si la racine runtime manque ou n'est
+///   pas qualifiée.
 /// - [`PlatformError::ForbiddenDocumentationPath`] si le chemin résolu touche `.claude/`.
 pub fn prepare_canonical_rendezvous_dir_with(
     os: PlatformOsKind,
     uid: u32,
 ) -> Result<PathBuf, PlatformError> {
-    canonical_rendezvous_dir_with(os, uid, &EnvSnapshot::default())
+    match os {
+        PlatformOsKind::Linux => prepare_linux_rendezvous_dir(uid),
+        // macOS : comportement conservé. Le système fournit la racine Darwin ; le rendez-vous
+        // reste créé et validé par `ensure_private_rendezvous_dir` à l'acquisition du verrou.
+        PlatformOsKind::MacOs => canonical_rendezvous_dir_with(os, uid, &EnvSnapshot::default()),
+    }
+}
+
+/// Prépare le rendez-vous canonique Linux de l'UID : racine runtime qualifiée avant toute
+/// création, puis seul sous-répertoire applicatif créé.
+fn prepare_linux_rendezvous_dir(uid: u32) -> Result<PathBuf, PlatformError> {
+    prepare_rendezvous_dir_in_runtime_root(&linux_runtime_root(uid), uid)
 }
 
 /// Qualifie la racine runtime `root` pour `expected_uid`, puis y crée le seul sous-répertoire de
@@ -412,11 +432,14 @@ pub fn prepare_canonical_rendezvous_dir_with(
 ///
 /// # Errors
 /// - [`PlatformError::RuntimeRootUnavailable`] si la racine manque ou n'est pas qualifiée.
+/// - [`PlatformError::ForbiddenDocumentationPath`] si le chemin touche `.claude/`.
 pub fn prepare_rendezvous_dir_in_runtime_root(
     root: &Path,
-    _expected_uid: u32,
+    expected_uid: u32,
 ) -> Result<PathBuf, PlatformError> {
-    Ok(root.join("unleash"))
+    qualify_runtime_root(root, expected_uid)?;
+    create_rendezvous_dir_in_qualified_root(root)?;
+    Ok(root.join(RUNTIME_ROOT_RENDEZVOUS_DIR))
 }
 
 // macOS : le candidat reste le répertoire temporaire Darwin par utilisateur, comportement conservé.
