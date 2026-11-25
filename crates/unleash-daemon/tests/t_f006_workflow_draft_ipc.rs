@@ -1,7 +1,8 @@
-// T-F006-010 : conservation d’un brouillon texte par le parcours IPC public.
+//! T-F006-010 : conservation d’un brouillon texte par le parcours IPC public.
 use std::os::unix::fs::PermissionsExt;
+use std::time::Duration;
 
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 use unleash_client::{ClientConfig, ClientError, UnleashClient};
 use unleash_daemon::{DaemonConfig, DaemonHandle, DaemonStartOutcome, UnleashDaemon};
 use unleash_domain::{CommandId, ProjectId, RequestId, Revision};
@@ -32,6 +33,29 @@ async fn start(config: DaemonConfig) -> (DaemonHandle, UnleashClient) {
     (daemon, client)
 }
 
+/// Attend l'effet observable d'un `CreateProject` reçu `Accepted` : le projet lisible par une
+/// requête, dans un délai borné, avant toute commande qui le concerne.
+async fn wait_for_readable_project(
+    client: &mut UnleashClient,
+    project: ProjectId,
+    request: u128,
+) -> bool {
+    let query = QueryEnvelope {
+        protocol_version: ProtocolVersion,
+        request_id: RequestId::from_u128(request),
+        query_type: "GetProject".to_owned(),
+        project_id: Some(project),
+        payload: Map::new(),
+    };
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while client.query(&query).await.is_err() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .is_ok()
+}
+
 #[allow(
     clippy::unwrap_used,
     reason = "La création des projets est un prérequis de la fixture"
@@ -50,7 +74,11 @@ async fn create_project(client: &mut UnleashClient, project: ProjectId, id: u128
         payload: serde_json::from_value(json!({"name": format!("F006-{id}"), "weight": 1})).unwrap(),
     };
     let receipt = client.send_command(&command).await.unwrap();
-    assert_eq!(receipt.state, ReceiptState::Completed);
+    assert_eq!(receipt.state, ReceiptState::Accepted);
+    assert!(
+        wait_for_readable_project(client, project, id + 0x100).await,
+        "le projet devient lisible"
+    );
 }
 
 #[tokio::test]

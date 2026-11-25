@@ -1,12 +1,15 @@
 //! T-F006-009: publication respects the existing actor-scoped idempotency key.
 
 use std::os::unix::fs::PermissionsExt;
+use std::time::Duration;
 
-use serde_json::json;
+use serde_json::{Map, json};
 use unleash_client::{ClientConfig, ClientError, UnleashClient};
 use unleash_daemon::{DaemonConfig, DaemonStartOutcome, UnleashDaemon};
 use unleash_domain::{CommandId, ProjectId, RequestId, Revision};
-use unleash_protocol::{ClientKind, CommandEnvelope, ErrorCode, ProtocolVersion, ReceiptState};
+use unleash_protocol::{
+    ClientKind, CommandEnvelope, ErrorCode, ProtocolVersion, QueryEnvelope, ReceiptState,
+};
 use unleash_testkit::local_test_dir;
 
 #[tokio::test]
@@ -46,7 +49,25 @@ async fn t_f006_009_publish_rejects_an_existing_command_id_with_different_intent
             .unwrap(),
     };
     let original = client.send_command(&create).await.unwrap();
-    assert_eq!(original.state, ReceiptState::Completed);
+    assert_eq!(original.state, ReceiptState::Accepted);
+    // `Accepted` engage le projet sans le terminer : la commande suivante attend qu'il soit lisible.
+    let readable = QueryEnvelope {
+        protocol_version: ProtocolVersion,
+        request_id: RequestId::from_u128(0x6606),
+        query_type: "GetProject".to_owned(),
+        project_id: Some(project),
+        payload: Map::new(),
+    };
+    assert!(
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while client.query(&readable).await.is_err() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .is_ok(),
+        "le projet devient lisible"
+    );
 
     let mut publish: CommandEnvelope = serde_json::from_str(include_str!(
         "../../../.claude/examples/ipc-publish-workflow-version.json"
