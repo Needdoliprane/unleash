@@ -16,6 +16,7 @@ Les outils de test spécifiques au produit sont développés en Rust. Les tests 
 | T-F017-010 | AC-F017-010 ; REQ-SEC-010 | Journal distant indisponible et receipt dupliqué. | EV-F017-010 : assertions, journal causal, versions et artefacts |
 | T-F017-011 | AC-F017-011 ; REQ-SEC-011 | WAL, cache, export, sauvegarde et rétention fournisseur. | EV-F017-011 : assertions, journal causal, versions et artefacts |
 | T-F017-012 | AC-F017-012 ; REQ-SEC-012 | Tests allow/deny/require_approval/timeout/suspend/revoke/isolation sur vrai système. | EV-F017-012 : assertions, journal causal, versions et artefacts |
+| T-F017-013 | AC-F017-007 ; REQ-SEC-007 | Sauvegarde interne `RequestBackup`. Le courtier réservé est lié à la révision de politique engagée par la demande : une politique standard validée ne la refuse pas. Politique modifiée entre le claim et le dispatch, avant la revalidation, avant la phase `Authorizing` ou après l'autorisation : la demande devient `blocked` avec le motif fermé `policy_changed`, attesté par le magasin en comparant la révision effective courante à la révision engagée ; événement `BackupRequestBlocked` publié, aucun fichier de sauvegarde, aucun dispatch. Contrôle interne du harnais en échec avant tout marqueur d'effet : `blocked` avec `preflight_failed`. Aucun blocage n'est engagé après un marqueur de dispatch. | EV-F017-013 : assertions, journal causal, versions et artefacts |
 
 ## Procédure de validation
 

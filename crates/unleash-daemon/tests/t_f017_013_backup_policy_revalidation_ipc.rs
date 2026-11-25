@@ -1,8 +1,10 @@
-//! REQ-SEC-007 / AC-F017-007 : une politique validée ne refuse pas la sauvegarde interne.
+//! T-F017-013 / AC-F017-007 / REQ-SEC-007 : sauvegarde interne liée à la politique engagée.
 //!
-//! Le courtier réservé à `RequestBackup` doit être lié à la révision de politique que la
-//! demande a engagée. Un courtier construit à la révision initiale répond `PolicyDenied`
-//! dès qu'une politique a été posée, même standard.
+//! Le courtier réservé à `RequestBackup` est lié à la révision de politique que la demande a
+//! engagée. Une politique validée ne la refuse pas. Une politique qui change avant le dispatch
+//! laisse la demande dans l'état terminal `blocked`, avec un motif fermé attesté par le magasin,
+//! un événement publié, aucun fichier de sauvegarde et aucun dispatch.
+
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,

@@ -201,7 +201,7 @@ fd66815a76ace8b136778face8afcfd940d6b6d02d1f2dbe1c2a162d5ef3e666  .claude/brief/
 08e0a0152f290d07fa66453243218c404530afc1dcb92e9fc5d8e24aa366b6eb  .claude/catalog/README.md
 a87fbd5d995747bc222abdef47db8fb9c561b93c0ba0846c08ead13d1a1c6529  .claude/catalog/design-catalog.json
 bcdc9be2f4559a4d743d08307d710c818606896b4c59f55cb831b01539ddd3d7  .claude/catalog/operations.json
-063a7e97ac218304283045ccb6695ae70e17484c93c957de842a2fce9af350fb  .claude/catalog/package-manifest.json
+29f3b90b3a76282e29c31e27205f570b08a825b21a63cd85b51db387b3980604  .claude/catalog/package-manifest.json
 dc670318f9a2834c72d589fa921567ab3c2da5a6777d6d348697fd54b643f60b  .claude/design/activity-timeline.md
 7e66e407555c2cd16175e2f26c9515ede0d802d8e2bc53b2675d3883dfbfa2a8  .claude/design/agent-tree-and-status.md
 1558c901b73b4ce6ca5963a1b2a1c06864afc92f61b4f9ed1950ff841669c6ed  .claude/design/cli-tui-design.md
@@ -378,7 +378,7 @@ b022a06f8e0d90e7a44a8f7e096af58620ed11fdcfd5219fd983fb594016f65f  .claude/featur
 4d48956eba03414eb9f84a1e8c3883b124894c2e34a36fc9d3f97edd5ebabb0b  .claude/features/F017-ai-guard-integration/interfaces.md
 c7f630957d6d3a8549cdbcf19f2d5ae7d1d7c0c31daa3081a806f2c698331503  .claude/features/F017-ai-guard-integration/requirements.md
 17c102f039a7b9ad06fbafa0a43ad2d0a95e53ae052e47f58a48a442ab828ed5  .claude/features/F017-ai-guard-integration/technical-design.md
-1749f87659d63b7dde7b2dfb0e69b7961a753d1bb36f488eb1d72024aac5434a  .claude/features/F017-ai-guard-integration/tests.md
+3998abca1efe8e96b2ea41d1a93148fd767c320f9bd077cb64d7c3303f6988f4  .claude/features/F017-ai-guard-integration/tests.md
 739bbef04e20db78ecd8ca3e0e53f544635e70959559d4b8fe1d84b53bac5e15  .claude/features/F018-reliability-recovery/README.md
 5d22db02f4d639f7929838ece1257c4a014bb7ded6f9629a61502bf323b4b666  .claude/features/F018-reliability-recovery/acceptance.md
 27e242139794fbf0805dac2ba32adcb37389e839683bd604f681524091b37715  .claude/features/F018-reliability-recovery/dependencies.md
