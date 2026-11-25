@@ -568,25 +568,43 @@ mod tests {
 
     use super::*;
 
-    fn patch(command: &Value) -> &Value {
-        command
-            .pointer("/payload/patch/model_policy_version")
-            .unwrap()
-    }
+    const PUBLISH_FIXTURE: &str =
+        include_str!("../../../.claude/examples/ipc-set-model-policy-version.json");
 
     fn refused(value: Value) -> bool {
         serde_json::from_value::<ModelPolicyVersionChange>(value).is_err()
     }
 
-    // T-F012-002 — Les DTO fermés ont exactement la forme des fixtures du dossier et refusent ce
-    // que le contrat IPC interdit (REQ-MODEL-002).
+    fn publish_patch() -> Value {
+        let command: Value = serde_json::from_str(PUBLISH_FIXTURE).unwrap();
+        command
+            .pointer("/payload/patch/model_policy_version")
+            .unwrap()
+            .clone()
+    }
+
+    /// La fixture de publication, réduite à une révocation de sa version 1.
+    fn revoke_of(publish: &Value) -> Value {
+        let mut revoke = publish.clone();
+        let fields = revoke.as_object_mut().unwrap();
+        fields.insert("operation".to_owned(), json!("revoke"));
+        fields.insert("version".to_owned(), json!(1));
+        for field in [
+            "allowed_profiles",
+            "allowed_capabilities",
+            "fallback_profiles",
+            "limits",
+        ] {
+            fields.remove(field);
+        }
+        revoke
+    }
+
+    // T-F012-002 — Les DTO fermés se décodent exactement comme les fixtures du dossier
+    // (REQ-MODEL-002).
     #[test]
-    fn closed_dtos_follow_the_dossier_fixtures_and_refuse_forbidden_shapes() {
-        let command: Value = serde_json::from_str(include_str!(
-            "../../../.claude/examples/ipc-set-model-policy-version.json"
-        ))
-        .unwrap();
-        let publish = patch(&command).clone();
+    fn closed_dtos_follow_the_dossier_fixtures() {
+        let publish = publish_patch();
         // Le patch n'est qu'une entrée : la fixture se décode dans sa variante, valeurs exactes.
         let ModelPolicyVersionChange(Change::Publish {
             policy_id,
@@ -613,80 +631,13 @@ mod tests {
             }
         );
 
-        let mut revoke = publish.clone();
-        let fields = revoke.as_object_mut().unwrap();
-        fields.insert("operation".to_owned(), json!("revoke"));
-        fields.insert("version".to_owned(), json!(1));
-        for field in [
-            "allowed_profiles",
-            "allowed_capabilities",
-            "fallback_profiles",
-            "limits",
-        ] {
-            fields.remove(field);
-        }
         let ModelPolicyVersionChange(Change::Revoke { policy_id, version }) =
-            serde_json::from_value(revoke.clone()).unwrap()
+            serde_json::from_value(revoke_of(&publish)).unwrap()
         else {
             panic!("une révocation sans paramètre de publication doit se décoder");
         };
         assert_eq!(policy_id.as_str(), "policy.fixture");
         assert_eq!(version, 1);
-
-        let mut refused_shapes = Vec::new();
-        for (field, value) in [
-            ("version", json!(1)),
-            ("principal_id", json!("caller")),
-            ("state", json!("active")),
-        ] {
-            let mut forbidden = publish.clone();
-            forbidden
-                .as_object_mut()
-                .unwrap()
-                .insert(field.to_owned(), value);
-            refused_shapes.push(forbidden);
-        }
-        let mut missing = publish.clone();
-        missing.as_object_mut().unwrap().remove("limits");
-        refused_shapes.push(missing);
-        let mut negative = publish.clone();
-        negative
-            .pointer_mut("/limits/max_cost_microusd")
-            .unwrap()
-            .clone_from(&json!(-1));
-        refused_shapes.push(negative);
-        for (pointer, value) in [
-            ("/allowed_profiles/0/profile_version", json!(0)),
-            (
-                "/allowed_profiles/0/digest",
-                json!("sha256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"),
-            ),
-        ] {
-            let mut malformed = publish.clone();
-            malformed.pointer_mut(pointer).unwrap().clone_from(&value);
-            refused_shapes.push(malformed);
-        }
-        let oversized = "a".repeat(129);
-        for identity in ["", "Policy", "policy..fixture", oversized.as_str()] {
-            let mut malformed = publish.clone();
-            malformed
-                .as_object_mut()
-                .unwrap()
-                .insert("policy_id".to_owned(), json!(identity));
-            refused_shapes.push(malformed);
-        }
-        let mut unnumbered = revoke.clone();
-        unnumbered.as_object_mut().unwrap().remove("version");
-        refused_shapes.push(unnumbered);
-        let mut with_limits = revoke.clone();
-        with_limits
-            .as_object_mut()
-            .unwrap()
-            .insert("limits".to_owned(), json!({"max_llm_calls": 1}));
-        refused_shapes.push(with_limits);
-        for forbidden in refused_shapes {
-            assert!(refused(forbidden));
-        }
 
         let response: Value = serde_json::from_str(include_str!(
             "../../../.claude/examples/ipc-read-settings-model-policies-response.json"
@@ -697,5 +648,65 @@ mod tests {
         assert_eq!(&serde_json::to_value(&decoded).unwrap(), history);
         assert!(decoded.first().unwrap().revocation.is_some());
         assert!(decoded.get(1).unwrap().revocation.is_none());
+    }
+
+    // T-F012-002 — Les DTO fermés refusent ce que le contrat IPC interdit au décodage
+    // (REQ-MODEL-002). La version positive d'un profil est contrôlée par le writer et couverte
+    // par le test d'intégration du magasin.
+    #[test]
+    fn closed_dtos_refuse_the_shapes_the_contract_forbids() {
+        let publish = publish_patch();
+        let revoke = revoke_of(&publish);
+        let mut shapes = Vec::new();
+        for (field, value) in [
+            ("version", json!(1)),
+            ("principal_id", json!("caller")),
+            ("state", json!("active")),
+        ] {
+            let mut forbidden = publish.clone();
+            forbidden
+                .as_object_mut()
+                .unwrap()
+                .insert(field.to_owned(), value);
+            shapes.push(forbidden);
+        }
+        let mut missing = publish.clone();
+        missing.as_object_mut().unwrap().remove("limits");
+        shapes.push(missing);
+        let mut negative = publish.clone();
+        negative
+            .pointer_mut("/limits/max_cost_microusd")
+            .unwrap()
+            .clone_from(&json!(-1));
+        shapes.push(negative);
+        let mut uppercase = publish.clone();
+        uppercase
+            .pointer_mut("/allowed_profiles/0/digest")
+            .unwrap()
+            .clone_from(&json!(
+                "sha256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+            ));
+        shapes.push(uppercase);
+        let oversized = "a".repeat(129);
+        for identity in ["", "Policy", "policy..fixture", oversized.as_str()] {
+            let mut malformed = publish.clone();
+            malformed
+                .as_object_mut()
+                .unwrap()
+                .insert("policy_id".to_owned(), json!(identity));
+            shapes.push(malformed);
+        }
+        let mut unnumbered = revoke.clone();
+        unnumbered.as_object_mut().unwrap().remove("version");
+        shapes.push(unnumbered);
+        let mut with_limits = revoke;
+        with_limits
+            .as_object_mut()
+            .unwrap()
+            .insert("limits".to_owned(), json!({"max_llm_calls": 1}));
+        shapes.push(with_limits);
+        for forbidden in shapes {
+            assert!(refused(forbidden));
+        }
     }
 }

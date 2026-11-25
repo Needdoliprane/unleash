@@ -722,26 +722,28 @@ async fn revokes_a_published_model_policy_version_through_settings() {
         panic!("expected the two published policy versions");
     };
     assert_eq!(published["revision"], json!(3));
-    let fields: Vec<&str> = retained
+    // Un `Value` re-décodé trie ses clés : le contrat est l'ensemble exact des champs.
+    let mut fields: Vec<&str> = retained
         .as_object()
         .unwrap()
         .keys()
         .map(String::as_str)
         .collect();
+    fields.sort_unstable();
     assert_eq!(
         fields,
         [
-            "policy_id",
-            "version",
-            "digest",
-            "policy_version_ref",
-            "allowed_profiles",
             "allowed_capabilities",
+            "allowed_profiles",
+            "command_receipt_id",
+            "digest",
             "fallback_profiles",
             "limits",
+            "policy_id",
+            "policy_version_ref",
             "principal_id",
-            "command_receipt_id",
             "revocation",
+            "version",
         ]
     );
     assert_eq!(retained["version"], json!(1));
@@ -877,9 +879,25 @@ async fn refuses_a_model_policy_without_edition_right_or_outside_the_envelope_sc
 async fn refuses_a_model_policy_patch_outside_the_closed_contract_or_incoherent_with_state() {
     let (mut route, project, profile, read, publish) = unpublished_model_policy().await;
 
+    // Champs que la publication n'admet pas : refusés même ajoutés par le client.
+    for (id, field, value) in [
+        (0x59e2, "version", json!(1)),
+        (0x59e3, "principal_id", json!("DO_NOT_ECHO")),
+    ] {
+        let mut invalid = publish.clone();
+        invalid.command_id = CommandId::from_u128(id);
+        invalid.payload["patch"]["model_policy_version"][field] = value;
+        assert!(
+            matches!(
+                route.client.send_command(&invalid).await,
+                Err(ClientError::Remote(error))
+                    if error.code == ErrorCode::InvalidArgument
+                        && !error.message.contains("DO_NOT_ECHO")
+            ),
+            "accepted {field}"
+        );
+    }
     for (id, path, value) in [
-        (0x59e2, "/version", json!(1)),
-        (0x59e3, "/principal_id", json!("DO_NOT_ECHO")),
         (0x59e4, "/limits/max_cost_microusd", json!(-1)),
         (0x59e5, "/allowed_profiles/0/profile_version", json!(0)),
         (0x59e7, "/policy_id", json!("DO_NOT_ECHO policy")),
