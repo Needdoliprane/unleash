@@ -42,12 +42,44 @@ fn load_schema(rel_path: &str) -> Value {
     serde_json::from_str(&content).expect("Schéma JSON valide")
 }
 
-fn build_validator(rel_path: &str) -> jsonschema::Validator {
-    let schema = load_schema(rel_path);
+/// Construit le validateur d'un schéma du dossier en inscrivant au registre tous les schémas
+/// qui portent un `$id` : les `$ref` croisés entre documents (d'`ipc-query-response` vers
+/// `discovery-receipt`, par exemple) se résolvent comme dans le contrat, sans inscription manuelle.
+fn validator_for_dossier(schema: &Value) -> jsonschema::Validator {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .join(".claude/schemas");
+    let mut paths: Vec<_> = fs::read_dir(&dir)
+        .unwrap_or_else(|e| panic!("Impossible de lire le dossier des schémas : {e}"))
+        .map(|entry| entry.expect("entrée du dossier des schémas").path())
+        .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("json"))
+        .collect();
+    paths.sort();
+    let mut registry = referencing::Registry::new();
+    for path in paths {
+        let content = fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("Impossible de lire le schéma {}: {e}", path.display()));
+        let Ok(document) = serde_json::from_str::<Value>(&content) else {
+            continue;
+        };
+        let Some(id) = document["$id"].as_str().map(ToOwned::to_owned) else {
+            continue;
+        };
+        registry = registry
+            .add(id, document)
+            .unwrap_or_else(|e| panic!("Schéma {} non enregistrable : {e}", path.display()));
+    }
+    let registry = registry.prepare().expect("Registre des schémas");
     jsonschema::options()
         .should_validate_formats(true)
-        .build(&schema)
-        .unwrap_or_else(|e| panic!("Validateur {rel_path}: {e}"))
+        .with_registry(&registry)
+        .build(schema)
+        .unwrap_or_else(|e| panic!("Validateur du dossier : {e}"))
+}
+
+fn build_validator(rel_path: &str) -> jsonschema::Validator {
+    let schema = load_schema(rel_path);
+    validator_for_dossier(&schema)
 }
 
 fn ipc_command_fixture() -> String {
@@ -930,19 +962,10 @@ fn test_validate_list_provider_profiles_contract() {
 
     let response_schema = load_schema("ipc-query-response.schema.json");
     let schema_id = response_schema["$id"].as_str().unwrap().to_owned();
-    let registry = referencing::Registry::new()
-        .add(schema_id.as_str(), response_schema)
-        .unwrap()
-        .prepare()
-        .unwrap();
-    let validator = jsonschema::options()
-        .should_validate_formats(true)
-        .with_registry(&registry)
-        .build(&json!({
-            "$schema": "https://json-schema.org/draft/2020-12/schema",
-            "$ref": format!("{schema_id}#/$defs/provider_profile_list_response")
-        }))
-        .unwrap();
+    let validator = validator_for_dossier(&json!({
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "$ref": format!("{schema_id}#/$defs/provider_profile_list_response")
+    }));
     let fixture = include_str!("../../../.claude/examples/ipc-provider-profile-list-response.json");
     let expected: Value = serde_json::from_str(fixture).unwrap();
     let decoded: QueryResponse = from_json_str_strict(fixture).unwrap();
@@ -1065,20 +1088,9 @@ fn test_validate_ipc_hello_schema() {
 #[test]
 fn test_validate_ipc_subscribe_events_schema() {
     let schema = load_schema("ipc-subscribe-events.schema.json");
-    let event_schema = load_schema("event.schema.json");
 
-    // Construire le validateur en enregistrant event.schema.json sous son URN dans le registry local
-    let registry = referencing::Registry::new()
-        .add("urn:ovpt:unleash:event:1", event_schema)
-        .expect("Ajout event.schema.json au registry")
-        .prepare()
-        .expect("Préparation du registry");
-
-    let validator = jsonschema::options()
-        .should_validate_formats(true)
-        .with_registry(&registry)
-        .build(&schema)
-        .expect("Validateur ipc-subscribe-events avec schéma event lié");
+    // Le registre du dossier lie event.schema.json sous son URN.
+    let validator = validator_for_dossier(&schema);
 
     let stream_id = StreamId::from_uuid(uuid::uuid!("00000000-0000-4000-8000-000000000006"));
     let sub_req = SubscribeEventsRequest {
