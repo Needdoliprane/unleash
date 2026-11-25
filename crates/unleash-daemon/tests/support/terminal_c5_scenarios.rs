@@ -278,7 +278,7 @@ async fn await_observed(fixture: &LiveFixture, source: &str, key: &str) -> Dispo
 async fn start_c5_terminal(fixture: &mut LiveFixture) -> Value {
     let mut request = fixture.allocation(0xf011_4105);
     request.payload.insert(
-        "arguments".into,
+        "arguments".into(),
         json!(["--ignored", "--exact", WORKER_ENTRY, "--nocapture"]),
     );
     let accepted = fixture.client.send_command(&request).await.unwrap();
@@ -668,7 +668,7 @@ async fn t_f017_007_standard_policy_does_not_deny_terminal_acquisition_nor_input
         std::fs::Permissions::from_mode(0o700),
     )
     .unwrap();
-    let effect = signal_listener(fixture.project_root.path().join("e.sock"));
+    let effect = signal_listener(&fixture.project_root.path().join("e.sock"));
     // The standard policy is committed first: the launch and the input intents
     // engage its revision, so each reserved broker must be bound to that snapshot.
     super::super::resize_scenarios::set_standard_policy(&mut fixture).await;
