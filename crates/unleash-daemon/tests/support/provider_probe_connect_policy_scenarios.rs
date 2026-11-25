@@ -159,7 +159,12 @@ async fn policy_state(
                 .and_then(Value::as_u64)
                 .unwrap(),
         );
-    let digest = canonical_sha256(&json!({"schema_version":1,"global_policy":view.get("global_policy"),"project_policy":view.get("project_policy"),"guard_config":view.get("guard_config")})).unwrap();
+    let digest = canonical_sha256(&unleash_store::policies_secrets::engaged_policy_document_from_parts(
+        view.get("global_policy"),
+        view.get("project_policy"),
+        view.get("guard_config"),
+    ))
+    .unwrap();
     (revision, digest)
 }
 

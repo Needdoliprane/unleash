@@ -861,20 +861,39 @@ pub(crate) fn compute_policy_digest(
     canonical_sha256(&payload).map_err(StoreError::from)
 }
 
-/// Empreinte canonique de la politique engagée pour une portée, calculée depuis un résumé
-/// lu dans une seule transaction lectrice. Forme unique, partagée par les écritures du
-/// magasin et par les courtiers réservés du démon.
+/// Document canonique de la politique engagée pour une portée, assemblé à partir de ses trois
+/// parties (politique globale, politique de projet, configuration AI-Guard), chacune absente
+/// valant `null`. Forme unique : toutes les empreintes de politique engagée en dérivent.
+pub fn engaged_policy_document_from_parts(
+    global_policy: impl serde::Serialize,
+    project_policy: impl serde::Serialize,
+    guard_config: impl serde::Serialize,
+) -> serde_json::Value {
+    serde_json::json!({
+        "schema_version": 1,
+        "global_policy": global_policy,
+        "project_policy": project_policy,
+        "guard_config": guard_config,
+    })
+}
+
+/// Document canonique de la politique engagée, depuis un résumé lu dans une seule transaction
+/// lectrice.
+pub fn engaged_policy_document(summary: &PolicySummary) -> serde_json::Value {
+    engaged_policy_document_from_parts(
+        &summary.global_policy,
+        &summary.project_policy,
+        &summary.guard_config,
+    )
+}
+
+/// Empreinte canonique de la politique engagée pour une portée. Forme unique, partagée par les
+/// écritures du magasin, par les courtiers réservés du démon et par les tests qui la relisent.
 ///
 /// # Errors
 /// Retourne les erreurs de sérialisation canonique.
 pub fn engaged_policy_digest(summary: &PolicySummary) -> Result<Sha256Digest, StoreError> {
-    canonical_sha256(&serde_json::json!({
-        "schema_version": 1,
-        "global_policy": summary.global_policy,
-        "project_policy": summary.project_policy,
-        "guard_config": summary.guard_config,
-    }))
-    .map_err(StoreError::from)
+    canonical_sha256(&engaged_policy_document(summary)).map_err(StoreError::from)
 }
 
 #[expect(
