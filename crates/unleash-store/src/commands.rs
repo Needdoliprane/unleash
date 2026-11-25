@@ -1336,6 +1336,7 @@ pub(crate) fn tx_commit_command(
             scope_id,
             binding,
             policy,
+            ..
         } = &req.mutation
         {
             match (binding.is_some(), policy.is_some()) {
