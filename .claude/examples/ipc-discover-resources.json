@@ -1,0 +1,31 @@
+{
+  "protocol_version": "unleash.ipc.v2",
+  "request_id": "00000000-0000-4000-8000-000000000202",
+  "command_id": "00000000-0000-4000-8000-000000000222",
+  "authority_generation": "00000000-0000-4000-8000-000000000100",
+  "actor_ref": null,
+  "project_id": "00000000-0000-4000-8000-000000000102",
+  "aggregate_id": "00000000-0000-4000-8000-000000000103",
+  "expected_revision": 0,
+  "command_type": "DiscoverResources",
+  "payload": {
+    "intent_id": "00000000-0000-4000-8000-000000000101",
+    "intent_revision": 1,
+    "resource_kinds": [
+      "technical_resource"
+    ],
+    "query": "procédure locale documentée",
+    "scope": {
+      "project_id": "00000000-0000-4000-8000-000000000102",
+      "repo_ids": [],
+      "source_binding_ids": [],
+      "registry_scopes": [
+        "project"
+      ]
+    },
+    "consumer_context_ref": null,
+    "include_unmerged": false,
+    "required_freshness": "current",
+    "limit": 20
+  }
+}

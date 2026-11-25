@@ -311,6 +311,13 @@
     }
   ],
   "$defs": {
+    "canonicalReceiptId": {
+      "type": "string",
+      "format": "uuid",
+      "not": {
+        "const": "00000000-0000-0000-0000-000000000000"
+      }
+    },
     "contentDigest": {
       "type": "object",
       "additionalProperties": false,

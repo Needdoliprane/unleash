@@ -1,0 +1,10 @@
+{
+  "protocol_version": "unleash.ipc.v2",
+  "request_id": "00000000-0000-4000-8000-000000000203",
+  "query_type": "GetCommandReceipt",
+  "project_id": "00000000-0000-4000-8000-000000000102",
+  "payload": {
+    "command_id": "00000000-0000-4000-8000-000000000222",
+    "result_ref": "discovery-query:00000000-0000-4000-8000-000000000103"
+  }
+}

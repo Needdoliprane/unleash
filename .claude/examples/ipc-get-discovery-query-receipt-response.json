@@ -1,0 +1,40 @@
+{
+  "request_id": "00000000-0000-4000-8000-000000000203",
+  "watermark": {
+    "stream_id": "00000000-0000-4000-8000-000000000301",
+    "sequence": 57
+  },
+  "result": {
+    "project_id": "00000000-0000-4000-8000-000000000102",
+    "command_id": "00000000-0000-4000-8000-000000000222",
+    "result_ref": "discovery-query:00000000-0000-4000-8000-000000000103",
+    "query_id": "00000000-0000-4000-8000-000000000103",
+    "intent_id": "00000000-0000-4000-8000-000000000101",
+    "intent_revision": 1,
+    "catalog_revision": 89,
+    "coverage_ref": "coverage:00000000-0000-4000-8000-000000000103",
+    "coverage": {
+      "status": "complete",
+      "scope": {
+        "project_id": "00000000-0000-4000-8000-000000000102",
+        "repo_ids": [],
+        "source_binding_ids": [],
+        "registry_scopes": [
+          "project"
+        ]
+      },
+      "registry_observations": [
+        {
+          "entry_kind": "technical_resource",
+          "scope_kind": "project",
+          "scope_owner_key": "00000000-0000-4000-8000-000000000102",
+          "observed_at": "2026-11-24T10:00:00Z"
+        }
+      ],
+      "limitations": []
+    },
+    "results": [],
+    "warnings": [],
+    "next_cursor": null
+  }
+}
