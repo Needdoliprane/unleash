@@ -122,6 +122,14 @@ Le verrou est un dossier `hold`, créé par `mkdir` sous `$UNLEASH_BENCH_LOCK_DI
 
 Par défaut, le dossier du verrou est `.claude/cache/bench` du checkout racine du dépôt : il est commun à tous ses worktrees, donc à tous les bancs qui en sont issus. Deux clônes du dépôt ont deux verrous distincts ; leur donner le même `UNLEASH_BENCH_LOCK_DIR`.
 
+### Marque d’arbre
+
+Les artefacts des crates du dépôt portent le même nom d’un arbre à l’autre, et leur fraîcheur repose sur les dates : après qu’un autre arbre a compilé, Cargo les croit à jour et lie le code de l’autre. À chaque contrôle d’une commande autre que `pnpm`, le verrou pris, le banc lit la marque `/cargo-target/.unleash-last-tree` du volume de compilation. Si elle désigne un autre répertoire de source, il rend plus récentes toutes les sources du dépôt (`crates`, `Cargo.toml`, `Cargo.lock`) et écrit le sien. Cargo recompile ainsi les crates du dépôt ; les dépendances du registre, identiques d’un arbre à l’autre, restent réutilisées. Un contrôle du renderer ne compile rien : il n’écrit pas la marque. Si la racine de source du banc n’existe pas encore, l’étape ne fait rien et la commande invitée échoue avec son propre message.
+
+Sur un volume partagé entre arbres différents, les deux mécanismes sont nécessaires ensemble : le verrou empêche l’écrasement pendant un contrôle, la marque d’arbre empêche la réutilisation entre deux contrôles. Sans volume partagé, aucun des deux n’est nécessaire, mais chaque banc compile ses dépendances à froid.
+
+Un vert obtenu sur un volume partagé n’est accepté que si le journal du contrôle montre `Compiling unleash-<crate>` pour les crates concernés. Voir [RETEX-008](../../.claude/dev/retours-experience.md#retex-008--ne-pas-partager-un-volume-de-compilation-entre-arbres-différents-sans-verrou-ni-marque-darbre).
+
 ## Codes de sortie de `bench.sh`
 
 | Code | Sens |

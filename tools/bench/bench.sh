@@ -44,9 +44,10 @@ usage() {
 }
 
 dock() {
-    limit=$1
+    # Variable propre à dock : ne jamais écraser `limit`, le délai du contrôle en cours.
+    dock_limit=$1
     shift
-    timeout --kill-after=5s "$limit" docker --context "$context" "$@"
+    timeout --kill-after=5s "$dock_limit" docker --context "$context" "$@"
 }
 
 api_ok() {
@@ -241,6 +242,28 @@ run_logged() {
     acquire_bench_lock
     status=0
     trap 'release_bench_lock' EXIT INT TERM
+    # Volume partagé, arbres différents : les artefacts des crates du dépôt ne dépendent pas du
+    # chemin des sources. Si un autre arbre a compilé depuis le dernier contrôle de celui-ci,
+    # Cargo les croirait à jour et lierait le code de l'autre arbre. On rend alors les sources
+    # du dépôt plus récentes que ces artefacts, ce qui force leur recompilation ; les dépendances
+    # du registre, identiques d'un arbre à l'autre, restent réutilisées.
+    # Seule une commande qui compile écrit la marque (une commande pnpm ne compile rien).
+    case ${1:-} in
+        pnpm) ;;
+        *)
+            tree=/work/src-${source_label:-$label}
+            last_tree=$(dock 240s exec "$bench" /bin/sh -c 'cat /cargo-target/.unleash-last-tree 2>/dev/null || true')
+            if [ "$last_tree" != "$tree" ]; then
+                # shellcheck disable=SC2016
+                dock 1200s exec "$bench" /bin/sh -eu -c '
+                    [ -d "$1" ] || exit 0
+                    cd "$1"
+                    find crates Cargo.toml Cargo.lock -type f -exec touch {} +
+                    printf "%s\n" "$1" > /cargo-target/.unleash-last-tree
+                ' sh "$tree"
+            fi
+            ;;
+    esac
     # shellcheck disable=SC2016
     dock $((limit + 600))s exec "$bench" /bin/sh -c '
         cd "$1" || exit 3

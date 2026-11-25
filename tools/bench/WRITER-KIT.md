@@ -55,8 +55,8 @@ UNLEASH_BENCH_SOURCE_LABEL="$L" sh "$B" run "$C" "$L-process-host" "$E/process-h
 - `RUSTDOCFLAGS=-Dwarnings` s'écrit sans espace : cette forme passe à travers le préfixe de commande imposé.
 - Environnement fixé dans le banc : `CARGO_TARGET_DIR=/cargo-target` (volume du conteneur), `RUSTFLAGS=-D warnings`
   (comme la CI), `CARGO_HOME` avec registre en lecture seule. `--locked --offline` obligatoire.
-- Le volume de compilation peut être partagé avec d'autres bancs, et un seul contrôle à la fois le prend, de la
-  compilation à la fin de l'exécution. « Attente du verrou des bancs » ou « Blocking waiting for file lock on
+- Le volume de compilation peut être partagé avec d'autres bancs. Chaque contrôle y prend un verrou global et
+  marque l'arbre compilé : « Attente du verrou des bancs » ou « Blocking waiting for file lock on
   build directory » signifie qu'un autre banc travaille : attendre, ne pas relancer.
 - Le disque de la machine virtuelle Docker est lent. Les délais des appels sont larges ; laisser faire.
 - Le banc refuse un contrôle si le conteneur n'est pas en service, si son réseau n'est pas `none` ou s'il est
