@@ -188,7 +188,7 @@ fn version_ref(policy_id: &ModelPolicyId, version: u64, digest: &Sha256Digest) -
 }
 
 /// Projette l'historique d'un scope en versions publiées, dans l'ordre des écritures.
-pub(crate) fn project(history: &[Fact]) -> Result<Vec<ModelPolicyVersion>, StoreError> {
+fn project(history: &[Fact]) -> Result<Vec<ModelPolicyVersion>, StoreError> {
     let mut revocations: BTreeMap<(ModelPolicyId, u64), ModelPolicyRevocation> = BTreeMap::new();
     for fact in history {
         if let Fact::Revoked {
