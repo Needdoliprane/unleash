@@ -142,12 +142,6 @@ impl PlatformPaths {
         }
         assert_not_under_claude(home)?;
 
-        // Windows : emplacement explicite. Aucune disposition n'est arrêtée (ADR-14 : hors matrice
-        // qualifiée) ; la résolution refuse plutôt que de replier sur la règle Linux.
-        if os == PlatformOsKind::Windows {
-            return Err(PlatformError::LayoutUndecided { os });
-        }
-
         let (config_dir, data_dir, logs_dir, cache_dir) = match os {
             PlatformOsKind::MacOs => {
                 let app_support = home.join("Library/Application Support/Unleash");
@@ -185,6 +179,11 @@ impl PlatformPaths {
                     state_base.join("unleash/logs"),
                     cache_base.join("unleash"),
                 )
+            }
+            // Windows : emplacement explicite. Aucune disposition n'est arrêtée (ADR-14 : hors
+            // matrice qualifiée) ; la résolution refuse plutôt que de replier sur la règle Linux.
+            PlatformOsKind::Windows => {
+                return Err(PlatformError::LayoutUndecided { os });
             }
         };
 
@@ -379,7 +378,8 @@ pub fn effective_uid() -> u32 {
 /// sans chemin explicite passe par [`prepare_canonical_rendezvous_dir`].
 ///
 /// # Errors
-/// Retourne [`PlatformError::ForbiddenDocumentationPath`] si un invariant de chemin est violé.
+/// - [`PlatformError::LayoutUndecided`] pour une plateforme sans candidat arrêté (Windows).
+/// - [`PlatformError::ForbiddenDocumentationPath`] sous macOS si le chemin résolu touche `.claude/`.
 pub fn canonical_rendezvous_dir() -> Result<PathBuf, PlatformError> {
     canonical_rendezvous_dir_with(
         PlatformOsKind::current(),
