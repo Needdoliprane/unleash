@@ -227,6 +227,15 @@ pub enum StoreCutpoint {
     C11fAfterBackupJobCommit,
     /// Racine commune absente, juste avant sa création privée (`C11g`).
     C11gBeforeManagedBackupRootCreate,
+    /// Demande de sauvegarde réclamée, avant la revalidation pré-dispatch du harnais (`C11h`).
+    /// Atteint par le harnais hors du writer, jamais par une transaction du magasin.
+    C11hAfterBackupClaim,
+    /// Politique et profil de sauvegarde revalidés, avant le courtier réservé (`C11i`).
+    /// Atteint par le harnais hors du writer, jamais par une transaction du magasin.
+    C11iAfterBackupRevalidation,
+    /// Autorisation de sauvegarde rendue, avant la phase durable de dispatch (`C11j`).
+    /// Atteint par le harnais hors du writer, jamais par une transaction du magasin.
+    C11jAfterBackupAuthorization,
     /// Pendant la restauration entre import capsule et activation finale (`C11`).
     C11RestoreBeforeActivate,
     /// Juste après `ApplyInboxEvent` avant acquittement outbox (`C7`).
