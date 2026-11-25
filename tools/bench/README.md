@@ -166,7 +166,6 @@ Sur la révision citée par le transfert (`source` imprime le commit), dans un c
 - Le disque de la machine virtuelle est lent : les appels Docker du banc sont bornés entre 90 s et 30 min, et un contrôle dispose de son délai plus 600 s. Une expiration reste une issue inconnue, à réconcilier avant de reprendre.
 - `--cpus` est un quota, pas un jeu de processeurs : `nproc` voit ceux de la machine virtuelle. Un banc à un processeur n’a pas la capacité d’un poste ; un test sensible au temps peut y expirer.
 - Un contrôle dont la commande sort avec un autre code que `0`, `1` et `101` est rapporté comme issue inconnue (`3`), pas comme un échec de contrôle : c’est le cas de `tsc` sur une erreur de type (code `2`). Le journal dit lequel.
-- Un volume de compilation ne se copie pas par liens physiques : les volumes de Docker Desktop sont sur des périphériques distincts (« Invalid cross-device link »). On le partage, ou on recompile.
 - `create` lance l’image sans vérifier qu’elle existe : une étiquette absente provoque une tentative de tirage, donc un accès réseau.
 - Le registre Cargo de l’hôte n’est pas vérifié contre `Cargo.lock` : une crate absente se traduit par une erreur cargo hors ligne.
 - La version de la toolchain figure dans `rust-toolchain.toml`, dans le `Dockerfile` et dans la variable `toolchain` de `bench.sh` et de `gates.sh`. Une montée de version les change ensemble et reconstruit l’image.
