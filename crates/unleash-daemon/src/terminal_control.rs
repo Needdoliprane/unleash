@@ -292,7 +292,7 @@ impl ActionExecutorPort for ControlExecutor {
             })
             .await
             .map_err(|_| unknown())?
-            .map_err(|_| unknown())?;
+            .map_err(|error| super::terminal_effect_failure(dispatch, "control", error))?;
             let output_digest =
                 unleash_protocol::canonical_sha256(&observation).map_err(|_| unknown())?;
             let observed_at_ms = observation.observed_at_ms;
@@ -402,15 +402,36 @@ fn validate_initial_rendezvous(
     Ok((runtime, expected))
 }
 
+/// Transfert préparé sans contacter l'hôte.
+struct PreparedTransfer {
+    runtime: std::path::PathBuf,
+    expected: Sha256Digest,
+    client: HostClient,
+    request: ControlTransferRequest,
+}
+
 fn transfer_and_observe(
     state: &DaemonRuntimeState,
     record: &TerminalControlRecord,
     dispatch: DispatchId,
     control_secrets: &dyn super::ControlSecretSource,
-) -> Result<TerminalControlObservation, ControlError> {
+) -> Result<TerminalControlObservation, super::TerminalEffectError> {
     if record.context.release_source.is_some() {
         return reacquire_and_observe(state, record, dispatch, control_secrets);
     }
+    super::host_effect(
+        || prepare_transfer(state, record, dispatch, control_secrets),
+        |prepared| send_transfer(state, record, dispatch, prepared),
+    )
+}
+
+/// Tire le secret suivant, consomme le permis et prépare la requête, sans écrire à l'hôte.
+fn prepare_transfer(
+    state: &DaemonRuntimeState,
+    record: &TerminalControlRecord,
+    dispatch: DispatchId,
+    control_secrets: &dyn super::ControlSecretSource,
+) -> Result<PreparedTransfer, ControlError> {
     let c = &record.context;
     // Le secret suivant est tiré avant toute écriture durable : le permis à usage unique, puis
     // le fichier de la capacité de transfert (REQ-TERM-003).
@@ -443,18 +464,40 @@ fn transfer_and_observe(
         c.daemon_epoch,
         c.next_fence,
     )?;
-    let header = client.make_header(c.command_id, c.action_id, record.context_digest);
     let request = ControlTransferRequest {
-        header: header.clone(),
+        header: client.make_header(c.command_id, c.action_id, record.context_digest),
         dispatch_id: dispatch,
         initial_context_digest: c.initial_context_digest,
         current_secret: secret.expose_secret().into(),
         next_secret: next.expose_secret().into(),
     };
+    Ok(PreparedTransfer {
+        runtime,
+        expected,
+        client,
+        request,
+    })
+}
+
+/// Envoie le transfert puis vérifie l'état publié. À partir de l'envoi, l'effet ne peut plus être
+/// exclu (REQ-TERM-003).
+fn send_transfer(
+    state: &DaemonRuntimeState,
+    record: &TerminalControlRecord,
+    dispatch: DispatchId,
+    prepared: PreparedTransfer,
+) -> Result<TerminalControlObservation, ControlError> {
+    let c = &record.context;
+    let PreparedTransfer {
+        runtime,
+        expected,
+        mut client,
+        request,
+    } = prepared;
     let ControlTransferResponse::Ack { ack } = client.transfer_control(&request)? else {
         return Err("terminal transfer has no correlated acknowledgement".into());
     };
-    if ack.header != header
+    if ack.header != request.header
         || ack.dispatch_id != dispatch
         || ack.initial_context_digest != c.initial_context_digest
         || ack.effective_environment_digest != expected
@@ -492,12 +535,36 @@ fn transfer_and_observe(
     Ok(observation)
 }
 
+/// Réactivation préparée sans contacter l'hôte.
+struct PreparedReacquisition {
+    runtime: std::path::PathBuf,
+    expected: Sha256Digest,
+    client: HostClient,
+    released_by: DispatchId,
+    header: unleash_process_host::HostCommandHeader,
+    request: ControlTransferRequest,
+}
+
 fn reacquire_and_observe(
     state: &DaemonRuntimeState,
     record: &TerminalControlRecord,
     dispatch: DispatchId,
     control_secrets: &dyn super::ControlSecretSource,
-) -> Result<TerminalControlObservation, ControlError> {
+) -> Result<TerminalControlObservation, super::TerminalEffectError> {
+    super::host_effect(
+        || prepare_reacquisition(state, record, dispatch, control_secrets),
+        |prepared| send_reacquisition(state, record, dispatch, prepared),
+    )
+}
+
+/// Vérifie le retrait antérieur, tire le secret suivant, consomme le permis et prépare la requête,
+/// sans écrire à l'hôte.
+fn prepare_reacquisition(
+    state: &DaemonRuntimeState,
+    record: &TerminalControlRecord,
+    dispatch: DispatchId,
+    control_secrets: &dyn super::ControlSecretSource,
+) -> Result<PreparedReacquisition, ControlError> {
     let c = &record.context;
     let source = c
         .release_source
@@ -539,22 +606,50 @@ fn reacquire_and_observe(
     )?;
     let header = client.make_header(c.command_id, c.action_id, record.context_digest);
     reactivation_permission(state, c)?;
+    let request = ControlTransferRequest {
+        header: header.clone(),
+        dispatch_id: dispatch,
+        initial_context_digest: c.initial_context_digest,
+        current_secret: secret.expose_secret().into(),
+        next_secret: next.expose_secret().into(),
+    };
+    Ok(PreparedReacquisition {
+        runtime,
+        expected,
+        client,
+        released_by: source.dispatch_id,
+        header,
+        request,
+    })
+}
+
+/// Envoie la réactivation puis vérifie l'état publié. À partir de l'envoi, l'effet ne peut plus
+/// être exclu (REQ-TERM-003).
+fn send_reacquisition(
+    state: &DaemonRuntimeState,
+    record: &TerminalControlRecord,
+    dispatch: DispatchId,
+    prepared: PreparedReacquisition,
+) -> Result<TerminalControlObservation, ControlError> {
+    let c = &record.context;
+    let PreparedReacquisition {
+        runtime,
+        expected,
+        mut client,
+        released_by,
+        header,
+        request,
+    } = prepared;
     let response =
         client.reacquire_released_control(&unleash_process_host::ControlReacquisitionRequest {
-            released_by: source.dispatch_id,
-            transfer: ControlTransferRequest {
-                header: header.clone(),
-                dispatch_id: dispatch,
-                initial_context_digest: c.initial_context_digest,
-                current_secret: secret.expose_secret().into(),
-                next_secret: next.expose_secret().into(),
-            },
+            released_by,
+            transfer: request,
         })?;
     let unleash_process_host::ControlReacquisitionResponse::Ack { ack } = response else {
         return Err("terminal reactivation has no native acknowledgement".into());
     };
     let facts = &ack.transfer;
-    if ack.released_by != source.dispatch_id
+    if ack.released_by != released_by
         || facts.header != header
         || facts.dispatch_id != dispatch
         || facts.initial_context_digest != c.initial_context_digest

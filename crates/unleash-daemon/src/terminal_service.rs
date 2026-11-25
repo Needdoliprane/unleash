@@ -529,7 +529,7 @@ impl unleash_action_broker::ActionExecutorPort for TerminalExecutor {
             })
             .await
             .map_err(|_| unknown())?
-            .map_err(|_| unknown())?;
+            .map_err(|error| terminal_effect_failure(dispatch, "launch", error))?;
             let digest = unleash_protocol::canonical_sha256(&observation).map_err(|_| unknown())?;
             let observed_at_ms = observation.observed_at_ms;
             *self.slot.lock().map_err(|_| unknown())? = Some(observation);
@@ -544,6 +544,54 @@ impl unleash_action_broker::ActionExecutorPort for TerminalExecutor {
 }
 
 type TerminalError = Box<dyn std::error::Error + Send + Sync>;
+
+/// Erreur d'un exécuteur de terminal, classée à la frontière de l'envoi à l'hôte (REQ-TERM-003).
+#[derive(Debug)]
+pub(crate) enum TerminalEffectError {
+    /// Survenue avant tout envoi à l'hôte : aucun effet externe n'a eu lieu. La cause typée est
+    /// conservée telle quelle.
+    BeforeSend(Box<dyn std::error::Error + Send + Sync>),
+    /// Survenue à partir de l'envoi : l'effet ne peut être exclu.
+    AfterSend(Box<dyn std::error::Error + Send + Sync>),
+}
+
+/// Exécute un effet d'hôte en deux temps.
+///
+/// `prepare` ne contacte pas l'hôte : son échec est un refus certain, sans effet résiduel. À partir
+/// de `send`, l'effet ne peut plus être exclu : son échec laisse l'issue inconnue (REQ-TERM-003).
+pub(super) fn host_effect<P, T>(
+    prepare: impl FnOnce() -> Result<P, TerminalError>,
+    send: impl FnOnce(P) -> Result<T, TerminalError>,
+) -> Result<T, TerminalEffectError> {
+    let prepared = prepare().map_err(TerminalEffectError::BeforeSend)?;
+    send(prepared).map_err(TerminalEffectError::AfterSend)
+}
+
+/// Échec rendu au courtier pour l'erreur d'un exécuteur de terminal (REQ-TERM-003).
+///
+/// Avant l'envoi, l'échec est établi sans effet résiduel : c'est un refus certain, dont le motif
+/// conserve la cause. À partir de l'envoi, l'effet ne peut être exclu : l'issue reste inconnue et
+/// exige une réconciliation ; ce n'est jamais un succès ni une relance automatique.
+pub(crate) fn terminal_effect_failure(
+    dispatch: unleash_domain::DispatchId,
+    effect: &'static str,
+    error: TerminalEffectError,
+) -> unleash_action_broker::ActionExecutionFailure {
+    match error {
+        TerminalEffectError::BeforeSend(cause) => {
+            unleash_action_broker::ActionExecutionFailure::ConfirmedFailureNoEffect {
+                dispatch_id: dispatch,
+                reason: format!("Terminal {effect} refused before host dispatch: {cause}"),
+            }
+        }
+        TerminalEffectError::AfterSend(_) => {
+            unleash_action_broker::ActionExecutionFailure::OutcomeUnknown {
+                dispatch_id: dispatch,
+                reason: format!("Terminal {effect} requires reconciliation"),
+            }
+        }
+    }
+}
 
 /// Source du secret de contrôle d'un hôte de processus (REQ-TERM-003).
 ///
@@ -578,14 +626,36 @@ fn spawn_and_observe(
     record: &unleash_store::TerminalAllocationRecord,
     dispatch: unleash_domain::DispatchId,
     control_secrets: &dyn ControlSecretSource,
-) -> Result<unleash_store::terminal_allocations::TerminalLaunchObservation, TerminalError> {
+) -> Result<unleash_store::terminal_allocations::TerminalLaunchObservation, TerminalEffectError> {
+    host_effect(
+        || prepare_launch(state, record, dispatch, control_secrets),
+        |launch| launch_host_and_observe(state, record, dispatch, &launch),
+    )
+}
+
+/// Prépare le lancement sans créer l'hôte : secret neuf, permis, répertoires et fichiers.
+fn prepare_launch(
+    state: &Arc<DaemonRuntimeState>,
+    record: &unleash_store::TerminalAllocationRecord,
+    dispatch: unleash_domain::DispatchId,
+    control_secrets: &dyn ControlSecretSource,
+) -> Result<HostLaunch, TerminalError> {
     // Le secret est tiré avant toute écriture durable : le permis à usage unique, puis les
     // répertoires et les fichiers de l'hôte (REQ-TERM-003).
     let secret = control_secrets.generate()?;
     let profile = resolve_launch_permit(state, record, dispatch)?;
-    let launch = prepare_host_launch(state, record, profile, secret)?;
-    let expected_host = spawn_registered_host(state, &launch)?;
-    let observation = observe_spawned_host(state, record, dispatch, &launch, &expected_host)?;
+    prepare_host_launch(state, record, profile, secret)
+}
+
+/// Crée l'hôte puis l'observe. À partir de la création, l'effet ne peut plus être exclu.
+fn launch_host_and_observe(
+    state: &Arc<DaemonRuntimeState>,
+    record: &unleash_store::TerminalAllocationRecord,
+    dispatch: unleash_domain::DispatchId,
+    launch: &HostLaunch,
+) -> Result<unleash_store::terminal_allocations::TerminalLaunchObservation, TerminalError> {
+    let expected_host = spawn_registered_host(state, launch)?;
+    let observation = observe_spawned_host(state, record, dispatch, launch, &expected_host)?;
     publish_launch_observation(state, &observation)?;
     Ok(observation)
 }
