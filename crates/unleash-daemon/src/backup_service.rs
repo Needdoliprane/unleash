@@ -18,7 +18,8 @@ use unleash_platform::UnavailableOsKeyring;
 use unleash_protocol::canonical_sha256;
 use unleash_store::{
     BackupBlockReason, BackupRequestRecord, ExecuteReservedBackupRequest, GuardPolicyMode,
-    PolicyIsolationMode, REQUEST_BACKUP_VERB, policies_secrets::engaged_policy_digest,
+    PolicyIsolationMode, REQUEST_BACKUP_VERB, StoreCutpoint,
+    policies_secrets::engaged_policy_digest,
 };
 
 use crate::broker_activity::BrokerActivityGuard;
@@ -170,6 +171,12 @@ async fn run(
     let read_activity = Arc::clone(&activity);
     let policy = tokio::task::spawn_blocking(move || {
         let _activity = read_activity;
+        // Point de contrôle de la revalidation (REQ-SEC-007) : atteint hors du thread writer,
+        // inerte avec l'observateur de production.
+        store
+            .config()
+            .cutpoints
+            .hit(StoreCutpoint::C11hAfterBackupClaim)?;
         store.read_policy_summary_snapshot(None)
     })
     .await
