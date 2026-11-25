@@ -12,12 +12,13 @@ use std::{os::unix::fs::PermissionsExt, path::Path, sync::Arc};
 use serde_json::{Value, json};
 use unleash_client::{ClientConfig, ClientError, UnleashClient};
 use unleash_domain::{
-    ActorId, AgentId, CommandId, InvocationId, MissionId, RequestId, Revision, Sha256Digest,
+    ActorId, AgentId, CommandId, InvocationId, MissionId, ProjectId, RequestId, Revision,
+    Sha256Digest,
 };
 use unleash_platform::{current_boot_identity, effective_uid};
 use unleash_protocol::{
-    ClientKind, CommandEnvelope, ErrorCode, ProtocolVersion, QueryEnvelope, ReasonCode,
-    ReceiptState, canonical_sha256,
+    ClientKind, CommandEnvelope, CommandReceipt, ErrorCode, ProtocolVersion, QueryEnvelope,
+    ReasonCode, ReceiptState, canonical_sha256,
 };
 use unleash_store::{
     CallerAuthority, InitialContextPlan, PreparedTaskAssignment, StoreConfig, StoreError,
@@ -606,6 +607,415 @@ async fn publishes_a_role_model_policy_through_settings() {
     drop(client);
     daemon
         .shutdown_graceful("finish model policy fixture")
+        .await
+        .unwrap();
+}
+
+fn model_policy(profiles: &Value, limits: &Value) -> Value {
+    json!({"operation":"publish","policy_id":"policy.fixture","allowed_profiles":profiles,
+        "allowed_capabilities":["text"],"fallback_profiles":[],"limits":limits})
+}
+
+fn model_policy_bounds(calls: u64, tokens: u64, seconds: u64) -> Value {
+    json!({"max_llm_calls":calls,"max_output_tokens":tokens,"max_cost_microusd":10000,
+        "max_duration_seconds":seconds})
+}
+
+fn model_policy_revocation(version: u64) -> Value {
+    json!({"operation":"revoke","policy_id":"policy.fixture","version":version})
+}
+
+/// Envoie un `SetSettings` de politique de modèle sur le socket, à la révision attendue.
+async fn set_model_policy(
+    client: &mut UnleashClient,
+    base: &CommandEnvelope,
+    id: u128,
+    project: ProjectId,
+    revision: u64,
+    policy: &Value,
+) -> Result<CommandReceipt, ClientError> {
+    client
+        .send_command(&command(
+            base,
+            id,
+            "SetSettings",
+            project.as_uuid(),
+            revision,
+            json!({"scope_kind":"project","scope_id":project,"patch":{"model_policy_version":policy}}),
+        ))
+        .await
+}
+
+fn settings_query(id: u128, project: ProjectId) -> QueryEnvelope {
+    QueryEnvelope {
+        protocol_version: ProtocolVersion,
+        request_id: RequestId::from_u128(id),
+        query_type: "ReadSettings".to_owned(),
+        project_id: Some(project),
+        payload: serde_json::from_value(json!({"scope_kind":"project","scope_id":project}))
+            .unwrap(),
+    }
+}
+
+fn project_settings(project: ProjectId, policy: &Value) -> Value {
+    json!({"scope_kind":"project","scope_id":project,"patch":{"model_policy_version":policy}})
+}
+
+fn is_model_conflict(result: &Result<CommandReceipt, ClientError>) -> bool {
+    matches!(
+        result,
+        Err(ClientError::Remote(error))
+            if error.reason_code == Some(ReasonCode::ModelConfigurationConflict)
+    )
+}
+
+// T-F012-002 — La révocation par les réglages est un fait distinct : la version garde son
+// document, son digest et son reçu de publication ; l'ensemble survit au redémarrage et au rejeu.
+#[expect(
+    clippy::too_many_lines,
+    reason = "One revocation lifecycle through IPC and restart"
+)]
+#[tokio::test]
+async fn revokes_a_published_model_policy_version_through_settings() {
+    let mut route = route().await;
+    let project = route.assign.project_id.unwrap();
+    let profile = configured_profile_reference(&mut route.client, &route.assign, PROFILE).await;
+    let read = settings_query(0x59d1, project);
+    let allowed = json!([profile]);
+    let first = set_model_policy(
+        &mut route.client,
+        &route.assign,
+        0x59d0,
+        project,
+        0,
+        &model_policy(&allowed, &model_policy_bounds(1, 128, 60)),
+    )
+    .await
+    .unwrap();
+    let second = set_model_policy(
+        &mut route.client,
+        &route.assign,
+        0x59d4,
+        project,
+        1,
+        &model_policy(&allowed, &model_policy_bounds(2, 256, 120)),
+    )
+    .await
+    .unwrap();
+    let revoked = set_model_policy(
+        &mut route.client,
+        &route.assign,
+        0x59d5,
+        project,
+        2,
+        &model_policy_revocation(1),
+    )
+    .await
+    .unwrap();
+
+    let published = route.client.query(&read).await.unwrap().result;
+    let [retained, active] = published["model_policy_versions"]
+        .as_array()
+        .unwrap()
+        .as_slice()
+    else {
+        panic!("expected the two published policy versions");
+    };
+    assert_eq!(published["revision"], json!(3));
+    // Un `Value` re-décodé trie ses clés : le contrat est l'ensemble exact des champs.
+    let mut fields: Vec<&str> = retained
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    fields.sort_unstable();
+    assert_eq!(
+        fields,
+        [
+            "allowed_capabilities",
+            "allowed_profiles",
+            "command_receipt_id",
+            "digest",
+            "fallback_profiles",
+            "limits",
+            "policy_id",
+            "policy_version_ref",
+            "principal_id",
+            "revocation",
+            "version",
+        ]
+    );
+    assert_eq!(retained["version"], json!(1));
+    assert_eq!(retained["command_receipt_id"], json!(first.receipt_id));
+    assert_eq!(
+        retained["revocation"],
+        json!({"principal_id":route.caller.actor_id,
+            "command_receipt_id":revoked.receipt_id})
+    );
+    assert_eq!(active["version"], json!(2));
+    assert_eq!(active["command_receipt_id"], json!(second.receipt_id));
+    assert_eq!(active["revocation"], Value::Null);
+    assert_eq!(
+        second.result_ref,
+        active["policy_version_ref"].as_str().map(ToOwned::to_owned)
+    );
+    assert_eq!(
+        revoked.result_ref,
+        retained["policy_version_ref"]
+            .as_str()
+            .map(|reference| format!("{reference}:revoked"))
+    );
+
+    // La révocation répétée est refusée sans rien engager.
+    let duplicate = set_model_policy(
+        &mut route.client,
+        &route.assign,
+        0x59d6,
+        project,
+        3,
+        &model_policy_revocation(1),
+    )
+    .await;
+    assert!(is_model_conflict(&duplicate));
+    assert_eq!(route.client.query(&read).await.unwrap().result, published);
+
+    drop(route.client);
+    route
+        .daemon
+        .shutdown_graceful("restart model policy revocation fixture")
+        .await
+        .unwrap();
+    drop(route.daemon);
+    let (daemon, mut client) = start(route.config).await;
+    let mut retransmitted = command(
+        &route.assign,
+        0x59d5,
+        "SetSettings",
+        project.as_uuid(),
+        2,
+        project_settings(project, &model_policy_revocation(1)),
+    );
+    retransmitted.request_id = RequestId::from_u128(0x59d7);
+    assert_eq!(client.send_command(&retransmitted).await.unwrap(), revoked);
+    assert_eq!(client.query(&read).await.unwrap().result, published);
+    drop(client);
+    daemon
+        .shutdown_graceful("finish model policy revocation fixture")
+        .await
+        .unwrap();
+}
+
+/// Une route dont la politique de modèle `policy.fixture` n'a encore rien publié.
+async fn unpublished_model_policy() -> (Route, ProjectId, Value, QueryEnvelope, CommandEnvelope) {
+    let mut route = route().await;
+    let project = route.assign.project_id.unwrap();
+    let profile = configured_profile_reference(&mut route.client, &route.assign, PROFILE).await;
+    let read = settings_query(0x59e9, project);
+    let publish = command(
+        &route.assign,
+        0x59e0,
+        "SetSettings",
+        project.as_uuid(),
+        0,
+        project_settings(
+            project,
+            &model_policy(&json!([profile]), &model_policy_bounds(1, 128, 60)),
+        ),
+    );
+    (route, project, profile, read, publish)
+}
+
+// T-F012-002 — Un acteur sans preuve administrative ne publie pas, et la portée du patch doit
+// être celle de l'enveloppe.
+#[tokio::test]
+async fn refuses_a_model_policy_without_edition_right_or_outside_the_envelope_scope() {
+    let (mut route, _project, _profile, read, publish) = unpublished_model_policy().await;
+
+    // Acteur sans droit d'édition : la preuve administrative manque.
+    let mut plain_client = UnleashClient::connect(
+        ClientConfig::new(
+            route.daemon.socket_path().to_owned(),
+            ClientKind::Cli,
+            "0.1.0",
+        )
+        .without_admin_credential(),
+    )
+    .await
+    .unwrap();
+    assert!(matches!(
+        plain_client.send_command(&publish).await,
+        Err(ClientError::Remote(error)) if error.code == ErrorCode::CapabilityDenied
+    ));
+    drop(plain_client);
+
+    // Portée du patch incompatible avec l'enveloppe : réglages utilisateur sous un projet.
+    let mut crossed = publish.clone();
+    crossed.command_id = CommandId::from_u128(0x59e1);
+    crossed.payload = json!({"scope_kind":"user","scope_id":"default",
+        "patch":{"model_policy_version":publish.payload["patch"]["model_policy_version"]}})
+    .as_object()
+    .unwrap()
+    .clone();
+    assert!(matches!(
+        route.client.send_command(&crossed).await,
+        Err(ClientError::Remote(error)) if error.code == ErrorCode::InvalidArgument
+    ));
+
+    let settings = route.client.query(&read).await.unwrap().result;
+    assert_eq!(settings["revision"], json!(0));
+    assert_eq!(settings["model_policy_versions"], json!([]));
+    drop(route.client);
+    route
+        .daemon
+        .shutdown_graceful("finish refused model policy fixture")
+        .await
+        .unwrap();
+}
+
+// T-F012-002 — Un patch fermé hors contrat est refusé sans écho de la valeur ; une référence
+// incohérente avec l'état est un conflit de configuration ; rien n'est engagé.
+#[tokio::test]
+async fn refuses_a_model_policy_patch_outside_the_closed_contract_or_incoherent_with_state() {
+    let (mut route, project, profile, read, publish) = unpublished_model_policy().await;
+
+    // Champs que la publication n'admet pas : refusés même ajoutés par le client.
+    for (id, field, value) in [
+        (0x59e2, "version", json!(1)),
+        (0x59e3, "principal_id", json!("DO_NOT_ECHO")),
+    ] {
+        let mut invalid = publish.clone();
+        invalid.command_id = CommandId::from_u128(id);
+        invalid.payload["patch"]["model_policy_version"][field] = value;
+        assert!(
+            matches!(
+                route.client.send_command(&invalid).await,
+                Err(ClientError::Remote(error))
+                    if error.code == ErrorCode::InvalidArgument
+                        && !error.message.contains("DO_NOT_ECHO")
+            ),
+            "accepted {field}"
+        );
+    }
+    for (id, path, value) in [
+        (0x59e4, "/limits/max_cost_microusd", json!(-1)),
+        (0x59e5, "/allowed_profiles/0/profile_version", json!(0)),
+        (0x59e7, "/policy_id", json!("DO_NOT_ECHO policy")),
+    ] {
+        let mut invalid = publish.clone();
+        invalid.command_id = CommandId::from_u128(id);
+        *invalid.payload["patch"]["model_policy_version"]
+            .pointer_mut(path)
+            .unwrap() = value;
+        assert!(
+            matches!(
+                route.client.send_command(&invalid).await,
+                Err(ClientError::Remote(error))
+                    if error.code == ErrorCode::InvalidArgument
+                        && !error.message.contains("DO_NOT_ECHO")
+            ),
+            "accepted {path}"
+        );
+    }
+
+    // Références incohérentes avec l'état : digest divergent, repli hors liste, version absente.
+    let mut divergent = publish.clone();
+    divergent.command_id = CommandId::from_u128(0x59e8);
+    divergent.payload["patch"]["model_policy_version"]["allowed_profiles"][0]["digest"] =
+        json!(Sha256Digest::from_bytes(b"other fixture version"));
+    assert!(is_model_conflict(
+        &route.client.send_command(&divergent).await
+    ));
+    let mut widened = publish.clone();
+    widened.command_id = CommandId::from_u128(0x59ea);
+    widened.payload["patch"]["model_policy_version"]["fallback_profiles"] =
+        json!([{"profile_id":PROFILE,"profile_version":2,"digest":profile["digest"]}]);
+    assert!(is_model_conflict(
+        &route.client.send_command(&widened).await
+    ));
+    let missing = set_model_policy(
+        &mut route.client,
+        &route.assign,
+        0x59eb,
+        project,
+        0,
+        &model_policy_revocation(1),
+    )
+    .await;
+    assert!(is_model_conflict(&missing));
+
+    let settings = route.client.query(&read).await.unwrap().result;
+    assert_eq!(settings["revision"], json!(0));
+    assert_eq!(settings["model_policy_versions"], json!([]));
+    drop(route.client);
+    route
+        .daemon
+        .shutdown_graceful("finish refused model policy fixture")
+        .await
+        .unwrap();
+}
+
+// T-F012-002 — Une même commande engage une préférence de skill et une politique de modèle sous
+// une seule révision et un seul reçu.
+#[tokio::test]
+async fn commits_a_skill_preference_and_a_model_policy_in_one_settings_command() {
+    let mut route = route().await;
+    let project = route.assign.project_id.unwrap();
+    let scope = json!({"kind":"project","owner_id":project});
+    let skill = json!({"skill_id":"skill.fixture","skill_version":1,"skill_scope":scope});
+    let profile = configured_profile_reference(&mut route.client, &route.assign, PROFILE).await;
+    let composed = command(
+        &route.assign,
+        0x59f0,
+        "SetSettings",
+        project.as_uuid(),
+        0,
+        json!({"scope_kind":"project","scope_id":project,"patch":{
+            "model_selection_binding":{"operation":"upsert","configuration_scope":scope,
+                "skill_ref":skill,"preferred_profile_ref":profile},
+            "model_policy_version":model_policy(
+                &json!([profile]),
+                &model_policy_bounds(1, 128, 60),
+            )
+        }}),
+    );
+    let read = settings_query(0x59f1, project);
+
+    let receipt = route.client.send_command(&composed).await.unwrap();
+
+    assert_eq!(receipt.state, ReceiptState::Accepted);
+    assert_eq!(receipt.new_revision, Revision::new(1));
+    assert!(
+        receipt
+            .result_ref
+            .as_deref()
+            .unwrap()
+            .starts_with("model-selection-binding:")
+    );
+    let settings = route.client.query(&read).await.unwrap().result;
+    let [binding] = settings["model_selection_bindings"]
+        .as_array()
+        .unwrap()
+        .as_slice()
+    else {
+        panic!("expected one binding in the composed command");
+    };
+    assert_eq!(binding["state"], "active");
+    assert_eq!(binding["command_receipt_id"], json!(receipt.receipt_id));
+    let [policy] = settings["model_policy_versions"]
+        .as_array()
+        .unwrap()
+        .as_slice()
+    else {
+        panic!("expected one model policy version in the composed command");
+    };
+    assert_eq!(policy["version"], json!(1));
+    assert_eq!(policy["command_receipt_id"], json!(receipt.receipt_id));
+    assert_eq!(policy["allowed_profiles"], json!([profile]));
+    drop(route.client);
+    route
+        .daemon
+        .shutdown_graceful("finish composed settings fixture")
         .await
         .unwrap();
 }

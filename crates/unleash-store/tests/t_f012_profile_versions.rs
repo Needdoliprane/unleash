@@ -154,12 +154,13 @@ fn set_skill_preference(
             result_ref: None,
             retention_days_override: None,
             fence_assertion: None,
-            mutation: CommandMutation::SetSettingsWithModelSelectionBinding {
+            mutation: CommandMutation::SetSettingsWithModelConfiguration {
                 scope_kind: kind,
                 scope_id,
                 caller: caller.clone(),
                 patch: SettingsPatch::default(),
-                binding: Box::new(serde_json::from_value(binding).unwrap()),
+                binding: Some(Box::new(serde_json::from_value(binding).unwrap())),
+                policy: None,
             },
             events: vec![],
             capacity_reservations: vec![],

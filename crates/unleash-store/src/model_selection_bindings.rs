@@ -76,13 +76,22 @@ impl SkillRef {
     }
 }
 
+/// Exacte `(profile_id, profile_version, digest)` d'un profil configuré, sans octet de secret.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-struct PreferredProfileRef {
+pub(crate) struct PreferredProfileRef {
     profile_id: Uuid,
     profile_version: u64,
     #[serde(deserialize_with = "deserialize_profile_digest")]
     digest: Sha256Digest,
+}
+
+impl PreferredProfileRef {
+    /// Indique si la référence a la forme fermée du contrat IPC : identité non nulle et version
+    /// positive exacte dans le domaine JSON.
+    pub(crate) fn is_well_formed(&self) -> bool {
+        !self.profile_id.is_nil() && (1..=MAX_WIRE_VERSION).contains(&self.profile_version)
+    }
 }
 
 fn deserialize_profile_digest<'de, D: serde::Deserializer<'de>>(
@@ -393,7 +402,7 @@ fn require_published_skill(
     Ok(())
 }
 
-fn require_profile(
+pub(crate) fn require_profile(
     conn: &Connection,
     authority: AuthorityGeneration,
     project: Option<ProjectId>,

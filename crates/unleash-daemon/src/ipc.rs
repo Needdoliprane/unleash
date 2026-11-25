@@ -1700,7 +1700,7 @@ async fn prepare_command_request(
             )
             .await?
                 && let CommandMutation::SetSettings { patch, .. }
-                | CommandMutation::SetSettingsWithModelSelectionBinding { patch, .. } =
+                | CommandMutation::SetSettingsWithModelConfiguration { patch, .. } =
                     &mut prepared.req.mutation
             {
                 patch.extra_typed.get_or_insert_with(Map::new).insert(
@@ -2160,27 +2160,33 @@ fn prepare_admin_command(
                 .map(serde_json::from_value)
                 .transpose()
                 .map_err(|_| invalid())?;
-            if binding.is_some() {
+            // Patch fermé (REQ-MODEL-002) : version, auteur et reçu ne viennent jamais du client.
+            let policy: Option<unleash_store::ModelPolicyVersionChange> = fields
+                .remove("model_policy_version")
+                .map(serde_json::from_value)
+                .transpose()
+                .map_err(|_| invalid())?;
+            if binding.is_some() || policy.is_some() {
                 fields
                     .entry("confirm_retention_shortening")
                     .or_insert(Value::Bool(false));
             }
             let patch = strict_settings_patch(patch).ok_or_else(invalid)?;
-            let mutation = if let Some(binding) = binding {
-                CommandMutation::SetSettingsWithModelSelectionBinding {
+            let mutation = match (binding, policy) {
+                (None, None) => CommandMutation::SetSettings {
                     scope_kind: payload.scope_kind,
                     scope_id: payload.scope_id,
                     caller,
                     patch,
-                    binding: Box::new(binding),
-                }
-            } else {
-                CommandMutation::SetSettings {
+                },
+                (binding, policy) => CommandMutation::SetSettingsWithModelConfiguration {
                     scope_kind: payload.scope_kind,
                     scope_id: payload.scope_id,
                     caller,
                     patch,
-                }
+                    binding: binding.map(Box::new),
+                    policy: policy.map(Box::new),
+                },
             };
             (AggregateKind::Settings, mutation)
         }
