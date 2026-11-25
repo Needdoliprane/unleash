@@ -8,17 +8,24 @@
 #![allow(clippy::unwrap_used)]
 
 use crate::ipc::DaemonRuntimeState;
-use crate::terminal_service::{ControlSecretSource, SystemControlSecretSource, start_with};
+use crate::terminal_host_launcher::TerminalHostLauncher;
+use crate::terminal_service::{
+    ControlSecretSource, SystemControlSecretSource, TerminalEffectError, start_with,
+    terminal_effect_failure,
+};
 use crate::{AuthenticatedSession, DaemonConfig, DaemonHandle, DaemonStartOutcome, UnleashDaemon};
 use std::collections::HashSet;
+use std::io::Stdio;
 use std::os::unix::fs::PermissionsExt as _;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::process::{Child, Command};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
+use unleash_action_broker::ActionExecutionFailure;
 use unleash_client::{ClientConfig, UnleashClient};
 use unleash_domain::{
-    ActionState, ActorId, AuthorityGeneration, CommandId, ProjectId, RequestId, Revision,
-    TerminalId,
+    ActionState, ActorId, AuthorityGeneration, CommandId, DispatchId, ProjectId, RequestId,
+    Revision, TerminalId,
 };
 use unleash_process_host::{HostControlSecret, ProcessHostError};
 use unleash_protocol::{ClientKind, CommandEnvelope, ProtocolVersion, ReceiptState};
@@ -105,6 +112,15 @@ struct LaunchFixture {
 
 impl LaunchFixture {
     async fn start() -> Result<Self, Box<dyn std::error::Error>> {
+        Self::start_with(Arc::new(
+            crate::terminal_host_launcher::PackagedTerminalHostLauncher,
+        ))
+        .await
+    }
+
+    async fn start_with(
+        launcher: Arc<dyn crate::terminal_host_launcher::TerminalHostLauncher>,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
         let rendezvous = unleash_testkit::local_test_dir("req-term-003-rdv")?;
         let data = unleash_testkit::local_test_dir("req-term-003-data")?;
         let project_root = unleash_testkit::local_test_dir("req-term-003-project")?;
@@ -114,6 +130,7 @@ impl LaunchFixture {
         let config = DaemonConfig {
             data_root: Some(data_root),
             rendezvous_dir: Some(rendezvous.path().to_path_buf()),
+            terminal_host_launcher: launcher,
             ..DaemonConfig::default()
         };
         let DaemonStartOutcome::Started(daemon) = UnleashDaemon::start(config)
@@ -158,8 +175,32 @@ impl LaunchFixture {
         })
     }
 
+    /// Lâche les références au store puis arrête le démon : l'arrêt attend que le store n'ait
+    /// plus de propriétaire actif.
+    async fn finish(self, reason: &str) -> Result<(), Box<dyn std::error::Error>> {
+        let Self {
+            daemon,
+            runtime,
+            session,
+            _client,
+            _directories,
+        } = self;
+        drop(runtime);
+        drop(_client);
+        drop(session);
+        daemon
+            .shutdown_graceful(reason)
+            .await
+            .map_err(|e| format!("{e:?}"))?;
+        drop(_directories);
+        Ok(())
+    }
+
     /// Prépare et commet l'allocation sans lancer l'hôte : le lancement revient au test.
-    async fn allocate(&self) -> Result<TerminalId, Box<dyn std::error::Error>> {
+    async fn allocate(
+        &self,
+        readiness_timeout_ms: u64,
+    ) -> Result<TerminalId, Box<dyn std::error::Error>> {
         let terminal = TerminalId::from_uuid(TERMINAL);
         let acquire = command(
             self.authority,
@@ -172,7 +213,7 @@ impl LaunchFixture {
                 "scope_id":PROJECT.to_string(), "scope_revision":2, "worktree_id":null,
                 "cwd":".", "program":"/usr/bin/printf", "arguments":["terminal-ready\n"],
                 "environment_profile_id":"terminal-test", "pty":{"rows":24,"cols":80},
-                "readiness":{"kind":"process_started","timeout_ms":10000}}),
+                "readiness":{"kind":"process_started","timeout_ms":readiness_timeout_ms}}),
         )?;
         let request =
             crate::terminal_service::prepare_acquisition(&self.runtime, &self.session, acquire)
@@ -328,7 +369,7 @@ async fn configure_nominal_terminal(
 #[tokio::test]
 async fn t_f011_003_launch_draws_the_control_secret_before_the_launch_permit() -> TestResult {
     let fixture = LaunchFixture::start().await?;
-    let terminal = fixture.allocate().await?;
+    let terminal = fixture.allocate(10_000).await?;
     let host_root = fixture
         .runtime
         .store
@@ -366,11 +407,9 @@ async fn t_f011_003_launch_draws_the_control_secret_before_the_launch_permit() -
         !host_root_at_draw,
         "aucun répertoire d'hôte ne doit exister au moment du tirage"
     );
-    fixture
-        .daemon
-        .shutdown_graceful("req-term-003 ordre")
-        .await
-        .map_err(|e| format!("{e:?}"))?;
+    // La sonde détient le store : elle doit le lâcher avant l'arrêt du démon.
+    drop(probe);
+    fixture.finish("req-term-003 ordre").await?;
     Ok(())
 }
 
@@ -380,7 +419,7 @@ async fn t_f011_003_launch_draws_the_control_secret_before_the_launch_permit() -
 async fn t_f011_003_unavailable_random_source_refuses_the_launch_without_durable_write()
 -> TestResult {
     let fixture = LaunchFixture::start().await?;
-    let terminal = fixture.allocate().await?;
+    let terminal = fixture.allocate(10_000).await?;
     let before = tokio::task::spawn_blocking({
         let store = Arc::clone(&fixture.runtime.store);
         move || store.inspect_terminal_allocation_snapshot(terminal)
@@ -419,10 +458,88 @@ async fn t_f011_003_unavailable_random_source_refuses_the_launch_without_durable
         !fixture.host_runtime(&settled).exists(),
         "aucun répertoire ni fichier d'hôte n'est créé"
     );
-    fixture
-        .daemon
-        .shutdown_graceful("req-term-003 refus")
-        .await
-        .map_err(|e| format!("{e:?}"))?;
+    fixture.finish("req-term-003 refus").await?;
     Ok(())
+}
+
+/// Lance un processus court qui ne sera jamais un hôte : ni socket, ni manifeste.
+struct SilentHostLauncher;
+
+impl TerminalHostLauncher for SilentHostLauncher {
+    fn spawn(&self, _executable: &Path, _bootstrap: &Path) -> std::io::Result<Child> {
+        let mut command = Command::new("/bin/sleep");
+        command
+            .arg("2")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        unleash_process_host::configure_setsid_pre_exec(&mut command);
+        command.spawn()
+    }
+}
+
+// T-F011-003 / AC-F011-003 / REQ-TERM-003
+// Propriété (c) : une erreur survenue après l'envoi à l'hôte reste une issue inconnue.
+#[tokio::test]
+async fn t_f011_003_launch_failure_after_host_creation_stays_outcome_unknown() -> TestResult {
+    let fixture = LaunchFixture::start_with(Arc::new(SilentHostLauncher)).await?;
+    let terminal = fixture.allocate(300).await?;
+    start_with(
+        &fixture.runtime,
+        terminal,
+        Arc::new(SystemControlSecretSource),
+    );
+    let settled = fixture.settled(terminal).await?;
+    assert!(
+        settled.dispatch_id.is_some(),
+        "précondition : le permis a été consommé, l'hôte a été créé"
+    );
+    assert!(
+        fixture.host_runtime(&settled).is_dir(),
+        "précondition : les fichiers de l'hôte existent"
+    );
+    assert_eq!(
+        settled.action_state,
+        Some(ActionState::OutcomeUnknown),
+        "l'impossibilité d'observer un hôte créé n'est jamais un refus certain"
+    );
+    fixture.finish("req-term-003 après envoi").await?;
+    Ok(())
+}
+
+// T-F011-003 / AC-F011-003 / REQ-TERM-003
+// L'échec rendu au courtier conserve la cause typée d'un refus avant envoi, et ne transforme jamais
+// une erreur survenue à partir de l'envoi en refus certain.
+#[test]
+fn t_f011_003_effect_failure_keeps_the_cause_of_a_refusal_before_host_dispatch() {
+    let dispatch = DispatchId::from_u128(0xf011_00a1);
+    let refused = terminal_effect_failure(
+        dispatch,
+        "launch",
+        TerminalEffectError::BeforeSend(ProcessHostError::RandomSourceUnavailable.into()),
+    );
+    assert!(
+        matches!(
+            refused,
+            ActionExecutionFailure::ConfirmedFailureNoEffect { ref dispatch_id, ref reason }
+                if dispatch_id == dispatch
+                    && reason.contains("RANDOM_SOURCE_UNAVAILABLE")
+                    && reason.contains("before host dispatch")
+        ),
+        "un refus avant envoi est un échec certain qui nomme sa cause typée"
+    );
+    let unknown = terminal_effect_failure(
+        dispatch,
+        "input",
+        TerminalEffectError::AfterSend("connexion fermée".into()),
+    );
+    assert!(
+        matches!(
+            unknown,
+            ActionExecutionFailure::OutcomeUnknown { ref dispatch_id, ref reason }
+                if dispatch_id == dispatch
+                    && reason == "Terminal input requires reconciliation"
+        ),
+        "une erreur à partir de l'envoi reste une issue inconnue, jamais un refus certain"
+    );
 }
