@@ -79,7 +79,7 @@ Voir aussi [les règles de test](testing.md).
 
 ## Exécution locale dans Docker
 
-Exécuter les compilations, tests, commandes `cargo`, `rustc`, `rustfmt`, Clippy, rustdoc et binaires Rust de vérification exclusivement dans Docker sur ce poste. Cette règle s’applique aux agents et sous-agents. Utiliser la version de `rust-toolchain.toml` dans l’image et un `CARGO_TARGET_DIR` interne au conteneur.
+Exécuter les compilations, tests, commandes `cargo`, `rustc`, `rustfmt`, Clippy, rustdoc et binaires Rust de vérification exclusivement dans Docker sur ce poste. Cette règle s’applique aux agents et sous-agents. Utiliser la version de `rust-toolchain.toml` dans l’image et un `CARGO_TARGET_DIR` interne au conteneur. La recette figure dans le [banc Docker du dépôt](../../tools/bench/README.md) : image reproductible, conteneur sans réseau, sources transmises depuis Git.
 
 Le dépôt est sur SMB. Placer aussi les bases SQLite, sockets, PTY et dépôts Git de test dans l’espace temporaire du conteneur. Pour les validations propres à Darwin, utiliser un runner macOS dédié. Si l’environnement nécessaire est indisponible, consigner le contrôle comme non exécuté et poursuivre les contrôles indépendants.
 

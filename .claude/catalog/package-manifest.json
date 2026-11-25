@@ -14,7 +14,7 @@
     "cache/"
   ],
   "hash_algorithm": "sha256",
-  "source_tree_digest": "217f14717e5d1e15131f078069a3a70ca119246a773a5f96478214b8e85b62b7",
+  "source_tree_digest": "4b8fa0611d070e95c99e396e92a0be400f6935f95b3a4bbc65a91e4435253feb",
   "files": [
     {
       "path": "INDEX.md",
@@ -876,8 +876,8 @@
     },
     {
       "path": "dev/retours-experience.md",
-      "sha256": "2ac719956d4b3aded3f4e29e815fcb076d413dd2098632fc3fa1430137d107f1",
-      "bytes": 7205,
+      "sha256": "a91c6c02ff1b982666f0f1bd1d655d3b5feee85d6153203cff3810a3b4370e8e",
+      "bytes": 11484,
       "media_type": "text/markdown"
     },
     {
@@ -1998,14 +1998,14 @@
     },
     {
       "path": "rules/rust.md",
-      "sha256": "d66f3db6bf1d634a00ad2aa2dbcbff504c31406864364c6c7f47fb21835726bf",
-      "bytes": 9648,
+      "sha256": "b06b52aa5e84cc6915980f8d681e917f5e6c05755b05db21f241b2b98a07d068",
+      "bytes": 9806,
       "media_type": "text/markdown"
     },
     {
       "path": "rules/testing.md",
-      "sha256": "dcb35b1f82adf0cb92edc571d4ef6db1cb85585a8b377d4363551fecbb6a7adb",
-      "bytes": 5154,
+      "sha256": "9cbcc6cded37028f621217d6a0b81e40ed7efe2dbe64864c2043d9d067606eb7",
+      "bytes": 6051,
       "media_type": "text/markdown"
     },
     {
