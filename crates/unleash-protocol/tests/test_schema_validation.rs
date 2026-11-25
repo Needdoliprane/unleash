@@ -124,6 +124,206 @@ fn validates_the_exact_skill_model_preference_patch() {
     assert!(!validator.is_valid(&remove));
 }
 
+// T-F012-002 — Le patch de politique modèle et son historique sont fermés et conformes au
+// contrat IPC (REQ-MODEL-002).
+#[test]
+fn validates_the_model_policy_version_patch_and_history() {
+    let commands = build_validator("ipc-command.schema.json");
+    let publish: Value = serde_json::from_str(include_str!(
+        "../../../.claude/examples/ipc-set-model-policy-version.json"
+    ))
+    .unwrap();
+    assert!(commands.is_valid(&publish));
+    let path = "/payload/patch/model_policy_version";
+
+    let mut revoke = publish.clone();
+    let change = revoke.pointer_mut(path).unwrap();
+    change["operation"] = json!("revoke");
+    change["version"] = json!(1);
+    let fields = change.as_object_mut().unwrap();
+    for field in [
+        "allowed_profiles",
+        "allowed_capabilities",
+        "fallback_profiles",
+        "limits",
+    ] {
+        fields.remove(field);
+    }
+    assert!(commands.is_valid(&revoke));
+
+    let replaced = |base: &Value, pointer: &str, value: &Value| {
+        let mut envelope = base.clone();
+        envelope.pointer_mut(pointer).unwrap().clone_from(value);
+        envelope
+    };
+    let removed = |base: &Value, parent: &str, field: &str| {
+        let mut envelope = base.clone();
+        envelope
+            .pointer_mut(parent)
+            .unwrap()
+            .as_object_mut()
+            .unwrap()
+            .remove(field);
+        envelope
+    };
+    let mut user = publish.clone();
+    user["project_id"] = Value::Null;
+    user["payload"]["scope_kind"] = json!("user");
+    user["payload"]["scope_id"] = json!("default");
+    assert!(commands.is_valid(&user), "la portée utilisateur est admise");
+    let mut extra_setting = publish.clone();
+    extra_setting["payload"]["patch"]["extra_typed"] = json!({"option": true});
+
+    let refused: Vec<(&str, Value)> = vec![
+        (
+            "profil sans version positive",
+            replaced(
+                &publish,
+                &format!("{path}/allowed_profiles/0/profile_version"),
+                &json!(0),
+            ),
+        ),
+        (
+            "digest mal formé",
+            replaced(
+                &publish,
+                &format!("{path}/allowed_profiles/0/digest"),
+                &json!("sha256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"),
+            ),
+        ),
+        (
+            "budget négatif",
+            replaced(
+                &publish,
+                &format!("{path}/limits/max_cost_microusd"),
+                &json!(-1),
+            ),
+        ),
+        (
+            "durée nulle",
+            replaced(
+                &publish,
+                &format!("{path}/limits/max_duration_seconds"),
+                &json!(0),
+            ),
+        ),
+        (
+            "version fournie à la publication",
+            replaced(&publish, &format!("{path}/version"), &json!(1)),
+        ),
+        (
+            "identité fournie à la publication",
+            replaced(&publish, &format!("{path}/principal_id"), &json!("caller")),
+        ),
+        (
+            "révocation contenant des paramètres de publication",
+            replaced(
+                &revoke,
+                &format!("{path}/limits"),
+                &json!({"max_llm_calls": 1}),
+            ),
+        ),
+        ("révocation sans version", removed(&revoke, path, "version")),
+        (
+            "plafond manquant",
+            removed(&publish, &format!("{path}/limits"), "max_cost_microusd"),
+        ),
+        (
+            "réglage inconnu aux côtés de la politique",
+            extra_setting,
+        ),
+        ("portée projet sans projet", replaced(&publish, "/project_id", &Value::Null)),
+        (
+            "portée utilisateur sous un projet",
+            replaced(&user, "/project_id", &publish["project_id"]),
+        ),
+        (
+            "portée utilisateur hors du réglage par défaut",
+            replaced(&user, "/payload/scope_id", &json!("other")),
+        ),
+    ];
+    for (label, envelope) in refused {
+        assert!(!commands.is_valid(&envelope), "accepté : {label}");
+    }
+
+    let response_schema = load_schema("ipc-query-response.schema.json");
+    let schema_id = response_schema["$id"].as_str().unwrap().to_owned();
+    let validator = validator_for_dossier(&json!({
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "$ref": format!("{schema_id}#/$defs/read_settings_model_policies_response")
+    }));
+    let fixture = include_str!("../../../.claude/examples/ipc-read-settings-model-policies-response.json");
+    let expected: Value = serde_json::from_str(fixture).unwrap();
+    let decoded: QueryResponse = from_json_str_strict(fixture).unwrap();
+    assert_eq!(serde_json::to_value(&decoded).unwrap(), expected);
+    assert!(validator.is_valid(&expected));
+
+    // La fixture porte les deux états : version révoquée et version active.
+    let versions = "/result/model_policy_versions";
+    let entries = expected.pointer(versions).unwrap().as_array().unwrap();
+    assert_eq!(
+        entries[0]["revocation"]["command_receipt_id"],
+        json!("10000000-0000-4000-8000-000000000029")
+    );
+    assert!(entries[1]["revocation"].is_null());
+    let mut empty = expected.clone();
+    empty["result"]["model_policy_versions"] = json!([]);
+    empty["result"]["revision"] = json!(0);
+    assert!(validator.is_valid(&empty), "liste vide avant publication");
+    let mut default_scope = expected.clone();
+    default_scope["result"]["scope_kind"] = json!("user");
+    default_scope["result"]["scope_id"] = json!("default");
+    assert!(validator.is_valid(&default_scope), "portée utilisateur");
+    let mut accompanied = expected.clone();
+    accompanied["result"]["execution_pool"] = json!({"max_active_executions": 5});
+    accompanied["result"]["retention_policy"] = json!({});
+    assert!(validator.is_valid(&accompanied), "autres champs de Settings");
+
+    let mut without_watermark = expected.clone();
+    without_watermark.as_object_mut().unwrap().remove("watermark");
+    let mut extra_entry = expected.clone();
+    extra_entry.pointer_mut(versions).unwrap()[1]["state"] = json!("active");
+    let invalid_history: Vec<(&str, Value)> = vec![
+        ("résultat sans watermark", without_watermark),
+        (
+            "entrée sans reçu de publication",
+            removed(&expected, &format!("{versions}/1"), "command_receipt_id"),
+        ),
+        (
+            "révocation sans son propre reçu",
+            removed(&expected, &format!("{versions}/0/revocation"), "command_receipt_id"),
+        ),
+        (
+            "entrée sans référence de version",
+            removed(&expected, &format!("{versions}/1"), "policy_version_ref"),
+        ),
+        ("champ inconnu dans une entrée", extra_entry),
+        (
+            "référence de version mal formée",
+            replaced(
+                &expected,
+                &format!("{versions}/1/policy_version_ref"),
+                &json!("model-policy:policy.fixture:02:sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"),
+            ),
+        ),
+        (
+            "version nulle dans l'historique",
+            replaced(&expected, &format!("{versions}/1/version"), &json!(0)),
+        ),
+        (
+            "portée projet sans identité",
+            replaced(&expected, "/result/scope_id", &json!("not-a-project")),
+        ),
+        (
+            "portée utilisateur hors du réglage par défaut",
+            replaced(&default_scope, "/result/scope_id", &json!("other")),
+        ),
+    ];
+    for (label, response) in invalid_history {
+        assert!(!validator.is_valid(&response), "accepté : {label}");
+    }
+}
+
 // REQ-AGENT-002: la provenance du bundle est résolue par le serveur.
 #[test]
 fn test_validate_assign_task_payload_schema() {
