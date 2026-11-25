@@ -253,13 +253,22 @@ pub(crate) fn qualify_runtime_root(root: &Path, expected_uid: u32) -> Result<(),
         Err(e) => return Err(PlatformError::Io(e)),
     };
     if meta.file_type().is_symlink() {
-        return Err(runtime_root_refusal(root, "la racine runtime est un lien symbolique"));
+        return Err(runtime_root_refusal(
+            root,
+            "la racine runtime est un lien symbolique",
+        ));
     }
     if !meta.is_dir() {
-        return Err(runtime_root_refusal(root, "la racine runtime n'est pas un répertoire"));
+        return Err(runtime_root_refusal(
+            root,
+            "la racine runtime n'est pas un répertoire",
+        ));
     }
     if let Err(rejection) = check_ancestor_symlinks(root) {
-        return Err(runtime_root_refusal(root, format!("ancêtre refusé ({rejection})")));
+        return Err(runtime_root_refusal(
+            root,
+            format!("ancêtre refusé ({rejection})"),
+        ));
     }
     let actual_uid = meta.uid();
     if actual_uid != expected_uid {
@@ -270,7 +279,10 @@ pub(crate) fn qualify_runtime_root(root: &Path, expected_uid: u32) -> Result<(),
     }
     let mode = meta.mode() & 0o7777;
     if mode != 0o700 {
-        return Err(runtime_root_refusal(root, format!("mode {mode:#o}, attendu 0o700")));
+        return Err(runtime_root_refusal(
+            root,
+            format!("mode {mode:#o}, attendu 0o700"),
+        ));
     }
     Ok(())
 }

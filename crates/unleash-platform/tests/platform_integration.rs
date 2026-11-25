@@ -397,15 +397,21 @@ fn t_f001_001_undecided_platform_refuses_instead_of_falling_back() {
     };
     assert!(matches!(
         canonical_rendezvous_dir_with(PlatformOsKind::Windows, 4242, &env),
-        Err(PlatformError::LayoutUndecided { os: PlatformOsKind::Windows })
+        Err(PlatformError::LayoutUndecided {
+            os: PlatformOsKind::Windows
+        })
     ));
     assert!(matches!(
         PlatformPaths::resolve_for(PlatformOsKind::Windows, &env),
-        Err(PlatformError::LayoutUndecided { os: PlatformOsKind::Windows })
+        Err(PlatformError::LayoutUndecided {
+            os: PlatformOsKind::Windows
+        })
     ));
     assert!(matches!(
         prepare_canonical_rendezvous_dir_with(PlatformOsKind::Windows, 4242),
-        Err(PlatformError::LayoutUndecided { os: PlatformOsKind::Windows })
+        Err(PlatformError::LayoutUndecided {
+            os: PlatformOsKind::Windows
+        })
     ));
 }
 

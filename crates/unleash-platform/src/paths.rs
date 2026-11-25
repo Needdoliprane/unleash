@@ -8,8 +8,8 @@ use std::path::{Component, Path, PathBuf};
 
 use crate::errors::PlatformError;
 use crate::rendezvous::{
-    MAX_UNIX_SOCKET_PATH_BYTES, RUNTIME_ROOT_RENDEZVOUS_DIR, create_rendezvous_dir_in_qualified_root,
-    qualify_runtime_root,
+    MAX_UNIX_SOCKET_PATH_BYTES, RUNTIME_ROOT_RENDEZVOUS_DIR,
+    create_rendezvous_dir_in_qualified_root, qualify_runtime_root,
 };
 
 /// Nom du dossier documentaire interdit à toute écriture runtime (`REQ-CORE-008`, `INV-046`).
