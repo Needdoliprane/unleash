@@ -480,6 +480,11 @@ impl WriterFixture {
         let directory = local_test_dir("f012-service-writer")?;
         let store = ready_store(directory.path())?;
         let caller = operator()?;
+        store.register_principal(
+            "service-writer-fixture",
+            "user",
+            caller.actor_id.as_str(),
+        )?;
         configure_profile(&store, &caller, "http://127.0.0.1:11434")?;
         let command = envelope(
             &store,
