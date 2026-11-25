@@ -298,6 +298,27 @@ fn t_f012_015_launch_placement_recovers_the_exact_attested_child() -> TestResult
     Ok(())
 }
 
+// T-F012-015 / AC-F012-015 / REQ-MODEL-015 — le démon reste multiplateforme (Linux, macOS,
+// Windows) : la création d'un fichier privé passe par `unleash-platform`.
+#[test]
+fn t_f012_015_service_launch_keeps_unix_only_system_calls_out_of_the_daemon() -> TestResult {
+    let source = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let launch = [
+        "src/provider_service_evaluation.rs",
+        "src/provider_service_evaluation/controller.rs",
+    ];
+    for file in launch {
+        let text = std::fs::read_to_string(source.join(file))?;
+        for token in ["std::os::unix", "OpenOptionsExt"] {
+            assert!(
+                !text.contains(token),
+                "{file} contient l'appel système Unix « {token} »"
+            );
+        }
+    }
+    Ok(())
+}
+
 /// Préparation au plan synthétique : le démon n'a pas encore de planificateur de lancement.
 struct WriterFixture {
     store: Arc<UnleashStore>,
