@@ -2430,8 +2430,9 @@ fn apply_command_mutation(
                 patch,
                 config.id_generator.as_ref(),
             )?;
-            if let CommandMutation::SetSettingsWithModelConfiguration { binding, policy, .. } =
-                mutation
+            if let CommandMutation::SetSettingsWithModelConfiguration {
+                binding, policy, ..
+            } = mutation
             {
                 if binding.is_none() && policy.is_none() {
                     return Err(StoreError::InvariantViolation(

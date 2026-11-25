@@ -964,11 +964,13 @@ async fn commits_a_skill_preference_and_a_model_policy_in_one_settings_command()
 
     assert_eq!(receipt.state, ReceiptState::Accepted);
     assert_eq!(receipt.new_revision, Revision::new(1));
-    assert!(receipt
-        .result_ref
-        .as_deref()
-        .unwrap()
-        .starts_with("model-selection-binding:"));
+    assert!(
+        receipt
+            .result_ref
+            .as_deref()
+            .unwrap()
+            .starts_with("model-selection-binding:")
+    );
     let settings = route.client.query(&read).await.unwrap().result;
     let [binding] = settings["model_selection_bindings"]
         .as_array()

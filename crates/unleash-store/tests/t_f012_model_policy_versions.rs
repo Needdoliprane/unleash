@@ -2,7 +2,10 @@
 //!
 //! Banc `SQLite` local, sans réseau ni coffre : le vrai writer publie et relit l'historique du
 //! scope. La forme attendue vient du contrat IPC, jamais du code sous test.
-#![expect(clippy::unwrap_used, reason = "Fixtures locales et assertions de contrat")]
+#![expect(
+    clippy::unwrap_used,
+    reason = "Fixtures locales et assertions de contrat"
+)]
 
 use std::path::Path;
 
@@ -317,10 +320,7 @@ fn history(store: &UnleashStore, scope: &Scope) -> Vec<ModelPolicyVersion> {
 }
 
 fn revision(store: &UnleashStore, scope: &Scope) -> Revision {
-    store
-        .read_settings(scope.kind, &scope.id)
-        .unwrap()
-        .revision
+    store.read_settings(scope.kind, &scope.id).unwrap().revision
 }
 
 /// Envoie le patch fermé `model_policy_version` au vrai writer, comme le fait le démon.
@@ -373,7 +373,10 @@ fn is_conflict(result: Result<CommandReceipt, StoreError>) -> bool {
 }
 
 fn is_invalid(result: Result<CommandReceipt, StoreError>) -> bool {
-    matches!(result, Err(StoreError::InvalidArgument { reason: None, .. }))
+    matches!(
+        result,
+        Err(StoreError::InvalidArgument { reason: None, .. })
+    )
 }
 
 // T-F012-002 — Le vrai writer engage une première version, son reçu et son digest ; la relecture
@@ -386,9 +389,15 @@ fn t_f012_002_publishes_a_model_policy_version_and_reads_it_after_reopen() {
     let policy = Policy::bounded(&[profile.reference()]);
     assert!(history(&store, &scope).is_empty());
 
-    let receipt =
-        commit_policy(&store, &author, &scope, 0xf012_0010, Revision::INITIAL, &policy.patch())
-            .unwrap();
+    let receipt = commit_policy(
+        &store,
+        &author,
+        &scope,
+        0xf012_0010,
+        Revision::INITIAL,
+        &policy.patch(),
+    )
+    .unwrap();
 
     let expected = policy.expected(1, &receipt.receipt_id, &Value::Null);
     assert_eq!(receipt.state, ReceiptState::Accepted);
@@ -417,9 +426,15 @@ fn t_f012_002_publishes_the_next_version_and_revokes_an_exact_version() {
         ..first.clone()
     };
 
-    let published =
-        commit_policy(&store, &author, &scope, 0xf012_0020, Revision::INITIAL, &first.patch())
-            .unwrap();
+    let published = commit_policy(
+        &store,
+        &author,
+        &scope,
+        0xf012_0020,
+        Revision::INITIAL,
+        &first.patch(),
+    )
+    .unwrap();
     let expected_first = first.expected(1, &published.receipt_id, &Value::Null);
     let next = commit_policy(
         &store,
@@ -432,7 +447,10 @@ fn t_f012_002_publishes_the_next_version_and_revokes_an_exact_version() {
     .unwrap();
     let expected_second = second.expected(2, &next.receipt_id, &Value::Null);
     assert_eq!(next.result_ref, Some(expected_second.reference.clone()));
-    let retained = vec![expected_first.version.clone(), expected_second.version.clone()];
+    let retained = vec![
+        expected_first.version.clone(),
+        expected_second.version.clone(),
+    ];
     assert_eq!(history(&store, &scope), retained);
 
     let revocation = commit_policy(
@@ -453,7 +471,10 @@ fn t_f012_002_publishes_the_next_version_and_revokes_an_exact_version() {
         revocation.result_ref,
         Some(format!("{}:revoked", expected_first.reference))
     );
-    let resulting = vec![revoked_first.version.clone(), expected_second.version.clone()];
+    let resulting = vec![
+        revoked_first.version.clone(),
+        expected_second.version.clone(),
+    ];
     assert_eq!(history(&store, &scope), resulting);
 
     // La révocation répétée et une version absente sont refusées sans rien engager.
@@ -547,9 +568,15 @@ fn t_f012_002_refuses_out_of_scope_profiles_divergent_digests_and_outsides() {
 
     // Un réglage projet vise les profils globaux ou de ce projet.
     let mixed = Policy::bounded(&[profile.reference(), shared.reference()]);
-    let receipt =
-        commit_policy(&store, &author, &scope, 0xf012_0034, Revision::INITIAL, &mixed.patch())
-            .unwrap();
+    let receipt = commit_policy(
+        &store,
+        &author,
+        &scope,
+        0xf012_0034,
+        Revision::INITIAL,
+        &mixed.patch(),
+    )
+    .unwrap();
     let expected = mixed.expected(1, &receipt.receipt_id, &Value::Null);
     assert_eq!(history(&store, &scope), vec![expected.version]);
     store.shutdown().unwrap();
@@ -610,17 +637,31 @@ fn t_f012_002_refuses_out_of_contract_limits_and_non_human_authority() {
         command += 1;
         let outsider = authority(role);
         assert!(matches!(
-            commit_policy(&store, &outsider, &scope, command, Revision::INITIAL, &bounded),
+            commit_policy(
+                &store,
+                &outsider,
+                &scope,
+                command,
+                Revision::INITIAL,
+                &bounded
+            ),
             Err(StoreError::Unauthorized(_))
         ));
     }
     assert_eq!(revision(&store, &scope), Revision::INITIAL);
 
     // Les deux rôles humains publient.
-    let receipt =
-        commit_policy(&store, &authority(CallerRole::PolicyAdmin), &scope, 0xf012_0050, Revision::INITIAL, &bounded)
-            .unwrap();
-    let expected = Policy::bounded(&[profile.reference()]).expected(1, &receipt.receipt_id, &Value::Null);
+    let receipt = commit_policy(
+        &store,
+        &authority(CallerRole::PolicyAdmin),
+        &scope,
+        0xf012_0050,
+        Revision::INITIAL,
+        &bounded,
+    )
+    .unwrap();
+    let expected =
+        Policy::bounded(&[profile.reference()]).expected(1, &receipt.receipt_id, &Value::Null);
     assert_eq!(history(&store, &scope), vec![expected.version]);
     store.shutdown().unwrap();
 }

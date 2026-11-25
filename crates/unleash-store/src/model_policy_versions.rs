@@ -100,7 +100,9 @@ impl ModelPolicyLimits {
             || self.max_duration_seconds == 0
             || self.max_duration_seconds > MAX_DURATION_SECONDS
         {
-            return Err(invalid("model policy limits are outside the IPC contract bounds"));
+            return Err(invalid(
+                "model policy limits are outside the IPC contract bounds",
+            ));
         }
         Ok(())
     }
@@ -246,7 +248,9 @@ fn project(history: &[Fact]) -> Result<Vec<ModelPolicyVersion>, StoreError> {
             published.policy_id == document.policy_id && published.version == document.version
         });
         if &document.digest()? != digest || duplicated {
-            return Err(conflict("conflicting model policy versions in the same scope"));
+            return Err(conflict(
+                "conflicting model policy versions in the same scope",
+            ));
         }
         let revocation = revocations.remove(&identity);
         versions.push(ModelPolicyVersion {
@@ -264,7 +268,9 @@ fn project(history: &[Fact]) -> Result<Vec<ModelPolicyVersion>, StoreError> {
         });
     }
     if !revocations.is_empty() {
-        return Err(conflict("a model policy revocation has no published version"));
+        return Err(conflict(
+            "a model policy revocation has no published version",
+        ));
     }
     Ok(versions)
 }
@@ -377,7 +383,9 @@ fn edited_scope(
         {
             Ok(Some(project))
         }
-        _ => Err(conflict("model policy is outside the edited settings scope")),
+        _ => Err(conflict(
+            "model policy is outside the edited settings scope",
+        )),
     }
 }
 
@@ -418,18 +426,18 @@ fn validate_publish(
         .iter()
         .any(|fallback| !allowed_profiles.contains(fallback))
     {
-        return Err(conflict("a model policy fallback is not an allowed profile"));
+        return Err(conflict(
+            "a model policy fallback is not an allowed profile",
+        ));
     }
     Ok(())
 }
 
 fn is_unique<T: PartialEq>(values: &[T]) -> bool {
-    values.iter().enumerate().all(|(index, value)| {
-        !values
-            .iter()
-            .take(index)
-            .any(|other| other == value)
-    })
+    values
+        .iter()
+        .enumerate()
+        .all(|(index, value)| !values.iter().take(index).any(|other| other == value))
 }
 
 /// Forme `probe_reference` du contrat IPC : au moins un caractère non blanc, aucun caractère de
@@ -530,7 +538,10 @@ pub(crate) fn result_ref_tx(
             // Le dossier ne fixe pas la référence du reçu de révocation : elle désigne le fait
             // distinct par un suffixe, sans se confondre avec celle de la publication.
             let digest = published_digest(&history, policy_id, *version).ok_or_else(diverged)?;
-            Ok(format!("{}:revoked", version_ref(policy_id, *version, digest)))
+            Ok(format!(
+                "{}:revoked",
+                version_ref(policy_id, *version, digest)
+            ))
         }
         _ => Err(diverged()),
     }
@@ -624,10 +635,7 @@ mod tests {
             ),
         ] {
             let mut malformed = publish.clone();
-            malformed
-                .pointer_mut(pointer)
-                .unwrap()
-                .clone_from(&value);
+            malformed.pointer_mut(pointer).unwrap().clone_from(&value);
             refused_shapes.push(malformed);
         }
         let oversized = "a".repeat(129);

@@ -228,11 +228,11 @@ fn validates_the_model_policy_version_patch_and_history() {
             "plafond manquant",
             removed(&publish, &format!("{path}/limits"), "max_cost_microusd"),
         ),
+        ("réglage inconnu aux côtés de la politique", extra_setting),
         (
-            "réglage inconnu aux côtés de la politique",
-            extra_setting,
+            "portée projet sans projet",
+            replaced(&publish, "/project_id", &Value::Null),
         ),
-        ("portée projet sans projet", replaced(&publish, "/project_id", &Value::Null)),
         (
             "portée utilisateur sous un projet",
             replaced(&user, "/project_id", &publish["project_id"]),
@@ -252,7 +252,8 @@ fn validates_the_model_policy_version_patch_and_history() {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "$ref": format!("{schema_id}#/$defs/read_settings_model_policies_response")
     }));
-    let fixture = include_str!("../../../.claude/examples/ipc-read-settings-model-policies-response.json");
+    let fixture =
+        include_str!("../../../.claude/examples/ipc-read-settings-model-policies-response.json");
     let expected: Value = serde_json::from_str(fixture).unwrap();
     let decoded: QueryResponse = from_json_str_strict(fixture).unwrap();
     assert_eq!(serde_json::to_value(&decoded).unwrap(), expected);
@@ -277,10 +278,16 @@ fn validates_the_model_policy_version_patch_and_history() {
     let mut accompanied = expected.clone();
     accompanied["result"]["execution_pool"] = json!({"max_active_executions": 5});
     accompanied["result"]["retention_policy"] = json!({});
-    assert!(validator.is_valid(&accompanied), "autres champs de Settings");
+    assert!(
+        validator.is_valid(&accompanied),
+        "autres champs de Settings"
+    );
 
     let mut without_watermark = expected.clone();
-    without_watermark.as_object_mut().unwrap().remove("watermark");
+    without_watermark
+        .as_object_mut()
+        .unwrap()
+        .remove("watermark");
     let mut extra_entry = expected.clone();
     extra_entry.pointer_mut(versions).unwrap()[1]["state"] = json!("active");
     let invalid_history: Vec<(&str, Value)> = vec![
@@ -291,7 +298,11 @@ fn validates_the_model_policy_version_patch_and_history() {
         ),
         (
             "révocation sans son propre reçu",
-            removed(&expected, &format!("{versions}/0/revocation"), "command_receipt_id"),
+            removed(
+                &expected,
+                &format!("{versions}/0/revocation"),
+                "command_receipt_id",
+            ),
         ),
         (
             "entrée sans référence de version",
@@ -303,7 +314,9 @@ fn validates_the_model_policy_version_patch_and_history() {
             replaced(
                 &expected,
                 &format!("{versions}/1/policy_version_ref"),
-                &json!("model-policy:policy.fixture:02:sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"),
+                &json!(
+                    "model-policy:policy.fixture:02:sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+                ),
             ),
         ),
         (
