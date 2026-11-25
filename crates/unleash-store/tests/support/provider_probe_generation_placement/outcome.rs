@@ -71,8 +71,11 @@ fn t_f012_015_launch_refusal_replays_exactly_and_cannot_be_replaced()
     let refused = ProviderServiceLaunchOutcome::NotStarted {
         cause: ProviderServiceLaunchRefusal::RuntimeInUse,
     };
-    let commit =
-        store.commit_provider_service_launch_observation(context.launch_id, dispatch, refused)?;
+    let commit = store.commit_provider_service_launch_observation(
+        context.launch_id,
+        dispatch,
+        refused.clone(),
+    )?;
     let replay =
         store.commit_provider_service_launch_observation(context.launch_id, dispatch, refused)?;
     assert!(replay.replayed);
