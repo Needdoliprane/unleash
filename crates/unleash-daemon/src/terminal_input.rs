@@ -580,7 +580,10 @@ fn send_input(
     prepared: PreparedInput,
 ) -> Result<TerminalInputObservation, InputError> {
     let c = &record.context;
-    let PreparedInput { mut client, request } = prepared;
+    let PreparedInput {
+        mut client,
+        request,
+    } = prepared;
     // This is the only native SendInput call. Never repeat it after an error.
     let response = client.call(&request)?;
     let observed_at_ms = state.store.config().clock.now_ms();
