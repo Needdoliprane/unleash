@@ -9,7 +9,7 @@
 )]
 
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
 use unleash_domain::{
@@ -33,42 +33,56 @@ fn schema(relative: &str) -> Value {
     serde_json::from_str(&dossier(relative)).unwrap()
 }
 
-/// Validateur du schéma de requête, qui ne référence que lui-même.
-fn query_validator() -> jsonschema::Validator {
-    jsonschema::options()
-        .should_validate_formats(true)
-        .build(&schema(".claude/schemas/ipc-query.schema.json"))
+/// Tous les schémas du dossier, par nom de fichier croissant.
+fn dossier_schemas() -> Vec<Value> {
+    let directory = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.claude/schemas");
+    let mut paths: Vec<PathBuf> = fs::read_dir(&directory)
         .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| path.extension().and_then(|s| s.to_str()) == Some("json"))
+        .collect();
+    paths.sort();
+    paths
+        .iter()
+        .map(|path| serde_json::from_str(&fs::read_to_string(path).unwrap()).unwrap())
+        .collect()
 }
 
-/// Validateur d'une définition de la réponse, les deux schémas étant enregistrés sous leur `$id`.
+/// Validateur du schéma de requête.
+fn query_validator() -> jsonschema::Validator {
+    build_dossier_validator(&schema(".claude/schemas/ipc-query.schema.json"))
+}
+
+/// Validateur d'une définition de la réponse, tous les schémas du dossier étant en registre : la
+/// page de runs cite `ipc-query`, et le rapport de validation cite `ipc-command`, `role` et
+/// `workflow`.
 fn definition_validator(name: &str) -> jsonschema::Validator {
-    let query = schema(".claude/schemas/ipc-query.schema.json");
-    let response = schema(".claude/schemas/ipc-query-response.schema.json");
-    let query_id = query
+    let response_id = schema(".claude/schemas/ipc-query-response.schema.json")
         .get("$id")
         .and_then(Value::as_str)
         .unwrap()
         .to_owned();
-    let response_id = response
-        .get("$id")
-        .and_then(Value::as_str)
-        .unwrap()
-        .to_owned();
-    let registry = referencing::Registry::new()
-        .add(query_id, query)
-        .unwrap()
-        .add(response_id.as_str(), response)
-        .unwrap()
-        .prepare()
-        .unwrap();
+    build_dossier_validator(&json!({
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "$ref": format!("{response_id}#/$defs/{name}"),
+    }))
+}
+
+fn build_dossier_validator(schema: &Value) -> jsonschema::Validator {
+    let mut registry = referencing::Registry::new();
+    for resource in dossier_schemas() {
+        let id = resource
+            .get("$id")
+            .and_then(Value::as_str)
+            .unwrap()
+            .to_owned();
+        registry = registry.add(id.as_str(), resource).unwrap();
+    }
+    let registry = registry.prepare().unwrap();
     jsonschema::options()
         .should_validate_formats(true)
         .with_registry(&registry)
-        .build(&json!({
-            "$schema": "https://json-schema.org/draft/2020-12/schema",
-            "$ref": format!("{response_id}#/$defs/{name}"),
-        }))
+        .build(schema)
         .unwrap()
 }
 
@@ -111,7 +125,8 @@ fn example_page() -> RunPage {
 #[test]
 fn t_f005_001_list_runs_payload_is_closed_and_bounded() {
     let query: QueryEnvelope = from_json_str_strict(&dossier(QUERY_FIXTURE)).unwrap();
-    let decoded: ListRunsPayload = serde_json::from_value(Value::Object(query.payload.clone())).unwrap();
+    let decoded: ListRunsPayload =
+        serde_json::from_value(Value::Object(query.payload.clone())).unwrap();
     assert_eq!((decoded.page_size(), decoded.opaque_cursor()), (1, None));
     let wire = query_validator();
     assert!(wire.is_valid(&serde_json::to_value(&query).unwrap()));
@@ -123,12 +138,19 @@ fn t_f005_001_list_runs_payload_is_closed_and_bounded() {
         (
             json!({"page_size": 1, "opaque_cursor": "fixture-next-page"}),
             1,
-            Some("fixture-next-page")
+            Some("fixture-next-page"),
         ),
-        (json!({"page_size": 1, "opaque_cursor": "AZaz09-_"}), 1, Some("AZaz09-_")),
+        (
+            json!({"page_size": 1, "opaque_cursor": "AZaz09-_"}),
+            1,
+            Some("AZaz09-_"),
+        ),
     ] {
         let decoded: ListRunsPayload = serde_json::from_value(payload.clone()).unwrap();
-        assert_eq!((decoded.page_size(), decoded.opaque_cursor()), (page_size, cursor));
+        assert_eq!(
+            (decoded.page_size(), decoded.opaque_cursor()),
+            (page_size, cursor)
+        );
         assert!(wire.is_valid(&list_runs(json!(LIST_RUNS_PROJECT), payload)));
         let encoded = serde_json::to_value(&decoded).unwrap();
         let again: ListRunsPayload = serde_json::from_value(encoded).unwrap();
@@ -141,7 +163,10 @@ fn t_f005_001_list_runs_payload_is_closed_and_bounded() {
         (json!({"opaque_cursor": ""}), "dashes or underscores"),
         (json!({"opaque_cursor": "a.b"}), "dashes or underscores"),
         (json!({"opaque_cursor": "été"}), "dashes or underscores"),
-        (json!({"opaque_cursor": "a".repeat(513)}), "dashes or underscores"),
+        (
+            json!({"opaque_cursor": "a".repeat(513)}),
+            "dashes or underscores",
+        ),
     ] {
         let refused = serde_json::from_value::<ListRunsPayload>(payload.clone()).unwrap_err();
         assert!(refused.to_string().contains(refusal), "{refused}");
@@ -173,7 +198,10 @@ fn t_f005_001_list_runs_page_matches_the_wire_contract() {
     assert_eq!(serde_json::to_value(&response).unwrap(), fixture);
 
     let page = example_page();
-    assert_eq!(serde_json::to_value(&page).unwrap(), *fixture.get("result").unwrap());
+    assert_eq!(
+        serde_json::to_value(&page).unwrap(),
+        *fixture.get("result").unwrap()
+    );
     let built = serde_json::to_value(QueryResponse {
         request_id: RequestId::from_u128(1),
         watermark: Some(EventCursor::new(StreamId::from_u128(6), Sequence::new(42))),

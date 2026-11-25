@@ -140,11 +140,12 @@ fn test_reason_codes_bijection_with_dossier_registries() {
         extract_class_reason_pairs(&content, &mut expected_pairs);
     }
 
-    // 146 paires Class/REASON_CODE dans .claude/
+    // 147 paires Class/REASON_CODE dans .claude/ ; la 147e est ScopeDenied/ACCESS_DENIED,
+    // que le contrat de ListRuns (F005) cite désormais dans le dossier.
     assert_eq!(
         expected_pairs.len(),
-        146,
-        "Attendu exactement 146 paires Class/REASON_CODE distinctes dans .claude/"
+        147,
+        "Attendu exactement 147 paires Class/REASON_CODE distinctes dans .claude/"
     );
 
     // Compléter avec les raisons enregistrées en prose dans F009/interfaces.md:98
@@ -173,7 +174,8 @@ fn test_reason_codes_bijection_with_dossier_registries() {
             .insert(class_name.to_owned());
     }
 
-    // Total attendu : 146 + 10 = 156 raisons canoniques, sans aucun conflit de classe
+    // Total attendu : 147 paires du dossier, dont ACCESS_DENIED repris dans la prose F009, plus
+    // les 9 autres raisons de cette prose : 156 raisons canoniques, sans aucun conflit de classe
     assert_eq!(expected_pairs.len(), 156);
     for (reason, classes) in &expected_pairs {
         assert_eq!(

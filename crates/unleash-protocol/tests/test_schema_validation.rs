@@ -14,7 +14,7 @@
 use chrono::{DateTime, Utc};
 use serde_json::{Map, Value, json};
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use unleash_domain::{
     AgentId, AuthorityGeneration, CommandId, DaemonEpoch, DaemonInstanceId, OperationId, ProjectId,
     ReceiptId, RequestId, Revision, Sequence, Sha256Digest, StreamId,
@@ -44,10 +44,41 @@ fn load_schema(rel_path: &str) -> Value {
 
 fn build_validator(rel_path: &str) -> jsonschema::Validator {
     let schema = load_schema(rel_path);
+    build_dossier_validator(&schema).unwrap_or_else(|e| panic!("Validateur {rel_path}: {e}"))
+}
+
+/// Construit le validateur d'un schéma, tous les schémas du dossier étant en registre.
+///
+/// Les schémas IPC se référencent par URN : la liste des runs cite `ipc-query`, le rapport de
+/// validation cite `ipc-command`, `role` et `workflow`.
+fn build_dossier_validator(schema: &Value) -> jsonschema::Validator {
+    let directory = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.claude/schemas");
+    let mut paths: Vec<PathBuf> = fs::read_dir(&directory)
+        .unwrap_or_else(|e| panic!("Impossible de lire le dossier {}: {e}", directory.display()))
+        .map(|entry| entry.expect("Entrée de répertoire valide").path())
+        .filter(|path| path.extension().and_then(|s| s.to_str()) == Some("json"))
+        .collect();
+    paths.sort();
+    let mut registry = referencing::Registry::new();
+    for path in paths {
+        let content = fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("Impossible de lire {}: {e}", path.display()));
+        let resource: Value = serde_json::from_str(&content).expect("Schéma JSON valide");
+        let id = resource
+            .get("$id")
+            .and_then(Value::as_str)
+            .expect("$id du schéma")
+            .to_owned();
+        registry = registry
+            .add(id.as_str(), resource)
+            .expect("Schéma enregistré sous son $id");
+    }
+    let registry = registry.prepare().expect("Registre des schémas prêt");
     jsonschema::options()
         .should_validate_formats(true)
-        .build(&schema)
-        .unwrap_or_else(|e| panic!("Validateur {rel_path}: {e}"))
+        .with_registry(&registry)
+        .build(schema)
+        .unwrap_or_else(|e| panic!("Validateur : {e}"))
 }
 
 fn ipc_command_fixture() -> String {
@@ -930,19 +961,10 @@ fn test_validate_list_provider_profiles_contract() {
 
     let response_schema = load_schema("ipc-query-response.schema.json");
     let schema_id = response_schema["$id"].as_str().unwrap().to_owned();
-    let registry = referencing::Registry::new()
-        .add(schema_id.as_str(), response_schema)
-        .unwrap()
-        .prepare()
-        .unwrap();
-    let validator = jsonschema::options()
-        .should_validate_formats(true)
-        .with_registry(&registry)
-        .build(&json!({
-            "$schema": "https://json-schema.org/draft/2020-12/schema",
-            "$ref": format!("{schema_id}#/$defs/provider_profile_list_response")
-        }))
-        .unwrap();
+    let validator = build_dossier_validator(&json!({
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "$ref": format!("{schema_id}#/$defs/provider_profile_list_response")
+    }));
     let fixture = include_str!("../../../.claude/examples/ipc-provider-profile-list-response.json");
     let expected: Value = serde_json::from_str(fixture).unwrap();
     let decoded: QueryResponse = from_json_str_strict(fixture).unwrap();
