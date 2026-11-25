@@ -53,6 +53,7 @@ mod workflow_run_creation;
 mod workflow_run_plan;
 mod workflow_run_projection;
 mod workflow_run_start;
+mod worktree_registry;
 pub mod writer;
 
 pub use admission::{

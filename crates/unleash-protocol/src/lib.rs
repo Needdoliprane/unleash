@@ -27,6 +27,7 @@ pub mod provider_profile;
 pub mod strict_json;
 pub mod ts_export;
 pub mod workflow_run;
+pub mod worktrees;
 
 pub use canonical::{
     canonical_sha256, canonicalize_to_string, canonicalize_to_vec, compute_command_digest_v2,
@@ -57,3 +58,11 @@ pub use provider_profile::{
 pub use strict_json::{from_json_str_strict, parse_json_value_strict};
 pub use ts_export::{generate_all_ts_files, write_ts_bindings};
 pub use workflow_run::{CreateRunPayload, CreateRunPurpose, CreateRunSource, GetRunPayload};
+pub use worktrees::{
+    DEFAULT_WORKTREE_PAGE_SIZE, GitObjectFormat, GitObjectId, GitOperation, InventoryCoverage,
+    InventoryCoverageStatus, ListWorktreesPayload, ListWorktreesResult,
+    MAX_WORKTREE_CURSOR_CHARS, MAX_WORKTREE_PAGE_SIZE, OperationBranch,
+    OperationBranchProvenance, ReservedBranchOperation, WorktreeContractViolation, WorktreeDirty,
+    WorktreeItem, WorktreeOwnership, WorktreeQueryError, is_worktree_branch_ref,
+    is_well_formed_cursor,
+};

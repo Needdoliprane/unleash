@@ -518,6 +518,7 @@ async fn dispatch_query(
         }
         "ListProjects" | "GetProject" | "ReadSettings" | "ReadPolicySummary"
         | "ReadGuardHealth" | "InspectRecovery" => query_m1_projection(state, session, query).await,
+        "ListWorktrees" => crate::worktree_inventory::query(state, query).await,
         other => Err(IpcError::new(
             ErrorCode::InvalidArgument,
             None,

@@ -30,6 +30,7 @@ pub mod diagnostic;
 pub mod error;
 pub mod execution_scheduler;
 pub mod executors;
+mod git_inspector;
 pub mod ipc;
 mod managed_workers;
 mod provider_probe_connect_service;
@@ -41,6 +42,7 @@ pub mod subscriptions;
 pub mod terminal_host_launcher;
 mod terminal_service;
 pub mod worker_launch;
+pub mod worktree_inventory;
 #[cfg(test)]
 mod worker_shutdown_tests;
 
@@ -54,6 +56,7 @@ pub use executors::{
 };
 pub use recovery::RecoveryGate;
 pub use subscriptions::SubscriptionHub;
+pub use worktree_inventory::{IntegrationReadiness, integration_readiness};
 
 #[cfg(test)]
 mod start_assignment_tests;

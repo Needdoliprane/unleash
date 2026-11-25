@@ -2299,6 +2299,23 @@ impl UnleashStore {
         self.project_snapshot(|conn| get_project_conn(conn, project_id))
     }
 
+    /// Lit un projet et les chemins des worktrees qu'Unleash y a alloués pour un dépôt, dans la
+    /// même transaction lectrice.
+    ///
+    /// # Errors
+    /// Retourne [`StoreError::NotFound`] si le projet est absent, ou une erreur de lecture.
+    pub fn project_worktree_registry(
+        &self,
+        project_id: ProjectId,
+        repo_id: &str,
+    ) -> Result<SnapshotProjection<(ProjectRecord, Vec<String>)>, StoreError> {
+        self.project_snapshot(|conn| {
+            let project = get_project_conn(conn, project_id)?;
+            let managed = crate::worktree_registry::managed_paths_conn(conn, project_id, repo_id)?;
+            Ok((project, managed))
+        })
+    }
+
     /// Lit un agent et le watermark de la même transaction lectrice.
     ///
     /// # Errors

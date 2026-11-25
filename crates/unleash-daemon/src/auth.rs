@@ -303,7 +303,8 @@ pub fn authorize_query(
         | "GetAgent"
         | "GetInvocation"
         | "GetRun"
-        | "ListProviderProfiles" => Capability::QueryState,
+        | "ListProviderProfiles"
+        | "ListWorktrees" => Capability::QueryState,
         _ => {
             return Err(IpcError::new(
                 ErrorCode::InvalidArgument,
