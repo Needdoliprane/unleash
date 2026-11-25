@@ -350,7 +350,7 @@ impl ActionExecutorPort for InputExecutor {
             })
             .await
             .map_err(|_| unknown())?
-            .map_err(|_| unknown())?;
+            .map_err(|error| super::terminal_effect_failure(dispatch, "input", error))?;
             let output_digest =
                 unleash_protocol::canonical_sha256(&observation).map_err(|_| unknown())?;
             let observed_at_ms = observation.observed_at_ms;
@@ -490,12 +490,31 @@ fn before_effect(
     Ok(now)
 }
 
+/// Saisie préparée sans écrire à l'hôte.
+struct PreparedInput {
+    client: HostClient,
+    request: HostRequest,
+}
+
 fn write_and_observe(
     state: &DaemonRuntimeState,
     record: &TerminalInputRecord,
     bytes: Vec<u8>,
     dispatch: DispatchId,
-) -> Result<TerminalInputObservation, InputError> {
+) -> Result<TerminalInputObservation, super::TerminalEffectError> {
+    super::host_effect(
+        || prepare_input(state, record, bytes, dispatch),
+        |prepared| send_input(state, record, dispatch, prepared),
+    )
+}
+
+/// Consomme le permis et s'authentifie auprès de l'hôte, sans écrire dans le PTY.
+fn prepare_input(
+    state: &DaemonRuntimeState,
+    record: &TerminalInputRecord,
+    bytes: Vec<u8>,
+    dispatch: DispatchId,
+) -> Result<PreparedInput, InputError> {
     let c = &record.context;
     if u64::try_from(bytes.len())? != c.payload_byte_length
         || Sha256Digest::from_bytes(&bytes) != c.payload_digest
@@ -542,15 +561,31 @@ fn write_and_observe(
     {
         return Err("terminal live identity changed before input".into());
     }
-    let header = client.make_header(c.command_id, c.action_id, record.context_digest);
-    // This is the only native SendInput call. Never repeat it after an error.
-    let response = client.call(&HostRequest::SendInput {
-        header,
+    let request = HostRequest::SendInput {
+        header: client.make_header(c.command_id, c.action_id, record.context_digest),
         secret: secret.expose_secret().into(),
         input_seq: c.input_seq,
         payload_bytes: bytes,
         now_ms: before_effect(state, c)?,
-    })?;
+    };
+    Ok(PreparedInput { client, request })
+}
+
+/// Écrit dans le PTY, une seule fois, puis relève le reçu. À partir de l'envoi, l'effet ne peut
+/// plus être exclu et l'écriture n'est jamais répétée (REQ-TERM-003).
+fn send_input(
+    state: &DaemonRuntimeState,
+    record: &TerminalInputRecord,
+    dispatch: DispatchId,
+    prepared: PreparedInput,
+) -> Result<TerminalInputObservation, InputError> {
+    let c = &record.context;
+    let PreparedInput {
+        mut client,
+        request,
+    } = prepared;
+    // This is the only native SendInput call. Never repeat it after an error.
+    let response = client.call(&request)?;
     let observed_at_ms = state.store.config().clock.now_ms();
     let HostResponse::InputReceipt { receipt } = &response else {
         return Err("terminal input has no native receipt".into());

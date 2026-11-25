@@ -451,7 +451,7 @@ impl ActionExecutorPort for ReleaseExecutor {
             })
             .await
             .map_err(|_| unknown())?
-            .map_err(|_| unknown())?;
+            .map_err(|error| super::terminal_effect_failure(dispatch, "release", error))?;
             let digest = unleash_protocol::canonical_sha256(&observation).map_err(|_| unknown())?;
             let captured = observation.captured_at_ms;
             *self.slot.lock().map_err(|_| unknown())? = Some(observation);
@@ -626,12 +626,33 @@ fn before_effect(
     Ok(())
 }
 
+/// Retrait préparé sans contacter l'hôte.
+struct PreparedRelease {
+    runtime: PathBuf,
+    client: HostClient,
+    key: ControlReleaseKey,
+    request: ControlReleaseRequest,
+}
+
 fn observe_once(
     state: &DaemonRuntimeState,
     record: &TerminalReleaseRecord,
     dispatch: DispatchId,
     control_secrets: &dyn super::ControlSecretSource,
-) -> Result<TerminalReleaseObservation, ReleaseError> {
+) -> Result<TerminalReleaseObservation, super::TerminalEffectError> {
+    super::host_effect(
+        || prepare_release(state, record, dispatch, control_secrets),
+        |prepared| send_release(state, record, prepared),
+    )
+}
+
+/// Tire le secret suivant, consomme le permis et prépare la requête, sans écrire à l'hôte.
+fn prepare_release(
+    state: &DaemonRuntimeState,
+    record: &TerminalReleaseRecord,
+    dispatch: DispatchId,
+    control_secrets: &dyn super::ControlSecretSource,
+) -> Result<PreparedRelease, ReleaseError> {
     let c = &record.context;
     let runtime = rendezvous(state, record)?;
     before_effect(state, c)?;
@@ -651,7 +672,7 @@ fn observe_once(
         })?;
     let secret = load_control_secret(&runtime.join(CONTROL_SECRET_FILENAME))?;
     before_effect(state, c)?;
-    let mut client = HostClient::connect(
+    let client = HostClient::connect(
         &runtime.join(HOST_SOCKET_FILENAME),
         c.process_run_uuid,
         c.authority_generation,
@@ -666,11 +687,34 @@ fn observe_once(
         lease_id: c.lease_id,
         control_revision: c.control_revision,
     };
-    let response = client.release_control(&ControlReleaseRequest {
+    let request = ControlReleaseRequest {
         key: key.clone(),
         current_secret: secret.expose_secret().into(),
         next_secret: next.expose_secret().into(),
-    })?;
+    };
+    Ok(PreparedRelease {
+        runtime,
+        client,
+        key,
+        request,
+    })
+}
+
+/// Envoie le retrait puis vérifie la disposition publiée. À partir de l'envoi, l'effet ne peut plus
+/// être exclu (REQ-TERM-003).
+fn send_release(
+    state: &DaemonRuntimeState,
+    record: &TerminalReleaseRecord,
+    prepared: PreparedRelease,
+) -> Result<TerminalReleaseObservation, ReleaseError> {
+    let c = &record.context;
+    let PreparedRelease {
+        runtime,
+        mut client,
+        key,
+        request,
+    } = prepared;
+    let response = client.release_control(&request)?;
     let ControlReleaseResponse::Ack { ack } = response else {
         return Err("terminal release native refusal".into());
     };
