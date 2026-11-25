@@ -202,8 +202,8 @@ impl OwnedProviderServiceHost {
 /// Secret de contrôle neuf d'un service fournisseur managé : 256 bits de la source d'aléa du
 /// système, jamais dérivés du générateur d'identifiants du démon, dont la séquence est
 /// reproductible.
-pub(crate) fn fresh_provider_service_secret(
-) -> Result<HostControlSecret, ProviderServiceLaunchError> {
+pub(crate) fn fresh_provider_service_secret()
+-> Result<HostControlSecret, ProviderServiceLaunchError> {
     Ok(HostControlSecret::generate()?)
 }
 

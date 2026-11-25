@@ -807,8 +807,7 @@ pub(crate) fn verify_frozen_inputs(
         return Err(invalid("profil du probe changé depuis préparation"));
     }
     let summary = read_policy_summary_conn(tx, context.project_id)?;
-    if crate::policies_secrets::engaged_policy_digest(&summary)? != context.security_policy_digest
-    {
+    if crate::policies_secrets::engaged_policy_digest(&summary)? != context.security_policy_digest {
         return Err(invalid("politique du probe changée depuis préparation"));
     }
     verify_objects(tx, &context.preparation)?;
