@@ -306,7 +306,7 @@ async fn t_f011_003_resize_changes_the_size_observed_by_the_live_child() {
     assert_eq!(stored_dimensions(&fixture, terminal), (43, 119));
 }
 
-async fn set_standard_policy(fixture: &mut LiveFixture) {
+pub(super) async fn set_standard_policy(fixture: &mut LiveFixture) {
     let mut policy = command(
         fixture.authority,
         0xf011_7510,

@@ -211,14 +211,79 @@ async fn prepare_c5_authority() -> (
     (fixture, effect, notification, marker)
 }
 
+/// Durable outcome of one terminal action: its state, the policy revision its
+/// intent engaged, and the broker authorization outcome once journaled.
+#[derive(Debug)]
+struct Disposition {
+    state: String,
+    policy_revision: Option<i64>,
+    authorization: Option<Value>,
+}
+
+const LAUNCH_DISPOSITION: &str = "SELECT a.state,json_extract(t.context_json,'$.policy_revision'),p.phase_json FROM terminal_allocations t JOIN actions a ON a.action_id=t.action_id LEFT JOIN broker_phase_records p ON p.action_id=a.action_id AND p.phase_key='authorization' WHERE t.terminal_id=?1";
+const INPUT_DISPOSITION: &str = "SELECT a.state,json_extract(i.context_json,'$.policy_revision'),p.phase_json FROM terminal_input_intents i JOIN actions a ON a.action_id=i.action_id LEFT JOIN broker_phase_records p ON p.action_id=a.action_id AND p.phase_key='authorization' WHERE i.command_id=?1";
+
+fn disposition(fixture: &LiveFixture, source: &str, key: &str) -> Option<Disposition> {
+    let conn = rusqlite::Connection::open_with_flags(
+        fixture.data.path().join("unleash-authority.db"),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .unwrap();
+    conn.query_row(source, [key], |row| {
+        let phase: Option<String> = row.get(2)?;
+        Ok(Disposition {
+            state: row.get(0)?,
+            policy_revision: row.get(1)?,
+            authorization: phase.and_then(|json| {
+                serde_json::from_str::<Value>(&json)
+                    .ok()?
+                    .pointer("/phase/outcome")
+                    .cloned()
+            }),
+        })
+    })
+    .ok()
+}
+
+/// Waits until one terminal action is durably `observed_success`, then returns its
+/// disposition. A conclusive refusal or an unknown outcome fails at once and names
+/// the broker decision: such an action never produces the effect a caller awaits.
+async fn await_observed(fixture: &LiveFixture, source: &str, key: &str) -> Disposition {
+    let deadline = Instant::now() + DEADLINE;
+    loop {
+        if let Some(found) = disposition(fixture, source, key) {
+            assert!(
+                !matches!(
+                    found.state.as_str(),
+                    "denied" | "observed_failure" | "outcome_unknown" | "cancelled"
+                ),
+                "the terminal action ended as '{}': {} ; {}",
+                found.state,
+                found.authorization.clone().unwrap_or(Value::Null),
+                terminal_diagnostic(fixture.data.path())
+            );
+            if found.state == "observed_success" {
+                return found;
+            }
+        }
+        assert!(
+            Instant::now() < deadline,
+            "terminal action has no observed outcome: {}",
+            terminal_diagnostic(fixture.data.path())
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
 async fn start_c5_terminal(fixture: &mut LiveFixture) -> Value {
     let mut request = fixture.allocation(0xf011_4105);
     request.payload.insert(
-        "arguments".into(),
+        "arguments".into,
         json!(["--ignored", "--exact", WORKER_ENTRY, "--nocapture"]),
     );
     let accepted = fixture.client.send_command(&request).await.unwrap();
     assert_eq!(accepted.state, ReceiptState::Accepted);
+    await_observed(fixture, LAUNCH_DISPOSITION, &request.aggregate_id.to_string()).await;
     let reference = accepted.result_ref.unwrap();
     let query = result_query(fixture, request.command_id, &reference, 0xf011_6001);
     let deadline = Instant::now() + DEADLINE;
@@ -590,6 +655,86 @@ async fn t_f011_005_real_daemon_commits_native_receipt_before_causal_sequence_on
     assert_eq!(
         std::fs::read(fixture.project_root.path().join("worker-starts")).unwrap(),
         b"started\n"
+    );
+}
+
+// T-F017-007 / AC-F017-007 / REQ-SEC-007
+#[tokio::test]
+async fn t_f017_007_standard_policy_does_not_deny_terminal_acquisition_nor_input() {
+    // This path uses the packaged daemon and its default packaged host launcher.
+    let mut fixture = LiveFixture::new(true).await;
+    std::fs::set_permissions(
+        fixture.project_root.path(),
+        std::fs::Permissions::from_mode(0o700),
+    )
+    .unwrap();
+    let effect = signal_listener(fixture.project_root.path().join("e.sock"));
+    // The standard policy is committed first: the launch and the input intents
+    // engage its revision, so each reserved broker must be bound to that snapshot.
+    super::super::resize_scenarios::set_standard_policy(&mut fixture).await;
+    let acquired = start_c5_terminal(&mut fixture).await;
+    let terminal = acquired["terminal_id"].as_str().unwrap();
+    assert_eq!(
+        await_observed(&fixture, LAUNCH_DISPOSITION, terminal)
+            .await
+            .policy_revision,
+        Some(1),
+        "the launch intent engages the committed standard policy revision"
+    );
+    let before = fixture.host_manifest();
+    let request = input_command(&fixture, &acquired);
+    let accepted = fixture
+        .client
+        .send_command(&request)
+        .await
+        .expect("a committed standard policy does not refuse SendTerminalInput");
+    assert_eq!(accepted.state, ReceiptState::Accepted);
+    let input = await_observed(&fixture, INPUT_DISPOSITION, &request.command_id.to_string()).await;
+    assert_eq!(
+        input.policy_revision,
+        Some(1),
+        "the input intent engages the committed standard policy revision"
+    );
+    wait_signal(&effect, EFFECT_SIGNAL).await;
+    wait_known_input(&fixture, &request, &accepted).await;
+    let journal = read_native_journal(&before);
+    assert_confirmed_native_input(&journal, request.command_id);
+    let known = fixture
+        .client
+        .query(&result_query(
+            &fixture,
+            acquired["command_id"].as_str().unwrap().parse().unwrap(),
+            acquired["result_ref"].as_str().unwrap(),
+            0xf011_6201,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        known.result.get("input_seq").and_then(Value::as_u64),
+        Some(1)
+    );
+    for _ in 0..3 {
+        assert_eq!(
+            fixture.client.send_command(&request).await.unwrap(),
+            accepted
+        );
+    }
+    let after = fixture.host_manifest();
+    assert_eq!(after.last_confirmed_input_seq, 1);
+    assert_eq!(
+        read_native_journal(&after),
+        journal,
+        "command replay never contacts native input again"
+    );
+    assert_eq!(
+        std::fs::read(fixture.project_root.path().join("worker-effects")).unwrap(),
+        b"effect\n",
+        "one native write, one child effect"
+    );
+    assert_eq!(
+        std::fs::read(fixture.project_root.path().join("worker-starts")).unwrap(),
+        b"started\n",
+        "one physical launch"
     );
 }
 
