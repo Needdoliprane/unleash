@@ -426,11 +426,8 @@ async fn t_f012_018_forbidden_run_refuses_agent_task_activation() {
 async fn t_f012_018_forbidden_run_with_a_mechanical_entry_is_not_refused_by_the_model_policy() {
     let data = unleash_testkit::local_test_dir("f012-mechanical-entry-data").unwrap();
     let rendezvous = unleash_testkit::local_test_dir("f012-mechanical-entry-rdv").unwrap();
-    let (store, config, mut create) = fixture(
-        data.path(),
-        rendezvous.path(),
-        AgentLevel::N,
-        |workflow| {
+    let (store, config, mut create) =
+        fixture(data.path(), rendezvous.path(), AgentLevel::N, |workflow| {
             let task = workflow.get_mut("body").unwrap().take();
             let definition = workflow.as_object_mut().unwrap();
             definition.insert("schema_version".to_owned(), json!("unleash.workflow.v1.1"));
@@ -447,9 +444,8 @@ async fn t_f012_018_forbidden_run_with_a_mechanical_entry_is_not_refused_by_the_
                     task,
                 ]}),
             );
-        },
-    )
-    .await;
+        })
+        .await;
     let (daemon, mut client) = start(config).await;
     publish_mandate(&mut client, &mut create).await;
     client.send_command(&create).await.unwrap();

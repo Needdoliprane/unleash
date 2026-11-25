@@ -271,10 +271,7 @@ fn mechanical_entry_then_tasks(definition: &mut Value, model_policy: &str) {
         serde_json::json!("unleash.workflow.v1.1"),
     );
     // An inconsistent version imported before semantic validation.
-    fields.insert(
-        "model_policy".to_owned(),
-        serde_json::json!(model_policy),
-    );
+    fields.insert("model_policy".to_owned(), serde_json::json!(model_policy));
     fields.insert(
         "body".to_owned(),
         serde_json::json!({"id": "intake", "kind": "sequence", "steps": [

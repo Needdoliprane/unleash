@@ -12,7 +12,8 @@ use unleash_protocol::{
 
 use crate::{
     AggregateKind, CommandMutation, CommitCommandRequest, CommitOutcome, DaemonStateRow,
-    EventAppendSpec, StoreError, UnleashStore, commands::ensure_scope_not_frozen_tx,
+    EventAppendSpec, StoreError, UnleashStore,
+    commands::ensure_scope_not_frozen_tx,
     workflow_run_plan::{definition_model_policy, require_agent_task_allowed},
 };
 
