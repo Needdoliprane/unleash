@@ -1,6 +1,6 @@
 # Architecture Decision Records
 
-Les dix-neuf ADR ci-dessous documentent options, risques, coûts de complexité et critères de décision. Depuis la [révision R7](../../brief/revision-2026-11-16-r7.md), tous sont **acceptés** : ce sont des décisions d’architecture arrêtées le 16 novembre 2026 par l’arbitrage délégué de Louis, qui font autorité pour l’implémentation ; chacun consigne son amendement R7 dans une section dédiée. Accepté n’est pas confirmé : le statut confirmé reste réservé aux invariants utilisateur, et une décision acceptée se révise par un ADR de supersession. ADR-15 à ADR-17 consignent les clarifications R2–R5 déjà confirmées et distinguent leurs solutions techniques, acceptées en R7 ; ADR-18 et ADR-19 portent les contrats R6. Des choix déjà explicitement demandés (Rust, API-only, V1 complète, etc.) ne sont pas soumis à une nouvelle approbation de principe.
+Les ADR ci-dessous documentent options, risques, coûts de complexité et critères de décision. Les ADR-01 à ADR-19 ont été acceptés le 16 novembre 2026 par l’arbitrage délégué de Louis et consignent leur amendement R7. Le statut confirmé est réservé aux invariants utilisateur. Une décision acceptée se révise par un ADR de supersession. ADR-15 à ADR-17 consignent les clarifications R2–R5 et leurs solutions techniques. ADR-18 et ADR-19 portent les contrats R6. [Révision R7](../../brief/revision-2026-11-16-r7.md)
 
 | ID | Sujet | Statut |
 | --- | --- | --- |
@@ -17,12 +17,13 @@ Les dix-neuf ADR ci-dessous documentent options, risques, coûts de complexité 
 | ADR-11 | [Abstraction des modèles API](ADR-11-model-api-abstraction.md) | Accepté avec amendement (R7) ; tranche Q-07 |
 | ADR-12 | [Frontières N+2 / N+1 / N](ADR-12-hierarchy.md) | Accepté avec amendement (R7) |
 | ADR-13 | [Concurrence, fairness et budgets](ADR-13-scheduler-budget.md) | Accepté avec amendement (R7) ; tranche Q-15 |
-| ADR-14 | [Données locales, open source, plateformes et distribution](ADR-14-local-data-oss.md) | Accepté avec amendement (R7) ; tranche Q-06, Q-11 et Q-16 |
+| ADR-14 | [Données locales, open source, plateformes et distribution](ADR-14-local-data-oss.md) | Accepté en R7 pour Q-06, Q-11 et Q-16. Règle de contribution révisée par l'ADR-20 |
 | ADR-15 | [Rust pragmatique et parité GUI/TUI](ADR-15-interface-parity-and-pragmatic-rust.md) | Contraintes R2 confirmées ; solutions acceptées avec amendement (R7) |
 | ADR-16 | [Automatisations et supervision par blocs](ADR-16-reusable-automation-and-supervision.md) | Besoins R3/R5 confirmés ; mécanismes acceptés avec amendement (R7) |
 | ADR-17 | [Fournisseurs de modèles locaux](ADR-17-local-model-providers.md) | Besoin R4 confirmé ; mécanismes acceptés avec amendement (R7) |
 | ADR-18 | [Itération bornée sur données et diagnostic bloqué](ADR-18-bounded-data-iteration.md) | Proposé en R6 ; accepté avec amendement (R7) |
 | ADR-19 | [Paquet de conception contrôlable par une application](ADR-19-design-package-ingestion.md) | Proposé en R6 ; accepté avec amendement (R7) |
+| ADR-20 | [Mention Signed-off-by facultative](ADR-20-contribution-signoff.md) | Accepté le 25 novembre 2026 pour les contributions (Q-06) |
 
 ## Procédure d’adoption
 

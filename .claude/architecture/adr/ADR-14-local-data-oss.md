@@ -32,6 +32,8 @@ Cet amendement tranche Q-06, Q-11 et Q-16 ([révision R7](../../brief/revision-2
 
 ### Licence et marque (Q-06)
 
+L'[ADR-20](ADR-20-contribution-signoff.md) remplace la règle DCO du point 4.
+
 4. Licence Apache-2.0 unique pour tout le dépôt : code, présentation, schémas, exemples et dossier. Fichiers racine `LICENSE`, `NOTICE`, `CONTRIBUTING.md` (DCO, sans CLA ; sa section « Marques » porte la politique de marque, à laquelle renvoie `NOTICE`) et `SECURITY.md` ; notices tierces (`THIRD-PARTY-LICENSES`) générées par artefact publié depuis le SBOM. En-tête SPDX dans chaque fichier source ; crates `license = "Apache-2.0"` et `publish = false` en V1.
 5. Les dépendances distribuées respectent l’allow-list de `deny.toml` ; GPL, AGPL, LGPL liée statiquement, SSPL, BUSL et licences non commerciales sont refusées, toute autre licence exige une dérogation écrite. `cargo deny` bloque la CI ; chaque artefact publié fournit son SBOM CycloneDX et ses notices générées.
 6. La licence ne concède aucun droit sur les noms OVPT et Unleash. Une version modifiée distribuée porte un autre nom affiché et retire le profil de distribution officiel. Une recherche d’antériorité du nom précède la première publication publique.

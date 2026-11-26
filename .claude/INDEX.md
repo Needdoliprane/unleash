@@ -65,6 +65,7 @@ Révision consolidée R7 — 16 novembre 2026. Le manifest inventorie 389 fichie
 - [architecture/adr/ADR-17-local-model-providers.md](architecture/adr/ADR-17-local-model-providers.md) — ADR-17 — Fournisseurs de modèles locaux dans le Model Router
 - [architecture/adr/ADR-18-bounded-data-iteration.md](architecture/adr/ADR-18-bounded-data-iteration.md) — ADR-18 — Itération bornée sur données et diagnostic bloqué
 - [architecture/adr/ADR-19-design-package-ingestion.md](architecture/adr/ADR-19-design-package-ingestion.md) — ADR-19 — Paquet de conception contrôlable par une application
+- [architecture/adr/ADR-20-contribution-signoff.md](architecture/adr/ADR-20-contribution-signoff.md) — ADR-20 — Mention Signed-off-by facultative
 - [architecture/adr/README.md](architecture/adr/README.md) — Architecture Decision Records
 - [architecture/automation-artifact-model.md](architecture/automation-artifact-model.md) — Automatisations réutilisables — artefacts, données et exécutions
 - [architecture/automation-execution-profile.md](architecture/automation-execution-profile.md) — Profil d’exécution des automatismes — workflow v1.1

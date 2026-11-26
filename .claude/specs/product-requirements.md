@@ -40,7 +40,7 @@ La V1 est complète seulement après tous les critères des features et scénari
 
 ## Préparation open source
 
-INV-049 et INV-055 exigent attribution produit OVPT Unleash et intention de publication open source. La licence Apache-2.0, la politique de marque et le DCO sont décidés (Q-06, [ADR-14](../architecture/adr/ADR-14-local-data-oss.md)) ; la compatibilité des dépendances est vérifiée à EXT-OSS. Le plan inclut documentation d’installation, migration, exploitation, politique sécurité, notices et artefacts reproductibles. Aucun dépôt public n’a été créé.
+INV-049 et INV-055 exigent l’attribution du produit OVPT Unleash et prévoient sa publication open source. Q-06 fixe la licence Apache-2.0 et la politique de marque. La mention `Signed-off-by` est facultative pour les contributions. EXT-OSS vérifie la compatibilité des dépendances. Le plan inclut la documentation d’installation, de migration et d’exploitation, la politique de sécurité, les notices et des artefacts reproductibles. [ADR-14](../architecture/adr/ADR-14-local-data-oss.md) et [ADR-20](../architecture/adr/ADR-20-contribution-signoff.md)
 
 Le dossier vit dans le dépôt de réalisation, à côté du code ; le produit ne lit jamais `.claude/` à l’exécution et ne dépend pas de Claude Code. Les données runtime privées, clés et historiques opérationnels ne doivent pas être ajoutés à .claude ni au dépôt ; les preuves réelles de qualification vont dans `qualification/evidence/`.
 

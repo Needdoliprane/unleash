@@ -1,6 +1,6 @@
 4a5d50981b8e188512e509e30436bbc568e6cc165090afa4a742d824a79dc197  .agents/rules/rust.md
 04317d38fbbbf49dc166ef3f1a28c3fd092d953d779ed279bfcd008af3a8202d  .agents/skills/unleash-goal/SKILL.md
-8a5a3af27c67ba52b647e9cd1d5c2bd43628d35a8bb215b66ebeedda15e6dd57  .claude/INDEX.md
+9d8f7588832fac5daa689d072b2f942688464eebdc6243fa5e35d51af41f4e28  .claude/INDEX.md
 6368a279d87a30da6b5394a0b3ab7d0f3e1144646a2f1b6cb20273a681be06a7  .claude/README.md
 369e3c7eea39a8ee01bc224170574635b5176598b8a191a8f35c959733820fcf  .claude/agents/README.md
 c5437538bfd3c69d3762784d4b3d8ac564eeff12ebde222b5595aadb9914e9cf  .claude/agents/adversarial-reviewer.md
@@ -39,13 +39,14 @@ d14e77bf760e1fcdf5c2ad68455de9ab6419894539087357f3629db5918bf2c8  .claude/archit
 6ce3959cf1cfcecf3c582245d9d1cf94c6fd5530ddae0e2f20ff827aa8edb94a  .claude/architecture/adr/ADR-11-model-api-abstraction.md
 6d313a27f49f7a68480ba3a3f9ad916f6a8febb2125d6e7a905682d02d416454  .claude/architecture/adr/ADR-12-hierarchy.md
 52e1e27579dc5fdc389fd3b542bb1912abc3424272fdae67a8ee41c76b3da803  .claude/architecture/adr/ADR-13-scheduler-budget.md
-feca3e331987b9781b3ad5df5bcb01bacc9492b625d1312cfd0835d0d8ca138f  .claude/architecture/adr/ADR-14-local-data-oss.md
+70057d486abd621963600841f98c7def6fcaae56e8f439836d605e9abfbf9a5a  .claude/architecture/adr/ADR-14-local-data-oss.md
 bf699d464eb89e9fc9da251562318605751dfec669d0e366d278ce1ccc0459dd  .claude/architecture/adr/ADR-15-interface-parity-and-pragmatic-rust.md
 66c275aee9ca1ff12a93820186cf3cc9fc57d90346206dff5f32ea5ff724bb72  .claude/architecture/adr/ADR-16-reusable-automation-and-supervision.md
 c12cf528f88e01d378db100e1305361faa4fc65ff49f47a122398ab268dfa24f  .claude/architecture/adr/ADR-17-local-model-providers.md
 2499b92feff90d375db6153a9a5c81408ea235ffd983d624748cc093c842e314  .claude/architecture/adr/ADR-18-bounded-data-iteration.md
 4137dec172da602975e563a177bb125faa824a12c3d5c262b057b888424b4176  .claude/architecture/adr/ADR-19-design-package-ingestion.md
-285e5f502a4f580b73a7072449bbfc0d10eeeb4eaaff3b254e29283a67280e7a  .claude/architecture/adr/README.md
+f31af798bcabf9ce4883f246c26aeeb09533bf2380b0b7a54f814953780042fa  .claude/architecture/adr/ADR-20-contribution-signoff.md
+aca24b81f63823b93fdb90d92de8d8d7f316d36e6517fd9f95b74e4dce0cfc38  .claude/architecture/adr/README.md
 ff8d58cd8af7133dc77115acbcc6689bbb6a954f99c0f84aa1263d87ae1a307c  .claude/architecture/automation-artifact-model.md
 103957ea6a997435aad0f73e103e0bc92a2916836a964d8f57292bb2855cef57  .claude/architecture/automation-execution-profile.md
 ce7d32c861fd9581db1df6c676518337666b6eaf60dd24a401620de4de11ab52  .claude/architecture/browser-execution.md
@@ -111,7 +112,7 @@ fd66815a76ace8b136778face8afcfd940d6b6d02d1f2dbe1c2a162d5ef3e666  .claude/brief/
 070dd856bb79da8448b0a5678c03abe6a34d60d5e97c3b7562a5933b9e06afa9  .claude/brief/glossary.md
 4bce1b6acb9076b284b6beaca17001dcda562ef42ccaf5d2dca4ec29908ec693  .claude/brief/implementation-policy.md
 2d62a2bc14492e195212250d624547fbeffe66b3d5ac7ef99e42a6812b0fd51e  .claude/brief/invariants.md
-297a20dbaf39e90c63ff14930d0b0988d7784514599d03cff10ff87bc181fa50  .claude/brief/open-questions.md
+23e531233731010da8748239ce84e267fe83df0fd4a41cdbd50ecb2f3e6b5fa2  .claude/brief/open-questions.md
 99d784f29408780519704210d0895277bf94f4c3ac218486b6d2b3b3667009f0  .claude/brief/product-scope-v1.md
 26288f79b07eeb88461e34090e7ebce39847ce72334eb78c7056cb9e7fc9c6b7  .claude/brief/revision-2026-11-16-r2.md
 51860daf8d1913f0c06f233aaa878580f84aae77908102adf6ecd1dad0e36724  .claude/brief/revision-2026-11-16-r3-r5.md
@@ -119,9 +120,9 @@ fd66815a76ace8b136778face8afcfd940d6b6d02d1f2dbe1c2a162d5ef3e666  .claude/brief/
 8050a08fed0b727a47e816c1ba8783c5f148fd1a072bbb55a3aa70f75044bdf4  .claude/brief/revision-2026-11-16-r7.md
 00c8b76d5cc8a0eb982a9d7d61f02b5c378cdc1e4606895ead4e89a373a1cdb9  .claude/brief/vision.md
 08e0a0152f290d07fa66453243218c404530afc1dcb92e9fc5d8e24aa366b6eb  .claude/catalog/README.md
-a87fbd5d995747bc222abdef47db8fb9c561b93c0ba0846c08ead13d1a1c6529  .claude/catalog/design-catalog.json
+e239aee03fa0fe93d9b4aa3ed54e2526f80a899fc808b3becc31962023f5e1bf  .claude/catalog/design-catalog.json
 8aca037c06eff8b169635c824e138bb274ead08d2b53697b9635d7fe8a7bfc28  .claude/catalog/operations.json
-5abdff46c4e7863870c57943980c709def0a46f6538478638aeaeadcf1909dd6  .claude/catalog/package-manifest.json
+e296fc621e8015ba0b49ad3a9a318fc85ee75018b1c4e0ba7beb0e409207f9a2  .claude/catalog/package-manifest.json
 dc670318f9a2834c72d589fa921567ab3c2da5a6777d6d348697fd54b643f60b  .claude/design/activity-timeline.md
 7e66e407555c2cd16175e2f26c9515ede0d802d8e2bc53b2675d3883dfbfa2a8  .claude/design/agent-tree-and-status.md
 1783877dac336d47efaae65896fdffc5d5ce84616c1c4cf9ed0e411cc39614c4  .claude/design/cli-tui-design.md
@@ -309,7 +310,7 @@ d9c97687d56794360328e6afaca0de72368b3f5cb02dca38eb76494b2d2de76e  .claude/featur
 5375a5e384666b4e8a1b72370c20a52b692a234e443fc2a6590e50cf9501c18f  .claude/hooks/git_guard.py
 23a8e9768d599e34a7ec337aa63d4ac6fa20205acd99e12195e8d78e3a8fe13d  .claude/plans/critical-path.md
 096cc15fb9f0a63cd2c2c2a5cb1e35f047cd0ed28fd9758dd20290eec5e0086b  .claude/plans/dependencies.md
-4835cd3bc5800f7dd310461747e9880cce515ccbb5fd48d592e3decf7c53d6f4  .claude/plans/readiness-checklist.md
+b672b88d92a860be9e7e385797e113151dc617f2fa87a8127c1b37c8a1d14c24  .claude/plans/readiness-checklist.md
 d085ddba4bdc62bbadb29a6ef715fac6d4ef5fefc36ae6183f074fd36280a508  .claude/plans/risk-register.md
 b4128909b20303ec9d40d97f7efcb1cd359002891c5d8d208478951d91dd53e3  .claude/plans/v1-implementation-plan.md
 80ea9692e29a49561a77ccc9bcc8d8d3f819d7d34328406c7e73fd64487ea303  .claude/plans/workstreams.md
@@ -369,7 +370,7 @@ c9738f705ee45e9efe05d15c0779ae65d82a775ca4a47f9a7aa81c145458a5bb  .claude/specs/
 89defa31a59dbfa6474e6afbcc4750bb0e4e2111ec61af6e8c54e81c685b8568  .claude/specs/gui-cli-tui.md
 157480be8cad63d01acb564264e21ccbef0818c074add95aa8872def9f017d28  .claude/specs/local-models.md
 93788827f0d7e31ef004d28966692fd3a01354612a55cb9e0d20101260b25e45  .claude/specs/model-routing.md
-14118aa95b0a074231c698097f8423b20c7ae0bcfff2912a5561df61e381d2bf  .claude/specs/product-requirements.md
+601d0a935ed33b21136cdc89e3a6e383d529b29aa0f7ccb4cd5dc1e3d9d0e818  .claude/specs/product-requirements.md
 9d1ca27a68a5a62db3e8cde2798ec83e252e27ab883b33097a11cc71e90aa62a  .claude/specs/reusable-automations.md
 d4eb41cf819cb4b60c1bf6365909c9003c4b4714d5a19c1bfbf8c009a167a06c  .claude/specs/role-registry.md
 18c607a85e77a7d9f200f4f579a67f331195fafaa6dc4b610d6011d1ed64d1ad  .claude/specs/scheduling.md

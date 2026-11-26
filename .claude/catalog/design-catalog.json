@@ -4980,6 +4980,16 @@
         "R-16",
         "R-22"
       ]
+    },
+    {
+      "id": "ADR-20",
+      "status": "accepted",
+      "title": "ADR-20 — Mention Signed-off-by facultative",
+      "source": {
+        "path": "architecture/adr/ADR-20-contribution-signoff.md",
+        "subject": "ADR-20"
+      },
+      "related_ids": []
     }
   ],
   "assumptions": [
@@ -5278,9 +5288,9 @@
         "path": "brief/open-questions.md",
         "subject": "Q-06"
       },
-      "question": "Résolue R7 : licence open source et politique de marque",
-      "recommendation": "Apache-2.0 pour tout le dépôt ; noms OVPT et Unleash non concédés ; recherche d'antériorité du nom avant publication ; [ADR-14](../architecture/adr/ADR-14-local-data-oss.md)",
-      "owner_gate": "Arbitrage délégué R7 / EXT-OSS : raison sociale, adresse de sécurité, antériorité"
+      "question": "Résolue en R7. Licence open source, politique de marque et contributions",
+      "recommendation": "Apache-2.0 pour tout le dépôt. Noms OVPT et Unleash réservés. Recherche d'antériorité du nom avant publication. Mention `Signed-off-by` facultative. [ADR-14](../architecture/adr/ADR-14-local-data-oss.md) et [ADR-20](../architecture/adr/ADR-20-contribution-signoff.md)",
+      "owner_gate": "Arbitrage R7 et décision de Louis du 25 novembre 2026. EXT-OSS pour la raison sociale, l'adresse de sécurité et l'antériorité"
     },
     {
       "id": "Q-07",
