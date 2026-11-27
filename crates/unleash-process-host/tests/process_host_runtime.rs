@@ -18,6 +18,7 @@
 use std::collections::BTreeMap;
 use std::fs::{self, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Write};
+#[cfg(target_os = "macos")]
 use std::net::TcpListener;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
@@ -37,10 +38,13 @@ use unleash_platform::{
 use unleash_process_host::{
     CONTROL_SECRET_FILENAME, ChildExitStatus, HOST_MANIFEST_FILENAME, HOST_READY_PREFIX,
     HostBootstrapSpec, HostClient, HostCommandHeader, HostControlSecret, HostLaunchState,
-    HostManifest, HostRequest, HostResponse, IsolationBackendProbe, IsolationMode,
-    IsolationProfileKind, LogSpool, OsIsolationBackendProbe, OsProcessInspector, ProcessHostError,
-    ProcessHostServer, ProcessInspector, ResourceKind, SandboxProbeOutcome, StrictIsolationSpec,
+    HostManifest, HostRequest, HostResponse, IsolationMode, LogSpool, OsIsolationBackendProbe,
+    OsProcessInspector, ProcessHostError, ProcessHostServer, ProcessInspector, ResourceKind,
     reconcile_after_lost_host, store_canary_secrets, store_control_secret,
+};
+#[cfg(target_os = "macos")]
+use unleash_process_host::{
+    IsolationBackendProbe, IsolationProfileKind, SandboxProbeOutcome, StrictIsolationSpec,
 };
 use unleash_protocol::{ErrorCode, ReasonCode, RetryClass, read_frame, write_frame};
 use unleash_testkit::{ExternalEffectOracle, local_test_dir};
@@ -1902,6 +1906,25 @@ fn t_f011_010_external_sigkill_on_child_observed_by_reconcile_and_shutdown() {
     .unwrap();
     let mut eof_b = Vec::new();
     let _ = reader_b.read_to_end(&mut eof_b);
+    #[cfg(target_os = "linux")]
+    {
+        // An unreaped child keeps its process identity on Linux.
+        let stat_path = format!("/proc/{}/stat", id_b.pid);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let status = fs::read_to_string(&stat_path).unwrap();
+            let (_, fields) = status.rsplit_once(')').unwrap();
+            if fields.split_ascii_whitespace().next() == Some("Z") {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "l'enfant de la fixture doit être sorti avant Shutdown"
+            );
+            std::thread::yield_now();
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
     while matches!(
         OsProcessInspector.verify_identity(&id_b),
         Ok(ProcessVerification::Match)
@@ -1928,8 +1951,10 @@ fn t_f011_010_external_sigkill_on_child_observed_by_reconcile_and_shutdown() {
     );
 }
 
+#[cfg(target_os = "macos")]
 struct UnenforceableProbe;
 
+#[cfg(target_os = "macos")]
 impl IsolationBackendProbe for UnenforceableProbe {
     fn macos_sandbox_exec_path(&self) -> &Path {
         Path::new("/usr/bin/sandbox-exec")

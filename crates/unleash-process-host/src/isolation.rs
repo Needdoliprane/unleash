@@ -23,6 +23,7 @@ use std::process::Command;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use unleash_domain::Sha256Digest;
+#[cfg(any(target_os = "macos", test))]
 use unleash_platform::{
     assert_not_under_claude, ensure_private_rendezvous_dir, write_private_file_atomic,
 };
