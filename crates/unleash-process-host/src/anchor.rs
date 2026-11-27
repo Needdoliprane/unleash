@@ -814,6 +814,12 @@ impl OwnedChildAnchor {
             String::from("reaped")
         } else {
             match self.inspector.verify_identity(&guard.expected_identity) {
+                #[cfg(target_os = "linux")]
+                Ok(ProcessVerification::Match)
+                    if observe_exit_without_reaping_locked(&guard).is_some() =>
+                {
+                    String::from("exited_unreaped_zombie")
+                }
                 Ok(ProcessVerification::Match) => String::from("match"),
                 Ok(ProcessVerification::BootChanged) => String::from("boot_changed"),
                 Ok(ProcessVerification::IdentityMismatch { .. }) => {
@@ -1029,11 +1035,12 @@ mod tests {
     use super::*;
     use std::io::Read;
     use std::process::Stdio;
-    use unleash_platform::{IdentityBackend, StartIdentity};
+    use std::sync::Arc;
+    use unleash_platform::StartIdentity;
 
     struct InjectedReuseInspector {
         boot: BootIdentity,
-        injected_mismatch: Mutex<Option<OsProcessIdentity>>,
+        injected_mismatch: Arc<Mutex<Option<OsProcessIdentity>>>,
     }
 
     impl ProcessInspector for InjectedReuseInspector {
@@ -1093,17 +1100,12 @@ mod tests {
         let child_pid = child.id();
 
         let boot = current_boot_identity().unwrap();
-        let mismatch_obs = OsProcessIdentity {
-            pid: child_pid,
-            pgid: child_pid,
-            owner_uid: witness_id.owner_uid,
-            boot_identity: boot.clone(),
-            start_identity: StartIdentity::new("reused-pid-other-start").unwrap(),
-            backend: IdentityBackend::MacosProcPidinfo,
-        };
+        let mut mismatch_obs = inspect_process_identity(child_pid).unwrap();
+        mismatch_obs.start_identity = StartIdentity::new("reused-pid-other-start").unwrap();
+        let injected_mismatch = Arc::new(Mutex::new(None));
         let inspector = Box::new(InjectedReuseInspector {
             boot,
-            injected_mismatch: Mutex::new(Some(mismatch_obs)),
+            injected_mismatch: Arc::clone(&injected_mismatch),
         });
 
         let sigchld = ensure_sigchld_qualified().unwrap();
@@ -1113,6 +1115,7 @@ mod tests {
             inspector,
         )
         .unwrap();
+        *injected_mismatch.lock().unwrap() = Some(mismatch_obs);
 
         let reuse_err = anchor.signal_direct_child(HostSignal::Term).unwrap_err();
         assert!(matches!(
@@ -1184,6 +1187,7 @@ mod tests {
             Box::new(OsProcessInspector),
         )
         .unwrap();
+        assert_eq!(anchor.verification_report().identity_status, "match");
 
         let raw_pid = Pid::from_raw(i32::try_from(pid).unwrap()).unwrap();
         kill_process(raw_pid, Signal::KILL).unwrap();
@@ -1199,10 +1203,15 @@ mod tests {
         assert_eq!(observed.exit_code, None);
         assert_eq!(observed.exit_signal, Some(libc::SIGKILL));
         assert!(!observed.success);
+        assert_eq!(
+            anchor.verification_report().identity_status,
+            "exited_unreaped_zombie"
+        );
 
         let reaped = anchor.wait_and_reap().unwrap();
         assert!(anchor.is_reaped());
         assert_eq!(reaped, observed);
+        assert_eq!(anchor.verification_report().identity_status, "reaped");
     }
 
     #[test]
